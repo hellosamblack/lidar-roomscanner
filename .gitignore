@@ -32,6 +32,8 @@ env/
 
 # Build artifacts
 build/
+# native transform DLL build tree (already matched by build/ above; kept explicit per task brief)
+host/transform/build/
 dist/
 *.elf
 *.bin
