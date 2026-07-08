@@ -81,8 +81,8 @@ def main(argv=None) -> int:
     ap.add_argument("--baud", type=int, default=921600)
     ap.add_argument("--replay")
     ap.add_argument("--record")
-    ap.add_argument("--fov-h", type=float, default=60.0)
-    ap.add_argument("--fov-v", type=float, default=45.0)
+    ap.add_argument("--fov-h", type=float, default=55.0)
+    ap.add_argument("--fov-v", type=float, default=42.0)
     ap.add_argument("--replay-fps", type=float, default=0.0,
                     help="pace file replay at N fps (0 = as fast as it decodes)")
     args = ap.parse_args(argv)
