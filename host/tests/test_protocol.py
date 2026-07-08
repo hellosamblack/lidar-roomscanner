@@ -52,3 +52,18 @@ def test_unpack_rejects_bad_version():
 def test_golden_fixture_matches_pack():
     golden = (FIXTURES / "golden_depth_2x2.bin").read_bytes()
     assert pack_frame(GOLDEN_HEADER, GOLDEN_PAYLOAD) == golden
+
+
+def test_parse_event_roundtrip():
+    payload = struct.pack("<II", 2, 3) + b"trigger retries exhausted"
+    from roomscan.protocol import EventCode, parse_event
+    code, detail, msg = parse_event(payload)
+    assert code == EventCode.TRIGGER_TIMEOUT
+    assert detail == 3
+    assert msg == "trigger retries exhausted"
+
+
+def test_parse_event_rejects_short_payload():
+    from roomscan.protocol import parse_event
+    with pytest.raises(ProtocolError):
+        parse_event(b"\x01\x00\x00")

@@ -22,6 +22,23 @@ class FrameType(IntEnum):
 
 class StreamId(IntEnum):
     DEPTH_ZF32 = 0
+    DEPTH_ZAPC = 1
+    AMBIENT = 2
+    AMPLITUDE = 3
+    CONFIDENCE = 4
+    REFLECTANCE = 5
+    STATUS = 6
+
+
+class EventCode(IntEnum):
+    SENSOR_INIT_FAIL = 1
+    TRIGGER_TIMEOUT = 2
+    DMA_TIMEOUT = 3
+    SENSOR_ERROR_STATUS = 4
+    TX_OVERFLOW = 5
+
+
+DEPTH_NO_RETURN_MM = 12000.0  # empirical no-return sentinel in DEPTH_ZF32 payloads (Task 8)
 
 
 class ProtocolError(Exception):
@@ -64,3 +81,11 @@ def pack_frame(header: FrameHeader, payload: bytes) -> bytes:
         raise ProtocolError(f"payload length {len(payload)} != header {header.payload_len}")
     body = header.pack() + payload
     return body + zlib.crc32(body).to_bytes(4, "little")
+
+
+def parse_event(payload: bytes) -> tuple[int, int, str]:
+    """Decode a frame_type=EVENT payload -> (code, detail, message)."""
+    if len(payload) < 8:
+        raise ProtocolError(f"event payload too short: {len(payload)} bytes")
+    code, detail = struct.unpack_from("<II", payload, 0)
+    return code, detail, payload[8:].decode("ascii", "replace")

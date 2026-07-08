@@ -13,6 +13,21 @@
 #define RS_STREAM_DEPTH_ZF32 (0u)
 #define RS_FLAG_DROPPED      (0x01u)
 
+/* Stream registry — see roomscanner/docs/protocol.md. 1-6 reserved for Phase 2. */
+#define RS_STREAM_DEPTH_ZAPC  (1u)
+#define RS_STREAM_AMBIENT     (2u)
+#define RS_STREAM_AMPLITUDE   (3u)
+#define RS_STREAM_CONFIDENCE  (4u)
+#define RS_STREAM_REFLECTANCE (5u)
+#define RS_STREAM_STATUS      (6u)
+
+/* EVENT (RS_FRAME_EVENT) payload: u32 code, u32 detail, optional ASCII message. */
+#define RS_EVT_SENSOR_INIT_FAIL    (1u)
+#define RS_EVT_TRIGGER_TIMEOUT     (2u)
+#define RS_EVT_DMA_TIMEOUT         (3u)
+#define RS_EVT_SENSOR_ERROR_STATUS (4u)
+#define RS_EVT_TX_OVERFLOW         (5u)
+
 void rs_put_u32(uint8_t *p, uint32_t v);
 
 /* IEEE 802.3 / zlib CRC-32. Chain calls by passing the previous return as crc (start 0). */
