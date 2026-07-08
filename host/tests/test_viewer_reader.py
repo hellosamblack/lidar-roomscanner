@@ -102,4 +102,8 @@ def test_reader_paces_frames_with_min_interval():
     _reader(ThreeThenStop(), StreamDecoder(), slot, stats, None, fault, min_interval=0.05)
     elapsed = time.monotonic() - t0
     assert stats.frames == 3
-    assert elapsed >= 0.10        # frames 2 and 3 each waited ~50 ms
+    # Frames 2 and 3 each waited ~50 ms, so the theoretical minimum is 0.10 s —
+    # but OS sleeps can return marginally early, making an exact >= 0.10 flaky.
+    # 0.08 keeps a scheduling-jitter margin while still discriminating
+    # unambiguously: with pacing off, elapsed is ~0.001 s.
+    assert elapsed >= 0.08
