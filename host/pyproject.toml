@@ -2,7 +2,7 @@
 name = "roomscan"
 version = "0.1.0"
 description = "Host-side tools for the roomscanner ToF streamer"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"  # upper bound: open3d wheel availability
 dependencies = ["numpy>=1.26", "pyserial>=3.5", "open3d>=0.18"]
 
 [project.optional-dependencies]
