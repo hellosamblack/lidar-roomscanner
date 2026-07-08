@@ -138,8 +138,10 @@ a live-rendered point cloud.
 - **ZF32 units and range unverified** — believed float millimetres of perpendicular Z
   (`radial_to_perp.c` exists in the algo set). Confirm empirically at capture time before hardcoding the
   mm→m conversion.
-- **FoV constants for deprojection are placeholders** until confirmed against the VL53L9CX datasheet (or
-  obsoleted by an XYZ output stream, if `streams_inspect` reveals one).
+- **FoV constants for deprojection** — resolved in Phase 2.5: datasheet-derived defaults (55.0°H/42.0°V,
+  `docs/vl53l9cx-fov-notes.md`), independently confirmed by a ZAPC least-squares best-fit (54.65°/42.50°,
+  `docs/deprojector-validation.md`) within 0.35°/0.50° — no XYZ output stream exists (ZAPC is the closest
+  equivalent; see Phase 2's stream facts below).
 - ST-Link VCP at 921600: V3EC supports it, but verify clean reception (frame CRC failures at rate 0)
   before trusting milestone 1a numbers.
 
@@ -200,22 +202,43 @@ a live-rendered point cloud.
 > traceback. Confirms replay exercises the full PC-transform path on the exact recorded bytes.
 > Replay identity is guaranteed only for recordings started from a device boot (frame 1): a mid-session `--record` starts at an arbitrary point, so its replay re-runs the transform with fresh TNR state after the next CALIB — a brief filter transient vs the live render, below sensor noise.
 >
-> **Deferred / follow-up** (not blockers for calling Phase 2 done):
-> - Reflectance/confidence/ambient/`--color` viewer support — the native shim only negotiates the
->   `depth`/ZF32 output capability today (Task 6); adding more output streams is small, host-only
->   follow-on work.
-> - Trigger-early overlap (autonomous trigger mode + async TX) to close the 24.6 → ~30 fps gap —
->   Phase 3+ scope per the roadmap's deferred on-device-optimizations list above (now moot for
->   on-device processing, but the overlap idea still applies to the raw-acquisition loop itself).
-> - ZAPC Deprojector validation — the transform library's on-device-calibrated `ZAPC` point-cloud
->   format should still be used to validate/replace the host `Deprojector`'s placeholder linear-FoV
->   model (flagged in `docs/transform-streams.md`); not done in Phase 2.
-> - Connect-time CRC/DROPPED transient (first observed Task 7, see above) — unexplained; track
->   alongside the ~1-in-5 boot hang (candidate common root: sensor bring-up timing), to be
->   investigated with the EVENT-frame/recovery work.
-> - CALIB retransmit cadence means a host attaching mid-cycle discards up to 63 RAW frames
->   (~2.5 s blind start at 24.6 fps); improvement: firmware sends CALIB immediately on DTR-connect
->   (cheap — the connect wait already exists).
+> **Deferred / follow-up** (not blockers for calling Phase 2 done) — **resolved in Phase 2.5 except where
+> noted still-open:**
+> - ✅ **Reflectance/confidence/ambient/`--color` viewer support** — shipped Phase 2.5 Task 2: the shim
+>   grew a mask-selection API (`rst_create2`/`rst_process2`, `DEPTH|REFLECTANCE|CONFIDENCE|AMBIENT|ZAPC`)
+>   and the viewer gained `--color {depth,reflectance,confidence}` (default `depth`, no behavior change)
+>   with a one-time stderr fallback notice if the requested plane is absent from the stream. Verified live
+>   on hardware (Task 5, this doc's Phase 2.5 note below): IR-shaded cloud renders, no fallback warning,
+>   no traceback.
+> - ✅ **Trigger-early overlap** — shipped Phase 2.5 Task 4: the raw-only loop now triggers frame N+1
+>   before sending frame N over CDC, hiding the ~15 ms send inside the sensor's ranging window. Measured
+>   **27.76 fps** (up from 24.6), 2 ms settle (down from 5 ms; the one bounded experiment the task allowed),
+>   0 crc, 0 gaps, re-confirmed by this task's 60 s live soak (below). **Strategic implication**: the CDC
+>   send is no longer on the critical path at all (fully hidden inside ranging) — so Phase 4's Ethernet
+>   cutover will **not** by itself raise raw-only fps further; the sensor-serial chain (settle + ranging +
+>   I3C DMA readout) is now the ceiling. Ethernet's value going forward is what the Phase 4 section already
+>   says: 100 Hz-class rates, hardware PTP timestamping, and zero-config direct-link — not a fps lift for
+>   this loop.
+> - ✅ **ZAPC Deprojector validation** — done Phase 2.5 Task 3: ZAPC's z is bit-identical to ZF32 depth
+>   (hard-asserted, 0.0 mm diff); best-fit FoV 54.65°H/42.50°V agrees with the datasheet defaults within
+>   0.35°/0.50°; worst-case linear-model displacement is corner-concentrated (127 mm / 6.36% of z at
+>   row 0, col 53, vs. 12-20 mm center-region) and doesn't improve with a global FoV tweak, so the linear
+>   defaults stand and an **optional per-zone tan-table path** was added to `Deprojector` (constructor arg,
+>   linear stays default) for future consumers needing corner accuracy. Full numbers, conventions, and the
+>   decision writeup: `docs/deprojector-validation.md`. **Vendor-bug note**: ZAPC's 4th (confidence)
+>   channel is structurally ~1.0 on every zone including no-return sentinels — not usable as a validity
+>   gate as documented in `docs/transform-streams.md` (traced to an uninitialized `conf_scaling` in the
+>   library; the sentinel zones' 1e-6-digit micro-variation is actually a packed filter-status code, not a
+>   confidence score). Depth-sentinel gating remains the correct exclusion mechanism, not the ZAPC
+>   confidence field.
+> - **Open — connect-time CRC/DROPPED transient** (first observed Phase 2 Task 7): still unexplained;
+>   reproduced again in this task's 60 s soak (1 CRC failure + 1 dropped flag, both at connection time,
+>   first-occurrence-transient class — no recurrence within any run so far). Tracked alongside the
+>   ~1-in-5 boot hang (candidate common root: sensor bring-up timing); to be investigated with the
+>   EVENT-frame/recovery work.
+> - **Open — CALIB-on-DTR-connect**: CALIB retransmit cadence means a host attaching mid-cycle discards
+>   up to 63 RAW frames (~2.3 s blind start at 27.76 fps); improvement: firmware sends CALIB immediately
+>   on DTR-connect (cheap — the connect wait already exists). Not yet implemented.
 
 Migrate post-processing to the PC per the architecture decision above. This **absorbs the original
 Phase 2** (IR + additional streams): once the transform runs host-side, every output stream — depth,
@@ -238,12 +261,34 @@ for free; multi-stream firmware plumbing is no longer needed.
 - **Stream facts** (Task 7 capture, `docs/transform-streams.md`): the transform library exposes `depth`,
   `ambient`, `amplitude`, `confidence`, `reflectance`, `status` outputs; wire stream IDs 0-6 are
   allocated in `docs/protocol.md`'s registry. With the transform host-side these are PC-config choices,
-  not firmware features. The `ZAPC` point-cloud format now also runs on the PC — use one ZAPC decode to
-  validate/replace the host `Deprojector`'s placeholder linear-FoV model with calibrated intrinsics.
+  not firmware features. The `ZAPC` point-cloud format now also runs on the PC and was used (Phase 2.5
+  Task 3) to validate the host `Deprojector`'s linear-FoV model against calibrated intrinsics — datasheet
+  defaults confirmed, optional per-zone tan-table added for corner accuracy (`docs/deprojector-validation.md`).
+  **Vendor bug**: ZAPC's per-zone confidence channel is structurally ~1.0 everywhere (uninitialized
+  `conf_scaling` in the library) and does not discriminate valid/invalid zones — don't gate on it; use the
+  depth sentinel instead (see the Phase 2.5 deferred-list entry above and `docs/transform-streams.md`).
 - Bandwidth: only the raw stream crosses the wire (14,842 B/frame — 1.63× the old depth payload,
   regardless of how many output streams the PC computes). 30 Hz ≈ 445 KB/s fits CDC FS; beyond ~60 Hz
   wants Phase 4's Ethernet (and I3C readout itself tops out ~60-80 Hz, estimate — see the architecture
   decision above).
+
+### Phase 2.5 (interlude) — Multi-stream color, calibrated FoV, 30 fps overlap ← **✅ Complete**
+
+Plan: `docs/superpowers/plans/2026-07-08-phase2.5-color-fov-overlap.md`. Cleared the top three items
+from Phase 2's deferred list (all detailed above, inline, where each topic is discussed): datasheet +
+ZAPC-calibrated Deprojector FoV, host-side reflectance/confidence/ambient/ZAPC outputs with viewer
+`--color`, and a trigger-early restructure of the raw-only firmware loop (24.6 → 27.76 fps, target ≥28
+missed by 0.3 fps — sensor-serial, not hideable; see the overlap bullet above for the honest budget
+breakdown). Re-verified end-to-end on hardware (this task): 60 s live soak steady 27.0-28.0 fps, 0 seq
+gaps, 1 crc fail + 1 dropped flag (both connect-time, same tracked transient as Phase 2 — no new
+failure mode, 2 ms settle stability tripwire passed with no stall/gap bursts across the full soak);
+`--color reflectance` 15 s live check rendered the IR-shaded cloud with no fallback warning and no
+traceback; stall/recover quick check (2 s read → 5 s not-reading, port held open → 10 s resume)
+reproduced the established drop-policy behavior exactly (one seq gap, one `FLAG_DROPPED` on the
+recovery frame, one transient CRC failure, then clean contiguous decoding with all post-recovery depth
+frames finite/non-negative). `docs/protocol.md` verified unchanged — no wire change in this phase, as
+planned. Left open: the connect-time transient and CALIB-on-DTR-connect (both above), carried forward
+unchanged from Phase 2.
 
 ### Phase 3 — UI & runtime configuration
 
