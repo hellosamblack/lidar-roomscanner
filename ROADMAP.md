@@ -29,6 +29,20 @@ Engineering conventions live in [`docs/engineering-practices.md`](./docs/enginee
   references the `53L9A1/` package in place for shared Drivers/Middlewares/Utilities. `<APP>` itself is
   never edited. Our copy is hand-maintained (we accept divorcing from CubeMX regeneration; keep the
   `USER CODE` guards anyway so a future regen remains possible).
+- **Post-processing runs on the PC (owner decision, 2026-07-08).** The `vl53l9-transform-c` pipeline is
+  the throughput wall on the M33 (~37-40 ms/frame ≈ 25 fps ceiling at full 54×42 — a hard requirement;
+  see `docs/h563-optimization-notes.md`: the M33 has no vector FPU, CORDIC/FMAC don't fit this workload,
+  and fidelity-neutral micro-optimizations buy only ~5-10%). The MCU becomes a thin bridge: raw `3DMD`
+  frames (14,842 B at full res, per `docs/vl53l9cx-datasheet-notes.md` p.20) + the calibration blob once
+  at startup stream to the PC, which runs the same portable-C transform bit-exact at desktop speed. Raw
+  at 30 Hz ≈ 445 KB/s fits USB CDC today; ~100 Hz ≈ 1.5 MB/s is the Ethernet (Phase 4) trigger — note
+  I3C readout at 12.5 MHz makes 100 Hz raw marginal on this board (realistic I3C ceiling ~60-80 Hz,
+  estimate; the sensor's CSI-2 output is its true 100 Hz path but the H5 has no CSI-2 receiver).
+- **Deferred on-device optimizations** (recorded in case the on-MCU transform path is ever revived):
+  `powf(x, const)` → multiplies in `ratenorm.c`/`sharpener.c` shadowed copies (verified `powf` survives
+  in the ELF; est. 0.3-2 ms/frame), `-flto` (est. low single-digit %), SRAM bank placement for
+  DMA-vs-CPU contention (speculative), acquisition/processing overlap via autonomous trigger mode +
+  GPDMA2-driven async TX (est. → ~20-25 fps on-device). Full analysis: `docs/h563-optimization-notes.md`.
 
 ## Reference-firmware bugs — do not inherit
 
@@ -129,24 +143,33 @@ a live-rendered point cloud.
 - ST-Link VCP at 921600: V3EC supports it, but verify clean reception (frame CRC failures at rate 0)
   before trusting milestone 1a numbers.
 
-### Phase 2 — IR + additional sensor streams
+### Phase 2 — Raw streaming + PC-side transform (revised 2026-07-08) ← **NEXT**
 
-Extend the protocol and PC UI to carry and toggle IR reflectance, confidence, ambient, etc.; colorize the
-point cloud by IR intensity.
+Migrate post-processing to the PC per the architecture decision above. This **absorbs the original
+Phase 2** (IR + additional streams): once the transform runs host-side, every output stream — depth,
+reflectance, confidence, ambient, amplitude, status, and the ZAPC point cloud — is available on the PC
+for free; multi-stream firmware plumbing is no longer needed.
 
-- **Gate resolved** (Task 7 capture, `docs/transform-streams.md`): the transform library exposes
-  `depth`, `ambient`, `amplitude`, `confidence`, `reflectance`, `status` output streams; wire stream IDs
-  0-6 are allocated in `docs/protocol.md`'s stream registry.
-- **New option — on-device point cloud:** the depth stream's `ZAPC` format emits 4×float32
-  [x, y, z, confidence] per zone (16 B/zone, 4× the ZF32 payload) deprojected on-device with
-  factory-calibrated intrinsics. Phase 2 should evaluate ZAPC vs PC-side deprojection — and at minimum
-  use one ZAPC capture to validate the host `Deprojector`'s placeholder linear-FoV model.
-- Protocol is multi-stream from v1 (`stream_id` in the header), so this phase is: configure extra output
-  capabilities on the transform (each needs its own output buffer — mind SRAM; 640 KB total, raw double
-  buffer + N output planes), interleave frames per stream, and add per-stream toggles + colormap in the
-  viewer.
-- Watch: bandwidth multiplies per enabled stream — CDC FS (~1 MB/s) fits depth+IR+confidence at moderate
-  rates; full rate on all streams may already want the Phase 4 transport.
+- Firmware: new RAW stream over the existing protocol (`stream_id` from the registry; raw `3DMD`
+  payload + a one-time calibration/EVENT frame at startup carrying `calib_data`); acquisition loop
+  simplifies (no transform, no output buffer) — target the sensor's characterized 30 Hz profile.
+- Host: build `vl53l9-transform-c` as a native library (portable C; needs a thin platform shim),
+  wrap for the `roomscan` pipeline (raw frame + calib in → chosen output streams out), golden-test
+  bit-exactness against an on-MCU-produced depth capture from Phase 1 (we have `captures/` +
+  `hw_capture_snippet.bin` as ground truth).
+- Viewer: colorize the cloud by IR reflectance/confidence (original Phase 2 UI goals), stream toggles.
+- Acceptance: full 54×42 at ~30 fps over USB CDC, PC-transform output bit-identical to the Phase 1
+  on-MCU output for the same raw input.
+
+- **Stream facts** (Task 7 capture, `docs/transform-streams.md`): the transform library exposes `depth`,
+  `ambient`, `amplitude`, `confidence`, `reflectance`, `status` outputs; wire stream IDs 0-6 are
+  allocated in `docs/protocol.md`'s registry. With the transform host-side these are PC-config choices,
+  not firmware features. The `ZAPC` point-cloud format now also runs on the PC — use one ZAPC decode to
+  validate/replace the host `Deprojector`'s placeholder linear-FoV model with calibrated intrinsics.
+- Bandwidth: only the raw stream crosses the wire (14,842 B/frame — 1.63× the old depth payload,
+  regardless of how many output streams the PC computes). 30 Hz ≈ 445 KB/s fits CDC FS; beyond ~60 Hz
+  wants Phase 4's Ethernet (and I3C readout itself tops out ~60-80 Hz, estimate — see the architecture
+  decision above).
 
 ### Phase 3 — UI & runtime configuration
 
