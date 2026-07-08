@@ -1,0 +1,249 @@
+# **Architecture and Software Stack Evaluation for Tethered 3D Room Mapping Systems**
+
+## **Executive Summary**
+
+The development of a tethered, handheld 3D room mapping device utilizing a direct Time-of-Flight (dToF) sensor and a high-performance inertial measurement unit (IMU) requires a strictly optimized data pipeline. The hardware foundation—comprising the STMicroelectronics NUCLEO-H563ZI baseboard, the VL53L9CX dToF LiDAR, and the LSM6DSV16X 6-axis IMU paired with a LIS2MDL magnetometer—offers high-fidelity spatial and rotational data capable of sub-centimeter accuracy1. However, the architectural constraints of the microcontroller, specifically its USB 2.0 Full-Speed (FS) interface, impose strict bandwidth limitations that govern the entire firmware and software design4.  
+This report provides an exhaustive evaluation of the optimal open-source software stack, algorithmic workflows, and data structures required to execute Phase 1 (real-time mapping) and Phase 2 (post-processing with photogrammetry and Gaussian Splatting). The analysis identifies Open3D's Tensor-based pipeline as the superior framework for real-time volumetric integration. Furthermore, it establishes a mathematically grounded workflow for initializing 3D Gaussian Splatting (3DGS) using the ToF geometric baseline, eliminating the inherent fragility of purely optical Structure-from-Motion (SfM) pipelines.
+
+## **Hardware Architecture and Interface Constraints**
+
+### **Microcontroller and Peripheral Interfaces**
+
+The NUCLEO-H563ZI serves as the central processing hub, featuring the STM32H563ZI microcontroller built on the ARM Cortex-M33 architecture running at 250 MHz1. While the core provides robust processing capabilities (yielding 375 DMIPS) and a large internal SRAM footprint of 640 KB, the primary architectural bottleneck lies in the external data link. The STM32H563ZI features a built-in USB 2.0 Full-Speed (FS) PHY, limiting the theoretical raw throughput to 12 Mbps4. Empirical testing of USB Communication Device Class (CDC) implementations on STM32 FS peripherals indicates a maximum effective payload throughput of approximately 9.2 Mbps (1.15 MB/s) under optimal polling conditions, with catastrophic packet loss occurring in multiples of 64 bytes if host-side OS buffers overflow6.  
+To interface with the VL53L9CX, the STM32H563ZI must utilize its embedded I3C controller2. The VL53L9CX is a state-of-the-art dToF sensor that outputs up to 2.3k zones (a 54x42 resolution matrix) at up to 100 Hz7. Because the STM32H5 lacks a MIPI CSI-2 receiver, I3C is the mandatory communication bus to achieve the necessary sensor readout speeds without saturating the processor via legacy I2C overhead3.
+
+### **Sensor Fusion Low Power (SFLP) and Orientation Estimation**
+
+The LSM6DSV16X IMU represents a critical component in the real-time spatial tracking pipeline. It embeds a hardware-based Sensor Fusion Low Power (SFLP) algorithm, a highly optimized engine that computes a 6-axis game rotation vector (quaternion) internally without waking the host microcontroller9. This architectural decision offloads complex Kalman filtering and integration math from the Cortex-M33. The SFLP outputs half-precision floating-point quaternions directly into the IMU's 4.5 KB hardware FIFO9.  
+While the hardware stack includes a LIS2MDL magnetometer to enable 9-axis absolute orientation, indoor room mapping environments suffer from extreme hard and soft iron distortions—such as structural steel beams, electrical conduits, and reinforced concrete. Therefore, relying exclusively on the 6-axis game rotation vector is strictly recommended for real-time inter-frame rotation estimation, reserving the magnetometer solely for long-term yaw drift correction algorithms if stable, undisturbed magnetic vectors are detected12.
+
+## **MCU Firmware and Payload Structure**
+
+To operate the VL53L9CX at 60 Hz—a practical target that balances the temporal resolution required for continuous mapping algorithms against available data bandwidth—the firmware must meticulously pack the payload to avoid USB saturation7.
+
+### **Operating System and Driver Considerations**
+
+The selection between a bare-metal implementation and a Real-Time Operating System (RTOS) significantly impacts USB latency. Implementing ThreadX (Azure RTOS) or Zephyr provides access to highly optimized USBX and USB CDC-ACM middleware that natively supports Zero-Copy Direct Memory Access (DMA) transfers15. Utilizing UX\_DEVICE\_CLASS\_CDC\_ACM\_ZERO\_COPY ensures that the 640 KB of internal SRAM is not wasted on redundant buffer copying between the application layer and the USB peripheral, which is vital when operating near the 9.2 Mbps hardware ceiling17.
+
+### **Data Requirements and Bandwidth Mathematical Modeling**
+
+The VL53L9CX generates 2,268 discrete distance zones per frame. A naive transmission of all available metrics—16-bit depth, 8-bit IR reflectance, and 8-bit confidence per pixel—requires 4 bytes per zone (9,072 bytes per frame). At 60 Hz, this necessitates 544.3 KB/s (\~4.35 Mbps). While theoretically within the 9.2 Mbps USB FS limit, this leaves an inadequate margin for USB protocol overhead, IMU telemetry, and the inevitable scheduling jitter of the host PC's operating system6.  
+To maximize efficiency, confidence values must be stripped from the USB payload at the MCU level. The MCU firmware should apply a thresholding filter: any pixel returning a confidence metric below a predefined minimum is overridden with a depth value of 0x0000, explicitly marking it as an invalid reading for the PC ingestion engine. This strategy reduces the per-pixel payload to 3 bytes (16-bit depth, 8-bit IR reflectance), decreasing the spatial matrix to 6,804 bytes per frame.
+
+### **Recommended C-Struct Payload Blueprint**
+
+The binary payload must be strictly defined with compiler directives (e.g., \_\_attribute\_\_((packed)) or \#pragma pack(1)) to prevent the insertion of invisible alignment padding bytes. The structure uses a magic word for frame boundary detection and incorporates hardware-driven microsecond timestamps to ensure rigorous temporal synchronization between the IMU and ToF data streams.
+
+| Field Name | Data Type | Size (Bytes) | Description and Implementation Details |
+| :---- | :---- | :---- | :---- |
+| magic\_word | uint16\_t | 2 | 0xAA55 frame alignment header to recover from dropped packets. |
+| timestamp\_us | uint32\_t | 4 | Microsecond hardware timer sync driven by the MCU master clock. |
+| frame\_seq\_id | uint16\_t | 2 | Monotonically increasing sequence counter to detect USB packet loss. |
+| quat\_x | int16\_t | 2 | SFLP Game rotation vector X (Half-precision float from LSM6DSV16X)11. |
+| quat\_y | int16\_t | 2 | SFLP Game rotation vector Y (Half-precision float). |
+| quat\_z | int16\_t | 2 | SFLP Game rotation vector Z (Half-precision float). |
+| quat\_w | int16\_t | 2 | SFLP Game rotation vector W (Half-precision float). |
+| accel\_x | int16\_t | 2 | Raw linear acceleration X for high-frequency translation estimation. |
+| accel\_y | int16\_t | 2 | Raw linear acceleration Y. |
+| accel\_z | int16\_t | 2 | Raw linear acceleration Z. |
+| pixels | Array | 6,804 | Array of 2,268 elements. Each element contains a uint16\_t depth and uint8\_t IR. |
+| crc32 | uint32\_t | 4 | Cyclic redundancy check to ensure data integrity over the virtual serial link. |
+
+*Total Payload Size:* 6,830 bytes per frame. At 60 Hz, the required bandwidth is 409.8 KB/s (\~3.27 Mbps). This payload structure is exceptionally robust, easily sustainable over the STM32H563ZI's USB FS interface when using Double-Buffered DMA (Ping-Pong buffering) feeding the USB Endpoint, leaving ample bandwidth overhead19.
+
+## **Phase 1: Real-Time PC Ingestion and Mapping Stack**
+
+The real-time PC stack must parse the incoming high-speed binary stream, apply IMU-driven rotational corrections, register the point clouds for translational movement, and integrate the aligned geometry into a cohesive 3D volume.
+
+### **Framework Evaluation: Open3D vs. RTAB-Map vs. ROS 2**
+
+For this specific sensor profile—characterized by a low-resolution 54x42 depth matrix, native 2D IR intensity, and a total absence of RGB visual data—the selection of the software framework dictates the success or failure of the real-time mapping pipeline.
+
+| Framework | Core Paradigm | Input Suitability for 54x42 ToF | Verdict |
+| :---- | :---- | :---- | :---- |
+| **RTAB-Map** | Graph-SLAM prioritizing visual feature matching (ORB/SIFT/SURF) and loop closure detection21. | Severely mismatched. Low-resolution IR matrices lack the high-frequency spatial gradients necessary to extract persistent visual features. | **Discard**. Fails to calculate reliable visual odometry on textureless or low-resolution inputs. |
+| **ROS 2 (RViz)** | Inter-Process Communication (IPC) middleware relying on publishers, subscribers, and TF trees. | Feasible, but introduces unnecessary serialization and deserialization overhead for a single tethered serial device. | **Sub-optimal**. Middleware latency bottlenecks rapid GPU ingestion for simple tethered rigs. |
+| **Open3D (Tensor)** | Dense geometric registration (G-ICP) and GPU-accelerated Volumetric Truncated Signed Distance Function (TSDF) integration23. | Exceptional. Natively processes raw depth arrays and maps 8-bit intensity data directly to vertex properties independent of color25. | **Optimal Selection**. Fully leverages CUDA/Tensor pipelines for instantaneous geometric fusion26. |
+
+The analysis conclusively identifies Open3D's Tensor-based pipeline as the superior choice for Phase 1\. RTAB-Map relies on extracting visual keypoints to compute odometry; the 54x42 IR image from the VL53L9CX simply does not possess enough pixels to generate reliable ORB descriptors21. Conversely, Open3D's Tensor pipeline (open3d.t.pipelines.odometry) natively implements Generalized Iterative Closest Point (G-ICP) and Multi-Scale ICP on the GPU, algorithms that excel at aligning pure geometric topographies without relying on distinct visual textures23.
+
+### **Algorithmic Workflow for Real-Time Mapping**
+
+The implementation of the Open3D pipeline requires a specific sequence of asynchronous data ingestion and geometric manipulation.
+
+#### **1\. Asynchronous USB Parsing**
+
+A high-performance C++ or Python asynchronous routine (utilizing asyncio or Boost.Asio) must be established to monitor the Virtual COM Port. Upon verifying the 0xAA55 magic word and validating the CRC32 checksum, the 6,830-byte packet is parsed. The 54x42 array is reshaped into an Open3D Image object. The IR reflectance array is converted into a floating-point intensity image, explicitly mapping the 8-bit IR to a grayscale channel using Open3D's TSDFVolumeColorType.Gray32 flag in conjunction with convert\_rgb\_to\_intensity=True25.
+
+#### **2\. Rotational Prior Injection via SFLP**
+
+The half-precision quaternions extracted from the LSM6DSV16X dictate the absolute rotation of the camera in the global reference frame. Before executing the Iterative Closest Point (ICP) algorithm between Frame ![][image1] and Frame ![][image2], the rotational matrix ![][image3] derived from the IMU quaternion is forcibly applied to the incoming point cloud.
+
+#### **3\. Constrained ICP for Translation Estimation**
+
+Because the hardware IMU provides a highly accurate, zero-drift short-term rotational baseline, the computationally expensive ICP algorithm is constrained. It only needs to solve for the translation vector ![][image4], drastically reducing the dimensionality of the optimization problem from six degrees of freedom down to three. Open3D's Tensor-based G-ICP minimizes the point-to-plane objective function orders of magnitude faster, and avoids catastrophic local minima, when the rotation matrix is tightly constrained prior to execution23.
+
+#### **4\. Scalable TSDF Volumetric Integration**
+
+The aligned depth frames are ingested into Open3D's VoxelBlockGrid (a scalable TSDF volume). The TSDF algorithm relies on a hierarchical hashing structure to allocate memory only where surfaces exist, preventing memory exhaustion in large rooms24. The algorithm computes the signed distance ![][image5] and a continuous weight ![][image6] for each voxel ![][image7] in the 3D grid:  
+![][image8]  
+![][image9]  
+The utilization of the VL53L9CX's native IR intensity enables the TSDF volume to be "painted" in total darkness. As depth rays are cast into the voxel grid, the 8-bit IR reflectance values are integrated into the voxel weights alongside the geometry. This generates a textured 3D mesh representing the physical reflectivity of the environment at 940 nm3.
+
+#### **5\. Real-Time Raycasting and Visualization**
+
+To visualize the data without interrupting the integration loop, Open3D utilizes Tensor-based raycasting. This algorithm rapidly queries the active voxel blocks and extracts the zero-crossing surfaces of the TSDF volume, rendering a smooth, live-updating mesh on the PC screen at high frame rates26.
+
+## **Phase 2: Post-Processing and Photogrammetry Fusion**
+
+Phase 2 introduces a secondary data modality: 4K 60fps full-color video recorded from a smartphone traversing the same spatial volume. The primary objective is to rigidly lock this high-resolution color data to the mathematically accurate, zero-drift geometric baseline established by the tethered ToF/IMU rig.
+
+### **Data Fusion: Aligning 4K Video to the ToF Geometric Baseline**
+
+Traditional Structure-from-Motion (SfM) pipelines, such as COLMAP, rely heavily on multi-view stereo triangulation to estimate camera poses and scene depth31. However, SfM suffers from inherent scale ambiguity—it cannot determine physical metric distances without a known prior—and frequently fails catastrophically in textureless regions such as flat white walls or reflective glass32.  
+To overcome this failure mode, the exact metric trajectory and depth map generated by the ToF/IMU stack is injected directly into COLMAP as a rigorous mathematical constraint34.  
+**Step-by-Step Alignment Workflow:**
+
+1. **Hardware Temporal Synchronization:** The 4K video must be temporally synced with the ToF data. Because standard smartphones do not expose hardware trigger pins, this is achieved by introducing a visual-temporal anchor during the capture phase. A distinct, rapid-flashing IR/RGB LED attached to the rig pulses once. Both the smartphone and the VL53L9CX capture the impulse, establishing a rigid microsecond timestamp offset.  
+2. **Spatial Extrinsic Calibration:** A one-time hand-eye calibration is performed using an asymmetrical checkerboard. By capturing the board simultaneously in the smartphone's RGB camera and the ToF's IR camera, the static translation and rotation matrix (![][image10]) between the two focal nodes is computed.  
+3. **Trajectory Projection:** The exact 6-DoF poses of the ToF sensor, generated by Open3D's G-ICP in Phase 1, are mathematically transformed by ![][image10]. This yields the true, metric 6-DoF poses of the smartphone camera for every recorded frame.  
+4. **Prior-Driven Bundle Adjustment:** These poses are fed into COLMAP using an external pose prior mapping function. During COLMAP's bundle adjustment phase, the optimization algorithm is heavily regularized by these known poses. This completely eliminates scale drift and ensures a globally accurate camera trajectory, bypassing the traditional failure points of optical SfM35.
+
+### **Texturing and Reconstruction: Traditional Photogrammetry vs. 3D Gaussian Splatting**
+
+Once the 4K video frames are precisely localized within the metric space of the ToF geometry, the system must reconstruct the final 3D asset.  
+**Traditional Photogrammetry (Meshroom / COLMAP Mesh Texturing):**  
+Traditional methods extract a Poisson surface reconstruction from the underlying point cloud and attempt to project the 2D RGB pixels onto the 3D mesh polygons. However, minor micro-alignment errors between the ToF depth and the high-resolution RGB frames inevitably result in visible texture smearing, tearing, and "ghosting" on object edges.  
+**3D Gaussian Splatting (3DGS):** 3DGS represents a paradigm shift and is profoundly superior for this dual-sensor architecture. In a standard 3DGS workflow, the network suffers when initialized with sparse, noisy COLMAP point clouds, frequently generating optical artifacts known as "floaters" or converging to incorrect local minima in textureless regions37.  
+By utilizing the dense, millimeter-accurate ToF point cloud for initialization and constraint, these visual artifacts are entirely eradicated39.
+
+1. **Deterministic Initialization:** Instead of initializing the Gaussians' mean positions (![][image11]) from an unreliable optical SfM cloud, the system initializes them using the precise, dense point cloud generated by the Phase 1 TSDF integration.  
+2. **Depth Regularization Optimization:** During the differentiable rasterization training loop, a depth-regularized optimization loss is applied. The 3DGS network is mathematically penalized if the rendered depth of the scene deviates from the absolute metric depth captured by the VL53L9CX41.  
+3. **Refined Scene Representation:** As a result, the 3DGS optimization algorithm avoids struggling to discover the underlying geometry. Instead, it focuses purely on refining the covariance matrices (the physical scale and rotation of the Gaussian ellipsoids) and the spherical harmonics (the view-dependent RGB color) using the 4K video. This workflow yields a photorealistic, real-time renderable digital twin that maintains strict, millimeter-accurate physical scaling.
+
+## **Bottleneck Analysis and Mitigation Strategies**
+
+Several critical failure modes exist within this hardware and software architecture. Identifying and mitigating these bottlenecks is paramount to ensuring robust spatial data fidelity.
+
+### **1\. USB Bus Saturation and Data Loss**
+
+**Failure Mode:** The STM32H563ZI relies on a USB 2.0 Full-Speed PHY, physically capping transmission at 12 Mbps. In real-world environments, Windows and Linux CDC-ACM serial drivers constrain continuous bulk transfers to a practical ceiling of approximately 9.2 Mbps. If the host operating system experiences momentary CPU scheduling latency, the PC's 16 KB driver buffers fail to empty in time. Consequently, the MCU's transmission buffers overflow, resulting in dropped packets that inexplicably vanish in multiples of exactly 64 bytes, destroying frame continuity6. **Mitigation Strategy:** To bypass this limitation, implement a lightweight Run-Length Encoding (RLE) or Delta compression algorithm directly on the MCU before USB transmission. Depth maps of indoor rooms contain vast contiguous regions of identical depths (e.g., flat walls, floors). Applying Delta-RLE reduces the spatial payload size by an estimated 40-60%, safely avoiding the 9.2 Mbps ceiling and ensuring consistent frame delivery even during host-side latency spikes42. Additionally, utilizing strict Zero-Copy DMA pipelines on the STM32 ensures CPU cycles are not wasted buffering the compressed payload to the USB peripheral19.
+
+### **2\. Iterative Closest Point (ICP) Degeneracy on Featureless Geometries**
+
+**Failure Mode:** The VL53L9CX provides a relatively low-resolution 54x42 depth matrix. When the sensor rig faces a flat, textureless wall (such as moving down a featureless hallway), pure geometric ICP algorithms fall victim to the "aperture problem." The covariance matrix of the point cloud becomes singular along the infinite plane of the wall, causing the translation estimation to slide unboundedly along the surface without converging, resulting in severe spatial tracking drift. **Mitigation Strategy:** Open3D's RGB-D Odometry pipeline supports joint geometric and photometric optimization25. By passing the VL53L9CX's 2D IR intensity data as the "color" channel into the ICP algorithm, the solver evaluates both spatial geometry and pixel-intensity gradients. The algorithm mathematically locks onto infrared anomalies—such as variations in paint density, thermal smudges, or drywall seams—that are completely invisible to the naked eye but highly distinct in the 940 nm spectrum, thereby anchoring the translation estimate and eliminating geometric slip.
+
+### **3\. Timestamp Synchronization Drift**
+
+**Failure Mode:** The IMU's internal SFLP engine operates asynchronously at high frequencies, while the LiDAR array exposes frames at a down-sampled 60 Hz. If sensor data is simply ingested by the PC sequentially as it arrives over USB, minor oscillator clock drifts between the components will gradually misalign the IMU quaternions with the depth frames. This temporal tearing corrupts the spatial registration during fast rotational movements, causing the mesh to warp. **Mitigation Strategy:** The Cortex-M33 MCU must assert itself as the absolute master clock of the system. It must utilize a precise hardware timer to drive the physical SYNC\_IN pin of the VL53L9CX, forcing a synchronized global shutter exposure7. The MCU then captures the IMU quaternion and packages the exact microsecond timer value into the binary payload structure (timestamp\_us). This guarantees that the PC-side SLAM algorithm possesses microsecond-accurate data association, effectively immunizing the system against asynchronous clock drift.
+
+### **4\. Cover Glass Crosstalk and Multipath Interference**
+
+**Failure Mode:** The VL53L9CX relies on a dual-VCSEL flood illumination array. If the module is rigidly mounted behind a laptop screen or protective glass cover, severe internal optical reflections (crosstalk) will bounce between the VCSEL emitters and the SPAD receiver array. This multipath interference introduces massive systemic distance measurement errors, blinding the sensor at close ranges (under 60 cm) and drastically degrading the signal-to-noise ratio43. **Mitigation Strategy:** Physical and optical isolation is mandatory. The hardware mounting must incorporate an internal light-blocker (a dense, opaque gasket) directly between the Transmitter (Tx) and Receiver (Rx) apertures to sever the internal reflection path. Furthermore, the cover glass must feature a specialized Anti-Reflective Coating (ARC) optimized for the 940 nm wavelength (ensuring transmittance exceeds 87%). Crucially, the glass must maintain a haze percentile strictly below 2% to prevent IR scatter and ensure the structural integrity of the returning photon wave43.
+
+## **Conclusion**
+
+The proposed hardware and software architecture represents a highly capable approach to low-cost, high-fidelity spatial mapping. By tightly coupling the LSM6DSV16X's hardware-computed quaternions with the VL53L9CX's high-speed dToF depth matrices, the computational burden on the host PC's real-time SLAM is vastly minimized. Utilizing Open3D's Tensor pipeline allows for rapid, GPU-accelerated TSDF volumetric integration, dynamically textured with native 940 nm IR intensity.  
+For post-processing, utilizing the metric, zero-drift geometric baseline established in Phase 1 to directly initialize and depth-regularize a 3D Gaussian Splatting model resolves the inherent weaknesses of traditional photogrammetry. This dual-phase methodology successfully bridges the gap between hardware telemetry and neural rendering, resulting in dimensionally accurate, photorealistic digital twins. Provided the microcontroller's USB 2.0 Full-Speed bandwidth constraints are aggressively mitigated via delta compression and zero-copy DMA management, this stack will deliver exceptional performance and reliability in complex indoor environments.
+
+## **Revision 2026-07-07 — Transport Decision and Sensor Additions**
+
+*This section supersedes assumptions in the original report where noted. The original text is retained below for reference.*
+
+### **Host Transport: Ethernet Supersedes USB Full-Speed**
+
+The NUCLEO-H563ZI carries a **10/100 Ethernet MAC** (LAN8742 PHY; the RMII pins are already pinned as `GPIO_AF11_ETH` in `Src/main.c`, though the ETH peripheral and a network stack are not yet enabled). Ethernet is adopted as the **target production transport**, superseding the USB Full-Speed assumption that underpins the *MCU Firmware and Payload Structure* section and much of the *Bottleneck Analysis*:
+
+* **~90+ Mbps usable vs. ~9.2 Mbps** — roughly a 10× increase. The full *uncompressed* payload including confidence (9,072 bytes/frame) at 100 Hz is ≈ 7.3 Mbps, about 8% of the link. **This voids Bottleneck 1 (USB saturation → Delta-RLE compression); on-MCU compression is removed from the plan.**
+* **Hardware PTP (IEEE 1588) timestamping** on the STM32H5 ETH replaces the SYNC_IN master-clock scheme for temporal alignment. **This largely voids Bottleneck 3 (timestamp synchronization drift)** and extends cleanly to multi-device sync.
+* **Lower, more deterministic latency** than host USB CDC-ACM scheduling, whose jitter was itself the Bottleneck-1 failure mode.
+* **Stack:** lwIP (bare-metal RAW/UDP) or NetX Duo under Azure RTOS. UDP with the existing magic-word + sequence + CRC32 framing for the sensor feed; TCP only if reliability outweighs head-of-line blocking. Power the board over USB/ST-Link while Ethernet carries data; a direct board↔NIC link with static IPs works (modern NICs auto-MDIX).
+* **USB CDC (native USB_DRD_FS) is retained as a bring-up and fallback transport**, not the production link.
+
+Net effect: two of the four original bottleneck sections collapse, and the design is freed to stream richer, fully-timestamped data rather than aggressively conserving bandwidth.
+
+### **Sensor Suite: X-NUCLEO-IKS4A1 Added**
+
+A second Arduino-connector expansion board, the **X-NUCLEO-IKS4A1** MEMS motion + environmental board, is added alongside the X-NUCLEO-53L9A1 ToF board. Intended roles:
+
+| Sensor | Type | Role in the pipeline |
+| :---- | :---- | :---- |
+| **LSM6DSV16X** | 6-axis IMU w/ hardware SFLP | **Primary orientation.** SFLP game-rotation-vector quaternions offload fusion from the MCU and provide the rotation prior that constrains PC-side ICP to 3-DoF translation. |
+| **LIS2MDL** | Magnetometer | Long-term yaw-drift correction **only** (hard/soft-iron distortion indoors makes it unfit for per-frame rotation). |
+| **LPS22DF** | Barometer | Highest-value bonus: relative altitude → **1-DoF vertical (Z) constraint** against SLAM drift in stairwells/corridors. *Caveat:* indoor baro Z is corrupted by HVAC/door pressure transients (~12 Pa/m; a door can shift indoor pressure several Pa) — treat as a soft constraint. |
+| **SHT40AD1B / STTS22H** | Humidity+temp / temp | Ambient temperature for thermal-drift compensation (main win is IMU gyro-bias; the VL53L9CX has its own internal temp compensation). |
+| **LSM6DSO16IS** | 6-axis IMU w/ ISPU | Largely redundant given SFLP; ISPU available for edge inference if needed. |
+| **LIS2DUXS12** | Ultra-low-power accel | Wake-on-motion trigger to bring LiDAR/SLAM out of deep sleep. |
+
+**Open integration question:** the ToF owns I3C1; the IKS4A1 sensors are I2C. STM32H5 I3C is backward-compatible with legacy I2C on the same SDA/SCL, or a separate I2C peripheral can be used — pin/stacking compatibility across the two Arduino shields must be verified before assuming they co-exist. Any payload field added for these sensors (e.g., a `baro` float after `accel`) must bump the payload version and keep CRC32 last.
+
+---
+
+#### **Works cited**
+
+1. STM32H563ZI | Product \- STMicroelectronics, [https://www.st.com/en/microcontrollers-microprocessors/stm32h563zi.html](https://www.st.com/en/microcontrollers-microprocessors/stm32h563zi.html)  
+2. Nucleo H563ZI \- Zephyr Documentation, [https://docs.zephyrproject.org/latest/boards/st/nucleo\_h563zi/doc/index.html](https://docs.zephyrproject.org/latest/boards/st/nucleo_h563zi/doc/index.html)  
+3. ST Unveils 2.3K-Zone dToF 3D Lidar Module for Resource-Limited Edge AI \- News, [https://www.allaboutcircuits.com/news/st-unveils-2.3k-zone-dtof-3d-lidar-module-for-resource-limited-edge-ai/](https://www.allaboutcircuits.com/news/st-unveils-2.3k-zone-dtof-3d-lidar-module-for-resource-limited-edge-ai/)  
+4. Datasheet \- STM32H562xx and STM32H563xx \- Arm® Cortex®\-M33 32-bit MCU \+ TrustZon, [https://www.st.com/resource/en/datasheet/stm32h563ri.pdf](https://www.st.com/resource/en/datasheet/stm32h563ri.pdf)  
+5. STM32H5 series \- STMicroelectronics, [https://www.st.com/en/microcontrollers-microprocessors/stm32h5-series.html](https://www.st.com/en/microcontrollers-microprocessors/stm32h5-series.html)  
+6. USB CDC packet loss at high data rates \- STMicroelectronics Community, [https://community.st.com/stm32-mcus-embedded-software-32/usb-cdc-packet-loss-at-high-data-rates-160879](https://community.st.com/stm32-mcus-embedded-software-32/usb-cdc-packet-loss-at-high-data-rates-160879)  
+7. Datasheet \- VL53L9CX \- 3D dToF all-in-one lidar module \- STMicroelectronics, [https://www.st.com/resource/en/datasheet/vl53l9cx.pdf](https://www.st.com/resource/en/datasheet/vl53l9cx.pdf)  
+8. STMicroelectronics VL53L9CX | EBV Elektronik \- Avnet EMEA, [https://my.avnet.com/ebv/products/new-products/npi/2026/stmicroelectronics-vl53l9cx/](https://my.avnet.com/ebv/products/new-products/npi/2026/stmicroelectronics-vl53l9cx/)  
+9. Datasheet \- LSM6DSV16X \- 6-axis inertial measurement unit (IMU) and AI sensor with embedded sensor fusion, Qvar for high-end ap \- STMicroelectronics, [https://www.st.com/resource/en/datasheet/lsm6dsv16x.pdf](https://www.st.com/resource/en/datasheet/lsm6dsv16x.pdf)  
+10. LSM6DSV Family, [https://www.st.com/content/dam/ces23/pdf/new-imu-presentation-ces-2023.pdf](https://www.st.com/content/dam/ces23/pdf/new-imu-presentation-ces-2023.pdf)  
+11. How LSM6DSV16X enables sensor fusion low power (SFLP) algorithm | Community, [https://community.st.com/mems-and-sensors-62/how-lsm6dsv16x-enables-sensor-fusion-low-power-sflp-algorithm-120280](https://community.st.com/mems-and-sensors-62/how-lsm6dsv16x-enables-sensor-fusion-low-power-sflp-algorithm-120280)  
+12. Getting started with MotionFX sensor fusion library in X-CUBE-MEMS1 expansion for STM32Cube \- User manual \- STMicroelectronics, [https://www.st.com/resource/en/user\_manual/um2220-getting-started-with-motionfx-sensor-fusion-library-in-xcubemems1-expansion-for-stm32cube-stmicroelectronics.pdf](https://www.st.com/resource/en/user_manual/um2220-getting-started-with-motionfx-sensor-fusion-library-in-xcubemems1-expansion-for-stm32cube-stmicroelectronics.pdf)  
+13. AppNote \- 9-Axis MotionFusion and Calibration Algorithms PDF \- Scribd, [https://www.scribd.com/document/415774856/AppNote-9-Axis-MotionFusion-and-Calibration-Algorithms-pdf](https://www.scribd.com/document/415774856/AppNote-9-Axis-MotionFusion-and-Calibration-Algorithms-pdf)  
+14. 3D dToF Lidar Module VL53L9CX Features | PDF | Imaging | Computer Vision \- Scribd, [https://www.scribd.com/document/951335093/vl53l9cx-1](https://www.scribd.com/document/951335093/vl53l9cx-1)  
+15. micropython 标签 \- Gitee.com, [https://gitee.com/819589789/micropython/tags](https://gitee.com/819589789/micropython/tags)  
+16. USBX on STM32H563 \- Unaligned Access Confusion \- STMicroelectronics Community, [https://community.st.com/stm32-mcus-products-25/usbx-on-stm32h563-unaligned-access-confusion-153089](https://community.st.com/stm32-mcus-products-25/usbx-on-stm32h563-unaligned-access-confusion-153089)  
+17. slow data rate with usb cdc on nucleo-h533 \- STMicroelectronics Community, [https://community.st.com/stm32-mcus-embedded-software-32/slow-data-rate-with-usb-cdc-on-nucleo-h533-161069](https://community.st.com/stm32-mcus-embedded-software-32/slow-data-rate-with-usb-cdc-on-nucleo-h533-161069)  
+18. ST launches compact 3D LiDAR module for edge systems \- IN Electronics & Design, [https://www.inelectronics.co.uk/st-launches-compact-3d-lidar-module-edge-systems/](https://www.inelectronics.co.uk/st-launches-compact-3d-lidar-module-edge-systems/)  
+19. STM32L552 USB CDC Library CDC\_Receive\_FS Interrupt Control and Speed Optimization, [https://community.st.com/stm32-mcus-embedded-software-32/stm32l552-usb-cdc-library-cdc-receive-fs-interrupt-control-and-speed-optimization-37804](https://community.st.com/stm32-mcus-embedded-software-32/stm32l552-usb-cdc-library-cdc-receive-fs-interrupt-control-and-speed-optimization-37804)  
+20. USB HID or CDC \- STMicroelectronics Community, [https://community.st.com/stm32-mcus-products-25/usb-hid-or-cdc-96595](https://community.st.com/stm32-mcus-products-25/usb-hid-or-cdc-96595)  
+21. COMPONENT-BASED SLAM IN RTAB-MAP A. (Ángel) Lorente Rogel, [https://essay.utwente.nl/fileshare/file/88715/Lorente\_Rogel\_MA\_EE.pdf](https://essay.utwente.nl/fileshare/file/88715/Lorente_Rogel_MA_EE.pdf)  
+22. (PDF) Improved RTAB-Map Algorithm Based on Visible Light Positioning \- ResearchGate, [https://www.researchgate.net/publication/393896161\_Improved\_RTAB-Map\_algorithm\_based\_on\_visible\_light\_positioning](https://www.researchgate.net/publication/393896161_Improved_RTAB-Map_algorithm_based_on_visible_light_positioning)  
+23. RealSense™ SDK 2.0 and Open3D, [https://www.realsenseai.com/news-insights/insights/open3d/](https://www.realsenseai.com/news-insights/insights/open3d/)  
+24. TSDF Integration — Open3D 0.17.0 documentation, [https://www.open3d.org/docs/0.17.0/tutorial/t\_reconstruction\_system/integration.html](https://www.open3d.org/docs/0.17.0/tutorial/t_reconstruction_system/integration.html)  
+25. RGBD integration \- Open3D 0.19.0 documentation, [https://www.open3d.org/docs/release/tutorial/pipelines/rgbd\_integration.html](https://www.open3d.org/docs/release/tutorial/pipelines/rgbd_integration.html)  
+26. Reconstruction system (Tensor) \- Open3D primary (unknown) documentation, [https://www.open3d.org/docs/latest/tutorial/t\_reconstruction\_system/index.html](https://www.open3d.org/docs/latest/tutorial/t_reconstruction_system/index.html)  
+27. Optimizing RTAB-Map Viewability to Reduce Cognitive Workload in VR Teleoperation: A User-Centric Approach \- MDPI, [https://www.mdpi.com/2227-7390/14/3/579](https://www.mdpi.com/2227-7390/14/3/579)  
+28. rsasaki0109/localization\_zoo: C++ from-paper reimplementations of LiDAR localization & odometry papers — honestly benchmarked on KITTI, with tests. \- GitHub, [https://github.com/rsasaki0109/localization\_zoo](https://github.com/rsasaki0109/localization_zoo)  
+29. open3d.integration.ScalableTSDFVolume, [https://www.open3d.org/docs/0.8.0/python\_api/open3d.integration.ScalableTSDFVolume.html](https://www.open3d.org/docs/0.8.0/python_api/open3d.integration.ScalableTSDFVolume.html)  
+30. TSDF Integration \- Open3D primary (unknown) documentation, [https://www.open3d.org/docs/latest/tutorial/t\_reconstruction\_system/integration.html](https://www.open3d.org/docs/latest/tutorial/t_reconstruction_system/integration.html)  
+31. Daily Papers \- Hugging Face, [https://huggingface.co/papers?q=COLMAP%20priors](https://huggingface.co/papers?q=COLMAP+priors)  
+32. Optimizing Multi-Camera Rigs for 3D Gaussian Splatting \- Search for publications in DiVA, [https://liu.diva-portal.org/smash/get/diva2:2070853/FULLTEXT01.pdf](https://liu.diva-portal.org/smash/get/diva2:2070853/FULLTEXT01.pdf)  
+33. Paper-Notes-en/docs/CVPR2026/3d\_vision/aerogs\_scale-aware\_gaussian\_splatting\_for\_pose-free\_dynamic\_uav\_scene\_reconstruc.md at main \- GitHub, [https://github.com/zhaoyang97/Paper-Notes-en/blob/main/docs/CVPR2026/3d\_vision/aerogs\_scale-aware\_gaussian\_splatting\_for\_pose-free\_dynamic\_uav\_scene\_reconstruc.md](https://github.com/zhaoyang97/Paper-Notes-en/blob/main/docs/CVPR2026/3d_vision/aerogs_scale-aware_gaussian_splatting_for_pose-free_dynamic_uav_scene_reconstruc.md)  
+34. Why is there such a gap for RGB \+ External 6DoF : r/GaussianSplatting \- Reddit, [https://www.reddit.com/r/GaussianSplatting/comments/1roxte8/why\_is\_there\_such\_a\_gap\_for\_rgb\_external\_6dof/](https://www.reddit.com/r/GaussianSplatting/comments/1roxte8/why_is_there_such_a_gap_for_rgb_external_6dof/)  
+35. Robust and High-Fidelity 3D Gaussian Splatting: Fusing Pose Priors and Geometry Constraints for Texture-Deficient Outdoor Scenes \- arXiv, [https://arxiv.org/html/2511.06765v1](https://arxiv.org/html/2511.06765v1)  
+36. SiLVR: Scalable Lidar-Visual Radiance Field Reconstruction with Uncertainty Quantification \- arXiv, [https://arxiv.org/html/2502.02657v1](https://arxiv.org/html/2502.02657v1)  
+37. Depth-Regularized Optimization for 3D Gaussian Splatting in Few-Shot Images | Request PDF \- ResearchGate, [https://www.researchgate.net/publication/384423570\_Depth-Regularized\_Optimization\_for\_3D\_Gaussian\_Splatting\_in\_Few-Shot\_Images](https://www.researchgate.net/publication/384423570_Depth-Regularized_Optimization_for_3D_Gaussian_Splatting_in_Few-Shot_Images)  
+38. Liberated-GS: 3D Gaussian Splatting Independent from SfM Point Clouds \- CVF Open Access, [https://openaccess.thecvf.com/content/ICCV2025/papers/Pan\_Liberated-GS\_3D\_Gaussian\_Splatting\_Independent\_from\_SfM\_Point\_Clouds\_ICCV\_2025\_paper.pdf](https://openaccess.thecvf.com/content/ICCV2025/papers/Pan_Liberated-GS_3D_Gaussian_Splatting_Independent_from_SfM_Point_Clouds_ICCV_2025_paper.pdf)  
+39. 3d gaussian splatting reconstruction with depth enhanced initialization \- AMS Laurea, [https://amslaurea.unibo.it/id/eprint/33932/1/AI\_Thesis\_Jacopo\_Meglioraldi.pdf](https://amslaurea.unibo.it/id/eprint/33932/1/AI_Thesis_Jacopo_Meglioraldi.pdf)  
+40. MGS-SLAM: Monocular 3D Gaussian Splatting SLAM with Significance-Guided Pruning \- ICCVM, [https://iccvm.org/2026/files/papers/435.pdf](https://iccvm.org/2026/files/papers/435.pdf)  
+41. Time of the Flight of the Gaussians: Optimizing Depth Indirectly in Dynamic Radiance Fields, [https://cvpr.thecvf.com/virtual/2025/poster/34194](https://cvpr.thecvf.com/virtual/2025/poster/34194)  
+42. STM32 FAST DATA COMPRESSION AND LOW MEMORY FOOTPRINT | Community, [https://community.st.com/stm32-mcus-products-25/stm32-fast-data-compression-and-low-memory-footprint-104171](https://community.st.com/stm32-mcus-products-25/stm32-fast-data-compression-and-low-memory-footprint-104171)  
+43. AN6346 Guidelines for the cover glass of the VL53L9CX Time-of-Flight 2K zones \- STMicroelectronics, [https://www.st.com/resource/en/application\_note/an6346-guidelines-for-the-cover-glass-of-the-vl53l9cx-timeofflight-2k-zones-stmicroelectronics.pdf](https://www.st.com/resource/en/application_note/an6346-guidelines-for-the-cover-glass-of-the-vl53l9cx-timeofflight-2k-zones-stmicroelectronics.pdf)  
+44. A guide to using the VL53L5CX multizone Time-of-Flight ranging sensor with a wide field of view ultra lite driver (ULD) \- STMicroelectronics, [https://www.st.com/resource/en/user\_manual/um2884-a-guide-to-using-the-vl53l5cx-multizone-timeofflight-ranging-sensor-with-a-wide-field-of-view-ultra-lite-driver-uld-stmicroelectronics.pdf](https://www.st.com/resource/en/user_manual/um2884-a-guide-to-using-the-vl53l5cx-multizone-timeofflight-ranging-sensor-with-a-wide-field-of-view-ultra-lite-driver-uld-stmicroelectronics.pdf)
+
+[image1]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACsAAAAaCAYAAAAue6XIAAAA4UlEQVR4Xu2UPQ5BURCFR5BISBQSCTqi01HagMYGrEKBFShsQae3ApXEFuhtQaFCOJPbXBM/8xImIvMlXzNzXt4p7r1EjuOY0YFDOTRiDA+wIhfP2MGrHH6ZLbzAM4V/q8tyeC2HRkwoQdkMhfBULoxQlR1QCMUeYTsOGaAqm6MQmMENbMAyTMchA1RlmRrcw56YW6Iu24UnWJeLBxThPIHZ8Nlb1GWXZP9kSdRl93RftkQ/fGY5xJeL4aL9aGdF4rJ5uCD9OfsE/PI04YpCjxFswUIciknBKr0IOI7jOP/PDUsWNKI6xRapAAAAAElFTkSuQmCC>
+
+[image2]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAcAAAAdCAYAAABmH3YuAAAAj0lEQVR4XmNgGMqAEYjDgJgVXQIEooF4DxBzo0uAdM0H4lZ0CRAQBOLTQOyHLAgy6j8WzAOS5ABiSQaIkSBBEBuE4YAXiA9DJTEAyB6QBMhODAByIUhyDroECID8BpIEOQ4DgCSuArEIA8S/zeiSa4CYBYjNgPgiuuRSBogukKOCkSWZgVgZiI2QBUcBEAAAahobe+sHnnAAAAAASUVORK5CYII=>
+
+[image3]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABYAAAAaCAYAAACzdqxAAAABO0lEQVR4Xu2UTytFURTFl/SKKKS8lBJKiWKszEx8BhmTMjFUhm/gK0jJXMnAyEcwNTAxUGSunqL8Wat9b+9YofNcGej9ag3uWvfse8+++1ygw19To+rUqKky/YhCd9QbNVVcS4uF90J1lQva5RFRxNlD+Ese5KC30eJbD8g2IjvyIIchxOIzD8gxIlv3IIdV6pVaNn8AUfTS/GwOEG0YQ2tKNqkbRI/7WrfmM089UDuJ142YhOfEaxu1Qdv1NhwW/rD5YoRac9O5QBToMb/8aDPmC+1u0k2nic/n9xrhp6dQLRqnzqkJajDJPvDd/MqXdDKFdjaLaNmXvVfBOWoDsfgK8SZlEfFUZJpxcUr1ItpwX970E/TwaWqf2k187a6RXP8aGsMVxL9jy7JKqG0n1IIHVdHJ1Bx3+E+8A4jHO4nqaN1lAAAAAElFTkSuQmCC>
+
+[image4]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADgAAAAaCAYAAADi4p8jAAACM0lEQVR4Xu2WTUgVURiGv7AgMUgwTPtRsUTa9EOKm5a6cFFIIiK1i2gdguIuiBA3QRKBkUhuIohQyF2LKMGluGjn4m4t2uWmiHpfvjndM5/3zj13pgu3yzzwwNzzzdwz75wz54xITl1yCA7BZ3DC1BqCJ/AR7IMfYXe8/P+zB3ei45vwhVerKzoTbPXOs7B2THSqPhUNGcQAvG8ba8yg6M2SFXgENsE7cApuwY6o7jMMv8AlW0jiM/xtG2vMVXgiOp712jk690TDbsDjXs3B2rxo2CAY7oNtrAA7eQd/iF7vG8Il0SlJ/IDkLWyBt0xtEV6MjnntvuiDSuSw6E1xdQrlDHwPZ2CXqYXi3jliA66JTl++Y36N9/kyOmawb/BCsRyHT8c++ZAnwnBzoiOYhaSA7vcn0f4cr0Qf7DT8LqWn71+OinawIPpH52C7VL7xB7DZNqagVED2PQrvwlV4OWp38P3sgWPwbLxUmtOwIPqnIXB0N21jSvyAD+Ft2C8a6rw7KSvX4E/YawtluA6/wucVDMGOINcCvtMcpWXRbSMzbyR81SPcu7g//QtsQDIpujVckeIXSyYKEg/YJsnvIPetbduYEk73k9GxC8hRex0dc8q6D4HUMBwXGMJwN7xaOXiem0pZYEAXwK6iDMmwHMVxU6sKF5CbKveX0Hm/Cx/bxioZEe2XLEm873XREeQex5CpHyYvPCXppoL7lPolB/fThoPT1i0abuHIycnJycmpV/4A7uNd/q1ojhIAAAAASUVORK5CYII=>
+
+[image5]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAC4AAAAbCAYAAAADDr0pAAACHUlEQVR4Xu2XTSgFURTHj1BEyUfKSrISopS1hQULLFgosmVhpyirt7GVtZRs2VLIQllai5QFYUFSyoZ8nL8z9737jjt3xngoza/+veacc2fOPffcO/OIUlJSkrDOmtHGGFSwNlnF2hHFAuvNoyfWajb6M6WsZVatdnyRW9awNvooYzWwrkgSbQ6ujXYD+wSrKBhjg4c9amMClljX2hgHJPeqjQHlJP5t7SAZM6qNCUBRsLJt2uEDg5DYpXZYwK8riwlhTJOyJ2WQldFGHx0kic1ph4XpeZtJ1ryyYTL9rBFLuC5h9Vi2IVaNDMmCjfpAkk8sxkiWvFc7LFyJr7AGlA374pzyNziuK1n7lg2r1yVD8oBP39NJNeuQtUWyUV0gRrdKHeuIwqtjThuMu2dVsfZYs+Te5AbEoyCR4MFYHr3kNqgMbogJGkxl8RsGkjUV3gl+MSEfiFnTRhdoEwT72mSaJCZj2eIkDk4plzwqHkXsxFFFBIe1SR9J/08pe9zEu0laBc94UT4XsRNH3yI4DFMxvcSmx1uUXYPx5hkQJuIDMZE97ju/O1nHJC8FHFMuXKeKQW/GRsoVwdcy8Ifd8+NGmDmWH4EnlH/uYqPCfhPEhuE6x+tZByRjcY8Nkom3kxTIVP6CtRiMMSDujqJX8dugqoV+c/peggUF1Svkt0qrdvwU46xnbUwAvg7PtPEn+bPv8ULx6/+AUlL+G+8WDYzpnHxBZQAAAABJRU5ErkJggg==>
+
+[image6]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADMAAAAbCAYAAADRXrdxAAACcklEQVR4Xu2XT6hNURSHl1CEFEWSlExkYCCkKAMGb4BCmZhjYqAwfYW5iYmJDMgze4OXknovZihzpZAYoYRI/qyvtVftu+7Z55x78u4zOF/9eu+utc8+e6291r77ivT09PyPLFVdVy2JjhacU92Pxjr+BH1W7VAdVP2u8Dvvg53xOYtUF1Vvg31UVqtuiCWlkQ2qs2ILuqdap1os9vB61c/kI0A+OzxH5t6ojok9k7Nb9VF1Jti7wBpORWOJnWILvhUdYpnFtzLYCXYq2HJ+qCajsSNHZLAqaiHrpWC8jFYF+yHVo2BzKDGC2RsdHdmoeiVWco1QMix4LrOxoGuq2eRjTM60anmwOfTPbbE5cg6oTmQ6qlqj2hPsLD5yPqkRss6CH2e2/arnYruFb1vm2yRWmiV46aVoFEtWfmh8FZvH3+E6nMbnTEh15QyxTGyS15ntgVifXE2+fcm+XfXMB1XAXDNiLy/BKcecv1THxU4rPtedWFtUL2XwECrCZBzLsFasJ4AM59m6mWwlSMCc1O8ci/YAPqW/DwdGDEOZk+xY7pX4tgPHqWeJksmDoekJtkSbYIBm9rJ6odo86B5i5GAQTX85sxMEdnaDs77U9E7bYIAg/L2UXh2dgnki1uDOLtU31Z3ka8J7Jt4IIuwMPfNU7L38X8fIPYNiCXGKfVC9U20NvhKl08yJDU+/NJVb69MM6Jeq7Pj21i0uUvqeuSt2/fHEcXUCvgLc9iWNW5F8Dgk6HWxFrohtZYSyuRCNDXBDno8bQLxSjQ1u3JPR2BHuZsy3YHCD4OD4F7fm76qT0ThOFuT3zHwz1l+aPT097fgL9eefDPj4ehYAAAAASUVORK5CYII=>
+
+[image7]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAaCAYAAACD+r1hAAAAjUlEQVR4XmNgGAUjB0gDcQgaBgEhNDEHqDgDBxArA/E+IP4PxE+h4qxA/A+IbwGxJBALQ8XhQJ4BogGE+YHYDIjfQ2mcIBiI/zIgNDKiSmMCkIIyBojin2hyWAHMhucMEE17GCDOwwlAbgZ5EuZ+kKZZKCqQALonQbZh9YsvkgQIl0PFQTSyOAiPAtoAAOb6JT6AClYjAAAAAElFTkSuQmCC>
+
+[image8]: <data:image/png;base64,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>
+
+[image9]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAmwAAAAxCAYAAABnGvUlAAAESUlEQVR4Xu3dzat1UxwH8KUoQigReRlKFPKWYoQhAxLFQCYkIwP+AMlUhlIykLxMJBMZ3JiIUooSGZAIyQSFvOxvZ6+eddfd+9z9PPfc5znq86nVWeu3T3eve9bgflvr7OcpBQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOBE+7gsTLhzaSX3xf+iavjDhw75wglzdFyZkXe7piwDAdvm3af34zK729jhuXVqWB7Ef+sIBnV92z/fUbpz5P91dP4gv+sIaN/SF4yzr8lRfnHFvXwAAtsvJ5UhYqzK+rRm/UOZD2d99YY3bh/ZkXzygzP/rrtb/Puvmv1Tm/lhfXGPp53JaX9iQpfevNr0uAMCGtQEnuzIZt3/Az2j6rbzn/r64j7/6wgb80/Tr/Ku7yvz8j0YfAvdz89Be6YsT7ugLG3Is65LwCwBsqTaMJIT9NrTnmvGcr4Z2QTNujyOvbfptYHq36W9Knf8p5cj8q+yuHVSOXttdvISs+ru9VFb3S3+nec/pY30/SwLbT2UVSusuYQ2ouedlY7+V+bbrkrnX+aZe++38si5ZMwBgS9U/3A+Mr/kDvzO0G4d28VibMrXrlO9upZ4wd3d3LdYFwGNV5/Hm+Jr5JyRm/sfiwW6cUJVg1vulrO49d/w49fn09gtsOZqux9YJbNk5+2i8lv7lY7819zPrujzfXyirdTmMtQEANiQBJ9+lenYc74y1d+obGm1AmAskTwztj744OoxQkHlk/nUHaqesdpL6+T9cpgNO67qy9ztxc4Et98u9b+kvjKY+n1vLKjDVljm24yltSMtrPe58fHyNn5v+XGCrYXrq+3wCGwBsuYSAN5rxy0P7vqyOGKv0ryi7j9pyNDf15GV2nBIMpo4/89TmlA+G9s2atk7u1c8/4aef/+dl9/zn9IEtu1xTT8hmBzE7Vrn/Wd21mApsvblw1co97hz7+Znnjv18ZpF1eXHsR+Y7tS55yvWTstoZ7GVd2gAIAGyZ7B61Tytmp+XLZlwlCLUSYq5vxglWCRSPDO3Rsf9d2f3EacLHptUdtirznzrKrbtU2WFKcGtbG3D6wJZrvzfj/D6/Du3PcVwDahss8z2yz5rxnCWBLQ8vPDP2c6+ryu4nX7Mu54z9yHzbdXl/aD8O7fVxnLn288261CAIAGyh+7px/sHVqScr29ASN5VlT0K2luw6Ha2HuvHcPxi79MnJPrBFjniP5inKhMa6K7bOksAWZw/tyrF/SXuh7F2X2IZ1AQBOgByTXtTVXuvG67xVpo8Oj5dXy97597JzlvDybVfPkeqnXW2d9/rCIcq6tEfCkXU5r6vNye7kiVwXAOA4mHoadMrS922rpf97wdL3HbYEuSWWvg8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABgr/8AFc7RCuBrifYAAAAASUVORK5CYII=>
+
+[image10]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAAAaCAYAAAAUqxq7AAAC7klEQVR4Xu2XSeiNURjGXxkyZYhIyLAgIQssZLoKsSALSWGjJPVfoJCpbCQLFqIkCiUZigUZkv4rKZYsFaWUkhUbGZ6f95y8HVfd3M94v6ee7neec873neF533OuWY0aNWrU+OtxW/ws7hRXJ15O2sGgvUhax+GNuDuUe4lXxVfixKAvEj+Eckegn7i+0OaZLwTuiZghPi20/x5TxAmFtss8lBYXOuUHhdaReG6+QH0LvUYC4dWRybgV4BoW52VZ8RsxQNxWij+JuWLvUmwHo80X6GZZ0SZ6iGettbDdbtU4eKT4TBxeVrQDEvQn+z5Bt4vZ4rpS/NfA7uIcwmtMUReBZWeJYwt9hTjJPESWBn2UuENsiCOCNszcWfQblPSe5tcMfjOWm7dlfA1xcKjLQOM9tMugH98pQbsFpdgKcA3u2VNWJHCBPC6OT+Uu83CYmnSAA+eIx8SVScPi8f60WVxmHkZcUAkD6peI+8Ru8VJoy4Rom3PJu6RlPDZf1LXiR/O73Unz778P7Z6Ip8wX86H5FaclsMrTxLvmAzkhrjKP4ZjgmAADAOh3xHHiGnF+0k+LQ82dxEAB4RUHut/8m/mmvsHckVvML6O0ZbJsCAvOhr3+2tPBGHBHBgt2xny8DXNn7xUvmi8E4F1EBnc+njeau7dSEH78H/sRZpoPtsQF8VGhEcLNnIrbcGMcPBPLt3p2n4kzyQzCk38DbO69oL8133iA43D7LwUT7Q5l8kR/83zDn1vCIS8Q7sn5hvDBWeSHo0kjnJsdBIQe+uSgRccQvriLd/cRN5n3ASxiPn35Ps/krenm/WNYgpjnKgFhddg8jskRC5N+QLxvbutb5jtMDso4b54nCCGcwcDo3+zIJ29cF7emMm2v2be25Job4pFUJjTPmY+JgyCnhIHmKYN3ZeDEK+abfCjolYP8wQAymHQ+PXiOdVmLpwso20QMKcrlQubTLwM3ZbdGEK4xh/JMnqrcOTVq1KhR4w/gC3k1fC4KgSIPAAAAAElFTkSuQmCC>
+
+[image11]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAbCAYAAABIpm7EAAAAxklEQVR4XmNgGAXDAqgBsT66ID7wH4j3IPEZgXg+EFchicEBCwNEwyQkMREgvgrELkhicGADxG+BWBNJrIgBYgg3khgcgCQPADEPktgaBogGDAByDkgS2TkgcJcBhwaQc34DsTGaOEjxYSCWBuITyBLlUElTJDF5qBjIVj8g3o8kx/AAKvkPiF8xQDwfDsRXgPgvEK9gQPUb2DnPgVgAiI2AmBUqzgzEYlAaDmDh34osiA+IM0A0gNxJFHAA4ikMEJtGATYAAEzsJNJwGkxKAAAAAElFTkSuQmCC>

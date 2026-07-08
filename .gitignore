@@ -1,3 +1,4 @@
+# CMake (from GitHub template)
 CMakeLists.txt.user
 CMakeCache.txt
 CMakeFiles
@@ -17,3 +18,39 @@ CMakeUserPresets.json
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #cmake-build-*
+
+# Python (PC-side visualizer / tooling)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Build artifacts
+build/
+dist/
+*.elf
+*.bin
+*.map
+*.o
+*.d
+
+# Captured data / recordings (keep the repo light)
+*.raw
+*.bag
+recordings/
+captures/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local env
+.env
+.env.local
