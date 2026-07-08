@@ -13,7 +13,8 @@ import numpy as np
 from .colors import turbo
 from .decoder import StreamDecoder
 from .deproject import Deprojector
-from .protocol import FLAG_DROPPED, FrameType, ProtocolError, StreamId, parse_event
+from .pipeline import TransformStage
+from .protocol import FLAG_DROPPED, FrameType, ProtocolError, parse_event
 from .sources import FileSource, SerialSource, pump
 
 
@@ -34,7 +35,9 @@ class Stats:
 
 
 def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dict,
-            min_interval: float = 0.0):
+            min_interval: float = 0.0, stage: TransformStage | None = None):
+    if stage is None:
+        stage = TransformStage()
     last = 0.0
     try:
         for frame in pump(source, decoder, record_path=record):
@@ -45,9 +48,13 @@ def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dic
                 except ProtocolError:
                     print(f"\n[device event] undecodable payload ({len(frame.payload)} B)")
                 continue
-            if frame.header.frame_type != FrameType.DATA or frame.header.stream_id != StreamId.DEPTH_ZF32:
+            if frame.header.frame_type != FrameType.DATA:
                 continue
-            stats.update(frame.header)
+            result = stage.feed(frame)          # RAW->transformed depth, DEPTH->passthrough,
+            if result is None:                   # CALIB/unknown -> None (stays silent)
+                continue
+            header, depth = result
+            stats.update(header)
             if min_interval > 0.0:  # paced replay: don't drain a recording at decode speed
                 wait = last + min_interval - time.monotonic()
                 if wait > 0:
@@ -57,7 +64,7 @@ def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dic
                 slot.get_nowait()          # latest-wins: drop stale frame
             except queue.Empty:
                 pass
-            slot.put(frame)
+            slot.put((header, depth))
     except Exception as exc:  # surface, don't vanish: main loop reports and exits
         fault["error"] = exc
 
@@ -79,11 +86,12 @@ def main(argv=None) -> int:
     source = FileSource(args.replay) if args.replay else SerialSource(args.port, args.baud)
     decoder = StreamDecoder()
     stats = Stats()
+    stage = TransformStage()   # cheap to construct; only touches the DLL on first CALIB frame
     slot: queue.Queue = queue.Queue(maxsize=1)
     fault: dict = {}
     min_interval = 1.0 / args.replay_fps if (args.replay and args.replay_fps > 0) else 0.0
     threading.Thread(target=_reader,
-                     args=(source, decoder, slot, stats, args.record, fault, min_interval),
+                     args=(source, decoder, slot, stats, args.record, fault, min_interval, stage),
                      daemon=True).start()
 
     vis = o3d.visualization.Visualizer()
@@ -100,17 +108,17 @@ def main(argv=None) -> int:
 
     while vis.poll_events():
         try:
-            frame = slot.get(timeout=0.02)
+            item = slot.get(timeout=0.02)
         except queue.Empty:
-            frame = None
+            item = None
         if fault:
             print(f"\nreader stopped: {fault['error']!r}")
             break
-        if frame is not None:
-            h, w = frame.header.height, frame.header.width
+        if item is not None:
+            header, depth = item
+            h, w = depth.shape
             if deproj is None:
                 deproj = Deprojector(w, h, args.fov_h, args.fov_v)
-            depth = np.frombuffer(frame.payload, dtype="<f4").reshape(h, w)
             pts = deproj(depth)
             pcd.points = o3d.utility.Vector3dVector(pts)
             if len(pts):
@@ -129,10 +137,12 @@ def main(argv=None) -> int:
         now = time.monotonic()
         if now - t_stat >= 1.0:
             fps = (shown - f_stat) / (now - t_stat)
-            print(f"\r{fps:5.1f} fps | frames {stats.frames} | seq gaps {stats.seq_gaps} "
-                  f"| drops {stats.dropped_flags} | crc fail {decoder.crc_failures} "
-                  f"| skipped {decoder.bytes_skipped} B ",
-                  end="", flush=True)
+            line = (f"\r{fps:5.1f} fps | frames {stats.frames} | seq gaps {stats.seq_gaps} "
+                    f"| drops {stats.dropped_flags} | crc fail {decoder.crc_failures} "
+                    f"| skipped {decoder.bytes_skipped} B | raw {stage.raw_transformed}")
+            if stage.raw_skipped_awaiting_calib:
+                line += f" | raw-skip {stage.raw_skipped_awaiting_calib}"
+            print(line + " ", end="", flush=True)
             t_stat, f_stat = now, shown
     vis.destroy_window()
     print()
