@@ -113,6 +113,7 @@ def main(argv=None) -> int:
     added = False
     deproj = None
     shown = 0
+    fallback_warned = False
     t_stat = time.monotonic()
     f_stat = 0
 
@@ -143,6 +144,10 @@ def main(argv=None) -> int:
                     valid = np.isfinite(depth) & (depth > 0.0) & (depth < deproj.max_range_mm)
                     vals = plane[valid].astype(np.float64, copy=False)
                 else:
+                    if args.color != "depth" and not fallback_warned:
+                        print(f"\n[viewer] no '{args.color}' plane in this stream — "
+                              "coloring by depth instead", file=sys.stderr)
+                        fallback_warned = True
                     vals = pts[:, 2]
                 vn = (vals - vals.min()) / max(float(np.ptp(vals)), 1e-6)
                 pcd.colors = o3d.utility.Vector3dVector(turbo(vn))
