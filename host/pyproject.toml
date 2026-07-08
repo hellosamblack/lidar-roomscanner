@@ -1,0 +1,19 @@
+[project]
+name = "roomscan"
+version = "0.1.0"
+description = "Host-side tools for the roomscanner ToF streamer"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26", "pyserial>=3.5", "open3d>=0.18"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.4"]
+
+[project.scripts]
+roomscan-view = "roomscan.viewer:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
