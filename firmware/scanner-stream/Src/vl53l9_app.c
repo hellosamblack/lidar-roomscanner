@@ -37,6 +37,13 @@
                                      * from the hot path) */
 #define CONF_USECASE     (VL53L9_USECASE_AR_PRECISION) /**< select ranging profile to be applied (see vl53l9_utils.h) */
 
+/* Every output path is knob-gated: DEPTH send needs BINARY && TRANSFORM, RAW/CALIB send needs
+ * BINARY && RAW, the legacy ASCII print needs !BINARY && TRANSFORM. With the transform off-board
+ * the only possible output is the binary RAW stream -- reject silent no-output combos loudly. */
+#if !CONF_TRANSFORM_ONBOARD && !(CONF_STREAM_BINARY && CONF_STREAM_RAW)
+#error "No output stream: transform off-board requires CONF_STREAM_BINARY=1 and CONF_STREAM_RAW=1"
+#endif
+
 #include "rs_protocol.h"
 #include "stm32h5xx_nucleo.h"
 #include "tusb.h"
@@ -404,9 +411,10 @@ void vl53l9_app() {
                  * previous loop iteration's DMA filled, which parse_frame below still hasn't
                  * touched this iteration. The sensor DMA in progress this iteration targets
                  * in_raw_mem[raw_mem_index] (the *other* buffer, kicked off earlier this iteration
-                 * by vl53l9_get_frame_async), and that complement buffer is not written again
-                 * until raw_mem_index cycles back to this same index two iterations from now --
-                 * well after this synchronous send completes. So reading it here is race-free. */
+                 * by vl53l9_get_frame_async). The buffer read here IS the next iteration's DMA
+                 * target (raw_mem_index toggles at loop-bottom), but that next DMA kick cannot
+                 * start until this iteration finishes -- and this send is synchronous, completing
+                 * before loop-bottom. So reading it here is race-free. */
                 {
                     static uint32_t rs_calib_countdown = 0;
                     if (rs_calib_countdown == 0) {
@@ -456,7 +464,9 @@ void vl53l9_app() {
         stop_time = platform_profiler_get_timestamp();
         frame_rate = (1.0f / (float)(platform_profiler_convert_to_us(stop_time - start_time))) * 1000000;
         start_time = stop_time;
-#if !CONF_STREAM_BINARY
+#if !CONF_STREAM_BINARY && CONF_TRANSFORM_ONBOARD
+        /* legacy ASCII debug path: only meaningful with an on-board transform
+         * (it renders out_depth_mem, which does not exist off-board) */
         print_frame((float *)out_depth_mem.data, out_height, out_width);
         printf("Processed frame n. %lu @ %u fps\n", (unsigned long)frame.p_metadata->frame_counter,
                (unsigned int)frame_rate);
