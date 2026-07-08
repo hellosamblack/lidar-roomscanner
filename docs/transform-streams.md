@@ -236,14 +236,22 @@ real-time rates.
 **1. Streams beyond `depth`/ZF32 (names + formats).**
 Eight streams total. One input (`raw`, direction `1`), seven outputs
 (direction `2`):
-- `raw` — input, format `3DMD`, four size variants (100×149, 100×39,
-  14842×1, 3844×1 — the last two match CLAUDE.md's binning-2/binning-4 raw
-  buffer sizes; the 100×149/100×39 variants appear to be the same raw data
-  reshaped as a 2‑D grid rather than a flat 1‑D buffer).
+- `raw` — input, format `3DMD`, four size variants split by capture
+  interface (per the library source, `vl53l9_transform.c` ~375-376:
+  `// csi` / `// i3c` comments): 100×149 and 100×39 are for **CSI-2**
+  capture (an interface this board doesn't use); 14842×1 and 3844×1 are
+  the **I3C** variants matching CLAUDE.md's binning-2 / binning-4 raw
+  buffer sizes.
 - `depth` — output, three formats each at two resolutions (54×42, 24×20):
-  `ZF32` (32-bit float depth, what the app currently selects),
-  `ZAPC` and `ZA16` (alternate packed/16-bit depth encodings — not decoded
-  here, but available).
+  - `ZF32` — one float32 depth value per zone (what the app currently
+    selects); 9 072 B/frame at 54×42.
+  - `ZAPC` — **Android depth point cloud**: four float32 per zone,
+    `[x, y, z, confidence]` (confidence normalized 0..1); 16 B/zone →
+    36 288 B/frame at 54×42, 4× the ZF32 payload. This is an on-device
+    point cloud — see Q2.
+  - `ZA16` — Android depth16: 16 bits per zone (confidence in the 3 MSBs,
+    depth in the remaining 13 bits) — a *smaller* wire format than ZF32
+    if bandwidth ever dominates precision.
 - `ambient` — `IF32` (32-bit float ambient/background light level).
 - `amplitude` — `AF32` (32-bit float return-signal amplitude).
 - `confidence` — `CF32` (32-bit float per-pixel confidence).
@@ -258,14 +266,30 @@ same two resolutions (54×42 and 24×20), so Phase 2's protocol can multiplex
 any of them without a resolution-negotiation problem.
 
 **2. Is there an XYZ/point-cloud output stream?**
-No. The output stream set is `depth, ambient, amplitude, confidence,
-reflectance, status` — there is no `xyz`/`points`/`cloud` stream. The
-transform library only emits 2‑D depth (+ auxiliary) maps; deprojection to
-3‑D points is not done on-device. **Phase 2 implication:** the `Deprojector`
-stays a PC-side responsibility exactly as planned in Phase 1 — the protocol
-only ever needs to carry 2‑D per-pixel arrays (depth/ambient/amplitude/
-confidence/reflectance/status), never point coordinates, keeping payload
-sizes and CPU work on the M33 down.
+**Yes — not as a separate stream, but as a format of the `depth` stream.**
+Negotiating the `depth` stream with format `ZAPC` (instead of `ZF32`)
+yields an on-device point cloud: four float32 per zone,
+`[x, y, z, confidence]` (confidence 0..1), 16 B/zone → 36 288 B/frame at
+54×42 — 4× the ZF32 payload. Verified in the library source:
+- `vl53l9-transform-c/README.md` (~43-46) defines ZAPC as "Android depth
+  point cloud format, each point is represented by four floats:
+  [x, y, z, confidence]".
+- `vl53l9_transform.c` ~736-737: selecting ZAPC sets
+  `is_pointcloud_requested = true`; ~1029-1030 copies the `_pointcloud`
+  buffer (`resolution * 4 * sizeof(float)`) into the depth stream's output.
+- `radial_to_perp.c` ~156-197 (`vl53l9_algo_pointcloud`): a true pinhole
+  deprojection on-device — focal length derived from the lens EFL and SPAD
+  pitch, per-pixel distortion correction, optional per-pixel parallax
+  correction — i.e. it uses the sensor's factory-calibrated optics, not a
+  linear-FoV approximation.
+
+**Phase 1/2 implication:** Phase 1 stays on `ZF32` + PC-side `Deprojector`
+as already decided in the plan's execution note. But Phase 2 has a real
+choice: trade 4× payload bandwidth for on-device deprojection with
+factory-calibrated intrinsics (plus a fused per-point confidence for free).
+Either way, when Phase 2 arrives the PC-side `Deprojector`'s linear-FoV
+model should be validated against ZAPC output for the same scene — ZAPC is
+ground truth here, since it uses the real calibrated intrinsics.
 
 **3. Which controls exist — which are Phase-3 targets?**
 Nine controls, all currently `false`/boolean except `calib-buffer`:
