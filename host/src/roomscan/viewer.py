@@ -10,6 +10,7 @@ import time
 
 import numpy as np
 
+from .colors import turbo
 from .decoder import StreamDecoder
 from .deproject import Deprojector
 from .protocol import FLAG_DROPPED, FrameType, StreamId
@@ -32,16 +33,19 @@ class Stats:
         self._last_seq = header.seq
 
 
-def _reader(source, decoder, slot: queue.Queue, stats: Stats, record):
-    for frame in pump(source, decoder, record_path=record):
-        if frame.header.frame_type != FrameType.DATA or frame.header.stream_id != StreamId.DEPTH_ZF32:
-            continue
-        stats.update(frame.header)
-        try:
-            slot.get_nowait()          # latest-wins: drop stale frame
-        except queue.Empty:
-            pass
-        slot.put(frame)
+def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dict):
+    try:
+        for frame in pump(source, decoder, record_path=record):
+            if frame.header.frame_type != FrameType.DATA or frame.header.stream_id != StreamId.DEPTH_ZF32:
+                continue
+            stats.update(frame.header)
+            try:
+                slot.get_nowait()          # latest-wins: drop stale frame
+            except queue.Empty:
+                pass
+            slot.put(frame)
+    except Exception as exc:  # surface, don't vanish: main loop reports and exits
+        fault["error"] = exc
 
 
 def main(argv=None) -> int:
@@ -60,11 +64,15 @@ def main(argv=None) -> int:
     decoder = StreamDecoder()
     stats = Stats()
     slot: queue.Queue = queue.Queue(maxsize=1)
-    threading.Thread(target=_reader, args=(source, decoder, slot, stats, args.record),
+    fault: dict = {}
+    threading.Thread(target=_reader, args=(source, decoder, slot, stats, args.record, fault),
                      daemon=True).start()
 
     vis = o3d.visualization.Visualizer()
     vis.create_window("roomscan", width=1280, height=800)
+    opt = vis.get_render_option()
+    opt.point_size = 3.0
+    opt.background_color = np.asarray([0.05, 0.05, 0.08])
     pcd = o3d.geometry.PointCloud()
     added = False
     deproj = None
@@ -77,6 +85,9 @@ def main(argv=None) -> int:
             frame = slot.get(timeout=0.02)
         except queue.Empty:
             frame = None
+        if fault:
+            print(f"\nreader stopped: {fault['error']!r}")
+            break
         if frame is not None:
             h, w = frame.header.height, frame.header.width
             if deproj is None:
@@ -86,11 +97,13 @@ def main(argv=None) -> int:
             pcd.points = o3d.utility.Vector3dVector(pts)
             if len(pts):
                 zn = (pts[:, 2] - pts[:, 2].min()) / max(float(np.ptp(pts[:, 2])), 1e-6)
-                pcd.colors = o3d.utility.Vector3dVector(
-                    np.stack([zn, 0.6 * (1 - zn), 1 - zn], axis=1))
+                pcd.colors = o3d.utility.Vector3dVector(turbo(zn))
+            else:
+                pcd.colors = o3d.utility.Vector3dVector(np.zeros((0, 3)))
             if not added:
                 vis.add_geometry(pcd)
                 added = True
+                vis.reset_view_point(True)
             else:
                 vis.update_geometry(pcd)
             shown += 1
@@ -99,9 +112,11 @@ def main(argv=None) -> int:
         if now - t_stat >= 1.0:
             fps = (shown - f_stat) / (now - t_stat)
             print(f"\r{fps:5.1f} fps | frames {stats.frames} | seq gaps {stats.seq_gaps} "
-                  f"| crc fail {decoder.crc_failures} | skipped {decoder.bytes_skipped} B ",
+                  f"| drops {stats.dropped_flags} | crc fail {decoder.crc_failures} "
+                  f"| skipped {decoder.bytes_skipped} B ",
                   end="", flush=True)
             t_stat, f_stat = now, shown
+    vis.destroy_window()
     print()
     return 0
 
