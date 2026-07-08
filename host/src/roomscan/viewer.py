@@ -39,6 +39,7 @@ def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dic
     if stage is None:
         stage = TransformStage()
     last = 0.0
+    last_paced_seq = None
     try:
         for frame in pump(source, decoder, record_path=record):
             if frame.header.frame_type == FrameType.EVENT:
@@ -55,11 +56,16 @@ def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dic
                 continue
             header, depth = result
             stats.update(header)
-            if min_interval > 0.0:  # paced replay: don't drain a recording at decode speed
+            # Paced replay: don't drain a recording at decode speed. Pace per SENSOR
+            # frame (seq change), not per stage result — dual-stream recordings yield
+            # two results per sensor frame (RAW-transformed + DEPTH-passthrough, same
+            # seq); pacing each would halve the effective frame rate.
+            if min_interval > 0.0 and header.seq != last_paced_seq:
                 wait = last + min_interval - time.monotonic()
                 if wait > 0:
                     time.sleep(wait)
                 last = time.monotonic()
+                last_paced_seq = header.seq
             try:
                 slot.get_nowait()          # latest-wins: drop stale frame
             except queue.Empty:
@@ -115,7 +121,7 @@ def main(argv=None) -> int:
             print(f"\nreader stopped: {fault['error']!r}")
             break
         if item is not None:
-            header, depth = item
+            _hdr, depth = item
             h, w = depth.shape
             if deproj is None:
                 deproj = Deprojector(w, h, args.fov_h, args.fov_v)

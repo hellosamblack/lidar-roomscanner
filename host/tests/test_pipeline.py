@@ -19,8 +19,9 @@ def _raw_frame(payload: bytes, seq: int = 1) -> Frame:
     return Frame(FrameHeader(FrameType.DATA, StreamId.RAW_3DMD, 0, seq, 0, 0, 0, len(payload)), payload)
 
 
-@needs_dll
 def test_raw_before_calib_counted_and_dropped():
+    # Not DLL-gated: RAW-before-CALIB short-circuits before any Transform
+    # construction, so this coverage runs (and matters most) without the DLL.
     calib, pairs = load_golden_pairs()
     raw, _ = pairs[0]
 
