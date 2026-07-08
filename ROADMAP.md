@@ -227,10 +227,11 @@ a live-rendered point cloud.
 >   linear stays default) for future consumers needing corner accuracy. Full numbers, conventions, and the
 >   decision writeup: `docs/deprojector-validation.md`. **Vendor-bug note**: ZAPC's 4th (confidence)
 >   channel is structurally ~1.0 on every zone including no-return sentinels — not usable as a validity
->   gate as documented in `docs/transform-streams.md` (traced to an uninitialized `conf_scaling` in the
->   library; the sentinel zones' 1e-6-digit micro-variation is actually a packed filter-status code, not a
->   confidence score). Depth-sentinel gating remains the correct exclusion mechanism, not the ZAPC
->   confidence field.
+>   gate. Root cause (uninitialized `conf_scaling` divisor, never assigned anywhere in the `53L9A1/`
+>   tree — the channel is structurally constant, no capture can change it; the sentinel zones'
+>   1e-6-digit micro-variation is actually a packed filter-status code, not a confidence score) is
+>   documented in `docs/deprojector-validation.md`'s confidence-channel section. Depth-sentinel gating
+>   remains the correct exclusion mechanism, not the ZAPC confidence field.
 > - **Open — connect-time CRC/DROPPED transient** (first observed Phase 2 Task 7): still unexplained;
 >   reproduced again in this task's 60 s soak (1 CRC failure + 1 dropped flag, both at connection time,
 >   first-occurrence-transient class — no recurrence within any run so far). Tracked alongside the
@@ -238,7 +239,9 @@ a live-rendered point cloud.
 >   EVENT-frame/recovery work.
 > - **Open — CALIB-on-DTR-connect**: CALIB retransmit cadence means a host attaching mid-cycle discards
 >   up to 63 RAW frames (~2.3 s blind start at 27.76 fps); improvement: firmware sends CALIB immediately
->   on DTR-connect (cheap — the connect wait already exists). Not yet implemented.
+>   on DTR-connect (cheap — the connect wait already exists). Not yet implemented. Live evidence of the
+>   blind start this fix addresses: Phase 2.5 Task 5's `--color` run attached mid-cycle and observed
+>   `raw-skip 37` (stable, within the documented ≤63 ceiling).
 
 Migrate post-processing to the PC per the architecture decision above. This **absorbs the original
 Phase 2** (IR + additional streams): once the transform runs host-side, every output stream — depth,
@@ -265,8 +268,10 @@ for free; multi-stream firmware plumbing is no longer needed.
   Task 3) to validate the host `Deprojector`'s linear-FoV model against calibrated intrinsics — datasheet
   defaults confirmed, optional per-zone tan-table added for corner accuracy (`docs/deprojector-validation.md`).
   **Vendor bug**: ZAPC's per-zone confidence channel is structurally ~1.0 everywhere (uninitialized
-  `conf_scaling` in the library) and does not discriminate valid/invalid zones — don't gate on it; use the
-  depth sentinel instead (see the Phase 2.5 deferred-list entry above and `docs/transform-streams.md`).
+  `conf_scaling` divisor in the library, never assigned) and does not discriminate valid/invalid zones —
+  don't gate on it; use the depth sentinel instead (root cause + measurements in
+  `docs/deprojector-validation.md`'s confidence-channel section; see also the Phase 2.5 deferred-list
+  entry above).
 - Bandwidth: only the raw stream crosses the wire (14,842 B/frame — 1.63× the old depth payload,
   regardless of how many output streams the PC computes). 30 Hz ≈ 445 KB/s fits CDC FS; beyond ~60 Hz
   wants Phase 4's Ethernet (and I3C readout itself tops out ~60-80 Hz, estimate — see the architecture
@@ -278,8 +283,8 @@ Plan: `docs/superpowers/plans/2026-07-08-phase2.5-color-fov-overlap.md`. Cleared
 from Phase 2's deferred list (all detailed above, inline, where each topic is discussed): datasheet +
 ZAPC-calibrated Deprojector FoV, host-side reflectance/confidence/ambient/ZAPC outputs with viewer
 `--color`, and a trigger-early restructure of the raw-only firmware loop (24.6 → 27.76 fps, target ≥28
-missed by 0.3 fps — sensor-serial, not hideable; see the overlap bullet above for the honest budget
-breakdown). Re-verified end-to-end on hardware (this task): 60 s live soak steady 27.0-28.0 fps, 0 seq
+missed by 0.24 fps — sensor-serial, not hideable; see the overlap bullet above for the honest budget
+breakdown). Re-verified end-to-end on hardware (this task): 60 s live soak steady 26.6-28.0 fps, 0 seq
 gaps, 1 crc fail + 1 dropped flag (both connect-time, same tracked transient as Phase 2 — no new
 failure mode, 2 ms settle stability tripwire passed with no stall/gap bursts across the full soak);
 `--color reflectance` 15 s live check rendered the IR-shaded cloud with no fallback warning and no

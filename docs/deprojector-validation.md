@@ -51,6 +51,21 @@ zero information for zone exclusion. `--conf-min` is still exposed as a
 script flag in case a different capture's confidence distribution is more
 informative.
 
+**Root cause (library bug — structurally constant, not scene-dependent):**
+the uniform ~1.0 is an **uninitialized divisor** in the read-only transform
+library. `radial_to_perp.h:61` declares `float_t conf_scaling;` in the algo's
+params struct, and `radial_to_perp.c:199` computes the point-cloud confidence
+as `minf(confidence[i] / (params->conf_scaling * conf_thr[i]), 1.0f)` — but
+`conf_scaling` is **never assigned anywhere in the `53L9A1/` tree** (those
+two lines are its only occurrences). The zero-initialized divisor makes the
+quotient +inf for every zone with nonzero raw confidence, and the `minf`
+clamp collapses +inf to exactly 1.0; the subsequent
+`floor(conf·1e3)·1e-3 + status·1e-6` packing (`radial_to_perp.c:202-203`)
+then adds only the filter-status micro-digits. So the channel is
+**structurally** 1.000000 + status·1e-6 on every zone — no capture, scene,
+or calibration can produce a discriminating value. This is a vendor bug in
+`vl53l9-transform-c`, not a property of this fixture.
+
 ## ZAPC axis/unit conventions (previously unknown — now established)
 
 | aspect | finding |

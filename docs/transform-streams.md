@@ -298,8 +298,10 @@ model should be validated against ZAPC output for the same scene — ZAPC is
 ground truth here, since it uses the real calibrated intrinsics.
 *Phase 2.5 caveat:* ZAPC's per-point confidence was measured
 **non-discriminating on real captures** (~1.0 on every zone, including
-no-return ones) — see `docs/deprojector-validation.md`'s confidence-channel
-finding before relying on it as a quality gate.
+no-return ones) — a vendor bug, not a scene artifact: the library never
+initializes its `conf_scaling` divisor, so the channel is structurally
+constant. See `docs/deprojector-validation.md`'s confidence-channel finding
+(root-cause paragraph included) before relying on it as a quality gate.
 
 **3. Which controls exist — which are Phase-3 targets?**
 Nine controls, all currently `false`/boolean except `calib-buffer`:
