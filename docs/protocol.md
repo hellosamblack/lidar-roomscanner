@@ -32,6 +32,8 @@ One frame = 32-byte header, payload, CRC32. See the `protocol-change` skill befo
 | 4 | CONFIDENCE  | per-zone confidence, format TBD | reserved (Phase 2) |
 | 5 | REFLECTANCE | per-zone IR reflectance, format TBD | reserved (Phase 2) |
 | 6 | STATUS      | per-zone status codes, format TBD | reserved (Phase 2) |
+| 7 | RAW_3DMD | opaque vendor raw frame from the VL53L9CX (input to vl53l9-transform-c). At binning 2: `payload_len` = 14842. Header `width`/`height` carry the logical zone grid (54×42); `payload_len` is authoritative for size. `seq`/`t_us` as for DEPTH frames. | live (Phase 2) |
+| 8 | CALIB | per-device calibration blob (`VL53L9_CALIB_DATA_SIZE` = 2332 B), required to run the transform host-side. `seq` = seq of the next RAW frame; `width`/`height` = zone grid. Sent at stream start and **retransmitted every 64 RAW frames** so late-attaching hosts acquire it (a host must buffer or discard RAW frames until a CALIB arrives). | live (Phase 2) |
 
 TBD formats are pinned when the stream is first enabled (the transform library's capability
 negotiation decides); pinning a TBD format is additive (no version bump); *changing* a pinned
@@ -91,3 +93,4 @@ specced with the Phase 4 transport work).
 - **v1** (2026-07): initial — DATA/EVENT frame types, DEPTH_ZF32 stream.
 - **v1 rev 2026-07-08**: additive — stream registry (IDs 1-6 reserved), EVENT payload defined,
   DROPPED/oversize semantics clarified, ZF32 no-return sentinel documented. No layout change.
+- **v1 rev 2026-07-08 (b)**: additive — RAW_3DMD (7) and CALIB (8) allocated for the PC-side-transform architecture. No layout change.

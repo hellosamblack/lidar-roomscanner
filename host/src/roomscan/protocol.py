@@ -28,6 +28,8 @@ class StreamId(IntEnum):
     CONFIDENCE = 4
     REFLECTANCE = 5
     STATUS = 6
+    RAW_3DMD = 7
+    CALIB = 8
 
 
 class EventCode(IntEnum):
@@ -39,6 +41,8 @@ class EventCode(IntEnum):
 
 
 DEPTH_NO_RETURN_MM = 12000.0  # empirical no-return sentinel in DEPTH_ZF32 payloads (Task 8)
+RAW_3DMD_SIZE_BIN2 = 14842  # size in bytes at binning=2 (54×42 zones)
+CALIB_SIZE = 2332  # VL53L9_CALIB_DATA_SIZE per-device calibration blob
 
 
 class ProtocolError(Exception):

@@ -67,3 +67,11 @@ def test_parse_event_rejects_short_payload():
     from roomscan.protocol import parse_event
     with pytest.raises(ProtocolError):
         parse_event(b"\x01\x00\x00")
+
+
+def test_raw_and_calib_stream_ids():
+    from roomscan.protocol import CALIB_SIZE, RAW_3DMD_SIZE_BIN2, StreamId
+    assert StreamId.RAW_3DMD == 7
+    assert StreamId.CALIB == 8
+    assert RAW_3DMD_SIZE_BIN2 == 14842
+    assert CALIB_SIZE == 2332

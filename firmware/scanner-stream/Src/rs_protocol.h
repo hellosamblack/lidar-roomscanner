@@ -20,6 +20,10 @@
 #define RS_STREAM_CONFIDENCE  (4u)
 #define RS_STREAM_REFLECTANCE (5u)
 #define RS_STREAM_STATUS      (6u)
+#define RS_STREAM_RAW_3DMD    (7u) /* opaque vendor raw frame (transform input) */
+#define RS_STREAM_CALIB       (8u) /* per-device calibration blob */
+#define RS_RAW_3DMD_SIZE_BIN2 (14842u)
+#define RS_CALIB_SIZE         (2332u)
 
 /* EVENT (RS_FRAME_EVENT) payload: u32 code, u32 detail, optional ASCII message. */
 #define RS_EVT_SENSOR_INIT_FAIL    (1u)
