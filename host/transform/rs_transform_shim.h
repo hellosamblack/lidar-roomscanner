@@ -100,8 +100,10 @@ extern "C" {
  * "calib-buffer" control -> transform_prepare.
  *
  * Depth-only convenience wrapper over rst_create2() with
- * out_mask = RST_OUT_DEPTH; kept so the byte-identity equivalence test
- * (host/tests/test_equivalence.py) exercises the same code path unmodified.
+ * out_mask = RST_OUT_DEPTH. NOTE: the Python wrapper calls rst_create2()
+ * directly (this symbol is retained only for external C callers / ABI
+ * stability); the equivalence test's depth path goes through rst_create2
+ * with the same mask, which is what preserves byte-identity.
  *
  * @param[in] calib      Pointer to the VL53L9_CALIB_DATA_SIZE (2332-byte)
  *                        calibration blob. Copied internally; the caller's
