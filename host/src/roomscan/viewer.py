@@ -33,7 +33,9 @@ class Stats:
         self._last_seq = header.seq
 
 
-def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dict):
+def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dict,
+            min_interval: float = 0.0):
+    last = 0.0
     try:
         for frame in pump(source, decoder, record_path=record):
             if frame.header.frame_type == FrameType.EVENT:
@@ -46,6 +48,11 @@ def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dic
             if frame.header.frame_type != FrameType.DATA or frame.header.stream_id != StreamId.DEPTH_ZF32:
                 continue
             stats.update(frame.header)
+            if min_interval > 0.0:  # paced replay: don't drain a recording at decode speed
+                wait = last + min_interval - time.monotonic()
+                if wait > 0:
+                    time.sleep(wait)
+                last = time.monotonic()
             try:
                 slot.get_nowait()          # latest-wins: drop stale frame
             except queue.Empty:
@@ -63,6 +70,8 @@ def main(argv=None) -> int:
     ap.add_argument("--record")
     ap.add_argument("--fov-h", type=float, default=60.0)
     ap.add_argument("--fov-v", type=float, default=45.0)
+    ap.add_argument("--replay-fps", type=float, default=0.0,
+                    help="pace file replay at N fps (0 = as fast as it decodes)")
     args = ap.parse_args(argv)
 
     import open3d as o3d   # deferred: heavy import
@@ -72,7 +81,9 @@ def main(argv=None) -> int:
     stats = Stats()
     slot: queue.Queue = queue.Queue(maxsize=1)
     fault: dict = {}
-    threading.Thread(target=_reader, args=(source, decoder, slot, stats, args.record, fault),
+    min_interval = 1.0 / args.replay_fps if (args.replay and args.replay_fps > 0) else 0.0
+    threading.Thread(target=_reader,
+                     args=(source, decoder, slot, stats, args.record, fault, min_interval),
                      daemon=True).start()
 
     vis = o3d.visualization.Visualizer()

@@ -41,10 +41,10 @@ dist/
 *.o
 *.d
 
-# Captured data / recordings (keep the repo light)
+# Captured data (keep the repo light). recordings/ is NOT ignored: it holds
+# small shareable scans for playback (see !recordings/*.bin below).
 *.raw
 *.bag
-recordings/
 captures/
 
 # Editor / OS
@@ -59,3 +59,6 @@ Thumbs.db
 
 # golden test fixtures are deliberately tracked despite *.bin above
 !host/tests/fixtures/*.bin
+
+# shareable scan recordings are deliberately tracked despite *.bin above
+!recordings/*.bin
