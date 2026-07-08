@@ -144,7 +144,11 @@ def main(argv=None) -> int:
     from .decoder import StreamDecoder  # deferred: keep CLI parsing importable without pyserial
     from .sources import SerialSource
 
-    source = SerialSource(args.port, args.baud)
+    try:
+        source = SerialSource(args.port, args.baud)
+    except Exception as exc:  # port missing/busy/broken: report cleanly, no traceback
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     decoder = StreamDecoder()
     client = CommandClient(source.write)
     stop = threading.Event()

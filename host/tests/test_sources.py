@@ -41,3 +41,15 @@ def test_recorded_capture_replays_identically(tmp_path):
     first = list(pump(FileSource(src_file), StreamDecoder(), record_path=rec))
     second = list(pump(FileSource(rec), StreamDecoder()))
     assert [f.payload for f in first] == [f.payload for f in second]
+
+
+def test_file_source_write_raises(tmp_path):
+    import pytest
+    p = tmp_path / "cap.bin"
+    p.write_bytes(FRAME)
+    src = FileSource(p)
+    try:
+        with pytest.raises(NotImplementedError):
+            src.write(b"\x00")   # replay is read-only: no device to write to
+    finally:
+        src.close()

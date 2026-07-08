@@ -144,6 +144,27 @@ def test_offer_rejects_ack_with_mismatched_token():
     assert isinstance(box.get("error"), TimeoutError)
 
 
+def test_offer_duplicate_ack_on_completed_token_not_consumed():
+    """A second/duplicate ACK for an already-completed token returns False, no crash."""
+    written = []
+    client = CommandClient(written.append)
+    t, box = _run_send(client, CommandCode.PING, 0, timeout=2.0)
+
+    for _ in range(200):
+        if written:
+            break
+        time.sleep(0.01)
+    hdr = FrameHeader.unpack(written[0][:HEADER_SIZE])
+    ack = make_ack(hdr.seq, CommandCode.PING, ResultCode.OK, 1)
+
+    assert client.offer(ack) is True
+    t.join(timeout=2.0)
+    assert box.get("value") == (ResultCode.OK, 1)
+
+    # Same ACK again: token no longer pending -> not consumed, no effect.
+    assert client.offer(ack) is False
+
+
 def test_send_raises_timeout_error_with_token_and_count():
     client = CommandClient(lambda data: None)
     with pytest.raises(TimeoutError) as excinfo:

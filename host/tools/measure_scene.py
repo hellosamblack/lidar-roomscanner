@@ -38,7 +38,22 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from roomscan.decoder import StreamDecoder  # noqa: E402
+from roomscan.deproject import Deprojector  # noqa: E402
 from roomscan.pipeline import TransformStage  # noqa: E402
+
+
+def zone_tan_tables(deproj: Deprojector, h: int, w: int) -> tuple[np.ndarray, np.ndarray]:
+    """Extract the Deprojector's per-zone tan(angle) tables via its public API.
+
+    Probe with a uniform 1000 mm depth: every zone is valid, and the returned
+    points (metres) are exactly (tan_x, tan_y, 1) per zone in row-major order.
+    Keeps ONE source of FoV truth — the ZAPC-validated Deprojector, including
+    any per-zone zone_tan_x/zone_tan_y tables it may carry — instead of
+    re-deriving the zone-center math here.
+    """
+    pts = deproj(np.full((h, w), 1000.0))
+    assert pts.shape == (h * w, 3), "probe depth must yield one point per zone"
+    return pts[:, 0].reshape(h, w), pts[:, 1].reshape(h, w)
 
 
 def load_depths(capture: Path) -> list[np.ndarray]:
@@ -139,9 +154,9 @@ def main(argv=None) -> int:
         warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN zones are expected
         zmed = np.nanmedian(np.where(valid, window, np.nan), axis=0)  # temporal median per zone
 
-    # Zone-center angle tables (Deprojector convention: y positive DOWN).
-    tan_x = np.tan(np.deg2rad(((np.arange(w) + 0.5) / w - 0.5) * args.fov_h))[None, :]
-    tan_y = np.tan(np.deg2rad(((np.arange(h) + 0.5) / h - 0.5) * args.fov_v))[:, None]
+    # Zone angle tables from the real Deprojector (y positive DOWN) — one source
+    # of FoV truth; (h, w) full grids.
+    tan_x, tan_y = zone_tan_tables(Deprojector(w, h, args.fov_h, args.fov_v), h, w)
 
     near = np.isfinite(zmed) & (zmed < args.near_mm)
     n_near = int(near.sum())
@@ -178,8 +193,8 @@ def main(argv=None) -> int:
         rows = np.array([r for r, _ in comp])
         cols = np.array([c for _, c in comp])
         zs = zmed[rows, cols]
-        ys = zs * tan_y[rows, 0]
-        xs = zs * tan_x[0, cols]
+        ys = zs * tan_y[rows, cols]
+        xs = zs * tan_x[rows, cols]
         z_c = float(np.median(zs))
         height = float(ys.max() - ys.min())
         width_mm = float(xs.max() - xs.min())
@@ -213,7 +228,8 @@ def main(argv=None) -> int:
         cs = [c for rr, c in comp if rr == r]
         zs_r = zmed[r, cs]
         z_r = float(np.median(zs_r))
-        print(f"    row {r:2d}: n={len(cs):2d}  z={z_r:6.1f} mm  y={z_r * tan_y[r, 0]:+7.1f} mm")
+        y_r = z_r * float(np.median(tan_y[r, cs]))
+        print(f"    row {r:2d}: n={len(cs):2d}  z={z_r:6.1f} mm  y={y_r:+7.1f} mm")
 
     tol = args.tolerance
     d_err = (z_c - args.expected_distance_mm) / args.expected_distance_mm
