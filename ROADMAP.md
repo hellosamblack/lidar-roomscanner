@@ -68,7 +68,16 @@ Found during review of `<APP>/Src/vl53l9_app.c`; fix these in our fork, leave th
 On-device transform pipeline + ASCII depth map over ST-Link VCOM.
 Enabled by `CONF_PRINT_FRAME = 1` in `Src/vl53l9_app.c:31`.
 
-### Phase 1 — Real-time 3D visualizer  ← **NEXT** (plan: `docs/superpowers/plans/2026-07-07-phase1-binary-protocol-visualizer.md`)
+### Phase 1 — Real-time 3D visualizer  ← **IN PROGRESS** (plan: `docs/superpowers/plans/2026-07-07-phase1-binary-protocol-visualizer.md`)
+
+> **Status 2026-07-08:** milestone **1a ✅ verified on hardware** — binary ZF32 frames over ST-Link VCOM
+> @921600: 0 CRC failures, 0 seq gaps, ~5.9 fps (sensor frame time + blocking UART co-limit; the plan's
+> 9-10 fps estimate ignored sensor-side races that needed a 5 ms settle + bounded retries — see
+> `.superpowers/sdd/task-8-report.md`). Depth confirmed float32 mm; **no-return sentinel = 12000.0**.
+> Milestone 1b (TinyUSB CDC) fully coded + flashed; enumeration blocked on a data-capable cable into
+> CN13 (device provably asserts D+ pull-up; host never signals — suspect charge-only cable).
+> Known follow-up: ~1-in-5 boots hang in sensor bring-up before frame 1 → needs EVENT-frame reporting +
+> re-init recovery (wire contract for EVENT frames is already specced in `docs/protocol.md`).
 
 Replace ASCII printing with a **versioned binary frame protocol** and a PC app that deprojects depth into
 a live-rendered point cloud.
@@ -109,8 +118,13 @@ a live-rendered point cloud.
 Extend the protocol and PC UI to carry and toggle IR reflectance, confidence, ambient, etc.; colorize the
 point cloud by IR intensity.
 
-- **Gated on** the Phase 1 `streams_inspect` capture — stream IDs get allocated from what the transform
-  library actually exposes.
+- **Gate resolved** (Task 7 capture, `docs/transform-streams.md`): the transform library exposes
+  `depth`, `ambient`, `amplitude`, `confidence`, `reflectance`, `status` output streams; wire stream IDs
+  0-6 are allocated in `docs/protocol.md`'s stream registry.
+- **New option — on-device point cloud:** the depth stream's `ZAPC` format emits 4×float32
+  [x, y, z, confidence] per zone (16 B/zone, 4× the ZF32 payload) deprojected on-device with
+  factory-calibrated intrinsics. Phase 2 should evaluate ZAPC vs PC-side deprojection — and at minimum
+  use one ZAPC capture to validate the host `Deprojector`'s placeholder linear-FoV model.
 - Protocol is multi-stream from v1 (`stream_id` in the header), so this phase is: configure extra output
   capabilities on the transform (each needs its own output buffer — mind SRAM; 640 KB total, raw double
   buffer + N output planes), interleave frames per stream, and add per-stream toggles + colormap in the
@@ -120,9 +134,15 @@ point cloud by IR intensity.
 
 ### Phase 3 — UI & runtime configuration
 
-Host→device **control channel** to set usecase / binning / active streams at runtime (the transform
-library exposes `controls`; `controls_inspect` output tells us which). Recording/playback and config
-persistence host-side.
+Host→device **control channel** to set usecase / binning / active streams at runtime. Recording/playback
+and config persistence host-side.
+
+- **Assumption corrected by the Task 7 capture:** the transform library's `controls` are only
+  `bypass-*` algorithm toggles + `calib-buffer` + `cover-glass` — there is **no runtime usecase or
+  binning control**. Usecase/binning are sensor-profile settings applied before init
+  (`vl53l9_utils_set_profile`), so runtime reconfiguration means a full stop → re-profile →
+  re-prepare → restart cycle on the device (which also forces the teardown path of reference bug #6 to
+  work). Plan Phase 3 around that, not around a transform control write.
 
 - Control frames reuse the same header (`frame_type` = command / ack); device replies with an ack frame
   carrying the applied config — the host never assumes.
