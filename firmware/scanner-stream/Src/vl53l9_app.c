@@ -37,6 +37,8 @@
 
 extern UART_HandleTypeDef hcom_uart[];
 
+static void handle_error(void);
+
 static uint64_t rs_time_us(void) {
     /* v1: HAL tick, 1 ms resolution widened to the u64 µs wire field.
      * Upgrade to a TIM-based µs clock when IMU fusion needs it (Phase 5). */
@@ -47,6 +49,11 @@ static void rs_send_depth_uart(uint32_t seq, uint8_t flags, const uint8_t *paylo
                                uint32_t len, uint16_t w, uint16_t h) {
     uint8_t hdr[RS_HEADER_SIZE];
     uint8_t tail[4];
+    /* HAL_UART_Transmit's u16 length bounds a single transfer; if a future
+     * profile produces >65535 B payloads, Phase 3 must chunk the send. */
+    if (len > 0xFFFFu) {
+        handle_error();
+    }
     rs_write_header(hdr, RS_FRAME_DATA, RS_STREAM_DEPTH_ZF32, flags, seq, rs_time_us(), w, h, len);
     uint32_t crc = rs_crc32(0u, hdr, RS_HEADER_SIZE);
     crc = rs_crc32(crc, payload, len);
@@ -250,19 +257,22 @@ void vl53l9_app() {
             }
 
             ret = platform_wait_for_event(PLATFORM_GPIO_IT_EVT, 1000);
-            platform_acknowledge_event(PLATFORM_GPIO_IT_EVT);
             if (ret) {
-                /* no edge seen: either the trigger was lost or the edge was
-                 * missed -- poll FRAME_READY to disambiguate */
+                /* no edge seen: either the trigger was lost or the edge landed
+                 * after the timeout -- poll FRAME_READY to disambiguate */
                 uint8_t rs_is_ready = 0;
                 (void)vl53l9_poll_frame(p_dev, &rs_is_ready);
                 if (!rs_is_ready) {
                     if (++rs_attempts > 3) {
                         handle_error();
                     }
-                    continue; /* trigger lost: re-trigger */
+                    continue; /* trigger lost: re-trigger (no event to ack) */
                 }
+                /* frame is ready: fall through and ack, clearing any edge that
+                 * arrived between the timeout and the poll so it cannot leak
+                 * into the next iteration as a spurious event */
             }
+            platform_acknowledge_event(PLATFORM_GPIO_IT_EVT);
 
             /* grab raw data from sensor and fill input buffer */
             ret = vl53l9_get_frame_async(p_dev, in_raw_mem[raw_mem_index].data, in_raw_mem[raw_mem_index].size);
