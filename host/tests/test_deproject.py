@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from roomscan.deproject import Deprojector
 
@@ -34,3 +35,30 @@ def test_invalid_zones_filtered():
 def test_out_of_range_filtered():
     d = Deprojector(width=1, height=1, max_range_mm=4000.0)
     assert d(np.array([[5000.0]], dtype=np.float32)).shape == (0, 3)
+
+
+def test_zone_tan_table_overrides_linear_model():
+    # A per-zone table can encode angles the separable linear model cannot
+    # (e.g. non-uniform spacing) -- here zone (0, 1)'s tan_x is set far from
+    # what any fov_h_deg would produce for a uniform 2-column grid.
+    zone_tan_x = np.array([[0.0, 5.0]])   # (h=1, w=2)
+    zone_tan_y = np.array([[0.0, 0.0]])
+    d = Deprojector(width=2, height=1, zone_tan_x=zone_tan_x, zone_tan_y=zone_tan_y)
+    depth = np.array([[1000.0, 1000.0]], dtype=np.float32)
+    pts = d(depth)
+    assert np.allclose(pts[0], [0.0, 0.0, 1.0], atol=1e-9)
+    assert np.allclose(pts[1], [5.0, 0.0, 1.0], atol=1e-9)
+
+
+def test_zone_tan_table_requires_matching_shape():
+    with pytest.raises(ValueError):
+        Deprojector(width=2, height=2, zone_tan_x=np.zeros((2, 2)), zone_tan_y=np.zeros((3, 2)))
+    with pytest.raises(ValueError):
+        Deprojector(width=2, height=2, zone_tan_x=np.zeros((3, 3)), zone_tan_y=np.zeros((3, 3)))
+
+
+def test_zone_tan_table_requires_both_or_neither():
+    with pytest.raises(ValueError):
+        Deprojector(width=2, height=2, zone_tan_x=np.zeros((2, 2)))
+    with pytest.raises(ValueError):
+        Deprojector(width=2, height=2, zone_tan_y=np.zeros((2, 2)))
