@@ -86,14 +86,16 @@ Device→host acknowledgement of a COMMAND. Header `seq` = echoes the COMMAND to
 | 4      | 4    | result  | u32 LE, 0 = OK; nonzero = error (see result-code registry) |
 | 8      | 4    | applied | u32 LE, command-specific: applied value, detail, or info |
 
-All ACK payloads are 12 bytes; header `payload_len` = 12.
+ACK payloads are exactly 12 bytes (header `payload_len` = 12); longer payloads are malformed
+and rejected — unlike EVENT's legitimate variable message tail. Future ACK growth would come
+via a new frame revision.
 
 ### Command registry
 
 | cmd | Name              | param meaning | applied meaning |
 |-----|-------------------|---------------|-----------------|
 | 1   | PING              | ignored       | firmware protocol version (u32) |
-| 2   | SEND_CALIB        | ignored       | 0                |
+| 2   | SEND_CALIB        | ignored       | 0 — device transmits a CALIB frame immediately; lets a late-attaching host obtain calibration immediately instead of waiting the ≤63-frame retransmit cadence (closes ROADMAP's CALIB-on-DTR-connect item when wired in firmware) |
 | 3   | SET_USECASE       | usecase ID (u16) | applied usecase ID (u16) |
 | 4   | SET_FRAME_PERIOD_US | period in µs (u32) | applied period (u32) |
 | 5   | SET_EXPOSURE_MS   | exposure in ms (u32) | applied exposure (u32) |

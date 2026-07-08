@@ -137,9 +137,10 @@ def pack_command(cmd: int, param: int, token: int) -> bytes:
 def parse_ack(payload: bytes) -> tuple[int, int, int]:
     """Decode a frame_type=ACK payload -> (cmd, result, applied).
 
-    Raises ProtocolError if payload is too short.
+    ACK payloads are exactly 12 bytes; any other length is malformed (unlike
+    EVENT's legitimate variable message tail) and raises ProtocolError.
     """
-    if len(payload) < 12:
-        raise ProtocolError(f"ACK payload too short: {len(payload)} bytes")
-    cmd, result, applied = struct.unpack_from("<III", payload, 0)
+    if len(payload) != 12:
+        raise ProtocolError(f"ACK payload must be exactly 12 bytes, got {len(payload)}")
+    cmd, result, applied = struct.unpack("<III", payload)
     return cmd, result, applied

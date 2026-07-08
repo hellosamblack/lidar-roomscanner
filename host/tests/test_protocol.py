@@ -87,6 +87,8 @@ def test_pack_command_golden():
     assert frame[5:6] == bytes([FrameType.COMMAND])
     assert frame[6:8] == bytes([0, 0])  # stream_id=0, flags=0
     assert frame[8:12] == (42).to_bytes(4, "little")
+    # width/height zero at the wire level
+    assert frame[20:24] == b"\x00\x00\x00\x00"
     # payload_len should be 8 (cmd + param)
     assert frame[24:28] == (8).to_bytes(4, "little")
     # CRC over everything before it
@@ -111,6 +113,12 @@ def test_parse_ack_rejects_short_payload():
         parse_ack(b"\x01\x00\x00")
 
 
+def test_parse_ack_rejects_long_payload():
+    """ACK payloads are exactly 12 bytes; trailing bytes are a wire-format violation."""
+    with pytest.raises(ProtocolError):
+        parse_ack(struct.pack("<III", 1, 0, 1) + b"\x00")  # 13 bytes
+
+
 def test_decoder_passthrough_command_and_ack():
     """Decoder passes through COMMAND and ACK frame types unchanged."""
     from roomscan.decoder import StreamDecoder
@@ -133,3 +141,6 @@ def test_decoder_passthrough_command_and_ack():
     assert frames[0].header.seq == 100
     assert frames[1].header.frame_type == FrameType.ACK
     assert frames[1].header.seq == 100
+    # payload content survives the decode intact (guards against payload-slice corruption)
+    assert struct.unpack("<II", frames[0].payload) == (CommandCode.PING, 0)
+    assert parse_ack(frames[1].payload) == (CommandCode.PING, ResultCode.OK, 1)
