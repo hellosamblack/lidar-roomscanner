@@ -4,7 +4,7 @@ from __future__ import annotations
 import struct
 import zlib
 
-from .protocol import HEADER_SIZE, MAGIC, VERSION, Frame, FrameHeader, ProtocolError
+from .protocol import HEADER_SIZE, MAGIC, Frame, FrameHeader, ProtocolError
 
 
 class StreamDecoder:
@@ -48,6 +48,7 @@ class StreamDecoder:
             (crc,) = struct.unpack_from("<I", body, total - 4)
             if zlib.crc32(body[:-4]) != crc:
                 self.crc_failures += 1
+                self.bytes_skipped += 1
                 del self._buf[:1]
                 continue
             out.append(Frame(hdr, body[HEADER_SIZE:-4]))

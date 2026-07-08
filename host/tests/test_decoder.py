@@ -38,6 +38,7 @@ def test_corrupt_crc_dropped_then_recovers():
     frames = d.feed(bytes(bad) + FRAME)
     assert len(frames) == 1
     assert d.crc_failures == 1
+    assert d.bytes_skipped == len(FRAME)  # every byte of the corrupted frame is discarded
 
 
 def test_oversize_payload_rejected():
