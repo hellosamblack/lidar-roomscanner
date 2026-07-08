@@ -365,6 +365,16 @@ SFLP quaternion as rotation prior → 3-DoF constrained Open3D Tensor G-ICP → 
 - Accel-derived translation is **not** an input (double-integration drift); translation comes from ICP.
 - CPU-first: Open3D tensor pipeline runs on CPU; CUDA optional. Validate real-time budget with recorded
   Phase 1/2 datasets before hardware-in-the-loop.
+- **Real-time RGB camera (owner question 2026-07-08, architecture decided):** live high-fidelity image
+  mapping uses a webcam **plugged directly into the PC**, physically mounted on the handheld rig (the
+  scanner is tethered anyway — the camera's USB run rides the same tether as the Ethernet cable).
+  Routing a webcam through the board's freed-up USER USB port does NOT work for this: the H563's
+  `USB_DRD_FS` can act as host, but it is **Full-Speed (12 Mbps)** — a UVC webcam at FS caps out around
+  QVGA/low-fps MJPEG, the opposite of high fidelity; 1080p+ needs USB High-Speed (480 Mbps), which this
+  MCU doesn't have. PC-attached also skips a host-side UVC stack on the MCU and lands frames directly in
+  SLAM's clock domain (PTP-united with device timestamps). Needs: rigid mount + hand-eye/extrinsic
+  calibration to the ToF (same calibration Phase 7 already requires for the phone camera — do it once,
+  share it).
 
 ### Phase 7 — Offline post-processing
 
