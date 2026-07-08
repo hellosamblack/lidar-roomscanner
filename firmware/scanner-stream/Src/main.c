@@ -128,6 +128,11 @@ int main(void)
   HAL_NVIC_SetPriority(USB_DRD_FS_IRQn, 6, 0);
   HAL_NVIC_EnableIRQ(USB_DRD_FS_IRQn);
   tud_init(BOARD_TUD_RHPORT);
+  /* Keep D+ pull-up off until the sensor is up and the acquisition loop can
+   * service USB (tud_connect() in vl53l9_app.c) — prevents enumeration
+   * attempts we can't answer, and stops hung boots from presenting a dead
+   * device to the host. */
+  tud_disconnect();
 
   /* USER CODE END 2 */
 

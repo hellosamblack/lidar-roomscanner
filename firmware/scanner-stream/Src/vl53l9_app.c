@@ -64,6 +64,27 @@ static void rs_send_depth_uart(uint32_t seq, uint8_t flags, const uint8_t *paylo
     HAL_UART_Transmit(&hcom_uart[COM1], tail, 4, 1000);
 }
 
+/* Wait for a platform event in short slices, pumping TinyUSB between slices so
+ * USB control transfers are serviced within host timeouts. Safe with the
+ * platform event semantics: the ISR-set flag in g_platform_evt persists until
+ * platform_acknowledge_event, so an event landing between slices is returned
+ * by the next slice immediately. Return convention matches
+ * platform_wait_for_event: 0 = event received, non-zero = timeout. */
+static int rs_wait_event_usb(uint32_t evt, uint32_t timeout_ms) {
+    uint32_t waited = 0;
+    for (;;) {
+        int ret = platform_wait_for_event(evt, 5);
+        tud_task();
+        if (ret == 0) {
+            return 0;
+        }
+        waited += 5;
+        if (waited >= timeout_ms) {
+            return ret;
+        }
+    }
+}
+
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 
@@ -234,6 +255,11 @@ void vl53l9_app() {
     uint32_t rs_prev_counter = 0;
     bool rs_have_prev = false;
 
+    /* Sensor is up and the loop below pumps tud_task(): present the USB
+     * device only now (D+ pull-up was held off after tud_init in main.c so
+     * the host never saw a device we couldn't answer). */
+    tud_connect();
+
     while (1) {
 
         /* TASK10 TEMP: CDC heartbeat, removed in Task 11 */
@@ -264,7 +290,7 @@ void vl53l9_app() {
                 handle_error();
             }
 
-            ret = platform_wait_for_event(PLATFORM_GPIO_IT_EVT, 1000);
+            ret = rs_wait_event_usb(PLATFORM_GPIO_IT_EVT, 1000);
             if (ret) {
                 /* no edge seen: either the trigger was lost or the edge landed
                  * after the timeout -- poll FRAME_READY to disambiguate */
@@ -316,7 +342,7 @@ void vl53l9_app() {
 #endif
         }
 
-        ret = platform_wait_for_event(PLATFORM_I3C_DMA_RX_EVT, 1000);
+        ret = rs_wait_event_usb(PLATFORM_I3C_DMA_RX_EVT, 1000);
         if (ret) {
             handle_error();
         }
@@ -406,6 +432,10 @@ static memory_t allocate_memory(uint16_t size) {
 }
 
 static void handle_error(void) {
+    /* Drop off the USB bus: this spin never services tud_task, so leaving the
+     * D+ pull-up asserted would present a dead device to the host (Code 43).
+     * Harmless if called before tud_connect (pull-up already off). */
+    tud_disconnect();
     vl53l9_status_t status = { 0 };
     vl53l9_get_status(&device[CONF_DEVICE_ID], &status);
     while (1)
