@@ -59,3 +59,18 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
   tool, observe fps + zero CRC failures + zero seq gaps). State actual numbers, not "works".
 - When debugging link problems, capture raw bytes first (`--record`), then debug offline against the
   file — don't iterate on live hardware.
+
+## Self-improvement after milestones
+
+- **After every milestone** (a phase completing, or any major merge to main), run a retrospective BEFORE
+  starting the next phase — follow the `milestone-retro` skill. The question is always: *what would have
+  made this push easier, done as a reusable artifact?*
+- Convert findings into durable tooling, not notes: new/updated **skills** under `.claude/skills/` (with
+  `references/` and `scripts/` subdirectories where they earn their keep), shared **scripts** under
+  `host/tools/`, and corrections to existing docs. Follow superpowers:writing-skills conventions.
+- Hard rules of thumb: any hardware ritual performed from prose by more than two subagents becomes a
+  script; any environment fact discovered the hard way (tool paths, port quirks, timing windows) becomes
+  a line in the relevant skill; any repeated review finding becomes a checklist item in the skill that
+  governs that work.
+- The retro's output is committed as part of closing the milestone — a milestone isn't done until the
+  next one got easier.

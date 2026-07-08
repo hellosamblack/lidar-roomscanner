@@ -35,6 +35,11 @@ inherit them into forks) are catalogued in `ROADMAP.md` → "Reference-firmware 
 package ships **no USB middleware** (`Middlewares/ST/` = media-object + vl53l9-transform-c only) — USB CDC
 work vendors TinyUSB (see the Phase 1 plan).
 
+**Self-improvement rule (owner, 2026-07-08):** after every milestone (phase completion / major merge),
+run the `milestone-retro` skill BEFORE starting the next phase — convert the push's friction into
+skills (with references/scripts), shared tools under `host/tools/`, and doc fixes. A milestone isn't
+done until the next one got easier.
+
 Throughout this doc, **`<APP>`** = `../53L9A1/Projects/NUCLEO-H563ZI/Applications/53L9A1/53L9A1_PostprocessSingle/` (the reference firmware app dir). File references like `Src/vl53l9_app.c` are relative to `<APP>`.
 
 ## The reference firmware (`<APP>`)
