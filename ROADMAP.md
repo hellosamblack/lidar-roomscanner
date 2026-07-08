@@ -198,6 +198,7 @@ a live-rendered point cloud.
 > through the same viewer/pipeline path at `--replay-fps 25` — `raw` climbing at the paced rate, 0 seq
 > gaps, the same 1 CRC failure / 1 dropped-flag baked into the recording reproduced identically, no
 > traceback. Confirms replay exercises the full PC-transform path on the exact recorded bytes.
+> Replay identity is guaranteed only for recordings started from a device boot (frame 1): a mid-session `--record` starts at an arbitrary point, so its replay re-runs the transform with fresh TNR state after the next CALIB — a brief filter transient vs the live render, below sensor noise.
 >
 > **Deferred / follow-up** (not blockers for calling Phase 2 done):
 > - Reflectance/confidence/ambient/`--color` viewer support — the native shim only negotiates the

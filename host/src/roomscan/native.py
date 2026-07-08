@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .protocol import RAW_3DMD_SIZE_BIN2
+from .protocol import RAW_3DMD_SIZE_BIN2, CALIB_SIZE
 
 _DLL_NAME = "roomscan_transform.dll"
 
@@ -87,8 +87,8 @@ class Transform:
         lib = _load_dll()
         if lib is None:
             raise RuntimeError(_BUILD_HINT)
-        if len(calib) != 2332:
-            raise ValueError(f"calib must be 2332 bytes (VL53L9_CALIB_DATA_SIZE), got {len(calib)}")
+        if len(calib) != CALIB_SIZE:
+            raise ValueError(f"calib must be {CALIB_SIZE} bytes (VL53L9_CALIB_DATA_SIZE), got {len(calib)}")
 
         self._lib = lib
         calib_buf = (ctypes.c_uint8 * len(calib)).from_buffer_copy(calib)
@@ -106,6 +106,7 @@ class Transform:
         """Run one raw 3DMD frame through the transform. Returns a (42, 54) float32 depth array."""
         if self._handle is None:
             raise RuntimeError("Transform used after destroy()")
+        # Assumes binning=2 profile (54x42 resolution); other binnings would need a parameterized size.
         if len(raw) != RAW_3DMD_SIZE_BIN2:
             raise ValueError(f"raw must be {RAW_3DMD_SIZE_BIN2} bytes, got {len(raw)}")
 
