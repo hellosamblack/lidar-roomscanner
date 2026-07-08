@@ -10,6 +10,8 @@
 #define RS_HEADER_SIZE       (32u)
 #define RS_FRAME_DATA        (1u)
 #define RS_FRAME_EVENT       (2u)
+#define RS_FRAME_COMMAND     (3u)
+#define RS_FRAME_ACK         (4u)
 #define RS_STREAM_DEPTH_ZF32 (0u)
 #define RS_FLAG_DROPPED      (0x01u)
 
@@ -31,6 +33,22 @@
 #define RS_EVT_DMA_TIMEOUT         (3u)
 #define RS_EVT_SENSOR_ERROR_STATUS (4u)
 #define RS_EVT_TX_OVERFLOW         (5u)
+
+/* COMMAND (RS_FRAME_COMMAND) payload: u32 cmd, u32 param (LE). */
+#define RS_CMD_PING                (1u)
+#define RS_CMD_SEND_CALIB          (2u)
+#define RS_CMD_SET_USECASE         (3u)
+#define RS_CMD_SET_FRAME_PERIOD_US (4u)
+#define RS_CMD_SET_EXPOSURE_MS     (5u)
+#define RS_CMD_REINIT              (6u)
+
+/* ACK (RS_FRAME_ACK) payload: u32 cmd, u32 result, u32 applied (LE). */
+#define RS_RESULT_OK               (0u)
+#define RS_RESULT_UNKNOWN_CMD      (1u)
+#define RS_RESULT_BAD_PARAM        (2u)
+#define RS_RESULT_REJECTED_BINNING (3u)
+#define RS_RESULT_SENSOR_ERROR     (4u)
+#define RS_RESULT_BUSY             (5u)
 
 void rs_put_u32(uint8_t *p, uint32_t v);
 

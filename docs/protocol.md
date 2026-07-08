@@ -9,16 +9,16 @@ One frame = 32-byte header, payload, CRC32. See the `protocol-change` skill befo
 |--------|------|---------------|--------------------------------------------------------------|
 | 0      | 4    | `magic`       | ASCII `RSCN` (bytes `52 53 43 4E`)                           |
 | 4      | 1    | `version`     | `1`                                                          |
-| 5      | 1    | `frame_type`  | `1` = DATA, `2` = EVENT (device error/log)                   |
-| 6      | 1    | `stream_id`   | see Stream registry below                                    |
-| 7      | 1    | `flags`       | bit0 = DROPPED: ≥1 frame was skipped since the last one sent |
-| 8      | 4    | `seq`         | u32; sensor `frame_counter`, increments per *captured* frame |
-| 12     | 8    | `t_us`        | u64 µs since boot (v1 source: `HAL_GetTick()*1000`, 1 ms resolution; a TIM-backed µs clock is planned with Phase 5 IMU fusion) |
-| 20     | 2    | `width`       | zones                                                        |
-| 22     | 2    | `height`      | zones                                                        |
-| 24     | 4    | `payload_len` | bytes; DEPTH_ZF32 ⇒ `width*height*4`                         |
+| 5      | 1    | `frame_type`  | `1` = DATA, `2` = EVENT (device error/log), `3` = COMMAND (host→device), `4` = ACK (device→host) |
+| 6      | 1    | `stream_id`   | see Stream registry below; ignored for COMMAND/ACK           |
+| 7      | 1    | `flags`       | bit0 = DROPPED (DATA/EVENT only); COMMAND/ACK = 0            |
+| 8      | 4    | `seq`         | DATA: sensor `frame_counter`. COMMAND: host-chosen token. ACK: echoes the COMMAND token (not a frame counter). |
+| 12     | 8    | `t_us`        | u64 µs since boot (v1 source: `HAL_GetTick()*1000`, 1 ms resolution; a TIM-backed µs clock is planned with Phase 5 IMU fusion); ignored for COMMAND/ACK |
+| 20     | 2    | `width`       | zones (DATA/EVENT); 0 for COMMAND/ACK                        |
+| 22     | 2    | `height`      | zones (DATA/EVENT); 0 for COMMAND/ACK                        |
+| 24     | 4    | `payload_len` | bytes; DEPTH_ZF32 ⇒ `width*height*4`; COMMAND = 8, ACK = 12   |
 | 28     | 4    | `reserved`    | 0                                                            |
-| 32     | N    | payload       | row-major, stream-defined encoding                           |
+| 32     | N    | payload       | row-major (DATA), stream-defined (EVENT), COMMAND/ACK-defined |
 | 32+N   | 4    | `crc32`       | IEEE 802.3 / zlib `crc32` over bytes `[0, 32+N)`             |
 
 ## Stream registry
@@ -65,6 +65,51 @@ recovery-path upgrade (ROADMAP "reference-firmware bugs" #2 + Task 8's 1-in-5 bo
 follow-up). This task defines the wire contract only; firmware emission is wired when the
 recovery work lands.
 
+## COMMAND frame payload (frame_type = 3)
+
+Host→device commands. Header `seq` = host-chosen token (not a frame counter); `stream_id`, `width`, `height`, `flags` all 0.
+
+| Offset | Size | Field  | Notes                  |
+|--------|------|--------|------------------------|
+| 0      | 4    | cmd    | u32 LE, see command registry |
+| 4      | 4    | param  | u32 LE, command-specific (e.g. usecase ID, period in µs, exposure in ms) |
+
+All COMMAND payloads are 8 bytes; header `payload_len` = 8.
+
+## ACK frame payload (frame_type = 4)
+
+Device→host acknowledgement of a COMMAND. Header `seq` = echoes the COMMAND token (not the device's frame counter); `stream_id`, `width`, `height`, `flags` all 0.
+
+| Offset | Size | Field   | Notes                  |
+|--------|------|---------|------------------------|
+| 0      | 4    | cmd     | u32 LE, echoes the command code from the COMMAND |
+| 4      | 4    | result  | u32 LE, 0 = OK; nonzero = error (see result-code registry) |
+| 8      | 4    | applied | u32 LE, command-specific: applied value, detail, or info |
+
+All ACK payloads are 12 bytes; header `payload_len` = 12.
+
+### Command registry
+
+| cmd | Name              | param meaning | applied meaning |
+|-----|-------------------|---------------|-----------------|
+| 1   | PING              | ignored       | firmware protocol version (u32) |
+| 2   | SEND_CALIB        | ignored       | 0                |
+| 3   | SET_USECASE       | usecase ID (u16) | applied usecase ID (u16) |
+| 4   | SET_FRAME_PERIOD_US | period in µs (u32) | applied period (u32) |
+| 5   | SET_EXPOSURE_MS   | exposure in ms (u32) | applied exposure (u32) |
+| 6   | REINIT            | ignored       | 0                |
+
+### Result-code registry
+
+| code | Name               | meaning                          |
+|------|--------------------|----------------------------------|
+| 0    | OK                 | command succeeded                |
+| 1    | UNKNOWN_CMD        | command code not recognized      |
+| 2    | BAD_PARAM          | parameter out of valid range     |
+| 3    | REJECTED_BINNING   | SET_USECASE rejected (binning mismatch) |
+| 4    | SENSOR_ERROR       | sensor operation failed (applied = status word) |
+| 5    | BUSY               | device not ready (e.g. frame in progress) |
+
 ## Decoder requirements
 
 - Resync by scanning for `magic`; tolerate arbitrary garbage (e.g. ASCII boot text) between frames.
@@ -94,3 +139,4 @@ specced with the Phase 4 transport work).
 - **v1 rev 2026-07-08**: additive — stream registry (IDs 1-6 reserved), EVENT payload defined,
   DROPPED/oversize semantics clarified, ZF32 no-return sentinel documented. No layout change.
 - **v1 rev 2026-07-08 (b)**: additive — RAW_3DMD (7) and CALIB (8) allocated for the PC-side-transform architecture. No layout change.
+- **v1 rev 2026-07-08 (c)**: additive — COMMAND (frame_type=3) and ACK (frame_type=4) frame types, command registry v1 (PING/SEND_CALIB/SET_USECASE/SET_FRAME_PERIOD_US/SET_EXPOSURE_MS/REINIT), result-code registry. No layout change.

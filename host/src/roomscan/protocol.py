@@ -18,6 +18,8 @@ assert _HEADER.size == HEADER_SIZE
 class FrameType(IntEnum):
     DATA = 1
     EVENT = 2
+    COMMAND = 3
+    ACK = 4
 
 
 class StreamId(IntEnum):
@@ -38,6 +40,24 @@ class EventCode(IntEnum):
     DMA_TIMEOUT = 3
     SENSOR_ERROR_STATUS = 4
     TX_OVERFLOW = 5
+
+
+class CommandCode(IntEnum):
+    PING = 1
+    SEND_CALIB = 2
+    SET_USECASE = 3
+    SET_FRAME_PERIOD_US = 4
+    SET_EXPOSURE_MS = 5
+    REINIT = 6
+
+
+class ResultCode(IntEnum):
+    OK = 0
+    UNKNOWN_CMD = 1
+    BAD_PARAM = 2
+    REJECTED_BINNING = 3
+    SENSOR_ERROR = 4
+    BUSY = 5
 
 
 DEPTH_NO_RETURN_MM = 12000.0  # empirical no-return sentinel in DEPTH_ZF32 payloads (Task 8)
@@ -93,3 +113,33 @@ def parse_event(payload: bytes) -> tuple[int, int, str]:
         raise ProtocolError(f"event payload too short: {len(payload)} bytes")
     code, detail = struct.unpack_from("<II", payload, 0)
     return code, detail, payload[8:].decode("ascii", "replace")
+
+
+def pack_command(cmd: int, param: int, token: int) -> bytes:
+    """Pack a COMMAND frame: cmd (u32) + param (u32) LE, with header seq=token.
+
+    Returns the full wire frame (header + payload + CRC).
+    """
+    payload = struct.pack("<II", cmd, param)
+    header = FrameHeader(
+        frame_type=FrameType.COMMAND,
+        stream_id=0,
+        flags=0,
+        seq=token,
+        t_us=0,
+        width=0,
+        height=0,
+        payload_len=len(payload),
+    )
+    return pack_frame(header, payload)
+
+
+def parse_ack(payload: bytes) -> tuple[int, int, int]:
+    """Decode a frame_type=ACK payload -> (cmd, result, applied).
+
+    Raises ProtocolError if payload is too short.
+    """
+    if len(payload) < 12:
+        raise ProtocolError(f"ACK payload too short: {len(payload)} bytes")
+    cmd, result, applied = struct.unpack_from("<III", payload, 0)
+    return cmd, result, applied

@@ -7,6 +7,7 @@ import pytest
 from roomscan.protocol import (
     FLAG_DROPPED, HEADER_SIZE, MAGIC, VERSION,
     Frame, FrameHeader, FrameType, ProtocolError, StreamId, pack_frame,
+    CommandCode, ResultCode, pack_command, parse_ack,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -75,3 +76,60 @@ def test_raw_and_calib_stream_ids():
     assert StreamId.CALIB == 8
     assert RAW_3DMD_SIZE_BIN2 == 14842
     assert CALIB_SIZE == 2332
+
+
+def test_pack_command_golden():
+    """Golden bytes test for pack_command: PING with token=42."""
+    frame = pack_command(CommandCode.PING, 0, token=42)
+    # hand-verifiable prefix: magic, version, type=3, stream=0, flags=0, seq=42
+    assert frame[:4] == b"RSCN"
+    assert frame[4:5] == bytes([VERSION])
+    assert frame[5:6] == bytes([FrameType.COMMAND])
+    assert frame[6:8] == bytes([0, 0])  # stream_id=0, flags=0
+    assert frame[8:12] == (42).to_bytes(4, "little")
+    # payload_len should be 8 (cmd + param)
+    assert frame[24:28] == (8).to_bytes(4, "little")
+    # CRC over everything before it
+    assert frame[-4:] == zlib.crc32(frame[:-4]).to_bytes(4, "little")
+    # Verify payload: PING (1) + param (0)
+    payload = frame[HEADER_SIZE : HEADER_SIZE + 8]
+    assert struct.unpack("<II", payload) == (CommandCode.PING, 0)
+
+
+def test_parse_ack_roundtrip():
+    """ACK parse roundtrip: pack and decode."""
+    payload = struct.pack("<III", CommandCode.SET_USECASE, ResultCode.OK, 3)
+    cmd, result, applied = parse_ack(payload)
+    assert cmd == CommandCode.SET_USECASE
+    assert result == ResultCode.OK
+    assert applied == 3
+
+
+def test_parse_ack_rejects_short_payload():
+    """ACK parse rejects short payloads."""
+    with pytest.raises(ProtocolError):
+        parse_ack(b"\x01\x00\x00")
+
+
+def test_decoder_passthrough_command_and_ack():
+    """Decoder passes through COMMAND and ACK frame types unchanged."""
+    from roomscan.decoder import StreamDecoder
+
+    decoder = StreamDecoder()
+    # Pack a COMMAND frame
+    cmd_frame = pack_command(CommandCode.PING, 0, token=100)
+    # Pack an ACK frame
+    ack_header = FrameHeader(
+        frame_type=FrameType.ACK, stream_id=0, flags=0,
+        seq=100, t_us=0, width=0, height=0, payload_len=12,
+    )
+    ack_payload = struct.pack("<III", CommandCode.PING, ResultCode.OK, 1)
+    ack_frame = pack_frame(ack_header, ack_payload)
+
+    # Feed both frames
+    frames = decoder.feed(cmd_frame + ack_frame)
+    assert len(frames) == 2
+    assert frames[0].header.frame_type == FrameType.COMMAND
+    assert frames[0].header.seq == 100
+    assert frames[1].header.frame_type == FrameType.ACK
+    assert frames[1].header.seq == 100
