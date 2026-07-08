@@ -16,7 +16,10 @@ flash-and-observe.
 
 ## Build
 
-Requires `arm-none-eabi-gcc` on PATH, CMake ≥3.22, Ninja. Run **from the app dir**:
+Requires `arm-none-eabi-gcc` on PATH, CMake ≥3.22, Ninja. On this machine the toolchain is NOT on the
+default PATH — it ships with STM32CubeIDE 2.2.0; prepend
+`C:\ST\STM32CubeIDE_2.2.0\STM32CubeIDE\plugins\...\tools\bin` (glob for `com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32*`)
+to PATH for the build. Run **from the app dir**:
 
 ```sh
 cmake --preset Debug          # once, or after CMakeLists changes; use Release for perf runs
