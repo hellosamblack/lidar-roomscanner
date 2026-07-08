@@ -1,0 +1,111 @@
+"""Live point-cloud viewer. Reader thread: source -> decoder -> latest-frame slot;
+main thread: Open3D non-blocking render loop + 1 Hz stats line."""
+from __future__ import annotations
+
+import argparse
+import queue
+import sys
+import threading
+import time
+
+import numpy as np
+
+from .decoder import StreamDecoder
+from .deproject import Deprojector
+from .protocol import FLAG_DROPPED, FrameType, StreamId
+from .sources import FileSource, SerialSource, pump
+
+
+class Stats:
+    def __init__(self):
+        self.frames = 0
+        self.seq_gaps = 0
+        self.dropped_flags = 0
+        self._last_seq = None
+
+    def update(self, header):
+        self.frames += 1
+        if header.flags & FLAG_DROPPED:
+            self.dropped_flags += 1
+        if self._last_seq is not None and header.seq > self._last_seq + 1:
+            self.seq_gaps += header.seq - self._last_seq - 1
+        self._last_seq = header.seq
+
+
+def _reader(source, decoder, slot: queue.Queue, stats: Stats, record):
+    for frame in pump(source, decoder, record_path=record):
+        if frame.header.frame_type != FrameType.DATA or frame.header.stream_id != StreamId.DEPTH_ZF32:
+            continue
+        stats.update(frame.header)
+        try:
+            slot.get_nowait()          # latest-wins: drop stale frame
+        except queue.Empty:
+            pass
+        slot.put(frame)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="roomscan-view")
+    ap.add_argument("--port")
+    ap.add_argument("--baud", type=int, default=921600)
+    ap.add_argument("--replay")
+    ap.add_argument("--record")
+    ap.add_argument("--fov-h", type=float, default=60.0)
+    ap.add_argument("--fov-v", type=float, default=45.0)
+    args = ap.parse_args(argv)
+
+    import open3d as o3d   # deferred: heavy import
+
+    source = FileSource(args.replay) if args.replay else SerialSource(args.port, args.baud)
+    decoder = StreamDecoder()
+    stats = Stats()
+    slot: queue.Queue = queue.Queue(maxsize=1)
+    threading.Thread(target=_reader, args=(source, decoder, slot, stats, args.record),
+                     daemon=True).start()
+
+    vis = o3d.visualization.Visualizer()
+    vis.create_window("roomscan", width=1280, height=800)
+    pcd = o3d.geometry.PointCloud()
+    added = False
+    deproj = None
+    shown = 0
+    t_stat = time.monotonic()
+    f_stat = 0
+
+    while vis.poll_events():
+        try:
+            frame = slot.get(timeout=0.02)
+        except queue.Empty:
+            vis.update_renderer()
+            continue
+        h, w = frame.header.height, frame.header.width
+        if deproj is None:
+            deproj = Deprojector(w, h, args.fov_h, args.fov_v)
+        depth = np.frombuffer(frame.payload, dtype="<f4").reshape(h, w)
+        pts = deproj(depth)
+        pcd.points = o3d.utility.Vector3dVector(pts)
+        if len(pts):
+            zn = (pts[:, 2] - pts[:, 2].min()) / max(float(np.ptp(pts[:, 2])), 1e-6)
+            pcd.colors = o3d.utility.Vector3dVector(
+                np.stack([zn, 0.6 * (1 - zn), 1 - zn], axis=1))
+        if not added:
+            vis.add_geometry(pcd)
+            added = True
+        else:
+            vis.update_geometry(pcd)
+        vis.update_renderer()
+        shown += 1
+
+        now = time.monotonic()
+        if now - t_stat >= 1.0:
+            fps = (shown - f_stat) / (now - t_stat)
+            print(f"\r{fps:5.1f} fps | frames {stats.frames} | seq gaps {stats.seq_gaps} "
+                  f"| crc fail {decoder.crc_failures} | skipped {decoder.bytes_skipped} B ",
+                  end="", flush=True)
+            t_stat, f_stat = now, shown
+    print()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
