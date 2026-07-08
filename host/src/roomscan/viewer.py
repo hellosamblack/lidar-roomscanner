@@ -13,7 +13,7 @@ import numpy as np
 from .colors import turbo
 from .decoder import StreamDecoder
 from .deproject import Deprojector
-from .protocol import FLAG_DROPPED, FrameType, StreamId
+from .protocol import FLAG_DROPPED, FrameType, ProtocolError, StreamId, parse_event
 from .sources import FileSource, SerialSource, pump
 
 
@@ -36,6 +36,13 @@ class Stats:
 def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dict):
     try:
         for frame in pump(source, decoder, record_path=record):
+            if frame.header.frame_type == FrameType.EVENT:
+                try:
+                    code, detail, msg = parse_event(frame.payload)
+                    print(f"\n[device event] code={code} detail={detail} {msg}")
+                except ProtocolError:
+                    print(f"\n[device event] undecodable payload ({len(frame.payload)} B)")
+                continue
             if frame.header.frame_type != FrameType.DATA or frame.header.stream_id != StreamId.DEPTH_ZF32:
                 continue
             stats.update(frame.header)

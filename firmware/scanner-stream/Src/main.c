@@ -434,7 +434,7 @@ static void MX_UCPD1_Init(void)
   * @param None
   * @retval None
   */
-static void MX_USB_PCD_Init(void)
+static void __attribute__((unused)) MX_USB_PCD_Init(void) /* retained MX-generated init; USB owned by TinyUSB */
 {
 
   /* USER CODE BEGIN USB_Init 0 */

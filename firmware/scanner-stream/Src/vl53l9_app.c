@@ -29,7 +29,7 @@
 /* application customization */
 #define CONF_DEVICE_ID   (0) /**< select device entry in platform descriptor array (see vl53l9_device.c) */
 #define CONF_PRINT_FRAME   (0) /**< ASCII art disabled in streaming builds */
-#define CONF_STREAM_BINARY (1) /**< emit rs_protocol frames on the COM1 UART */
+#define CONF_STREAM_BINARY (1) /**< emit rs_protocol frames over native USB CDC (see rs_send_depth_cdc) */
 #define CONF_USECASE     (VL53L9_USECASE_AR_PRECISION) /**< select ranging profile to be applied (see vl53l9_utils.h) */
 
 #include "rs_protocol.h"
@@ -47,24 +47,6 @@ static uint64_t rs_time_us(void) {
     /* v1: HAL tick, 1 ms resolution widened to the u64 µs wire field.
      * Upgrade to a TIM-based µs clock when IMU fusion needs it (Phase 5). */
     return (uint64_t)HAL_GetTick() * 1000u;
-}
-
-static void rs_send_depth_uart(uint32_t seq, uint8_t flags, const uint8_t *payload,
-                               uint32_t len, uint16_t w, uint16_t h) {
-    uint8_t hdr[RS_HEADER_SIZE];
-    uint8_t tail[4];
-    /* HAL_UART_Transmit's u16 length bounds a single transfer; if a future
-     * profile produces >65535 B payloads, Phase 3 must chunk the send. */
-    if (len > 0xFFFFu) {
-        handle_error();
-    }
-    rs_write_header(hdr, RS_FRAME_DATA, RS_STREAM_DEPTH_ZF32, flags, seq, rs_time_us(), w, h, len);
-    uint32_t crc = rs_crc32(0u, hdr, RS_HEADER_SIZE);
-    crc = rs_crc32(crc, payload, len);
-    rs_put_u32(tail, crc);
-    HAL_UART_Transmit(&hcom_uart[COM1], hdr, RS_HEADER_SIZE, 1000);
-    HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t *)payload, (uint16_t)len, 1000);
-    HAL_UART_Transmit(&hcom_uart[COM1], tail, 4, 1000);
 }
 
 /* Pump the CDC FIFO out. Returns false if the host stalled >100 ms (frame aborted:
@@ -132,7 +114,6 @@ static int rs_wait_event_usb(uint32_t evt, uint32_t timeout_ms) {
 
 static void print_frame(float *p_frame, size_t height, size_t width);
 static memory_t allocate_memory(uint16_t size);
-static void handle_error(void);
 
 void vl53l9_app() {
 
