@@ -284,6 +284,16 @@ void vl53l9_app() {
      * the host never saw a device we couldn't answer). */
     tud_connect();
 
+#if CONF_STREAM_RAW
+    /* Golden-pair captures need frame 1: TNR state is per-pixel and cumulative, so the
+     * host must witness the stream from the first processed frame. Hold acquisition
+     * until a host opens the CDC port (DTR). */
+    while (!tud_cdc_connected()) {
+        tud_task();
+    }
+    HAL_Delay(50); /* let the host's reader thread settle after opening the port */
+#endif
+
     while (1) {
 
         /* Keep USB serviced every iteration, including frames that skip the

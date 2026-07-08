@@ -4,13 +4,14 @@ Regenerate with (from repo root, after a fresh captures/golden_pairs.bin exists)
     host/.venv/Scripts/python host/tests/make_golden_snippet.py
 
 Selects the first CALIB frame present in the capture plus the first 3 complete
-RAW_3DMD/DEPTH_ZF32 seq-matched pairs starting at the earliest captured seq (the
+RAW_3DMD/DEPTH_ZF32 seq-matched pairs starting at the earliest captured seq. The
 transform's TNR stage is stateful, so Task 4's replay must start at the stream's
-first processed frames -- i.e. the earliest sequence numbers actually captured,
-not necessarily the sensor's absolute frame 1: USB CDC re-enumeration after reset
-takes longer than the sensor's un-throttled (no-host-connected) frame period, so a
-handful of early frames are always missed before the host can attach. See
-p2-task-2-report.md for the measurement backing this.)
+true first processed frame: in dual-stream mode (CONF_STREAM_RAW) the firmware
+holds acquisition until a host asserts DTR on the CDC port, so a from-boot capture
+begins at sensor frame-counter 1 with CALIB first in the byte stream. This script
+asserts nothing about absolute seq values, but a valid golden capture starts at
+seq 1 -- if the reported "earliest captured seq" is higher, the capture missed the
+boot window and must be redone.
 
 Each selected frame is re-emitted via roomscan.protocol.pack_frame(header, payload).
 This is NOT a re-encode from scratch -- pack_frame deterministically reproduces the
