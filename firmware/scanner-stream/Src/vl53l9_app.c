@@ -29,7 +29,8 @@
 /* application customization */
 #define CONF_DEVICE_ID   (0) /**< select device entry in platform descriptor array (see vl53l9_device.c) */
 #define CONF_PRINT_FRAME   (0) /**< ASCII art disabled in streaming builds */
-#define CONF_STREAM_BINARY (1) /**< emit rs_protocol frames over native USB CDC (see rs_send_depth_cdc) */
+#define CONF_STREAM_BINARY (1) /**< emit rs_protocol frames over native USB CDC (see rs_send_frame_cdc) */
+#define CONF_STREAM_RAW (1) /**< also stream RAW_3DMD + periodic CALIB (dual-stream validation / PC-transform mode) */
 #define CONF_USECASE     (VL53L9_USECASE_AR_PRECISION) /**< select ranging profile to be applied (see vl53l9_utils.h) */
 
 #include "rs_protocol.h"
@@ -70,7 +71,7 @@ static bool rs_cdc_send(const uint8_t *p, uint32_t n) {
     return true;
 }
 
-static void rs_send_depth_cdc(uint32_t seq, uint8_t flags, const uint8_t *payload,
+static void rs_send_frame_cdc(uint8_t stream_id, uint32_t seq, uint8_t flags, const uint8_t *payload,
                               uint32_t len, uint16_t w, uint16_t h) {
     static uint8_t pending_dropped = 0;
 
@@ -82,7 +83,7 @@ static void rs_send_depth_cdc(uint32_t seq, uint8_t flags, const uint8_t *payloa
 
     uint8_t hdr[RS_HEADER_SIZE];
     uint8_t tail[4];
-    rs_write_header(hdr, RS_FRAME_DATA, RS_STREAM_DEPTH_ZF32, flags, seq, rs_time_us(), w, h, len);
+    rs_write_header(hdr, RS_FRAME_DATA, stream_id, flags, seq, rs_time_us(), w, h, len);
     uint32_t crc = rs_crc32(0u, hdr, RS_HEADER_SIZE);
     crc = rs_crc32(crc, payload, len);
     rs_put_u32(tail, crc);
@@ -356,7 +357,33 @@ void vl53l9_app() {
             }
 #if CONF_STREAM_BINARY
             if (rs_have_prev) {
-                rs_send_depth_cdc(rs_prev_counter, 0u, (const uint8_t *)out_depth_mem.data,
+#if CONF_STREAM_RAW
+                /* Ordering constraint: this block runs after transform_process_stream (so
+                 * depth for rs_prev_counter is valid) and before raw_mem_index toggles at the
+                 * bottom of the loop. The raw buffer being read here is
+                 * in_raw_mem[(raw_mem_index + 1) % 2] -- the same buffer transform_process_stream
+                 * just consumed above via in_raw_mems.items, holding rs_prev_counter's raw frame.
+                 * The sensor DMA in progress this iteration targets in_raw_mem[raw_mem_index]
+                 * (the *other* buffer, kicked off earlier this iteration by
+                 * vl53l9_get_frame_async), and that complement buffer is not written again until
+                 * raw_mem_index cycles back to this same index two iterations from now -- well
+                 * after this synchronous send completes. So reading it here is race-free. */
+                {
+                    static uint32_t rs_calib_countdown = 0;
+                    if (rs_calib_countdown == 0) {
+                        rs_send_frame_cdc(RS_STREAM_CALIB, rs_prev_counter, 0u, calib_data,
+                                          VL53L9_CALIB_DATA_SIZE, out_width, out_height);
+                        rs_calib_countdown = 64;
+                    }
+                    rs_calib_countdown--;
+                    /* raw buffer of the frame being processed = the PREVIOUS index (the pipeline
+                     * input); send it with the same seq as the depth it produces */
+                    rs_send_frame_cdc(RS_STREAM_RAW_3DMD, rs_prev_counter, 0u,
+                                      (const uint8_t *)in_raw_mem[(raw_mem_index + 1) % 2].data,
+                                      raw_buffer_size, out_width, out_height);
+                }
+#endif
+                rs_send_frame_cdc(RS_STREAM_DEPTH_ZF32, rs_prev_counter, 0u, (const uint8_t *)out_depth_mem.data,
                                   frame_buffer_size, out_width, out_height);
             }
 #endif
