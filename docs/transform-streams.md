@@ -296,6 +296,10 @@ factory-calibrated intrinsics (plus a fused per-point confidence for free).
 Either way, when Phase 2 arrives the PC-side `Deprojector`'s linear-FoV
 model should be validated against ZAPC output for the same scene — ZAPC is
 ground truth here, since it uses the real calibrated intrinsics.
+*Phase 2.5 caveat:* ZAPC's per-point confidence was measured
+**non-discriminating on real captures** (~1.0 on every zone, including
+no-return ones) — see `docs/deprojector-validation.md`'s confidence-channel
+finding before relying on it as a quality gate.
 
 **3. Which controls exist — which are Phase-3 targets?**
 Nine controls, all currently `false`/boolean except `calib-buffer`:

@@ -30,14 +30,26 @@ sufficient. Ran both anyway rather than assume it, per "numeric honesty."
 
 **Confidence-channel finding:** ZAPC's 4th channel (confidence, nominally
 0..1) reports **~1.0 on every zone in this fixture, including the no-return
-sentinel zones** (min/max/mean all ≈1.0, one-bin histogram). It does not
-discriminate valid from invalid here — exclusion had to rely on the depth
-value itself (sentinel + finite + positive), not the confidence gate the
-task brief suggested as a secondary filter. Documented as a real finding,
-not treated as "confidence works, just didn't need it": on this scene/calib,
-the confidence channel gave zero information for zone exclusion. `--conf-min`
-is still exposed as a script flag in case a different capture's confidence
-distribution is more informative.
+sentinel zones**. Measured (printed by the script's "ZAPC confidence
+channel" section): over all 6804 fixture zones min=1.000000 max=1.000007
+mean=1.000000; the [0,1] histogram is single-bin — all 6747 valid zones sit
+at exactly 1.000000 — and the 57 sentinel zones read *marginally above* 1.0
+(1.000001–1.000007). The full 731-frame capture shows the identical pattern
+over 1.66M zones (sentinel min/max 1.000001/1.000007, mean 1.000004). As a
+threshold gate it does not discriminate valid from invalid — exclusion had
+to rely on the depth value itself (sentinel + finite + positive), not the
+confidence gate the task brief suggested as a secondary filter. One nuance
+the stats surfaced: the >1.0 values are the library's per-zone filter-status
+codes packed into the 1e-6 digits (`radial_to_perp.c:198-203`,
+`floor(conf·1e3)·1e-3 + status·1e-6`), and on this data *every* sentinel
+zone carries a nonzero status code while every valid zone reads exactly
+1.000000 — so the status micro-digits do mark no-return zones, but in the
+**wrong direction** for a `conf >= min` gate (sentinels are *higher*, not
+lower). Documented as a real finding, not treated as "confidence works, just
+didn't need it": on this scene/calib, the 0..1 confidence value itself gave
+zero information for zone exclusion. `--conf-min` is still exposed as a
+script flag in case a different capture's confidence distribution is more
+informative.
 
 ## ZAPC axis/unit conventions (previously unknown — now established)
 
@@ -45,7 +57,7 @@ distribution is more informative.
 |---|---|
 | x axis | increases monotonically with **column** index (col 0 median tan_x=-0.4996, col 53 median tan_x=+0.5210) |
 | y axis | increases monotonically with **row** index (row 0 median tan_y=-0.3750, row 41 median tan_y=+0.3798) |
-| radial vs perpendicular z | **perpendicular** — ZAPC's z is **bit-identical** to the ZF32 depth output on every valid zone (max abs diff = 0.000000 mm across both the 3-frame and 731-frame runs). A radial z would grow relative to ZF32 off-axis; there is no such trend, the diff is exactly zero. Traced in the read-only library source: `vl53l9_algo_pointcloud()` (`radial_to_perp.c:195-197`) writes `pointcloud[...+2] = depth[linear_id]` — the *same* r2p-corrected perpendicular depth array that feeds the ZF32 output, not a re-derived radial range. |
+| radial vs perpendicular z | **perpendicular** — ZAPC's z is **bit-identical** to the ZF32 depth output on every valid zone (max abs diff = 0.000000 mm across both the 3-frame and 731-frame runs; the script **hard-asserts `max_abs_diff == 0.0`** — exact identity, not a tolerance — and exits nonzero if a library/shim/fixture regression ever breaks it). A radial z would grow relative to ZF32 off-axis; there is no such trend, the diff is exactly zero. Traced in the read-only library source: `vl53l9_algo_pointcloud()` (`radial_to_perp.c:195-197`) writes `pointcloud[...+2] = depth[linear_id]` — the *same* r2p-corrected perpendicular depth array that feeds the ZF32 output, not a re-derived radial range. |
 | units | millimeters for x, y, and z (matches ZF32's mm depth exactly, and x/y magnitudes — up to ~6300 at the widest corner over ~400–12000 mm depths — are consistent with mm-scale geometry, not meters) |
 
 **Conclusion:** `x = z * tan(angle_x(col))`, `y = z * tan(angle_y(row))`,
@@ -81,8 +93,8 @@ weight) via `fov = Σ(k·angle) / Σ(k²)` over all valid zones:
 
 | axis | Deprojector's zone-center convention | zone-center-to-zone-center convention | RMS residual |
 |---|---|---|---|
-| H | fov = **54.66°** | fov = 53.65° | 0.528° |
-| V | fov = **42.50°** | fov = 41.49° | 0.450° |
+| H | fov = **54.65°** (54.6535; full capture 54.6592) | fov = 53.64° | 0.528° |
+| V | fov = **42.50°** (42.4990; full capture 42.5036) | fov = 41.49° | 0.450° |
 
 **Edge-vs-zone-center convention verdict (open question (a)): not a real
 choice.** The two candidate conventions —
@@ -99,10 +111,10 @@ between the two "conventions" — they're the same underlying linear model
 wearing two different fov labels. `Deprojector`'s code already commits to
 the zone-center-inside-optical-edge convention (matches typical camera-FoV
 semantics: FoV is the full optical field, pixel/zone centers sit inside it),
-so its fitted number is the one that matters: **54.66°/42.50°**.
+so its fitted number is the one that matters: **54.65°/42.50°**.
 
 **Reconciliation with the datasheet (55°×42°, DS14879 rev 6):** agrees
-closely — H within **0.34°**, V within **0.50°** of the datasheet numbers.
+closely — H within **0.35°**, V within **0.50°** of the datasheet numbers.
 Both directions are well inside what a single global distortion-free fit
 can average away; this is a confirmation of the datasheet values under the
 existing convention, not a disagreement.
@@ -110,7 +122,7 @@ existing convention, not a disagreement.
 ## Decision: does a pure FoV-default change fix it?
 
 **No.** Re-running the displacement calculation with the best-fit FoV
-(54.66°/42.50° instead of the datasheet's 55°/42°) leaves the worst case
+(54.65°/42.50° instead of the datasheet's 55°/42°) leaves the worst case
 **unchanged** (6.36% → 6.37% of z at 2 m — actually marginally worse, noise
 in the single-scalar fit) because the error is not a scale error, it's a
 shape error: real per-zone lens distortion (per `radial_to_perp.c`'s
@@ -182,6 +194,6 @@ scope — YAGNI unless a future consumer needs sub-cm corner accuracy).
 | ZAPC units | millimeters (x, y, z all) |
 | radial vs. perpendicular | perpendicular — bit-identical to ZF32 depth |
 | edge-vs-center FoV convention | not distinguishable by fit (algebraically the same model, different label); `Deprojector`'s existing zone-center convention is the one that matters and it fits well |
-| best-fit FoV vs. datasheet 55°×42° | 54.66°×42.50° — agrees within 0.34°/0.50° |
+| best-fit FoV vs. datasheet 55°×42° | 54.65°×42.50° — agrees within 0.35°/0.50° |
 | worst-case displacement | 127 mm at 2 m (6.36% of z), always at the extreme corner |
 | decision | **keep FoV defaults unchanged** (confirmed correct); **add optional `zone_tan_x`/`zone_tan_y` per-zone table** to `Deprojector` for callers needing corner accuracy — linear stays the default |

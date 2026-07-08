@@ -113,6 +113,8 @@ def main() -> int:
     all_row: list[np.ndarray] = []
     all_tanx: list[np.ndarray] = []
     all_tany: list[np.ndarray] = []
+    all_conf: list[np.ndarray] = []      # full plane, incl. sentinel zones -- see conf report
+    all_conf_sentinel: list[np.ndarray] = []
     z_vs_depth_diffs: list[np.ndarray] = []
     n_zones_total = 0
     n_zones_valid = 0
@@ -145,6 +147,8 @@ def main() -> int:
         all_row.append(row_idx[valid])
         all_tanx.append((x / z)[valid])
         all_tany.append((y / z)[valid])
+        all_conf.append(conf.ravel())
+        all_conf_sentinel.append(conf[sentinel])
         if len(pairs) <= 10:
             print(f"  frame {i}: {int(valid.sum())}/{depth_pc.size} zones valid "
                   f"({int(sentinel.sum())} sentinel, "
@@ -157,6 +161,8 @@ def main() -> int:
     row = np.concatenate(all_row).astype(np.int64)
     tanx = np.concatenate(all_tanx)
     tany = np.concatenate(all_tany)
+    conf_all = np.concatenate(all_conf)
+    conf_sentinel = np.concatenate(all_conf_sentinel) if n_zones_sentinel else np.empty(0)
     z_diff = np.concatenate(z_vs_depth_diffs)
 
     print()
@@ -166,6 +172,28 @@ def main() -> int:
     print(f"low-confidence (excluded):    {n_zones_low_conf}")
     print(f"valid zones used for fit:     {n_zones_valid} "
           f"({100.0 * n_zones_valid / n_zones_total:.1f}%)")
+
+    print()
+    print("=== ZAPC confidence channel (4th float) -- does it discriminate? ===")
+    hist, edges = np.histogram(conf_all, bins=10, range=(0.0, 1.0))
+    n_above_1 = int(np.sum(conf_all > 1.0))
+    print(f"all zones (n={conf_all.size}, incl. sentinel): "
+          f"min={conf_all.min():.6f} max={conf_all.max():.6f} mean={conf_all.mean():.6f}")
+    print(f"histogram over [0,1], 10 bins: {hist.tolist()}"
+          + (f"  (+{n_above_1} values marginally >1.0, outside the histogram range: the "
+             f"library packs per-zone filter-status codes into the 1e-6 digits, "
+             f"radial_to_perp.c:198-203)" if n_above_1 else ""))
+    if conf_sentinel.size:
+        print(f"sentinel (no-return) zones only (n={conf_sentinel.size}): "
+              f"min={conf_sentinel.min():.6f} max={conf_sentinel.max():.6f} "
+              f"mean={conf_sentinel.mean():.6f}")
+    if conf_all.min() >= 0.99:
+        print("-> confidence reports ~1.0 on EVERY zone, including no-return sentinel zones: "
+              "non-discriminating on this data; zone exclusion must rely on the depth "
+              "sentinel instead (see docs/deprojector-validation.md).")
+    else:
+        print("-> confidence varies on this data -- the --conf-min gate is meaningful here; "
+              "revisit docs/deprojector-validation.md's non-discrimination finding.")
 
     print()
     print("=== ZAPC axis-convention findings ===")
@@ -186,15 +214,25 @@ def main() -> int:
 
     print()
     print("=== z (ZAPC) vs depth (ZF32) -- perpendicular-vs-radial anchor ===")
+    max_abs_z_diff = float(np.max(np.abs(z_diff)))
     print(f"n compared: {z_diff.size}")
-    print(f"max abs diff: {np.max(np.abs(z_diff)):.6f} mm  "
+    print(f"max abs diff: {max_abs_z_diff:.6f} mm  "
           f"mean diff: {np.mean(z_diff):.6f} mm  median diff: {np.median(z_diff):.6f} mm")
-    if np.max(np.abs(z_diff)) < 1e-3:
-        print("VERDICT: ZAPC's z is bit-identical to ZF32 depth -- PERPENDICULAR, not radial "
-              "(radial would grow off-axis; no such trend, diff is exactly 0).")
-    else:
-        print("VERDICT: z differs from ZF32 depth -- inspect off-axis trend before assuming "
-              "perpendicular.")
+    # Hard check, not a tolerance: the established finding (docs/deprojector-validation.md)
+    # is that ZAPC's z channel is the SAME buffer as the ZF32 depth output
+    # (radial_to_perp.c:195-197 writes depth[linear_id] verbatim), so any nonzero diff at
+    # all means the library/fixture/shim changed underneath us -- fail loudly.
+    assert max_abs_z_diff == 0.0, (
+        f"ZAPC z is no longer bit-identical to ZF32 depth (max abs diff "
+        f"{max_abs_z_diff} mm over {z_diff.size} zones). This validation's "
+        "perpendicular-z finding rested on exact identity (radial_to_perp.c writes the same "
+        "corrected-depth array to both outputs) -- a library, shim, or fixture regression has "
+        "broken that. Inspect the off-axis trend of (z - depth) before trusting any "
+        "conclusion in docs/deprojector-validation.md."
+    )
+    print("VERDICT: ZAPC's z is bit-identical to ZF32 depth -- PERPENDICULAR, not radial "
+          "(radial would grow off-axis; no such trend, diff is exactly 0). "
+          "[hard-asserted: max abs diff == 0.0]")
 
     print()
     print("=== per-zone angular error vs the linear model (datasheet 55x42) ===")
