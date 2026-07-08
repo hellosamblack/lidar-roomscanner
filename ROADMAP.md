@@ -17,8 +17,9 @@ Engineering conventions live in [`docs/engineering-practices.md`](./docs/enginee
   (IEEE 1588) timestamping. Native USB CDC (`USB_DRD_FS`) is a bring-up/fallback link only. This voids the
   USB-bandwidth and timestamp-drift bottlenecks in `references/roadmapResearch.md`.
 - **Sensors: X-NUCLEO-IKS4A1** adds IMU (LSM6DSV16X, hardware SFLP orientation), magnetometer (yaw-drift
-  correction), barometer (Z-drift constraint), temp/humidity (thermal comp). Not yet in code; I2C vs the
-  ToF's I3C1 bus-sharing is unresolved.
+  correction), barometer (Z-drift constraint), temp/humidity (thermal comp). Not yet in code. Bus-sharing
+  is resolved — IKS4A1 rides the ToF's I3C1 bus as legacy-I2C targets (shared PB8/PB9), no separate
+  peripheral; stacking recipe + bench checklist in `docs/iks4a1-stacking.md`.
 - **Sequencing rule (owner):** mature the visualizer + UI/config on the **ToF sensor alone** before adding
   the IKS4A1 board.
 - **Protocol rule:** design the frame protocol transport-agnostic from day one —
@@ -282,9 +283,12 @@ UDP, add hardware PTP (IEEE 1588) timestamping.
 IMU (LSM6DSV16X hardware SFLP quaternions) / mag / baro drivers; fuse readings into the payload with
 hardware timestamps. New streams = new `stream_id`s + a version bump per the protocol rule.
 
-- **Unresolved first**: bus topology. ToF owns I3C1; IKS4A1 sensors are I2C. STM32H5 I3C controllers can
-  drive legacy-I2C targets on the same bus, or the IKS4A1 can sit on a separate I2C peripheral — check
-  Arduino-connector pin conflicts between the two stacked shields *before* buying into either.
+- **Bus topology — resolved** (`docs/iks4a1-stacking.md`): the IKS4A1 shares the ToF's **I3C1** bus as
+  legacy-I2C targets (`I3C1.BusUsage=MixedUsage` already set in the `.ioc`), not a separate I2C peripheral.
+  No static-address collision (ToF `0x29` vs IKS4A1 `0x1E`/`0x38`/`0x5C-5D`/`0x6A-6B`); keep IKS4A1 INT
+  lines off the ToF control pins PB1/PB5/PB6/PB7, and match both boards' bus I/O rail to 3.3 V. The driver
+  must assign the ToF's I3C dynamic address clear of the IKS4A1 statics and declare them as legacy-I2C
+  targets.
 - SFLP quaternion wire format: **IEEE binary16 (fp16), not fixed-point int16** — the research doc mislabels
   this; document the encoding in `docs/protocol.md` and test the fp16 decode path with a golden vector.
 - IMU sample rate (~100+ Hz) ≠ ToF frame rate: IMU frames are independent small frames with their own

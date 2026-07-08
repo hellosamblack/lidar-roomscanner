@@ -68,7 +68,7 @@ Presets in `<APP>/CMakePresets.json`. Post-build emits `53L9A1_PostprocessSingle
 
 Two decisions that override the older parts of `references/roadmapResearch.md`:
 - **Transport: Ethernet, not USB.** The board has a 10/100 MAC (RMII pins already `AF11_ETH` in `<APP>/Src/main.c`; MAC + lwIP not yet enabled). Target link is lwIP/UDP with hardware PTP timestamping. USB CDC (native `USB_DRD_FS`) is a bring-up/fallback only. This removes the USB-bandwidth and timestamp-drift bottlenecks the doc spends most of its length on.
-- **Sensors: X-NUCLEO-IKS4A1** adds an IMU (LSM6DSV16X, hardware SFLP orientation), magnetometer, barometer (Z-drift constraint), and temp/humidity. Not yet in code; I2C vs the ToF's I3C1 bus-sharing is an open question.
+- **Sensors: X-NUCLEO-IKS4A1** adds an IMU (LSM6DSV16X, hardware SFLP orientation), magnetometer, barometer (Z-drift constraint), and temp/humidity. Not yet in code. Bus-sharing is **resolved**: the IKS4A1 rides the ToF's I3C1 bus as legacy-I2C targets (shared PB8/PB9) — no separate peripheral. Stacking/config recipe + bench checklist in `docs/iks4a1-stacking.md`.
 
 ### Roadmap
 
