@@ -76,26 +76,25 @@ def main(argv=None) -> int:
         try:
             frame = slot.get(timeout=0.02)
         except queue.Empty:
-            vis.update_renderer()
-            continue
-        h, w = frame.header.height, frame.header.width
-        if deproj is None:
-            deproj = Deprojector(w, h, args.fov_h, args.fov_v)
-        depth = np.frombuffer(frame.payload, dtype="<f4").reshape(h, w)
-        pts = deproj(depth)
-        pcd.points = o3d.utility.Vector3dVector(pts)
-        if len(pts):
-            zn = (pts[:, 2] - pts[:, 2].min()) / max(float(np.ptp(pts[:, 2])), 1e-6)
-            pcd.colors = o3d.utility.Vector3dVector(
-                np.stack([zn, 0.6 * (1 - zn), 1 - zn], axis=1))
-        if not added:
-            vis.add_geometry(pcd)
-            added = True
-        else:
-            vis.update_geometry(pcd)
+            frame = None
+        if frame is not None:
+            h, w = frame.header.height, frame.header.width
+            if deproj is None:
+                deproj = Deprojector(w, h, args.fov_h, args.fov_v)
+            depth = np.frombuffer(frame.payload, dtype="<f4").reshape(h, w)
+            pts = deproj(depth)
+            pcd.points = o3d.utility.Vector3dVector(pts)
+            if len(pts):
+                zn = (pts[:, 2] - pts[:, 2].min()) / max(float(np.ptp(pts[:, 2])), 1e-6)
+                pcd.colors = o3d.utility.Vector3dVector(
+                    np.stack([zn, 0.6 * (1 - zn), 1 - zn], axis=1))
+            if not added:
+                vis.add_geometry(pcd)
+                added = True
+            else:
+                vis.update_geometry(pcd)
+            shown += 1
         vis.update_renderer()
-        shown += 1
-
         now = time.monotonic()
         if now - t_stat >= 1.0:
             fps = (shown - f_stat) / (now - t_stat)
