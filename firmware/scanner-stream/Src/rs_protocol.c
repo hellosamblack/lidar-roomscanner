@@ -74,9 +74,11 @@ int32_t rs_parse_command(const uint8_t *buf, size_t len, uint32_t *cmd, uint32_t
     }
 
     const uint8_t *p = buf + k;
+    uint8_t version = p[4];
     uint8_t frame_type = p[5];
     uint32_t payload_len = get_u32(p + 24);
-    if (frame_type != RS_FRAME_COMMAND || payload_len != RS_CMD_PAYLOAD_LEN) {
+    if (version != RS_PROTO_VERSION || frame_type != RS_FRAME_COMMAND ||
+        payload_len != RS_CMD_PAYLOAD_LEN) {
         return -(int32_t)(k + 1u); /* false-positive magic: resync one byte in */
     }
 

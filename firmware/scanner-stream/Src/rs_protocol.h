@@ -82,14 +82,16 @@ void rs_write_header(uint8_t out[RS_HEADER_SIZE], uint8_t frame_type, uint8_t st
  *     the candidate is dropped while the candidate itself is kept for next call.
  *
  *   - A magic candidate at offset k with >= RS_CMD_FRAME_SIZE bytes available: the header
- *     (frame_type == RS_FRAME_COMMAND, payload_len == RS_CMD_PAYLOAD_LEN) and the CRC-32
- *     over bytes [k, k+40) against the trailing u32 LE at [k+40, k+44) are validated.
- *       - Both pass: decodes cmd/param/token (LE) and returns k + RS_CMD_FRAME_SIZE (the
+ *     (version == RS_PROTO_VERSION, frame_type == RS_FRAME_COMMAND, payload_len ==
+ *     RS_CMD_PAYLOAD_LEN -- version rejection mirrors the host decoder's symmetric
+ *     behavior) and the CRC-32 over bytes [k, k+40) against the trailing u32 LE at
+ *     [k+40, k+44) are validated.
+ *       - All pass: decodes cmd/param/token (LE) and returns k + RS_CMD_FRAME_SIZE (the
  *         garbage prefix, if any, plus the consumed frame) -- a positive return.
- *       - Either fails: the candidate was a false positive (e.g. "RSCN" bytes inside a
- *         payload). Returns -(int32_t)(k + 1): drop the prefix plus one byte of the
- *         candidate, so the next call rescans starting one byte later (in case the real
- *         magic starts there).
+ *       - Any fails: the candidate was a false positive (e.g. "RSCN" bytes inside a
+ *         payload) or an incompatible version. Returns -(int32_t)(k + 1): drop the
+ *         prefix plus one byte of the candidate, so the next call rescans starting one
+ *         byte later (in case the real magic starts there).
  *
  * Caller convention: a POSITIVE return is a decoded command -- consume that many bytes
  * from the front of the accumulation buffer, dispatch the command, no counting. A NEGATIVE

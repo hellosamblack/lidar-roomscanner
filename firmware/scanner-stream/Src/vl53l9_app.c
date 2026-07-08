@@ -86,7 +86,9 @@ static bool rs_cdc_send(const uint8_t *p, uint32_t n) {
 /* Shared low-level sender: builds header + CRC and pushes header/payload/tail over CDC.
  * frame_type-agnostic so DATA (via rs_send_frame_cdc) and ACK (via rs_send_ack) share one
  * wire-framing implementation -- the only thing that differs between them is what goes in
- * the payload and whether the DROPPED-flag bookkeeping below applies. */
+ * the payload and whether the DROPPED-flag bookkeeping below applies. Stays OUTSIDE the
+ * !CONF_TRANSFORM_ONBOARD guard (unlike rs_send_ack) because rs_send_frame_cdc, used by
+ * both loop variants, is built on it. */
 static bool rs_send_generic_cdc(uint8_t frame_type, uint8_t stream_id, uint32_t seq, uint8_t flags,
                                 const uint8_t *payload, uint32_t len, uint16_t w, uint16_t h) {
     if (!tud_cdc_connected()) {
@@ -113,18 +115,6 @@ static void rs_send_frame_cdc(uint8_t stream_id, uint32_t seq, uint8_t flags, co
 
     bool ok = rs_send_generic_cdc(RS_FRAME_DATA, stream_id, seq, flags, payload, len, w, h);
     pending_dropped = ok ? 0u : 1u;
-}
-
-/* ACK sender: builds the 12-byte (cmd, result, applied) payload and sends an RS_FRAME_ACK
- * with header seq = the echoed command token (per docs/protocol.md, NOT a frame counter).
- * Best-effort like every other CDC send on this link -- no retry/queue if the host is gone
- * or stalls, and RS_FLAG_DROPPED does not apply to control frames (always flags=0). */
-static void rs_send_ack(uint32_t token, uint32_t cmd, uint32_t result, uint32_t applied) {
-    uint8_t payload[12];
-    rs_put_u32(payload + 0, cmd);
-    rs_put_u32(payload + 4, result);
-    rs_put_u32(payload + 8, applied);
-    (void)rs_send_generic_cdc(RS_FRAME_ACK, 0u, token, 0u, payload, sizeof(payload), 0u, 0u);
 }
 
 /* Wait for a platform event in short slices, pumping TinyUSB between slices so
@@ -181,19 +171,51 @@ static void rs_trigger_next(vl53l9_device_t *p_dev) {
  * Raw-only path only (not the on-MCU-transform golden loop above): the poll point is
  * called once per acquisition-loop iteration, after that iteration's RAW send, never
  * from inside rs_wait_event_usb (that primitive stays single-purpose: pump tud_task
- * while waiting on a platform event, nothing else). Polling never blocks acquisition --
- * tud_cdc_available()/tud_cdc_read() are non-blocking, and command handling itself only
- * ever does bounded, best-effort CDC sends (rs_send_ack / the CALIB send below), same as
- * every other frame this firmware emits.
+ * while waiting on a platform event, nothing else).
+ *
+ * Backpressure honesty: the RX side never blocks (tud_cdc_available()/tud_cdc_read()
+ * are non-blocking), but the TX responses ride the same best-effort rs_cdc_send policy
+ * as every DATA frame -- each of its calls can stall up to 100 ms waiting on a
+ * non-draining host before aborting. Worst case per dispatched command: an ACK is
+ * 3 rs_cdc_send calls (header/payload/tail, up to ~300 ms); SEND_CALIB adds a CALIB
+ * frame first (up to ~600 ms total). With the dispatch cap below (2 per poll), one
+ * poll's command handling is bounded at roughly ~1.2 s of stall against a wedged host
+ * -- a bounded acquisition hiccup, never a deadlock, and identical in kind to what a
+ * wedged host already costs the RAW send path. A healthy host drains fast enough that
+ * none of these limits are approached (measured: no fps change at ~28 fps).
  *
  * RX accumulation: a small flat buffer (commands are 44 B; a handful fit comfortably)
  * with memmove-compaction after each parse step -- simpler than a true ring buffer at
  * this size and call rate (one poll per ~36 ms frame period), and rs_parse_command's
  * contract (see rs_protocol.h) already does the "how much of the front can I discard"
- * reasoning, so the buffer code here only needs to shuffle bytes, not interpret them. */
+ * reasoning, so the buffer code here only needs to shuffle bytes, not interpret them.
+ * Draining and parsing are interleaved (parse after every read chunk) so a burst of
+ * back-to-back commands larger than the buffer -- e.g. 3+ x 44 B in one host write,
+ * TinyUSB's 256 B RX FIFO holds them fine -- is consumed command-by-command instead of
+ * overflowing and losing a valid frame already at the buffer front. */
 #define RS_CMD_RX_BUFSIZE (128u)
 
+/* Bounds one poll's worth of command handling (and thus its worst-case TX stall, see
+ * block comment above). Anything beyond the cap stays buffered -- in rx_buf and, past
+ * that, TinyUSB's RX FIFO -- and is handled on subsequent polls (~36 ms apart). */
+#define RS_CMD_MAX_DISPATCH_PER_POLL (2u)
+
 static uint32_t rs_malformed_cmd_count = 0;
+
+/* ACK sender: builds the 12-byte (cmd, result, applied) payload and sends an RS_FRAME_ACK
+ * with header seq = the echoed command token (per docs/protocol.md, NOT a frame counter).
+ * Best-effort like every other CDC send on this link -- no retry/queue if the host is gone
+ * or stalls (bounded at ~300 ms by rs_cdc_send's per-call timeout, see the channel block
+ * comment above), and RS_FLAG_DROPPED does not apply to control frames (always flags=0).
+ * Lives inside the !CONF_TRANSFORM_ONBOARD guard because only the raw-only loop has a
+ * command channel; the dual-stream golden loop would leave it unused. */
+static void rs_send_ack(uint32_t token, uint32_t cmd, uint32_t result, uint32_t applied) {
+    uint8_t payload[12];
+    rs_put_u32(payload + 0, cmd);
+    rs_put_u32(payload + 4, result);
+    rs_put_u32(payload + 8, applied);
+    (void)rs_send_generic_cdc(RS_FRAME_ACK, 0u, token, 0u, payload, sizeof(payload), 0u, 0u);
+}
 
 static void rs_handle_command(uint32_t cmd, uint32_t token, const uint8_t *calib_data,
                               uint16_t out_width, uint16_t out_height, uint32_t seq_for_calib) {
@@ -234,45 +256,73 @@ static void rs_poll_commands(const uint8_t *calib_data, uint16_t out_width, uint
     static uint8_t rx_buf[RS_CMD_RX_BUFSIZE];
     static uint32_t rx_len = 0;
 
-    /* Drain whatever TinyUSB is holding into the accumulation buffer. */
-    while (tud_cdc_available()) {
-        uint32_t avail = tud_cdc_available();
-        uint32_t space = RS_CMD_RX_BUFSIZE - rx_len;
-        if (space == 0) {
-            /* A full buffer with no valid command found in it: the host is either
-             * out of sync or sending garbage. Resync by dropping everything -- never
-             * grow the buffer or block acquisition on the host. */
-            rx_len = 0;
-            rs_malformed_cmd_count++;
-            space = RS_CMD_RX_BUFSIZE;
-        }
-        uint32_t want = MIN(avail, space);
-        uint32_t got = tud_cdc_read(rx_buf + rx_len, want);
-        if (got == 0) {
-            break;
-        }
-        rx_len += got;
-    }
+    uint32_t dispatched = 0;
 
-    /* Parse everything currently available; rs_parse_command tells us exactly how many
-     * bytes to drop from the front each step (see rs_protocol.h for the full contract). */
+    /* Parse-while-draining: after every chunk read from TinyUSB, the parse loop runs
+     * to consume completed commands out of the buffer front BEFORE reading more, so a
+     * burst larger than the buffer flows through it command-by-command instead of
+     * overflowing (the Task 2 review's critical fix -- the old drain-everything-first
+     * version wiped a valid buffered command when a 3+-command burst arrived). Outer
+     * loop terminates when an iteration makes no progress (nothing read AND nothing
+     * consumed) or the dispatch cap is reached. */
     for (;;) {
-        uint32_t cmd, param, token;
-        int32_t r = rs_parse_command(rx_buf, rx_len, &cmd, &param, &token);
-        if (r == 0) {
-            break; /* candidate pending: wait for more RX bytes */
+        bool progressed = false;
+
+        uint32_t space = RS_CMD_RX_BUFSIZE - rx_len;
+        if (space > 0) {
+            uint32_t got = tud_cdc_read(rx_buf + rx_len, space); /* 0 if FIFO empty */
+            if (got > 0) {
+                rx_len += got;
+                progressed = true;
+            }
         }
-        uint32_t consume = (uint32_t)((r > 0) ? r : -r);
-        if (consume > rx_len) {
-            consume = rx_len; /* defensive; rs_parse_command never over-reports */
+
+        /* Consume everything parseable right now; rs_parse_command reports exactly how
+         * many front bytes to drop each step (full contract in rs_protocol.h). */
+        while (rx_len > 0 && dispatched < RS_CMD_MAX_DISPATCH_PER_POLL) {
+            uint32_t cmd, param, token;
+            int32_t r = rs_parse_command(rx_buf, rx_len, &cmd, &param, &token);
+            if (r == 0) {
+                break; /* candidate pending: wait for more RX bytes */
+            }
+            uint32_t consume = (uint32_t)((r > 0) ? r : -r);
+            if (consume > rx_len) {
+                consume = rx_len; /* defensive; rs_parse_command never over-reports */
+            }
+            if (consume > 0) {
+                memmove(rx_buf, rx_buf + consume, rx_len - consume);
+                rx_len -= consume;
+                progressed = true;
+            }
+            if (r > 0) {
+                (void)param; /* no Task-2 command consumes param yet (Task 4 will) */
+                rs_handle_command(cmd, token, calib_data, out_width, out_height, seq_for_calib);
+                dispatched++;
+            } else {
+                rs_malformed_cmd_count++;
+                if (consume == 0) {
+                    break; /* defensive: no forward motion, avoid spinning */
+                }
+            }
         }
-        memmove(rx_buf, rx_buf + consume, rx_len - consume);
-        rx_len -= consume;
-        if (r > 0) {
-            (void)param; /* no Task-2 command consumes param yet (Task 4 will) */
-            rs_handle_command(cmd, token, calib_data, out_width, out_height, seq_for_calib);
-        } else {
-            rs_malformed_cmd_count++;
+
+        if (dispatched >= RS_CMD_MAX_DISPATCH_PER_POLL) {
+            return; /* cap reached: the rest stays buffered for the next poll */
+        }
+        if (!progressed) {
+            if (rx_len == RS_CMD_RX_BUFSIZE) {
+                /* Full buffer the parser cannot advance. Theoretically unreachable: a
+                 * full 128 B buffer always yields parser progress (any complete-frame,
+                 * false-magic, or no-magic outcome consumes bytes; the only 0-consume
+                 * outcome needs len < RS_CMD_FRAME_SIZE at a front magic). Kept as a
+                 * defensive escape: drop ONE byte past the front (preserving any later
+                 * magic candidate, unlike a whole-buffer wipe) and count it. */
+                memmove(rx_buf, rx_buf + 1, rx_len - 1u);
+                rx_len -= 1u;
+                rs_malformed_cmd_count++;
+                continue;
+            }
+            return; /* FIFO drained, nothing parseable left pending */
         }
     }
 }
@@ -778,9 +828,11 @@ void vl53l9_app() {
 
         /* Command-channel poll point: once per iteration, after this iteration's RAW
          * send (never inside rs_wait_event_usb -- see the channel's block comment
-         * above). Non-blocking; PING and SEND_CALIB are handled here, the reconfig
-         * commands (SET_USECASE, SET_FRAME_PERIOD_US, SET_EXPOSURE_MS, REINIT) ack
-         * BUSY as placeholders (Task 4 implements them). */
+         * above). RX never blocks; response TX is best-effort with bounded worst-case
+         * stalls against a wedged host (capped at RS_CMD_MAX_DISPATCH_PER_POLL
+         * dispatches, ~1.2 s ceiling -- see the block comment). PING and SEND_CALIB
+         * are handled here, the reconfig commands (SET_USECASE, SET_FRAME_PERIOD_US,
+         * SET_EXPOSURE_MS, REINIT) ack BUSY as placeholders (Task 4 implements them). */
         rs_poll_commands(calib_data, out_width, out_height, rs_counter);
 
         /* measure frame rate */
