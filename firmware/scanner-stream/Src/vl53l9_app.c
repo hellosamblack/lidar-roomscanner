@@ -31,6 +31,10 @@
 #define CONF_PRINT_FRAME   (0) /**< ASCII art disabled in streaming builds */
 #define CONF_STREAM_BINARY (1) /**< emit rs_protocol frames over native USB CDC (see rs_send_frame_cdc) */
 #define CONF_STREAM_RAW (1) /**< also stream RAW_3DMD + periodic CALIB (dual-stream validation / PC-transform mode) */
+#define CONF_TRANSFORM_ONBOARD (0) /**< 1 = run vl53l9_transform on-MCU and stream DEPTH (Phase 1 behavior, also the
+                                     * golden-pair regeneration path with CONF_STREAM_RAW=1); 0 = raw-only, transform
+                                     * runs on the PC (Phase 2 -- equivalence gate passed, on-MCU transform removed
+                                     * from the hot path) */
 #define CONF_USECASE     (VL53L9_USECASE_AR_PRECISION) /**< select ranging profile to be applied (see vl53l9_utils.h) */
 
 #include "rs_protocol.h"
@@ -119,23 +123,37 @@ static memory_t allocate_memory(uint16_t size);
 void vl53l9_app() {
 
     int ret;
+#if CONF_TRANSFORM_ONBOARD
     transform_t *p_transform = vl53l9_transform_create();
+#endif
     vl53l9_device_t *p_dev = &device[CONF_DEVICE_ID];
     vl53l9_profile_t *p_profile = &g_ranging_profiles[CONF_USECASE];
 
-    uint16_t raw_buffer_size = 0, frame_buffer_size = 0; /* bytes */
-    uint32_t in_width = 0, in_height = 0;                /* pixels */
-    uint8_t out_width = 0, out_height = 0;               /* pixels */
+    /* NOTE: g_ranging_profiles[] (vl53l9_utils.c, read-only reference) already sets
+     * frame_period_us = FPS_TO_FRAME_PERIOD(30) for every usecase, AR_PRECISION included --
+     * the sensor has been on a 30 fps profile all along. No override needed here. */
+    uint16_t raw_buffer_size = 0; /* bytes */
+    uint8_t out_width = 0, out_height = 0; /* pixels */
+#if CONF_TRANSFORM_ONBOARD
+    uint32_t in_width = 0, in_height = 0; /* pixels */
+    uint16_t frame_buffer_size = 0;       /* bytes */
+#endif
     vl53l9_get_raw_buffer_size(p_profile->binning, &raw_buffer_size);
     vl53l9_utils_get_resolution(p_profile->binning, &out_width, &out_height);
+#if CONF_TRANSFORM_ONBOARD
     frame_buffer_size = out_width * out_height * sizeof(float);
+#endif
 
     if (p_profile->binning == 2) {
+#if CONF_TRANSFORM_ONBOARD
         in_width = 14842;
         in_height = 1;
+#endif
     } else if (p_profile->binning == 4) {
+#if CONF_TRANSFORM_ONBOARD
         in_width = 3844;
         in_height = 1;
+#endif
     } else {
         handle_error(); /* unsupported binning */
     }
@@ -160,6 +178,7 @@ void vl53l9_app() {
 
     vl53l9_utils_set_profile(p_dev, p_profile);
 
+#if CONF_TRANSFORM_ONBOARD
     /* initialize processing pipeline */
     ret = transform_initialize(p_transform);
     if (ret) {
@@ -237,10 +256,12 @@ void vl53l9_app() {
     if (ret) {
         handle_error();
     }
+#endif /* CONF_TRANSFORM_ONBOARD */
 
     /* allocate memory and initialize buffers (raw data is double buffered) */
     uint8_t raw_mem_index = 0;
     memory_t in_raw_mem[2] = { allocate_memory(raw_buffer_size), allocate_memory(raw_buffer_size) };
+#if CONF_TRANSFORM_ONBOARD
     memory_t out_depth_mem = allocate_memory(frame_buffer_size);
 
     memories_t in_raw_mems = { .items = &in_raw_mem, .size = 1, .capacity = 1, .item_size = sizeof(memory_t) };
@@ -258,6 +279,7 @@ void vl53l9_app() {
                                         .size = 2,
                                         .capacity = 2,
                                         .item_size = sizeof(stream_buffer_t) };
+#endif /* CONF_TRANSFORM_ONBOARD */
 
     ret = vl53l9_set_sync_mode(p_dev, VL53L9_SYNC_MANUAL);
     if (ret) {
@@ -287,7 +309,10 @@ void vl53l9_app() {
 #if CONF_STREAM_RAW
     /* Golden-pair captures need frame 1: TNR state is per-pixel and cumulative, so the
      * host must witness the stream from the first processed frame. Hold acquisition
-     * until a host opens the CDC port (DTR). */
+     * until a host opens the CDC port (DTR). This gate is also what makes raw-only mode
+     * (CONF_TRANSFORM_ONBOARD=0) golden-capture-compatible, so it stays on by default here
+     * too; a headless/production build (no PC waiting on the far end) may want to revisit
+     * blocking acquisition start on a host connection. */
     while (!tud_cdc_connected()) {
         tud_task();
     }
@@ -359,25 +384,29 @@ void vl53l9_app() {
         if (is_first_frame) {
             is_first_frame = false;
         } else {
+#if CONF_TRANSFORM_ONBOARD
             /* TODO: find a better way to handle this, maybe leveraging mems list */
             in_raw_mems.items = &in_raw_mem[(raw_mem_index + 1) % 2];
             ret = transform_process_stream(p_transform, &stream_buffers);
             if (ret) {
                 handle_error();
             }
+#endif
 #if CONF_STREAM_BINARY
             if (rs_have_prev) {
 #if CONF_STREAM_RAW
-                /* Ordering constraint: this block runs after transform_process_stream (so
-                 * depth for rs_prev_counter is valid) and before raw_mem_index toggles at the
-                 * bottom of the loop. The raw buffer being read here is
-                 * in_raw_mem[(raw_mem_index + 1) % 2] -- the same buffer transform_process_stream
-                 * just consumed above via in_raw_mems.items, holding rs_prev_counter's raw frame.
-                 * The sensor DMA in progress this iteration targets in_raw_mem[raw_mem_index]
-                 * (the *other* buffer, kicked off earlier this iteration by
-                 * vl53l9_get_frame_async), and that complement buffer is not written again until
-                 * raw_mem_index cycles back to this same index two iterations from now -- well
-                 * after this synchronous send completes. So reading it here is race-free. */
+                /* Ordering constraint: this block runs (after transform_process_stream, when the
+                 * transform is on-MCU, so depth for rs_prev_counter is valid) and before
+                 * raw_mem_index toggles at the bottom of the loop. The raw buffer being read here
+                 * is in_raw_mem[(raw_mem_index + 1) % 2] -- when the transform runs, the same
+                 * buffer transform_process_stream just consumed above via in_raw_mems.items,
+                 * holding rs_prev_counter's raw frame; when raw-only, it is simply the buffer the
+                 * previous loop iteration's DMA filled, which parse_frame below still hasn't
+                 * touched this iteration. The sensor DMA in progress this iteration targets
+                 * in_raw_mem[raw_mem_index] (the *other* buffer, kicked off earlier this iteration
+                 * by vl53l9_get_frame_async), and that complement buffer is not written again
+                 * until raw_mem_index cycles back to this same index two iterations from now --
+                 * well after this synchronous send completes. So reading it here is race-free. */
                 {
                     static uint32_t rs_calib_countdown = 0;
                     if (rs_calib_countdown == 0) {
@@ -387,14 +416,17 @@ void vl53l9_app() {
                     }
                     rs_calib_countdown--;
                     /* raw buffer of the frame being processed = the PREVIOUS index (the pipeline
-                     * input); send it with the same seq as the depth it produces */
+                     * input, or -- raw-only -- simply the previously captured frame); send it with
+                     * the same seq as the depth it produces (or would have, on-MCU) */
                     rs_send_frame_cdc(RS_STREAM_RAW_3DMD, rs_prev_counter, 0u,
                                       (const uint8_t *)in_raw_mem[(raw_mem_index + 1) % 2].data,
                                       raw_buffer_size, out_width, out_height);
                 }
 #endif
+#if CONF_TRANSFORM_ONBOARD
                 rs_send_frame_cdc(RS_STREAM_DEPTH_ZF32, rs_prev_counter, 0u, (const uint8_t *)out_depth_mem.data,
                                   frame_buffer_size, out_width, out_height);
+#endif
             }
 #endif
         }
