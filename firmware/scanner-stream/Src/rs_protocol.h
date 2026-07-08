@@ -50,6 +50,10 @@
 #define RS_RESULT_SENSOR_ERROR     (4u)
 #define RS_RESULT_BUSY             (5u)
 
+/* Wire size of one inbound COMMAND frame: RS_HEADER_SIZE (32) + cmd/param (8) + CRC32 (4). */
+#define RS_CMD_PAYLOAD_LEN (8u)
+#define RS_CMD_FRAME_SIZE  (RS_HEADER_SIZE + RS_CMD_PAYLOAD_LEN + 4u)
+
 void rs_put_u32(uint8_t *p, uint32_t v);
 
 /* IEEE 802.3 / zlib CRC-32. Chain calls by passing the previous return as crc (start 0). */
@@ -58,5 +62,43 @@ uint32_t rs_crc32(uint32_t crc, const uint8_t *data, size_t len);
 void rs_write_header(uint8_t out[RS_HEADER_SIZE], uint8_t frame_type, uint8_t stream_id,
                      uint8_t flags, uint32_t seq, uint64_t t_us, uint16_t width,
                      uint16_t height, uint32_t payload_len);
+
+/* rs_parse_command: pull one COMMAND frame out of the front of an accumulation buffer.
+ * Pure buffer parsing, no I/O -- the caller owns RX (tud_cdc_read or anything else) and
+ * buffer accumulation/compaction; this function only decides how many bytes at buf[0..len)
+ * can be discarded and whether a valid command was found among them.
+ *
+ * Scans for the 4-byte "RSCN" magic starting at buf[0]. Three outcomes:
+ *
+ *   - No magic candidate anywhere in buf: returns -(int32_t)len, i.e. "drop everything"
+ *     (up to the last 3 bytes, which are kept in case they are the start of a magic that
+ *     completes with the next RX chunk -- so the true drop count can be len-3 in that case).
+ *     cmd, param, and token are left untouched.
+ *
+ *   - A magic candidate is found at offset k, but fewer than RS_CMD_FRAME_SIZE (44) bytes
+ *     remain from k to the end of buf: returns -(int32_t)k. If k == 0 this is 0, meaning
+ *     "consume nothing, just wait for more RX bytes before calling again" -- the candidate
+ *     is still pending, not yet known good or bad. If k > 0, the garbage strictly before
+ *     the candidate is dropped while the candidate itself is kept for next call.
+ *
+ *   - A magic candidate at offset k with >= RS_CMD_FRAME_SIZE bytes available: the header
+ *     (frame_type == RS_FRAME_COMMAND, payload_len == RS_CMD_PAYLOAD_LEN) and the CRC-32
+ *     over bytes [k, k+40) against the trailing u32 LE at [k+40, k+44) are validated.
+ *       - Both pass: decodes cmd/param/token (LE) and returns k + RS_CMD_FRAME_SIZE (the
+ *         garbage prefix, if any, plus the consumed frame) -- a positive return.
+ *       - Either fails: the candidate was a false positive (e.g. "RSCN" bytes inside a
+ *         payload). Returns -(int32_t)(k + 1): drop the prefix plus one byte of the
+ *         candidate, so the next call rescans starting one byte later (in case the real
+ *         magic starts there).
+ *
+ * Caller convention: a POSITIVE return is a decoded command -- consume that many bytes
+ * from the front of the accumulation buffer, dispatch the command, no counting. A NEGATIVE
+ * return means bytes should still be dropped (consume -return bytes) but nothing was
+ * decoded -- the caller should treat this as one resync/malformed event for its counters
+ * (regardless of how many bytes were dropped). A ZERO return means: do not drop anything,
+ * a candidate may still complete once more RX bytes arrive -- do not count this as
+ * malformed. */
+int32_t rs_parse_command(const uint8_t *buf, size_t len, uint32_t *cmd, uint32_t *param,
+                         uint32_t *token);
 
 #endif /* RS_PROTOCOL_H */

@@ -19,6 +19,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "vl53l9.h"
 #include "vl53l9_device.h"
@@ -82,6 +83,24 @@ static bool rs_cdc_send(const uint8_t *p, uint32_t n) {
     return true;
 }
 
+/* Shared low-level sender: builds header + CRC and pushes header/payload/tail over CDC.
+ * frame_type-agnostic so DATA (via rs_send_frame_cdc) and ACK (via rs_send_ack) share one
+ * wire-framing implementation -- the only thing that differs between them is what goes in
+ * the payload and whether the DROPPED-flag bookkeeping below applies. */
+static bool rs_send_generic_cdc(uint8_t frame_type, uint8_t stream_id, uint32_t seq, uint8_t flags,
+                                const uint8_t *payload, uint32_t len, uint16_t w, uint16_t h) {
+    if (!tud_cdc_connected()) {
+        return false;
+    }
+    uint8_t hdr[RS_HEADER_SIZE];
+    uint8_t tail[4];
+    rs_write_header(hdr, frame_type, stream_id, flags, seq, rs_time_us(), w, h, len);
+    uint32_t crc = rs_crc32(0u, hdr, RS_HEADER_SIZE);
+    crc = rs_crc32(crc, payload, len);
+    rs_put_u32(tail, crc);
+    return rs_cdc_send(hdr, RS_HEADER_SIZE) && rs_cdc_send(payload, len) && rs_cdc_send(tail, 4);
+}
+
 static void rs_send_frame_cdc(uint8_t stream_id, uint32_t seq, uint8_t flags, const uint8_t *payload,
                               uint32_t len, uint16_t w, uint16_t h) {
     static uint8_t pending_dropped = 0;
@@ -92,15 +111,20 @@ static void rs_send_frame_cdc(uint8_t stream_id, uint32_t seq, uint8_t flags, co
     }
     flags |= pending_dropped ? RS_FLAG_DROPPED : 0u;
 
-    uint8_t hdr[RS_HEADER_SIZE];
-    uint8_t tail[4];
-    rs_write_header(hdr, RS_FRAME_DATA, stream_id, flags, seq, rs_time_us(), w, h, len);
-    uint32_t crc = rs_crc32(0u, hdr, RS_HEADER_SIZE);
-    crc = rs_crc32(crc, payload, len);
-    rs_put_u32(tail, crc);
-
-    bool ok = rs_cdc_send(hdr, RS_HEADER_SIZE) && rs_cdc_send(payload, len) && rs_cdc_send(tail, 4);
+    bool ok = rs_send_generic_cdc(RS_FRAME_DATA, stream_id, seq, flags, payload, len, w, h);
     pending_dropped = ok ? 0u : 1u;
+}
+
+/* ACK sender: builds the 12-byte (cmd, result, applied) payload and sends an RS_FRAME_ACK
+ * with header seq = the echoed command token (per docs/protocol.md, NOT a frame counter).
+ * Best-effort like every other CDC send on this link -- no retry/queue if the host is gone
+ * or stalls, and RS_FLAG_DROPPED does not apply to control frames (always flags=0). */
+static void rs_send_ack(uint32_t token, uint32_t cmd, uint32_t result, uint32_t applied) {
+    uint8_t payload[12];
+    rs_put_u32(payload + 0, cmd);
+    rs_put_u32(payload + 4, result);
+    rs_put_u32(payload + 8, applied);
+    (void)rs_send_generic_cdc(RS_FRAME_ACK, 0u, token, 0u, payload, sizeof(payload), 0u, 0u);
 }
 
 /* Wait for a platform event in short slices, pumping TinyUSB between slices so
@@ -149,6 +173,107 @@ static void rs_trigger_next(vl53l9_device_t *p_dev) {
     ret = vl53l9_trigger_frame(p_dev);
     if (ret) {
         handle_error();
+    }
+}
+
+/* ---- Host->device command channel (Phase 3 Task 2) --------------------------------
+ *
+ * Raw-only path only (not the on-MCU-transform golden loop above): the poll point is
+ * called once per acquisition-loop iteration, after that iteration's RAW send, never
+ * from inside rs_wait_event_usb (that primitive stays single-purpose: pump tud_task
+ * while waiting on a platform event, nothing else). Polling never blocks acquisition --
+ * tud_cdc_available()/tud_cdc_read() are non-blocking, and command handling itself only
+ * ever does bounded, best-effort CDC sends (rs_send_ack / the CALIB send below), same as
+ * every other frame this firmware emits.
+ *
+ * RX accumulation: a small flat buffer (commands are 44 B; a handful fit comfortably)
+ * with memmove-compaction after each parse step -- simpler than a true ring buffer at
+ * this size and call rate (one poll per ~36 ms frame period), and rs_parse_command's
+ * contract (see rs_protocol.h) already does the "how much of the front can I discard"
+ * reasoning, so the buffer code here only needs to shuffle bytes, not interpret them. */
+#define RS_CMD_RX_BUFSIZE (128u)
+
+static uint32_t rs_malformed_cmd_count = 0;
+
+static void rs_handle_command(uint32_t cmd, uint32_t token, const uint8_t *calib_data,
+                              uint16_t out_width, uint16_t out_height, uint32_t seq_for_calib) {
+    switch (cmd) {
+    case RS_CMD_PING:
+        rs_send_ack(token, cmd, RS_RESULT_OK, RS_PROTO_VERSION);
+        break;
+    case RS_CMD_SEND_CALIB:
+        /* Send a CALIB frame immediately, independent of the periodic 64-frame cadence
+         * below (that countdown is left untouched -- it is local `static` state scoped
+         * to the send block and simply keeps counting down; this handler doesn't reset
+         * it). Rationale: decoupling avoids adding shared mutable state between the
+         * command channel and the per-frame send path for a command that is rare and
+         * whose only requirement (docs/protocol.md #98) is "device transmits a CALIB
+         * frame immediately" -- resetting the countdown as well would be a harmless
+         * alternative but buys nothing here and would require lifting that static out
+         * of its current block scope. */
+        rs_send_frame_cdc(RS_STREAM_CALIB, seq_for_calib, 0u, calib_data, VL53L9_CALIB_DATA_SIZE,
+                          out_width, out_height);
+        rs_send_ack(token, cmd, RS_RESULT_OK, 0u);
+        break;
+    case RS_CMD_SET_USECASE:
+    case RS_CMD_SET_FRAME_PERIOD_US:
+    case RS_CMD_SET_EXPOSURE_MS:
+    case RS_CMD_REINIT:
+        /* Registered (rs_protocol.h) but not implemented until Task 4: explicit
+         * not-yet-implemented placeholder rather than silently matching the default. */
+        rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u);
+        break;
+    default:
+        rs_send_ack(token, cmd, RS_RESULT_UNKNOWN_CMD, 0u);
+        break;
+    }
+}
+
+static void rs_poll_commands(const uint8_t *calib_data, uint16_t out_width, uint16_t out_height,
+                             uint32_t seq_for_calib) {
+    static uint8_t rx_buf[RS_CMD_RX_BUFSIZE];
+    static uint32_t rx_len = 0;
+
+    /* Drain whatever TinyUSB is holding into the accumulation buffer. */
+    while (tud_cdc_available()) {
+        uint32_t avail = tud_cdc_available();
+        uint32_t space = RS_CMD_RX_BUFSIZE - rx_len;
+        if (space == 0) {
+            /* A full buffer with no valid command found in it: the host is either
+             * out of sync or sending garbage. Resync by dropping everything -- never
+             * grow the buffer or block acquisition on the host. */
+            rx_len = 0;
+            rs_malformed_cmd_count++;
+            space = RS_CMD_RX_BUFSIZE;
+        }
+        uint32_t want = MIN(avail, space);
+        uint32_t got = tud_cdc_read(rx_buf + rx_len, want);
+        if (got == 0) {
+            break;
+        }
+        rx_len += got;
+    }
+
+    /* Parse everything currently available; rs_parse_command tells us exactly how many
+     * bytes to drop from the front each step (see rs_protocol.h for the full contract). */
+    for (;;) {
+        uint32_t cmd, param, token;
+        int32_t r = rs_parse_command(rx_buf, rx_len, &cmd, &param, &token);
+        if (r == 0) {
+            break; /* candidate pending: wait for more RX bytes */
+        }
+        uint32_t consume = (uint32_t)((r > 0) ? r : -r);
+        if (consume > rx_len) {
+            consume = rx_len; /* defensive; rs_parse_command never over-reports */
+        }
+        memmove(rx_buf, rx_buf + consume, rx_len - consume);
+        rx_len -= consume;
+        if (r > 0) {
+            (void)param; /* no Task-2 command consumes param yet (Task 4 will) */
+            rs_handle_command(cmd, token, calib_data, out_width, out_height, seq_for_calib);
+        } else {
+            rs_malformed_cmd_count++;
+        }
     }
 }
 #endif /* !CONF_TRANSFORM_ONBOARD */
@@ -650,6 +775,13 @@ void vl53l9_app() {
                               (const uint8_t *)in_raw_mem[raw_mem_index].data,
                               raw_buffer_size, out_width, out_height);
         }
+
+        /* Command-channel poll point: once per iteration, after this iteration's RAW
+         * send (never inside rs_wait_event_usb -- see the channel's block comment
+         * above). Non-blocking; PING and SEND_CALIB are handled here, the reconfig
+         * commands (SET_USECASE, SET_FRAME_PERIOD_US, SET_EXPOSURE_MS, REINIT) ack
+         * BUSY as placeholders (Task 4 implements them). */
+        rs_poll_commands(calib_data, out_width, out_height, rs_counter);
 
         /* measure frame rate */
         stop_time = platform_profiler_get_timestamp();
