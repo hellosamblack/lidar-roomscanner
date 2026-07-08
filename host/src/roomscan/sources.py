@@ -18,6 +18,9 @@ class FileSource:
     def read(self) -> bytes:
         return self._f.read(self._chunk)
 
+    def write(self, data: bytes) -> None:
+        raise NotImplementedError("FileSource is replay-only; there is no device to write to")
+
     def close(self) -> None:
         self._f.close()
 
@@ -44,6 +47,21 @@ class SerialSource:
 
     def read(self) -> bytes:
         return self._ser.read(4096)
+
+    def write(self, data: bytes) -> None:
+        """Write bytes to the serial port (delegates to pyserial).
+
+        CAUTION: this blocks until the OS accepts the write and, for anything
+        beyond a small command frame, potentially until the device drains its
+        RX buffer per its pacing policy (see docs/protocol.md and
+        host/tests/bench_commands.py). NEVER call this from the thread that is
+        draining reads (the loop calling `.read()` / `pump()`): starving that
+        loop for >100 ms causes the device to abort an in-flight send by
+        design (proven on hardware in Phase 3 Task 2). Call it from a
+        different thread than the reader — see CommandClient, which is built
+        around exactly this split.
+        """
+        self._ser.write(data)
 
     def close(self) -> None:
         self._ser.close()
