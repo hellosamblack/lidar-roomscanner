@@ -112,6 +112,17 @@ int main(void)
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
+  /* Route the 48 MHz USB kernel clock (HSI48). This lived in the now-bypassed
+   * HAL_PCD_MspInit (stm32h5xx_hal_msp.c) — without it the USB PHY never
+   * signals and the device does not enumerate. */
+  RCC_PeriphCLKInitTypeDef UsbClkInit = {0};
+  UsbClkInit.PeriphClockSelection = RCC_PERIPHCLK_USB;
+  UsbClkInit.UsbClockSelection = RCC_USBCLKSOURCE_HSI48;
+  if (HAL_RCCEx_PeriphCLKConfig(&UsbClkInit) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
   HAL_PWREx_EnableVddUSB();
   __HAL_RCC_USB_CLK_ENABLE();
   HAL_NVIC_SetPriority(USB_DRD_FS_IRQn, 6, 0);
