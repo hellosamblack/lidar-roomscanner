@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "stm32h5xx_nucleo.h"
+#include "tusb.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -107,9 +108,15 @@ int main(void)
   MX_ICACHE_Init();
   MX_UCPD1_Init();
   MX_I3C1_Init();
-  MX_USB_PCD_Init();
+  /* MX_USB_PCD_Init(); */ /* USB owned by TinyUSB (see USER CODE 2) */
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
+
+  HAL_PWREx_EnableVddUSB();
+  __HAL_RCC_USB_CLK_ENABLE();
+  HAL_NVIC_SetPriority(USB_DRD_FS_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(USB_DRD_FS_IRQn);
+  tud_init(BOARD_TUD_RHPORT);
 
   /* USER CODE END 2 */
 

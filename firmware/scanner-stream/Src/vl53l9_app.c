@@ -34,6 +34,7 @@
 
 #include "rs_protocol.h"
 #include "stm32h5xx_nucleo.h"
+#include "tusb.h"
 
 extern UART_HandleTypeDef hcom_uart[];
 
@@ -234,6 +235,13 @@ void vl53l9_app() {
     bool rs_have_prev = false;
 
     while (1) {
+
+        /* TASK10 TEMP: CDC heartbeat, removed in Task 11 */
+        tud_task();
+        if (tud_cdc_connected()) {
+            tud_cdc_write_str("hb\r\n");
+            tud_cdc_write_flush();
+        }
 
         /* Trigger the next frame, wait for data-ready, and start the raw readout.
          *

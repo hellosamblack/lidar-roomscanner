@@ -76,11 +76,22 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Transform Middleware (main)
     ${PKG_ROOT}/Middlewares/ST/vl53l9-transform-c/vl53l9-transform-c-lib/src/vl53l9_calib_utils.c
     ${PKG_ROOT}/Middlewares/ST/vl53l9-transform-c/vl53l9-transform-c-lib/src/vl53l9_transform.c
+
+    Src/usb_descriptors.c
+
+    # TinyUSB (vendored, MIT)
+    ../vendor/tinyusb/src/tusb.c
+    ../vendor/tinyusb/src/common/tusb_fifo.c
+    ../vendor/tinyusb/src/device/usbd.c
+    ../vendor/tinyusb/src/class/cdc/cdc_device.c
+    ../vendor/tinyusb/src/portable/st/stm32_fsdev/dcd_stm32_fsdev.c
+    ../vendor/tinyusb/src/portable/st/stm32_fsdev/fsdev_common.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     Inc
+    Src
     ${PKG_ROOT}/Drivers/BSP/Components/vl53l9
     ${PKG_ROOT}/Utilities/vl53l9-common
     ${PKG_ROOT}/Utilities/vl53l9-common/vl53l9
@@ -90,11 +101,15 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${PKG_ROOT}/Middlewares/ST/media-object/transform-c/header-lib/include/public
     ${PKG_ROOT}/Middlewares/ST/vl53l9-transform-c/vl53l9-transform-c-lib/include/private
     ${PKG_ROOT}/Middlewares/ST/vl53l9-transform-c/vl53l9-transform-c-lib/include/public
+
+    # TinyUSB (vendored, MIT)
+    ../vendor/tinyusb/src
 )
 
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     USE_NUCLEO_144
+    CFG_TUSB_MCU=OPT_MCU_STM32H5
 )
 
 # Optimization options -Ofast for real-time performance on ToF data

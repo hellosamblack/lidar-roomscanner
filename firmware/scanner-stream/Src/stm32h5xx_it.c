@@ -22,6 +22,7 @@
 #include "stm32h5xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "tusb.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -286,5 +287,13 @@ void I3C1_ER_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+/**
+  * @brief This function handles USB DRD FS global interrupt (TinyUSB owns the peripheral).
+  */
+void USB_DRD_FS_IRQHandler(void)
+{
+  tud_int_handler(0);
+}
 
 /* USER CODE END 1 */
