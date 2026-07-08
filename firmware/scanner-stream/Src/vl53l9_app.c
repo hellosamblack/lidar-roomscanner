@@ -28,8 +28,33 @@
 
 /* application customization */
 #define CONF_DEVICE_ID   (0) /**< select device entry in platform descriptor array (see vl53l9_device.c) */
-#define CONF_PRINT_FRAME (1) /**< enable printing depth frames as ascii art (slows performance) */
+#define CONF_PRINT_FRAME   (0) /**< ASCII art disabled in streaming builds */
+#define CONF_STREAM_BINARY (1) /**< emit rs_protocol frames on the COM1 UART */
 #define CONF_USECASE     (VL53L9_USECASE_AR_PRECISION) /**< select ranging profile to be applied (see vl53l9_utils.h) */
+
+#include "rs_protocol.h"
+#include "stm32h5xx_nucleo.h"
+
+extern UART_HandleTypeDef hcom_uart[];
+
+static uint64_t rs_time_us(void) {
+    /* v1: HAL tick, 1 ms resolution widened to the u64 µs wire field.
+     * Upgrade to a TIM-based µs clock when IMU fusion needs it (Phase 5). */
+    return (uint64_t)HAL_GetTick() * 1000u;
+}
+
+static void rs_send_depth_uart(uint32_t seq, uint8_t flags, const uint8_t *payload,
+                               uint32_t len, uint16_t w, uint16_t h) {
+    uint8_t hdr[RS_HEADER_SIZE];
+    uint8_t tail[4];
+    rs_write_header(hdr, RS_FRAME_DATA, RS_STREAM_DEPTH_ZF32, flags, seq, rs_time_us(), w, h, len);
+    uint32_t crc = rs_crc32(0u, hdr, RS_HEADER_SIZE);
+    crc = rs_crc32(crc, payload, len);
+    rs_put_u32(tail, crc);
+    HAL_UART_Transmit(&hcom_uart[COM1], hdr, RS_HEADER_SIZE, 1000);
+    HAL_UART_Transmit(&hcom_uart[COM1], (uint8_t *)payload, (uint16_t)len, 1000);
+    HAL_UART_Transmit(&hcom_uart[COM1], tail, 4, 1000);
+}
 
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
@@ -198,24 +223,61 @@ void vl53l9_app() {
 
     bool is_first_frame = true;
 
+    uint32_t rs_prev_counter = 0;
+    bool rs_have_prev = false;
+
     while (1) {
 
-        vl53l9_trigger_frame(p_dev);
-        if (ret) {
-            handle_error();
-        }
+        /* Trigger the next frame, wait for data-ready, and start the raw readout.
+         *
+         * NOTE (deviation from the reference app): the reference one-shot
+         * handshake (trigger -> wait 1000 ms -> read) is racy on real hardware
+         * once nothing throttles the loop. Measured on this board:
+         *  - a trigger issued immediately after the previous readout-ack is
+         *    intermittently ignored by the sensor (GPIO event never fires);
+         *  - the INT falling edge can lead the FRAME_READY register, so an
+         *    immediate vl53l9_get_frame_async fails VL53L9_ERROR_INVALID_STATE.
+         * The ASCII print in the reference build (~300 ms/frame) masked both.
+         * Bounded retries cover them; repeated failure still dies in
+         * handle_error(). */
+        int rs_attempts = 0;
+        for (;;) {
+            HAL_Delay(5); /* sensor settle after previous readout-ack; a trigger
+                           * issued back-to-back with the ack is ignored */
+            ret = vl53l9_trigger_frame(p_dev);
+            if (ret) {
+                handle_error();
+            }
 
-        ret = platform_wait_for_event(PLATFORM_GPIO_IT_EVT, 1000);
-        if (ret) {
-            handle_error();
-        }
+            ret = platform_wait_for_event(PLATFORM_GPIO_IT_EVT, 1000);
+            platform_acknowledge_event(PLATFORM_GPIO_IT_EVT);
+            if (ret) {
+                /* no edge seen: either the trigger was lost or the edge was
+                 * missed -- poll FRAME_READY to disambiguate */
+                uint8_t rs_is_ready = 0;
+                (void)vl53l9_poll_frame(p_dev, &rs_is_ready);
+                if (!rs_is_ready) {
+                    if (++rs_attempts > 3) {
+                        handle_error();
+                    }
+                    continue; /* trigger lost: re-trigger */
+                }
+            }
 
-        platform_acknowledge_event(PLATFORM_GPIO_IT_EVT);
-
-        /* grab raw data from sensor and fill input buffer */
-        ret = vl53l9_get_frame_async(p_dev, in_raw_mem[raw_mem_index].data, in_raw_mem[raw_mem_index].size);
-        if (ret) {
-            handle_error();
+            /* grab raw data from sensor and fill input buffer */
+            ret = vl53l9_get_frame_async(p_dev, in_raw_mem[raw_mem_index].data, in_raw_mem[raw_mem_index].size);
+            if (ret == VL53L9_ERROR_INVALID_STATE) {
+                /* early edge: FRAME_READY not visible yet, give it a moment */
+                if (++rs_attempts > 8) {
+                    handle_error();
+                }
+                HAL_Delay(1);
+                ret = vl53l9_get_frame_async(p_dev, in_raw_mem[raw_mem_index].data, in_raw_mem[raw_mem_index].size);
+            }
+            if (ret) {
+                handle_error();
+            }
+            break;
         }
 
         /* process the previous frame while the sensor is acquiring the next one */
@@ -228,6 +290,12 @@ void vl53l9_app() {
             if (ret) {
                 handle_error();
             }
+#if CONF_STREAM_BINARY
+            if (rs_have_prev) {
+                rs_send_depth_uart(rs_prev_counter, 0u, (const uint8_t *)out_depth_mem.data,
+                                   frame_buffer_size, out_width, out_height);
+            }
+#endif
         }
 
         ret = platform_wait_for_event(PLATFORM_I3C_DMA_RX_EVT, 1000);
@@ -248,13 +316,18 @@ void vl53l9_app() {
             handle_error();
         }
 
+        rs_prev_counter = (uint32_t)frame.p_metadata->frame_counter;
+        rs_have_prev = true;
+
         /* measure frame rate */
         stop_time = platform_profiler_get_timestamp();
         frame_rate = (1.0f / (float)(platform_profiler_convert_to_us(stop_time - start_time))) * 1000000;
         start_time = stop_time;
+#if !CONF_STREAM_BINARY
         print_frame((float *)out_depth_mem.data, out_height, out_width);
         printf("Processed frame n. %lu @ %u fps\n", (unsigned long)frame.p_metadata->frame_counter,
                (unsigned int)frame_rate);
+#endif
 
         /* swap raw buffer index for next frame acquisition */
         raw_mem_index = (raw_mem_index + 1) % 2;

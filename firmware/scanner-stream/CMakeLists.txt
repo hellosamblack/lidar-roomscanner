@@ -48,6 +48,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Src/vl53l9_app.c
+    Src/rs_protocol.c
 
     # Utilities
     ${PKG_ROOT}/Utilities/vl53l9-common/platform/platform_utils.c
