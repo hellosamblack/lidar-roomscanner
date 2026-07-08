@@ -14,7 +14,14 @@ New work — the PC-side visualizer, the binary frame protocol, and any new firm
 F:\git\personal\lidar\
 ├─ roomscanner\            ← YOU ARE HERE (active dev)
 │  ├─ CLAUDE.md            ← this file
-│  ├─ ROADMAP.md           ← phased plan (source of truth for sequencing)
+│  ├─ ROADMAP.md           ← phased plan (source of truth for sequencing; per-phase risks + reference-firmware bug list)
+│  ├─ .claude\skills\      ← project skills: firmware-loop (build/flash/monitor), protocol-change (wire-change checklist)
+│  ├─ docs\
+│  │  ├─ engineering-practices.md            ← binding conventions (repo rules, protocol rules, firmware/host standards)
+│  │  ├─ protocol.md                         ← wire protocol spec (created by Phase 1 Task 1)
+│  │  └─ superpowers\plans\                  ← implementation plans (Phase 1 plan lives here)
+│  ├─ firmware\            ← our firmware forks (scanner-stream; created by Phase 1 Task 6)
+│  ├─ host\                ← PC Python package `roomscan` (created by Phase 1 Task 1)
 │  └─ references\
 │     ├─ roadmapResearch.md                  ← architecture design + critical review
 │     └─ 3D Mapping Architecture Evaluation.md
@@ -22,6 +29,11 @@ F:\git\personal\lidar\
    ├─ Drivers\  Middlewares\ST\  Utilities\vl53l9-common\
    └─ Projects\NUCLEO-H563ZI\Applications\53L9A1\53L9A1_PostprocessSingle\  ← the firmware app
 ```
+
+Follow `docs/engineering-practices.md` for all work here. Known bugs in the reference firmware (do not
+inherit them into forks) are catalogued in `ROADMAP.md` → "Reference-firmware bugs". Note the `53L9A1/`
+package ships **no USB middleware** (`Middlewares/ST/` = media-object + vl53l9-transform-c only) — USB CDC
+work vendors TinyUSB (see the Phase 1 plan).
 
 Throughout this doc, **`<APP>`** = `../53L9A1/Projects/NUCLEO-H563ZI/Applications/53L9A1/53L9A1_PostprocessSingle/` (the reference firmware app dir). File references like `Src/vl53l9_app.c` are relative to `<APP>`.
 
@@ -50,7 +62,7 @@ Presets in `<APP>/CMakePresets.json`. Post-build emits `53L9A1_PostprocessSingle
 
 **The acquisition loop.** Setup (each step gated by a return code → `handle_error()`): reset sensor → assign I3C dynamic address → `vl53l9_init` → read `calib_data` → apply profile; `transform_initialize` → **set capabilities** (input `raw`/`3DMD` stream, then output `depth`/`ZF32` — order matters, input before output, no defaults); set the mandatory `calib-buffer` control → `transform_prepare`. Steady state uses **double-buffered raw input + DMA**: while the sensor DMA-transfers frame N into one buffer, the pipeline processes frame N-1 from the other (`raw_mem_index` toggles; pipeline pointed at the *previous* buffer via `in_raw_mems.items`). Per iteration: `vl53l9_trigger_frame` → wait `PLATFORM_GPIO_IT_EVT` → `vl53l9_get_frame_async` (kick DMA) → process previous frame → wait `PLATFORM_I3C_DMA_RX_EVT` → ack → parse metadata → print. First iteration skips processing. Binning drives sizes: binning 2 → raw width 14842, binning 4 → 3844 (height 1); output resolution from `vl53l9_utils_get_resolution`. Other binning unsupported.
 
-**Gotchas.** Errors are non-zero `int` return codes funneled to `handle_error()`, which reads sensor status and **spins forever** (no recovery). HAL failures hit `Error_Handler()` in `main.c` (disables IRQs, spins). The transform pipeline uses an opaque handle + hand-built `properties_t`/`capabilities_t`/`stream_buffer_t`; frees are commented out (loop never exits). Linker scripts `STM32H563xx_FLASH.ld` (default) / `STM32H563xx_RAM.ld`; startup `startup_stm32h563xx.s`. Neither `53L9A1/` nor `roomscanner/` is currently a git repository.
+**Gotchas.** Errors are non-zero `int` return codes funneled to `handle_error()`, which reads sensor status and **spins forever** (no recovery). HAL failures hit `Error_Handler()` in `main.c` (disables IRQs, spins). The transform pipeline uses an opaque handle + hand-built `properties_t`/`capabilities_t`/`stream_buffer_t`; frees are commented out (loop never exits). Linker scripts `STM32H563xx_FLASH.ld` (default) / `STM32H563xx_RAM.ld`; startup `startup_stm32h563xx.s`. `roomscanner/` is a git repository (branch `main`); `53L9A1/` is not.
 
 ## Target architecture (where this is going)
 
