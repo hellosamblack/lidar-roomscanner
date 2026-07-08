@@ -271,11 +271,21 @@ UDP, add hardware PTP (IEEE 1588) timestamping.
 
 - Protocol payload is unchanged by design — this phase is transport plumbing + a UDP source class in the
   host app (dgram boundaries replace the byte-stream resync logic).
-- Fragmentation: a 9 KB depth frame exceeds Ethernet MTU — either chunk frames into ≤1400-byte datagrams
-  with a fragment sub-header, or rely on IP fragmentation (fragile). Decide when speccing; chunking
-  preferred.
-- lwIP memory tuning (PBUF pools) on top of the transform pipeline's SRAM appetite is the main risk.
-- Static-IP direct link PC↔board (auto-MDIX, no switch) is the default topology; PTP master on the PC.
+- Fragmentation (updated for Phase 2 reality): the wire payload is now the 14,842 B RAW frame — chunk
+  into ≤1400-byte datagrams with a fragment sub-header (IP fragmentation is fragile; don't rely on it).
+- lwIP memory tuning (PBUF pools) is the main firmware risk (eased since Phase 2 — no transform on the
+  MCU anymore, so SRAM is mostly free).
+- **Zero-config direct link (owner requirement, 2026-07-08):** plugging the board straight into a PC must
+  work with NO PC-side configuration — the device handles cabling/addressing/discovery. Design:
+  - Cabling: LAN8742 supports auto-MDIX → any cable works (verify enabled in PHY init).
+  - Addressing: device first listens as a DHCP *client* for ~3 s; if a real DHCP server answers, join
+    that network (covers the plugged-into-a-LAN case — never run a rogue DHCP server on someone's LAN).
+    If silent, assume direct link: self-assign and start a minimal single-lease DHCP *server* on an
+    unusual private subnet (e.g. 172.31.253.0/30, dodging home/Wi-Fi collisions) so the PC — which
+    defaults to DHCP — gets an address instantly with no APIPA wait.
+  - Discovery: mDNS (lwIP's mdns app) advertising `roomscanner.local` + a service record; the host app
+    resolves it (fallback: the fixed /30 device address). `SerialSource`-style auto-find for the network.
+  - PTP master on the PC, as before.
 
 ### Phase 5 — Integrate X-NUCLEO-IKS4A1
 
