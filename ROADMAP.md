@@ -161,7 +161,7 @@ a live-rendered point cloud.
 > plus periodic CALIB (2,332 B, every 64 RAW frames) over native USB CDC. Measured **24.6 fps** (491
 > frames / 19.921 s), just under the 25 fps target — CDC send-time serialization on top of the
 > mandatory 5 ms settle + sensor ranging time, not a sensor limit (frame-time breakdown in the Task 5
-> report). Confirmed again live in Task 7's soak runs (steady 23.6-25.0 fps across 1600+ frames).
+> report). Confirmed again live in Task 7's soak runs (steady 23.3-27.0 fps across 1600+ frames).
 >
 > **Host pipeline** (Task 6): `TransformStage` bridges RAW/CALIB frames to depth arrays via the native
 > DLL, lazily constructed on the first CALIB frame (depth-only replays never touch the DLL); viewer HUD
@@ -169,9 +169,14 @@ a live-rendered point cloud.
 >
 > **Live end-to-end** (Task 7): `roomscan-view` against the live board, raw-only firmware, multiple
 > supervised soaks (~55-113 s each): steady **~24-25 fps**, **0 seq gaps**, `raw` climbing 1:1 with
-> `frames` throughout (1620 frames in the recorded run, `captures/e2e_p2.bin`). One transient CRC
-> failure and one static `FLAG_DROPPED` at connection are normal (boot-time partial frame / pre-host
-> capture, matching Phase 1's Task 11 findings) and do not recur. **`raw-skip` behavior, now
+> `frames` throughout (1620 frames in the recorded run, `captures/e2e_p2.bin`). One CRC failure and
+> one `FLAG_DROPPED` appeared at connection time — a **first occurrence**, not previously seen at
+> connect: Phase 1 Task 11's 20 s soak and Phase 2's Task 2 (1471 frames) / Task 5 (499 frames)
+> connect-time captures were all clean (Task 11's single CRC event came from its deliberate stall
+> test, a different mechanism). The transient is one frame, does not recur within the run, and
+> reproduces identically on replay of the same capture (i.e. it's in the recorded bytes, not decoder
+> nondeterminism). Cause unexplained — observed once and now tracked in the deferred list below
+> (candidate common root with the 1-in-5 boot hang: sensor bring-up timing). **`raw-skip` behavior, now
 > documented**: on a **freshly SWD-reset** board, `raw-skip` stays **absent (0)** for the whole run —
 > CALIB arrives before any RAW, as designed. On a board that had already been streaming since an
 > earlier session, a host attaching mid-cycle sees a transient `raw-skip` (observed: 31, stable, never
@@ -204,6 +209,12 @@ a live-rendered point cloud.
 > - ZAPC Deprojector validation — the transform library's on-device-calibrated `ZAPC` point-cloud
 >   format should still be used to validate/replace the host `Deprojector`'s placeholder linear-FoV
 >   model (flagged in `docs/transform-streams.md`); not done in Phase 2.
+> - Connect-time CRC/DROPPED transient (first observed Task 7, see above) — unexplained; track
+>   alongside the ~1-in-5 boot hang (candidate common root: sensor bring-up timing), to be
+>   investigated with the EVENT-frame/recovery work.
+> - CALIB retransmit cadence means a host attaching mid-cycle discards up to 63 RAW frames
+>   (~2.5 s blind start at 24.6 fps); improvement: firmware sends CALIB immediately on DTR-connect
+>   (cheap — the connect wait already exists).
 
 Migrate post-processing to the PC per the architecture decision above. This **absorbs the original
 Phase 2** (IR + additional streams): once the transform runs host-side, every output stream — depth,

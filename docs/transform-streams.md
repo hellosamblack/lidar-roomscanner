@@ -1,7 +1,8 @@
 # Transform library streams/controls — boot dump capture
 
 > **Phase 2 update (2026-07-08):** the transform now runs host-side (PC), not on the M33 — see
-> `docs/h563-optimization-notes.md` for the retired on-MCU option and why it was dropped. The
+> ROADMAP.md's "Post-processing runs on the PC" decision bullet for why it was dropped, and
+> `docs/h563-optimization-notes.md` for the retired on-device speed-up options. The
 > stream/control inventory captured below is still the authoritative source for what the transform
 > library exposes; only *where* it executes has changed.
 
