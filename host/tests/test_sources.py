@@ -24,6 +24,16 @@ def test_pump_records_raw_bytes(tmp_path):
     assert rec.read_bytes() == FRAME * 3   # byte-exact tee
 
 
+def test_pump_flushes_recording_on_early_close(tmp_path):
+    src_file = tmp_path / "cap.bin"
+    src_file.write_bytes(FRAME * 3)
+    rec = tmp_path / "rec.bin"
+    gen = pump(FileSource(src_file, chunk=len(FRAME)), StreamDecoder(), record_path=rec)
+    next(gen)          # consume one frame, generator suspended at yield
+    gen.close()        # early termination — finally must close/flush rec
+    assert rec.read_bytes() == FRAME  # exactly the one chunk read so far
+
+
 def test_recorded_capture_replays_identically(tmp_path):
     src_file = tmp_path / "cap.bin"
     src_file.write_bytes(b"junk" + FRAME * 2)

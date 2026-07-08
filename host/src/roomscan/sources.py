@@ -1,7 +1,6 @@
 """Byte sources and the frame pump. All I/O lives here — decoder/deproject stay pure."""
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Iterator, Optional
 
 from .decoder import StreamDecoder
@@ -51,8 +50,10 @@ class SerialSource:
 
 
 def pump(source, decoder: StreamDecoder, record_path=None) -> Iterator[Frame]:
-    rec = open(record_path, "wb") if record_path else None
+    rec = None
     try:
+        if record_path:
+            rec = open(record_path, "wb")
         while True:
             data = source.read()
             if not data:
