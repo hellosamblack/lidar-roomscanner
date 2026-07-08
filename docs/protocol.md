@@ -82,7 +82,9 @@ specced with the Phase 4 transport work).
 ## USB identification
 
 - Milestone 1a: ST-Link VCOM (VID `0x0483`), 921600 8N1.
-- Milestone 1b: native CDC ACM, VID `0xCAFE` PID `0x4001` (TinyUSB descriptors).
+- Milestone 1b: native CDC ACM, VID `0xCAFE` PID `0x4001` (TinyUSB descriptors). Confirmed on
+  hardware (Task 11): enumerates as its own COM port alongside the ST-Link VCOM (e.g. COM15 next
+  to COM14 on Windows); `SerialSource`'s baud parameter is a no-op on this port.
 
 ## Version history
 

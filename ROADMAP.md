@@ -68,16 +68,31 @@ Found during review of `<APP>/Src/vl53l9_app.c`; fix these in our fork, leave th
 On-device transform pipeline + ASCII depth map over ST-Link VCOM.
 Enabled by `CONF_PRINT_FRAME = 1` in `Src/vl53l9_app.c:31`.
 
-### Phase 1 — Real-time 3D visualizer  ← **IN PROGRESS** (plan: `docs/superpowers/plans/2026-07-07-phase1-binary-protocol-visualizer.md`)
+### Phase 1 — Real-time 3D visualizer  ← **✅ Complete** (plan: `docs/superpowers/plans/2026-07-07-phase1-binary-protocol-visualizer.md`)
 
-> **Status 2026-07-08:** milestone **1a ✅ verified on hardware** — binary ZF32 frames over ST-Link VCOM
-> @921600: 0 CRC failures, 0 seq gaps, ~5.9 fps (sensor frame time + blocking UART co-limit; the plan's
-> 9-10 fps estimate ignored sensor-side races that needed a 5 ms settle + bounded retries — see
-> `.superpowers/sdd/task-8-report.md`). Depth confirmed float32 mm; **no-return sentinel = 12000.0**.
-> Milestone 1b (TinyUSB CDC) fully coded + flashed; enumeration blocked on a data-capable cable into
-> CN13 (device provably asserts D+ pull-up; host never signals — suspect charge-only cable).
-> Known follow-up: ~1-in-5 boots hang in sensor bring-up before frame 1 → needs EVENT-frame reporting +
-> re-init recovery (wire contract for EVENT frames is already specced in `docs/protocol.md`).
+> **Status 2026-07-08:** both milestones verified on hardware.
+>
+> **1a** (ST-Link VCOM @921600): 0 CRC failures, 0 seq gaps, ~5.9 fps (sensor frame time + blocking
+> UART co-limit; see `.superpowers/sdd/task-8-report.md`).
+>
+> **1b** (native USB CDC, TinyUSB, VID:PID `0xCAFE:0x4001`): 0 CRC failures, 0 seq gaps, 0 drops over a
+> 20 s continuous capture (273 frames) — **13.65 fps**. Stall/recovery test (2 s read → 5 s host stops
+> reading, port held open → 5 s resume) behaved exactly per the drop-policy design: 1 transient CRC
+> failure from the mid-frame abort, one seq gap of 29 frames (dropped while the host wasn't draining,
+> correctly marked with `FLAG_DROPPED` on the next successfully-sent frame), then clean contiguous
+> decoding resumed with no further loss — see `.superpowers/sdd/task-11-report.md`.
+>
+> **The plan's "fps ≥ 15" figure is stale, not a miss**: a per-frame breakdown (`HAL_GetTick` deltas,
+> 20-frame samples with an active CDC host draining) shows `transform_process_stream` ≈ 37-40 ms,
+> the CDC send itself ≈ 8-9 ms, and sensor trigger/I3C readout/event-wait ≈ 26-29 ms — total ≈ 74 ms/frame
+> (13.5 fps). The CDC link is *not* the bottleneck (send is ~12% of the frame budget and headroom is
+> large — CDC FS moves the 9108 B frame in a fraction of that 8-9 ms of wall time budget, the rest is
+> host-driven FIFO pump/schedule slack); the ceiling is sensor + on-MCU transform time, unchanged from
+> milestone 1a's finding. Speeding this up (binning, usecase, or moving processing off the acquisition
+> loop) is Phase 3+ scope, not a Phase 1 blocker.
+>
+> Known follow-up (unchanged): ~1-in-5 boots hang in sensor bring-up before frame 1 → needs EVENT-frame
+> reporting + re-init recovery (wire contract for EVENT frames is already specced in `docs/protocol.md`).
 
 Replace ASCII printing with a **versioned binary frame protocol** and a PC app that deprojects depth into
 a live-rendered point cloud.
@@ -86,30 +101,31 @@ a live-rendered point cloud.
 - `docs/protocol.md` — wire spec v1 (32-byte header, depth/ZF32 stream, CRC32) + golden test vectors.
 - `host/` — Python package `roomscan`: streaming decoder (resyncs on corruption), depth→XYZ deprojection,
   serial + file-replay sources, raw-capture recorder, Open3D live viewer with fps/drop HUD.
-- `firmware/scanner-stream/` — fork of `<APP>` that emits binary frames. Two milestones:
-  **1a** over ST-Link VCOM at 921600 baud (~9 fps — enough to prove the whole chain with zero new
-  middleware), then **1b** over native USB CDC FS (~1 MB/s → full sensor rate).
+- `firmware/scanner-stream/` — fork of `<APP>` that emits binary frames. Two milestones, both ✅:
+  **1a** over ST-Link VCOM at 921600 baud (~5.9 fps — proved the whole chain with zero new
+  middleware), then **1b** over native USB CDC FS (13.65 fps — full sensor+transform rate; link
+  itself has ample headroom, see status note above).
 - `docs/transform-streams.md` — captured `streams_inspect` / `controls_inspect` startup dump
   (`vl53l9_app.c:91-98`). **Capture this at first flash** — it enumerates what the transform library can
   emit (depth / reflectance / confidence / possibly XYZ) and settles on-MCU vs PC-side deprojection, and
   it scopes Phase 2/3.
 
-**Acceptance**
+**Acceptance** — ✅ met
 - Live point cloud renders on the PC at the sensor's native frame rate over CDC; seq-gap counter proves
   zero drops with the host idle; recorder + replay reproduce identical clouds.
 
 **Risks / bugs to watch**
-- **No ST USB Device middleware in the `53L9A1/` package** (`Middlewares/ST/` has only `media-object` +
-  `vl53l9-transform-c`). Milestone 1b must vendor `STM32_USB_Device_Library` (Core + CDC) from
-  STM32CubeH5 — license-compatible (BSD-3 / SLA0044), but it's real integration work: `usbd_conf.c` glue
-  to the already-initialized `hpcd_USB_DRD_FS`, descriptors, NVIC. HSI48 is already on (USB clock ✓).
+- **No ST USB Device middleware in the `53L9A1/` package** — superseded: milestone 1b vendored
+  **TinyUSB** instead of `STM32_USB_Device_Library` (see the `firmware/vendor/tinyusb` commits); CDC
+  ACM enumerates on `hpcd_USB_DRD_FS` with HSI48 as the USB kernel clock, confirmed on hardware.
+- **CDC TX re-entrancy** — resolved: `rs_cdc_send` pumps `tud_task()` while draining
+  `tud_cdc_write_available()` and aborts (drop, not retry-spin) after a 100 ms stall; verified on
+  hardware by a stall/resume test (see status note above).
 - **ZF32 units and range unverified** — believed float millimetres of perpendicular Z
   (`radial_to_perp.c` exists in the algo set). Confirm empirically at capture time before hardcoding the
   mm→m conversion.
 - **FoV constants for deprojection are placeholders** until confirmed against the VL53L9CX datasheet (or
   obsoleted by an XYZ output stream, if `streams_inspect` reveals one).
-- **CDC TX re-entrancy**: `USBD_CDC_TransmitPacket` while a transfer is in flight returns BUSY — the
-  writer needs an explicit busy check + drop policy, not a retry spin.
 - ST-Link VCP at 921600: V3EC supports it, but verify clean reception (frame CRC failures at rate 0)
   before trusting milestone 1a numbers.
 

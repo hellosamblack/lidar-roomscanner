@@ -40,6 +40,9 @@ extern UART_HandleTypeDef hcom_uart[];
 
 static void handle_error(void);
 
+#define MAX(x, y) (((x) > (y)) ? (x) : (y))
+#define MIN(x, y) (((x) < (y)) ? (x) : (y))
+
 static uint64_t rs_time_us(void) {
     /* v1: HAL tick, 1 ms resolution widened to the u64 µs wire field.
      * Upgrade to a TIM-based µs clock when IMU fusion needs it (Phase 5). */
@@ -64,6 +67,48 @@ static void rs_send_depth_uart(uint32_t seq, uint8_t flags, const uint8_t *paylo
     HAL_UART_Transmit(&hcom_uart[COM1], tail, 4, 1000);
 }
 
+/* Pump the CDC FIFO out. Returns false if the host stalled >100 ms (frame aborted:
+ * the host decoder counts one CRC failure/resync and we set DROPPED on the next frame). */
+static bool rs_cdc_send(const uint8_t *p, uint32_t n) {
+    uint32_t t0 = HAL_GetTick();
+    while (n) {
+        uint32_t avail = tud_cdc_write_available();
+        if (avail) {
+            uint32_t k = MIN(avail, n);
+            tud_cdc_write(p, k);
+            p += k;
+            n -= k;
+        }
+        tud_task();
+        if ((HAL_GetTick() - t0) > 100u) {
+            return false;
+        }
+    }
+    tud_cdc_write_flush();
+    return true;
+}
+
+static void rs_send_depth_cdc(uint32_t seq, uint8_t flags, const uint8_t *payload,
+                              uint32_t len, uint16_t w, uint16_t h) {
+    static uint8_t pending_dropped = 0;
+
+    if (!tud_cdc_connected()) {   /* no host: don't burn 100 ms per frame */
+        pending_dropped = 1;
+        return;
+    }
+    flags |= pending_dropped ? RS_FLAG_DROPPED : 0u;
+
+    uint8_t hdr[RS_HEADER_SIZE];
+    uint8_t tail[4];
+    rs_write_header(hdr, RS_FRAME_DATA, RS_STREAM_DEPTH_ZF32, flags, seq, rs_time_us(), w, h, len);
+    uint32_t crc = rs_crc32(0u, hdr, RS_HEADER_SIZE);
+    crc = rs_crc32(crc, payload, len);
+    rs_put_u32(tail, crc);
+
+    bool ok = rs_cdc_send(hdr, RS_HEADER_SIZE) && rs_cdc_send(payload, len) && rs_cdc_send(tail, 4);
+    pending_dropped = ok ? 0u : 1u;
+}
+
 /* Wait for a platform event in short slices, pumping TinyUSB between slices so
  * USB control transfers are serviced within host timeouts. Safe with the
  * platform event semantics: the ISR-set flag in g_platform_evt persists until
@@ -84,9 +129,6 @@ static int rs_wait_event_usb(uint32_t evt, uint32_t timeout_ms) {
         }
     }
 }
-
-#define MAX(x, y) (((x) > (y)) ? (x) : (y))
-#define MIN(x, y) (((x) < (y)) ? (x) : (y))
 
 static void print_frame(float *p_frame, size_t height, size_t width);
 static memory_t allocate_memory(uint16_t size);
@@ -262,12 +304,9 @@ void vl53l9_app() {
 
     while (1) {
 
-        /* TASK10 TEMP: CDC heartbeat, removed in Task 11 */
+        /* Keep USB serviced every iteration, including frames that skip the
+         * send call below (first frame, or a stalled host). */
         tud_task();
-        if (tud_cdc_connected()) {
-            tud_cdc_write_str("hb\r\n");
-            tud_cdc_write_flush();
-        }
 
         /* Trigger the next frame, wait for data-ready, and start the raw readout.
          *
@@ -336,8 +375,8 @@ void vl53l9_app() {
             }
 #if CONF_STREAM_BINARY
             if (rs_have_prev) {
-                rs_send_depth_uart(rs_prev_counter, 0u, (const uint8_t *)out_depth_mem.data,
-                                   frame_buffer_size, out_width, out_height);
+                rs_send_depth_cdc(rs_prev_counter, 0u, (const uint8_t *)out_depth_mem.data,
+                                  frame_buffer_size, out_width, out_height);
             }
 #endif
         }
