@@ -45,16 +45,36 @@ def test_calib_then_raw_matches_direct_transform():
 
     result = stage.feed(_raw_frame(raw, seq=2))
     assert result is not None
-    header, depth = result
+    header, outputs = result
     assert header.stream_id == StreamId.RAW_3DMD
+    assert set(outputs) == {"depth"}
+    depth = outputs["depth"]
     assert depth.shape == (42, 54) and depth.dtype == np.float32
     assert stage.raw_transformed == 1
 
     # Fresh Transform instance fed the same single raw frame -- deterministic:
     # both start from the same just-reset TNR state, so direct process() output
     # must match the stage's output exactly.
-    direct = Transform(calib).process(raw)
+    direct = Transform(calib).process(raw)["depth"]
     assert np.array_equal(depth, direct)
+
+
+@needs_dll
+def test_stage_carries_aux_planes_when_requested():
+    # TransformStage(outputs=...) plumbs straight through to Transform -- the pipeline
+    # doesn't just default to depth-only, it forwards whatever the viewer asked for.
+    calib, pairs = load_golden_pairs()
+    raw, _ = pairs[0]
+
+    stage = TransformStage(outputs=("depth", "reflectance", "confidence"))
+    assert stage.feed(_calib_frame(calib)) is None
+
+    result = stage.feed(_raw_frame(raw, seq=2))
+    assert result is not None
+    header, outputs = result
+    assert set(outputs) == {"depth", "reflectance", "confidence"}
+    for name in outputs:
+        assert outputs[name].shape == (42, 54) and outputs[name].dtype == np.float32
 
 
 def test_depth_passthrough_without_dll():
@@ -71,8 +91,10 @@ def test_depth_passthrough_without_dll():
     result = stage.feed(frames[0])
 
     assert result is not None
-    out_header, depth = result
+    out_header, outputs = result
     assert out_header == header
+    assert set(outputs) == {"depth"}
+    depth = outputs["depth"]
     assert depth.shape == (2, 2) and depth.dtype == np.float32
     np.testing.assert_array_equal(depth, np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32))
     assert not stage.active  # DEPTH passthrough never touches the DLL/Transform

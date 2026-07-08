@@ -15,7 +15,7 @@ from .protocol import Frame, FrameHeader, FrameType, StreamId
 
 
 class TransformStage:
-    """Feeds on decoded Frames; turns RAW_3DMD into depth arrays via the native transform.
+    """Feeds on decoded Frames; turns RAW_3DMD into output arrays via the native transform.
 
     - CALIB frame: creates/keeps the Transform (first CALIB wins; identical repeats
       ignored; a DIFFERENT calib payload replaces the Transform -- new sensor/boot:
@@ -23,9 +23,10 @@ class TransformStage:
       internal TNR state).
     - RAW frame before any CALIB seen: counted in .raw_skipped_awaiting_calib, dropped
       (returns None).
-    - RAW frame after CALIB: returns (header, depth ndarray (42, 54) f32).
-    - DEPTH_ZF32 frame: returns (header, decoded ndarray (h, w) f32) -- Phase 1
-      passthrough, works with no DLL and no CALIB.
+    - RAW frame after CALIB: returns (header, {name: ndarray}) for every name in
+      `outputs` (see roomscan.native.Transform for per-output dtypes/shapes).
+    - DEPTH_ZF32 frame: returns (header, {"depth": decoded ndarray (h, w) f32}) --
+      Phase 1 passthrough, works with no DLL and no CALIB.
     - Everything else (STATUS/AMBIENT/... DATA streams, non-DATA frame types): None.
 
     Construction is cheap and never touches the DLL -- the Transform is only built
@@ -34,7 +35,8 @@ class TransformStage:
     constructor (DLL not built) propagates out of feed() at that point.
     """
 
-    def __init__(self):
+    def __init__(self, outputs: tuple[str, ...] = ("depth",)):
+        self._outputs = tuple(outputs)
         self._transform: Transform | None = None
         self._calib_payload: bytes | None = None
         self.raw_skipped_awaiting_calib = 0
@@ -45,7 +47,7 @@ class TransformStage:
         """True once a Transform has been constructed from a CALIB frame."""
         return self._transform is not None
 
-    def feed(self, frame: Frame) -> tuple[FrameHeader, np.ndarray] | None:
+    def feed(self, frame: Frame) -> tuple[FrameHeader, dict[str, np.ndarray]] | None:
         header = frame.header
         if header.frame_type != FrameType.DATA:
             return None
@@ -58,13 +60,13 @@ class TransformStage:
             if self._transform is None:
                 self.raw_skipped_awaiting_calib += 1
                 return None
-            depth = self._transform.process(frame.payload)
+            outputs = self._transform.process(frame.payload)
             self.raw_transformed += 1
-            return header, depth
+            return header, outputs
 
         if header.stream_id == StreamId.DEPTH_ZF32:
             depth = np.frombuffer(frame.payload, dtype="<f4").reshape(header.height, header.width)
-            return header, depth
+            return header, {"depth": depth}
 
         return None
 
@@ -72,7 +74,7 @@ class TransformStage:
         if payload == self._calib_payload:
             return  # identical repeat: keep the existing Transform (and its TNR state)
         old = self._transform
-        self._transform = Transform(payload)  # may raise RuntimeError if DLL not built
+        self._transform = Transform(payload, outputs=self._outputs)  # may raise RuntimeError if DLL not built
         self._calib_payload = payload
         if old is not None:
             old.destroy()

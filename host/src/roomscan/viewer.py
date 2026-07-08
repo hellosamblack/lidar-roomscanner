@@ -51,10 +51,10 @@ def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dic
                 continue
             if frame.header.frame_type != FrameType.DATA:
                 continue
-            result = stage.feed(frame)          # RAW->transformed depth, DEPTH->passthrough,
+            result = stage.feed(frame)          # RAW->transformed outputs dict, DEPTH->{"depth": ...},
             if result is None:                   # CALIB/unknown -> None (stays silent)
                 continue
-            header, depth = result
+            header, outputs = result
             stats.update(header)
             # Paced replay: don't drain a recording at decode speed. Pace per SENSOR
             # frame (seq change), not per stage result — dual-stream recordings yield
@@ -70,7 +70,7 @@ def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dic
                 slot.get_nowait()          # latest-wins: drop stale frame
             except queue.Empty:
                 pass
-            slot.put((header, depth))
+            slot.put((header, outputs))
     except Exception as exc:  # surface, don't vanish: main loop reports and exits
         fault["error"] = exc
 
@@ -85,6 +85,8 @@ def main(argv=None) -> int:
     ap.add_argument("--fov-v", type=float, default=42.0)
     ap.add_argument("--replay-fps", type=float, default=0.0,
                     help="pace file replay at N fps (0 = as fast as it decodes)")
+    ap.add_argument("--color", choices=("depth", "reflectance", "confidence"), default="depth",
+                    help="colorize the cloud by z-depth (default) or by an aux transform plane")
     args = ap.parse_args(argv)
 
     import open3d as o3d   # deferred: heavy import
@@ -92,7 +94,9 @@ def main(argv=None) -> int:
     source = FileSource(args.replay) if args.replay else SerialSource(args.port, args.baud)
     decoder = StreamDecoder()
     stats = Stats()
-    stage = TransformStage()   # cheap to construct; only touches the DLL on first CALIB frame
+    # Always need "depth" for point positions; add the color channel if it's a different plane.
+    stage_outputs = ("depth",) if args.color == "depth" else ("depth", args.color)
+    stage = TransformStage(outputs=stage_outputs)   # cheap to construct; only touches the DLL on first CALIB frame
     slot: queue.Queue = queue.Queue(maxsize=1)
     fault: dict = {}
     min_interval = 1.0 / args.replay_fps if (args.replay and args.replay_fps > 0) else 0.0
@@ -121,15 +125,27 @@ def main(argv=None) -> int:
             print(f"\nreader stopped: {fault['error']!r}")
             break
         if item is not None:
-            _hdr, depth = item
+            _hdr, outputs = item
+            depth = outputs["depth"]
             h, w = depth.shape
             if deproj is None:
                 deproj = Deprojector(w, h, args.fov_h, args.fov_v)
             pts = deproj(depth)
             pcd.points = o3d.utility.Vector3dVector(pts)
             if len(pts):
-                zn = (pts[:, 2] - pts[:, 2].min()) / max(float(np.ptp(pts[:, 2])), 1e-6)
-                pcd.colors = o3d.utility.Vector3dVector(turbo(zn))
+                # Color source: z-depth (default) or an aux plane (reflectance/confidence),
+                # normalized per-frame like the z case; same flat-plane divide guard either way.
+                # The aux plane isn't deprojected -- it shares depth's (h, w) shape, so it's
+                # filtered by the identical validity mask Deprojector used internally to keep
+                # per-point alignment with `pts`.
+                plane = None if args.color == "depth" else outputs.get(args.color)
+                if plane is not None:
+                    valid = np.isfinite(depth) & (depth > 0.0) & (depth < deproj.max_range_mm)
+                    vals = plane[valid].astype(np.float64, copy=False)
+                else:
+                    vals = pts[:, 2]
+                vn = (vals - vals.min()) / max(float(np.ptp(vals)), 1e-6)
+                pcd.colors = o3d.utility.Vector3dVector(turbo(vn))
             else:
                 pcd.colors = o3d.utility.Vector3dVector(np.zeros((0, 3)))
             if not added:

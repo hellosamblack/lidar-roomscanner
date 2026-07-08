@@ -27,7 +27,7 @@ def test_pc_transform_matches_mcu_output():
     t = Transform(calib)
     exact = 0
     for i, (raw, depth_mcu) in enumerate(pairs):   # capture order — TNR is stateful
-        depth_pc = t.process(raw)
+        depth_pc = t.process(raw)["depth"]
         mcu = np.frombuffer(depth_mcu, dtype="<f4").reshape(42, 54)
         if np.array_equal(depth_pc, mcu):
             exact += 1

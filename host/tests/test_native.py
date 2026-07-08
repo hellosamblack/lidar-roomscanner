@@ -11,6 +11,6 @@ pytestmark = pytest.mark.skipif(not Transform.available(),
 def test_create_process_destroy_smoke():
     calib, pairs = load_golden_pairs()
     t = Transform(calib)
-    depth = t.process(pairs[0][0])
+    depth = t.process(pairs[0][0])["depth"]
     assert depth.shape == (42, 54) and depth.dtype == np.float32
     assert np.isfinite(depth).all()

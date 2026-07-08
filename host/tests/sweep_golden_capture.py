@@ -80,7 +80,7 @@ def main() -> int:
     overall_max = 0.0
 
     for seq, raw, depth_mcu in triples:
-        depth_pc = t.process(raw)
+        depth_pc = t.process(raw)["depth"]
         mcu = np.frombuffer(depth_mcu, dtype="<f4").reshape(42, 54)
         if np.array_equal(depth_pc, mcu):
             exact += 1
