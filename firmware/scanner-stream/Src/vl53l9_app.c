@@ -124,6 +124,35 @@ static int rs_wait_event_usb(uint32_t evt, uint32_t timeout_ms) {
     }
 }
 
+#if !CONF_TRANSFORM_ONBOARD
+/* Raw-only trigger-early overlap (this task): settle then trigger, sharing one helper
+ * for every trigger call in this mode -- the pre-loop seed for frame 1, the
+ * "trigger(N+1)" issued right after frame N's readout ack, and any retry after a lost
+ * trigger inside the acquire loop below. Every one of those needs the same settle
+ * (a hardware requirement: a trigger issued back-to-back with the previous readout ack
+ * -- COMMAND_ACK_FRAME_READ inside vl53l9_get_frame_async_ack -- is intermittently
+ * ignored by the sensor, see Task 8's race writeup); folding settle+trigger into one
+ * function makes that impossible to accidentally skip at a new call site.
+ *
+ * Settle-time experiment (the one bounded experiment allowed by the P2.5 Task 4 brief):
+ * 5 ms (the Task 8 value) measured 25.9 fps (med 39 ms/frame); 2 ms measured 27.7 fps
+ * (med 36-37 ms/frame) across two 30 s captures, both with crc 0, gaps 0, and max
+ * inter-frame delta <= 39 ms -- i.e. no lost-trigger stalls (a lost trigger appears as a
+ * ~1 s delta via the retry path below, and none occurred). 2 ms is kept; if the
+ * lost-trigger race ever resurfaces at this value, the bounded-retry net below degrades
+ * it to a visible stall rather than a lost frame, and this is the knob to raise back to
+ * 5. (HAL_Delay(n) actually waits n+1 ticks, so 2 here means ~3 ms wall time.) */
+#define RS_TRIGGER_SETTLE_MS (2u)
+static void rs_trigger_next(vl53l9_device_t *p_dev) {
+    int ret;
+    HAL_Delay(RS_TRIGGER_SETTLE_MS);
+    ret = vl53l9_trigger_frame(p_dev);
+    if (ret) {
+        handle_error();
+    }
+}
+#endif /* !CONF_TRANSFORM_ONBOARD */
+
 static void print_frame(float *p_frame, size_t height, size_t width);
 static memory_t allocate_memory(uint16_t size);
 
@@ -303,10 +332,12 @@ void vl53l9_app() {
     uint32_t stop_time;
     float frame_rate;
 
+#if CONF_TRANSFORM_ONBOARD
     bool is_first_frame = true;
 
     uint32_t rs_prev_counter = 0;
     bool rs_have_prev = false;
+#endif
 
     /* Sensor is up and the loop below pumps tud_task(): present the USB
      * device only now (D+ pull-up was held off after tud_init in main.c so
@@ -326,6 +357,9 @@ void vl53l9_app() {
     HAL_Delay(50); /* let the host's reader thread settle after opening the port */
 #endif
 
+#if CONF_TRANSFORM_ONBOARD
+    /* Dual-stream / on-MCU-transform loop: UNCHANGED (golden-pair regeneration path).
+     * The raw-only loop with trigger-early overlap lives in the #else branch below. */
     while (1) {
 
         /* Keep USB serviced every iteration, including frames that skip the
@@ -475,6 +509,159 @@ void vl53l9_app() {
         /* swap raw buffer index for next frame acquisition */
         raw_mem_index = (raw_mem_index + 1) % 2;
     }
+
+#else /* !CONF_TRANSFORM_ONBOARD */
+
+    /* Raw-only loop with trigger-early overlap (Phase 2.5 Task 4).
+     *
+     * The Phase 2 raw-only loop serialized the ~15 ms CDC send of frame N-1 into the
+     * frame period: trigger(N) sat at the TOP of the loop, so the sensor idled while the
+     * MCU pushed bytes to the host (~41 ms/frame = 5 ms settle + ~15 ms un-hidden send +
+     * ~20 ms ranging/DMA/parse; see the P2 Task 5 report). Here the trigger for frame
+     * N+1 is issued BEFORE frame N's send, so the sensor's integration/ranging of N+1
+     * runs concurrently with the send of N:
+     *
+     *   GPIO wait (pumped) -> ack -> DMA kick(N) -> DMA wait (pumped) -> readout ack(N)
+     *   -> parse metadata(N) -> settle + trigger(N+1) -> send CALIB-cadence + RAW(N)
+     *   while the sensor integrates N+1 -> loop.
+     *
+     * Ordering decisions, in the order they appear:
+     *
+     *  - parse BEFORE send (deviation from the plan sketch, which listed parse last):
+     *    vl53l9_utils_parse_frame is pure pointer arithmetic over the raw buffer -- no
+     *    bus traffic (vl53l9_utils.c:149-179) -- so it can run any time after the buffer
+     *    is complete. It must run after the readout ack (the metadata lives at
+     *    buffer_size - sizeof(vl53l9_meta_t), i.e. in the tail segment that
+     *    vl53l9_get_frame_async_ack retrieves), and running it before the send lets the
+     *    wire seq be frame N's OWN frame_counter -- the send in this loop carries the
+     *    CURRENT frame, so the prev-counter tracking of the dual-stream loop
+     *    (rs_prev_counter/rs_have_prev) is gone in this mode. Seq on the wire always
+     *    matches the payload by construction.
+     *
+     *  - trigger only after readout ack + settle (Task 8 races): the settle+trigger
+     *    helper rs_trigger_next enforces the RS_TRIGGER_SETTLE_MS gap after the readout
+     *    ack; the ack happened just above (parse in between is microseconds of pointer
+     *    reads).
+     *
+     *  - trigger BEFORE send: the INT edge for N+1 may fire while the send is still in
+     *    flight (ranging ~20 ms vs send ~15 ms, and a slow host can stall the send up to
+     *    100 ms). That is safe: the ISR-set event flag in g_platform_evt persists until
+     *    platform_acknowledge_event, so an edge landing during the send is latched and
+     *    the next iteration's GPIO wait returns immediately (same contract
+     *    rs_wait_event_usb already relies on between its 5 ms slices).
+     *
+     * Buffer safety (truth for THIS ordering): the send reads in_raw_mem[raw_mem_index]
+     * -- the SAME buffer this iteration's DMA filled -- strictly after the DMA-done wait
+     * and readout ack for it completed. No DMA is in flight during the send at all: the
+     * next DMA is kicked only in the next iteration (after the GPIO wait), and it
+     * targets in_raw_mem[raw_mem_index ^ 1] because raw_mem_index toggles at loop
+     * bottom. Single-buffer semantics would therefore suffice in this mode, but the
+     * double buffer is KEPT: the allocation is shared with the dual-stream loop above,
+     * which genuinely needs it (its DMA of N overlaps its processing/send of N-1).
+     *
+     * First-frame edge: the trigger for frame 1 is seeded once before the loop (below,
+     * after the DTR gate so acquisition still starts on host connect). Iteration 1 then
+     * captures frame 1 completely before anything is sent, so every frame -- including
+     * frame 1, which golden captures need for TNR alignment -- is sent, and the CALIB
+     * countdown (initial value 0) fires before the first RAW send exactly as before.
+     *
+     * No CONF_STREAM_BINARY/CONF_STREAM_RAW guards inside this loop: the #error at the
+     * top of the file guarantees both are 1 whenever CONF_TRANSFORM_ONBOARD is 0. */
+
+    rs_trigger_next(p_dev); /* seed trigger for frame 1 */
+
+    while (1) {
+
+        /* Keep USB serviced every iteration, even when waits below return fast. */
+        tud_task();
+
+        /* Wait for data-ready. Same bounded-retry disambiguation as the dual-stream
+         * loop (Task 8): a timeout means either the trigger was lost (re-trigger, with
+         * settle, via rs_trigger_next) or the edge landed after the timeout (poll
+         * FRAME_READY, then fall through and ack, clearing any late edge so it cannot
+         * leak into the next iteration). */
+        int rs_attempts = 0;
+        for (;;) {
+            ret = rs_wait_event_usb(PLATFORM_GPIO_IT_EVT, 1000);
+            if (ret) {
+                uint8_t rs_is_ready = 0;
+                (void)vl53l9_poll_frame(p_dev, &rs_is_ready);
+                if (!rs_is_ready) {
+                    if (++rs_attempts > 3) {
+                        handle_error();
+                    }
+                    rs_trigger_next(p_dev); /* trigger lost: re-trigger (no event to ack) */
+                    continue;
+                }
+            }
+            platform_acknowledge_event(PLATFORM_GPIO_IT_EVT);
+
+            /* kick the DMA readout of frame N into this iteration's buffer */
+            ret = vl53l9_get_frame_async(p_dev, in_raw_mem[raw_mem_index].data, in_raw_mem[raw_mem_index].size);
+            if (ret == VL53L9_ERROR_INVALID_STATE) {
+                /* early edge: FRAME_READY not visible yet, give it a moment (Task 8) */
+                if (++rs_attempts > 8) {
+                    handle_error();
+                }
+                HAL_Delay(1);
+                ret = vl53l9_get_frame_async(p_dev, in_raw_mem[raw_mem_index].data, in_raw_mem[raw_mem_index].size);
+            }
+            if (ret) {
+                handle_error();
+            }
+            break;
+        }
+
+        ret = rs_wait_event_usb(PLATFORM_I3C_DMA_RX_EVT, 1000);
+        if (ret) {
+            handle_error();
+        }
+        platform_acknowledge_event(PLATFORM_I3C_DMA_RX_EVT);
+
+        ret = vl53l9_get_frame_async_ack(p_dev, in_raw_mem[raw_mem_index].data, in_raw_mem[raw_mem_index].size);
+        if (ret) {
+            handle_error();
+        }
+
+        /* parse frame N's metadata (pure in-memory reads; buffer complete after the
+         * readout ack above) so the send below carries frame N's own counter */
+        vl53l9_frame_t frame = { 0 };
+        ret = vl53l9_utils_parse_frame(in_raw_mem[raw_mem_index].data, in_raw_mem[raw_mem_index].size, &frame);
+        if (ret) {
+            handle_error();
+        }
+        uint32_t rs_counter = (uint32_t)frame.p_metadata->frame_counter;
+
+        /* trigger frame N+1 now (settle enforced inside): the sensor integrates while
+         * the CDC sends below are in flight */
+        rs_trigger_next(p_dev);
+
+        /* send frame N (and the periodic CALIB before it, so a host joining at frame 1
+         * always has calib before its first RAW) while the sensor works on N+1 */
+        {
+            static uint32_t rs_calib_countdown = 0;
+            if (rs_calib_countdown == 0) {
+                rs_send_frame_cdc(RS_STREAM_CALIB, rs_counter, 0u, calib_data,
+                                  VL53L9_CALIB_DATA_SIZE, out_width, out_height);
+                rs_calib_countdown = 64;
+            }
+            rs_calib_countdown--;
+            rs_send_frame_cdc(RS_STREAM_RAW_3DMD, rs_counter, 0u,
+                              (const uint8_t *)in_raw_mem[raw_mem_index].data,
+                              raw_buffer_size, out_width, out_height);
+        }
+
+        /* measure frame rate */
+        stop_time = platform_profiler_get_timestamp();
+        frame_rate = (1.0f / (float)(platform_profiler_convert_to_us(stop_time - start_time))) * 1000000;
+        start_time = stop_time;
+
+        /* swap raw buffer index: purely cosmetic in this mode (see buffer-safety note
+         * above), kept so both loops use the double buffer identically */
+        raw_mem_index = (raw_mem_index + 1) % 2;
+    }
+
+#endif /* CONF_TRANSFORM_ONBOARD */
 
     /* NOTE: free memory and pipeline resources to avoid leaks */
     /* free(in_raw_mem[0].data); */
