@@ -1,5 +1,10 @@
 # Transform library streams/controls — boot dump capture
 
+> **Phase 2 update (2026-07-08):** the transform now runs host-side (PC), not on the M33 — see
+> `docs/h563-optimization-notes.md` for the retired on-MCU option and why it was dropped. The
+> stream/control inventory captured below is still the authoritative source for what the transform
+> library exposes; only *where* it executes has changed.
+
 Captured from the real board (NUCLEO-H563ZI, X-NUCLEO-53L9A1, VL53L9CX) running
 `firmware/scanner-stream` (Task 6's unmodified fork of the reference app —
 `CONF_USECASE = VL53L9_USECASE_AR_PRECISION`, `CONF_PRINT_FRAME = 1`).
