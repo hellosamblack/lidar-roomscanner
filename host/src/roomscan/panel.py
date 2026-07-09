@@ -24,6 +24,7 @@ Threading model (hard rules, mirrors the classic viewer's hard-won contract):
 """
 from __future__ import annotations
 
+import os
 import queue
 import sys
 import threading
@@ -39,6 +40,7 @@ from .deproject import Deprojector
 from .ir_image import ir_range, reflectance_to_rgb
 from .logbus import LogBus
 from .native import Transform
+from . import portguard
 from .pipeline import TransformStage
 from .protocol import CommandCode, FrameType, ProtocolError, parse_event
 from .shading import MODES as _NEAR_MODES
@@ -749,19 +751,45 @@ def _resolve(argv):
     return args
 
 
+def _open_source(args):
+    """Open the frame source, distinguishing a busy port (locked by another
+    program -- offer to close it and retry) from a missing one (no scanner /
+    bad path). Returns the source, or None after printing a clean message."""
+    try:
+        return FileSource(args.replay) if args.replay else SerialSource(args.port, args.baud)
+    except Exception as exc:
+        if args.replay:
+            print(f"error: could not open replay file {args.replay!r}: {exc}", file=sys.stderr)
+            return None
+        kind = portguard.classify_open_error(exc)
+        if kind == "missing":
+            print(f"error: scanner not found: {exc}\n"
+                  "       Check the USER USB cable (CDC CAFE:4001) and press the board's RESET button.",
+                  file=sys.stderr)
+            return None
+        # busy (or unknown-but-permission): offer to close the holder, then retry once
+        print(f"error: the scanner port is in use: {exc}", file=sys.stderr)
+        if sys.stdin is not None and sys.stdin.isatty():
+            if portguard.offer_to_close_holders(exclude_pid=os.getpid()):
+                time.sleep(0.6)   # let Windows release the handle
+                try:
+                    return SerialSource(args.port, args.baud)
+                except Exception as exc2:
+                    print(f"error: port still in use after closing: {exc2}", file=sys.stderr)
+                    return None
+        else:
+            print("       Close any other roomscan viewer/panel window (only one can hold the "
+                  "port), then retry.", file=sys.stderr)
+        return None
+
+
 def run(args, *, smoke_ticks: int = 0) -> int:
     import open3d.visualization.gui as gui
 
     _fill_panel_fields(args)   # viewer-delegated args arrive without the panel-only fields
 
-    try:
-        source = FileSource(args.replay) if args.replay else SerialSource(args.port, args.baud)
-    except Exception as exc:  # port busy/missing, bad replay path: report cleanly, no traceback
-        hint = ""
-        if not args.replay and "Access is denied" in str(exc):
-            hint = ("\n       The scanner port is already open by another program — close any other "
-                    "roomscan\n       viewer/panel window (only one can hold the port at a time), then retry.")
-        print(f"error: could not open the scanner: {exc}{hint}", file=sys.stderr)
+    source = _open_source(args)
+    if source is None:
         return 1
     client = CommandClient(source.write) if isinstance(source, SerialSource) else None
     dll = Transform.available()

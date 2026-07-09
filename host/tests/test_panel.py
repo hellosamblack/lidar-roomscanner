@@ -113,11 +113,29 @@ def test_run_reports_busy_port_cleanly(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(panel, "SerialSource", _BusyPort)
     args = panel._resolve([])          # no --replay -> live path -> SerialSource
     args.port = "COM99"
-    rc = panel.run(args)
+    rc = panel.run(args)               # pytest stdin is not a tty -> no interactive prompt
     assert rc == 1                     # clean exit, not an uncaught traceback
     err = capsys.readouterr().err
-    assert "could not open the scanner" in err
-    assert "close any other" in err    # busy-port hint shown
+    assert "port is in use" in err
+    assert "Close any other roomscan" in err   # busy-port hint shown (non-interactive)
+
+
+def test_run_reports_missing_port_cleanly(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    import roomscan.panel as panel
+
+    class _NoPort:
+        def __init__(self, *a, **k):
+            raise FileNotFoundError(2, "The system cannot find the file specified.")
+
+    monkeypatch.setattr(panel, "SerialSource", _NoPort)
+    args = panel._resolve([])
+    args.port = "COM99"
+    rc = panel.run(args)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "scanner not found" in err
+    assert "RESET" in err              # missing-port hint, not the busy one
 
 
 # --- _run_reader routing -----------------------------------------------------
