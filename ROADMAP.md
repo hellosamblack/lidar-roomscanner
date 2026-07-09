@@ -453,7 +453,14 @@ are all reused unchanged (no wire change; `docs/protocol.md` untouched).
 - **Support layer:** five file-disjoint TDD'd modules — `ir_image.py` (reflectance→RGB), `logbus.py`,
   `config.py` (+`point_size`/`ir_colormap`/`ir_freeze_range`/`panel_width`), `sources.py` `Recorder`,
   `control.py` `CommandDispatcher`.
-- **Verified:** host suite 150 passed, ruff clean; headless `run_one_tick` smoke against
+- **Owner-requested follow-ups (2026-07-09):** (1) **Near contrast** (`roomscan/shading.py`) — for
+  the person-in-front-of-wall setup, spends more of the colormap on close targets so facial relief
+  stands out: `window` (default, greys past a cutoff), `emphasis` (near gamma), `equalize` (histogram),
+  `off`; View-group combobox + adaptive slider. (2) **Point size** slider widened 1→20, default 3→5, to
+  close the inter-zone gaps. (3) **Modal help** (`Help`/`H` → `gui.Dialog`). (4) A **headless snapshotter**
+  `tools/panel_view.py` (Pillow, CPU) that renders the panel to a PNG — Open3D Filament offscreen fails
+  on a locked box (`EGL Headless not supported`) — so the panel can be *seen* without a display.
+- **Verified:** host suite 162 passed, ruff clean; headless `run_one_tick` smoke against
   `captures/e2e_p2.bin` rendered 194 frames (2257-pt cloud), reflectance present, IR auto-range + freeze,
   all callbacks functional, reader thread joins clean. **Open:** live on-hardware run (buttons against a
   live board, visual check of the IR pane, config persistence round-trip) — owner-supervised, pending.
