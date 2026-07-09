@@ -1,0 +1,287 @@
+Quick Start Guide
+X-NUCLEO-IKS4A1
+
+An STM32 Nucleo expansion board quick description
+of the board
+                          Quick Start Guide Contents
+
+Hardware Overview
+Setup & Demo Examples
+Documents & Related Resources
+STM32 Open Development Environment: Overview
+
+                                                                                                                                                                                                                2
+                                                X-NUCLEO-IKS4A1 expansion board
+
+Hardware Description                                                                              Hardware overview 1/2
+
+The X-NUCLEO-IKS4A1 is an STM32 Nucleo expansion board to control and develop custom                              ST Morpho connectors
+
+applications with the latest released inertial and environmental ST MEMS sensors. On board are    Arduino UNO R3 connectors
+mounted:
+
+· LIS2DUXS12 3-axis accelerometer with Qvar, AI and anti-aliasing
+
+· LSM6DSO16IS: 3-axis accelerometer + 3-axis gyroscope with ISPU
+
+· LSM6DSV16X: 6-axis IMU with AI, Qvar and embedded sensor fusion
+
+· LIS2MDL: 3-axis magnetometer
+
+· LPS22DF: high precision nano pressure sensor
+
+· STTS22H: temperature sensor
+
+· SHT40AD1B: humidity sensor from Sensirion
+
+Main Features:
+
+Thanks to the embedded functions of ST MEMS sensors, it is possible to develop applications with
+sensor HUB functionalities (control up to 4 environmental sensors through 6-axis sensor), Qvar
+electrode (swipe and touch gestures) and IR sensor (motion and presence detection).
+
+                                                                                                  Qvar electrode        IR sensor         DIL24
+                                                                                                    connectors    industrial connector  connector
+
+                                Latest info available at www.st.com
+                                         X-NUCLEO-IKS4A1
+
+                                                                                                  Inertial + environmental sensors                 3
+                         X-NUCLEO-SNK1M1 expansion board
+
+                                                    Hardware overview 2/2
+
+Top view                                        Bottom view
+
+DIL24 + humidity sensor                         Detachable Qvar electrode
+       INT selelctor
+                         I2C bus + Qvar enable
+                                  selector                                 Click here to check pin
+                                                                            configuration tables 4
+                                     X-CUBE-MEMS1 software package
+
+                                                        SW architecture overview
+
+Software Description:
+· The software package X-CUBE-MEMS1
+Key Features:
+
+· This software is gathering Temperature, Humidity, Pressure and Motion sensor drivers for the HTS221, LPS22HB,
+   LPS22HH, STTS751, LSM6DSL, LSM303AGR, LSM6DSO, LIS2DW12, LIS2MDL, ASM330LHH, IIS2DLPC, IIS2ICLX,
+   IIS2MDC, ISM303DAC, ISM330DLC, LIS2DH12, LPS33HW, LPS33K, LSM6DSOX, A3G4250D, AIS2DW12, AIS328DQ,
+   AIS3624DQ, H3LIS331DL, ISM330DHCX, LIS3MDL, LSM6DSR, LSM6DSRX, STTS22H, LSM6DSO32, LPS22CH,
+   LPS27HHTW, AIS2IH, LSM6DSO32X, LIS2DTW12, LPS22DF, LIS2DU12, ILPS22QS, ILPS28QSW, LPS28DFW,
+   ASM330LHHX, IIS3DWB, LSM6DSV16X, LSM6DSV16BX, LSM6DSV, LSM6DSV16B, LIS2DUX12, LIS2DUXS12,
+   SHT40AD1B, LSM6DSV32X, STHS34PF80, LSM6DSO16IS, SGP40 devices, running on STM32
+
+· Several examples to show the innovative hardware features of the inertial and environmental sensors
+
+· Sample application to transmit real time sensors data to a PC
+
+· Compatible with the Unicleo-GUI graphical user interface to display sensors data and configure outputs
+
+· Sample implementation available on X-NUCLEO-IKS01A3 or X-NUCLEO-IKS02A1 or X-NUCLEO-IKS4A1 boards
+   connected to a NUCLEO-F401RE, NUCLEO-L152RE, NUCLEO-U575ZI-Q or NUCLEO-L073RZ development board
+
+· Advanced Motion or Infrared libraries with sample applications available only for NUCLEO-F401RE, NUCLEO-U575ZI-Q,
+   NUCLEO-L152RE and NUCLEO-L073RZ
+
+· Easy portability across different MCU families, thanks to STM32Cube
+
+· Free, user-friendly license terms
+
+                                     Latest info available at www.st.com
+                                                X-CUBE-MEMS1
+
+                                                                                                                                                                                                                  5
+                          Quick Start Guide Contents
+
+Hardware Overview
+Setup & Demo Examples
+Documents & Related Resources
+STM32 Open Development Environment: Overview
+
+                                                                                                                                                                                                                6
+                                                            Demo Example: Bill Of Material
+
+                                                                                              HW pre-requisites
+
+· 1x description expansion board                               X-NUCLEO-IKS4A1
+
+       (X-NUCLEO-IKS4A1)                                       NUCLEO-F401RE or
+                                                                  NUCLEO-L073RZ or
+· 1x STM32 Nucleo development board of                      +        NUCLEO-L152RE or
+                                                                        NUCLEO-U575ZI-Q
+NUCLEO-F401RE, NUCLEO-U575ZI-Q, NUCLEO-L152RE, NUCLEO-
+
+L073RZ
+
+· 1x USB type A to micro-B cable
+
+· 1x Laptop/PC with Windows 7, 8 or above
+
+· 1x 12-pins Industrial cable (not included)
+
+        A to micro.B              12-pins Industrial cable         NUCLEO
+        USB Cable
+                                                               stacked solution
+                                                                                                       7
+                                                 Hardware setup
+                                        Jumpers' configuration
+
+I2C bus/Qvar enable configuration setting jumpers J4 and J5
+
+J4 J5
+
+       All sensors controlled by STM32
+
+                            Qvar electrode disabled
+
+· To change I2C master (sensor HUB1/2, DIL24) move jumper from the first raw
+   (on both connectors).
+
+· To enable the Qvar electrode move the last jumpers up of 1 raw
+N.B. If sensor HUB1 is used as master I2C, the Qvar raws do not need a jumper
+(as they are in common with SDA and SCL)
+
+More details on pin configurations, power modes and capabilities are contained int the UM3239 8
+                                                        Demo Example: software tools
+
+                                                                                                               SW pre-requisites
+
+· STM32CubeIDE : All-in-one multi-OS software tool for programming STM32 products or STSW-LINK009: ST-LINK/V2-1
+  USB driver
+
+· STM32CubeMonUCPD : Monitoring and configuration software tool for STM32 USB-C and Power Delivery 3.0 applications
+· X-CUBE-MEMS1: software package including the application examples for NUCLEO-F401RE, NUCLEO-U575ZI-Q,
+
+  NUCLEO-L152RE and NUCLEO-L073RZ to be associated with the X-NUCLEO-IKS01A3, X-NUCLEO-IKS02A1 and X-
+  NUCLEO-IKS4A1
+
+                                                                                                                                                                                                                                                        9
+Demo Examples for different operating modes
+
+Qvar electrode application  Qvar electrode + IR sensor (not included)
+                                                application
+
+                                                                                                                                          10
+                          Quick Start Guide Contents
+
+Hardware Overview
+Setup & Demo Examples
+Documents & Related Resources
+STM32 Open Development Environment: Overview
+
+                                                                                                                                                                                                              11
+                                 Documents & related resources
+
+                              All documents are available in the DOCUMENTATION tab of the related products webpage
+
+X-NUCLEO-IKS4A1 :
+
+· Data brief DB5091: Motion MEMS and environmental sensor expansion board for STM32 Nucleo
+· User manual UM3239: Getting started with the X-NUCLEO-IKS4A1 motion MEMS and environmental sensor expansion board for STM32 Nucleo
+· SCHEMATIC
+· GERBER
+· BOM
+
+X-CUBE-MEMS1 :
+
+· Data brief DB2442: Sensor and motion algorithm software expansion for STM32Cube
+· User manual UM1859: Getting started with the X-CUBE-MEMS1 motion MEMS and environmental sensor software expansion for STM32Cube
+
+Consult www.st.com for the complete list  12
+                          Quick Start Guide Contents
+
+Hardware Overview
+Setup & Demo Examples
+Documents & Related Resources
+STM32 Open Development Environment: Overview
+
+                                                                                                                                                                                                              13
+                                                                                                        STM32ODE Ecosystem
+
+FAST, AFFORDABLE PROTOTYPING AND
+DEVELOPMENT
+
+The STM32 Open Development Environment (ODE) is an open, flexible, easy and affordable way to
+develop innovative devices and applications based on the STM32 32-bit microcontroller family combined
+with other state-of-the-art ST components connected via expansion boards. It enables fast prototyping
+with leading-edge components that can quickly be transformed into final designs.
+
+The STM32ODE includes the following five elements:
+
+o STM32 Nucleo development boards. A comprehensive range of affordable development boards for all
+   STM32 microcontroller series, with unlimited unified expansion capability, and with integrated
+   debugger/programmer
+
+o STM32 Nucleo expansion boards. Boards with additional functionality to add sensing, control,          STM32 Nucleo                                             STM32Cube
+   connectivity, power, audio or other functions as needed. The expansion boards are plugged on top of                                                     development boards
+   the STM32 Nucleo development boards. More complex functionalities can be achieved by stacking
+   additional expansion boards                                                                                                                                   STM32Cube
+                                                                                                                                                     expansion software (X-CUBE)
+o STM32Cube software. A set of free-of-charge tools and embedded software bricks to enable fast and     development boards
+   easy development on the STM32, including a Hardware Abstraction Layer, middleware and the
+   STM32CubeMX PC-based configurator and code generator
+
+                                                                                                        STM32 Nucleo
+
+o STM32Cube expansion software. Expansion software provided free of charge for use with STM32           expansion boards (X-NUCLEO)
+   Nucleo expansion boards, and compatible with the STM32Cube software framework
+
+o STM32Cube Function Packs. Set of function examples for some of the most common application                                         Function Packs
+   cases built by leveraging the modularity and interoperability of STM32 Nucleo development boards
+   and expansions, with STM32Cube software and expansions.
+
+The STM32 Open Development Environment is compatible with a wide range of development
+environments including STM32CubeIDE, IAR EWARM, Keil MDK-ARM, and GCC/LLVM-based IDEs,
+with the possibility to integrate the various components such as STM32CubeMX,
+STM32CubeProgrammer or STM32CubeMonitor.
+STM32 Open Development Environment:
+                                 all that you need
+
+The combination of a broad range of expandable boards based                         The building blocks                                               Your need                            Our answer
+on leading-edge commercial products and modular software,
+from driver to application level, enables fast prototyping of ideas                         Accelerometer, gyroscope              Sense              COLLECT
+that can be smoothly transformed into final designs.                                 Inertial modules, magnetometer
+
+                                                                                    Pressure, temperature, humidity
+                                                                                                 Proximity, microphone
+
+To start your design:                                                                   Bluetooth LE                              Connect            TRANSMIT
+                                                                                      Sub-GHz radio
+     · Choose the appropriate STM32 Nucleo development board                                                                      HMI                ACCESS
+          (NUCLEO) and expansion (X-NUCLEO) boards (sensors,                              NFC, GNSS
+          connectivity, audio, motor control etc.) for the functionality you need.              IO-Link
+
+                                                                                    Touch controller
+                                                                                          LED drivers
+
+· Select your development environment (IAR EWARM, Keil MDK and                                        Stepper motor driver        Move               ACTUATE
+     GCC/LLVM-based IDEs) and use the free STM32Cube tools and                                   DC & BLDC motor driver           Power              POWER
+     software such as STM32CubeMX, STM32CubeProgrammer,
+     STM32CubeMonitor or STM32CubeIDE.                                                            Industrial input / output       Process            PROCESS
+                                                                                         Energy management & battery              Software
+· Download all the necessary software to run the functionality on the
+     selected STM32 Nucleo expansion boards.                                                                                 USB
+
+· Compile your design and upload it to the STM32 Nucleo                             General-purpose microcontrollers
+     development board.                                                                          Secure microcontrollers
+
+· Then start developing and testing your application.
+
+Software developed on the STM32 Open Development                                                                                   Power supply                STM32
+Environment prototyping hardware can be directly used in an                                                                          through USB               microcontroller
+advanced prototyping board or in an end product design using
+the same commercial ST components, or components from                                                                                   or external            Complete product range
+the same family as those found on the STM32 Nucleo boards.                                                                                   source             from ultra-low power to
+
+                                                                                                                                        Integrated                  high-performance
+                                                                                                                                  debugging and
+                                                                                                                                                               ST morpho extension header
+                                                                                                                                   programming
+                                                                                                                                  ST-LINK probe
+
+                                                                                                                                                               Arduino UNO R3 extension                15
+                                                                                                                                                               headers
+

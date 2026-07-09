@@ -46,6 +46,18 @@ Engineering conventions live in [`docs/engineering-practices.md`](./docs/enginee
   DMA-vs-CPU contention (speculative), acquisition/processing overlap via autonomous trigger mode +
   GPDMA2-driven async TX (est. → ~20-25 fps on-device). Full analysis: `docs/h563-optimization-notes.md`.
 
+## Considered and rejected
+
+- **HDR exposure-bracketing (2026-07-09).** Proposal: sweep `SET_EXPOSURE_MS` and per-pixel fuse the
+  best-conditioned return to widen depth/IR dynamic range. **Rejected — redundant with the sensor's on-chip
+  Dynamic SPAD Selection (DSS).** Per ST engineer: DSS is per-zone hardware auto-gain (all SPADs for
+  dull/far, down to 1–2 for bright/near; 16 steps/zone, visible in the raw frame's 4-bit/zone DSS map),
+  applied before accumulation; the sensor also dual-ranges (two PRIs, radar-aliasing rejection) and returns a
+  fully-processed depth we can't reprocess host-side. DSS trades collection *area*; exposure trades
+  integration *time* — so host HDR would only add range at DSS's extreme tails (retroreflector past min-SPAD,
+  or very dark/far past all-SPAD), a corner case not worth a subsystem. Owner shelved it, trusting DSS. If
+  ever revisited: a firmware `DISABLE_DSS` command would be the enabling prerequisite.
+
 ## Reference-firmware bugs — do not inherit
 
 Found during review of `<APP>/Src/vl53l9_app.c`; fix these in our fork, leave the reference untouched:
@@ -475,12 +487,16 @@ hardware timestamps. New streams = new `stream_id`s + a version bump per the pro
 numbers; content is unchanged.)* The USB CDC link carries the added IMU/env traffic easily (~KB/s on
 top of 445 KB/s raw), so nothing here waits on Ethernet.
 
-- **Bus topology — resolved** (`docs/iks4a1-stacking.md`): the IKS4A1 shares the ToF's **I3C1** bus as
-  legacy-I2C targets (`I3C1.BusUsage=MixedUsage` already set in the `.ioc`), not a separate I2C peripheral.
-  No static-address collision (ToF `0x29` vs IKS4A1 `0x1E`/`0x38`/`0x5C-5D`/`0x6A-6B`); keep IKS4A1 INT
-  lines off the ToF control pins PB1/PB5/PB6/PB7, and match both boards' bus I/O rail to 3.3 V. The driver
-  must assign the ToF's I3C dynamic address clear of the IKS4A1 statics and declare them as legacy-I2C
-  targets.
+- **Bus topology — bench-tested, shared-I3C1 approach blocked** (`docs/iks4a1-stacking.md`): stacking
+  the IKS4A1 on the ToF's **I3C1** bus (`I3C1.BusUsage=MixedUsage`, shared PB8/PB9) works through ENTDAA
+  (~1.85 MHz open-drain) but fails once the bus switches to I3C push-pull SDR at the configured
+  12.5 MHz — the ToF init errors out with the IKS4A1 stacked, and works with it removed. Suspected root
+  cause: the 53L9A1's onboard NXS0108 level shifter can't meet PP timing under the extra stub/pull-up
+  load the stacked IKS4A1 adds; not yet confirmed with a scope. No static-address collision either way
+  (ToF `0x29` vs IKS4A1 `0x1E`/`0x38`/`0x5C-5D`/`0x6A-6B`). See `docs/iks4a1-stacking.md` → "Known
+  conflict" + "Candidate workarounds" for the ranked list of fixes to try (lift IKS4A1 pull-ups, verify
+  Vio under load, flying-lead unstacking, fall back to a second I2C peripheral) before driver work
+  starts.
 - SFLP quaternion wire format: **IEEE binary16 (fp16), not fixed-point int16** — the research doc mislabels
   this; document the encoding in `docs/protocol.md` and test the fp16 decode path with a golden vector.
 - IMU sample rate (~100+ Hz) ≠ ToF frame rate: IMU frames are independent small frames with their own
