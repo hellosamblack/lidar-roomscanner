@@ -60,19 +60,14 @@ _EXPOSURE_DEBOUNCE = 0.4        # s to settle before sending a dragged exposure 
 _BG_DARK = [0.05, 0.05, 0.08, 1.0]
 _BG_LIGHT = [0.90, 0.90, 0.92, 1.0]
 
-# Constrained turntable camera: orbit (azimuth/elevation) + pan + zoom, world-up
-# locked so the view can never roll/twist (the default arcball can). Sensitivities
-# are in radians (orbit) / fraction (pan,zoom) per pixel or wheel-notch.
+# World-up the camera is re-leveled to each tick so the view never rolls/twists
+# (the built-in arcball still drives orbit/pan/zoom; _level_camera removes roll).
 _WORLD_UP = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-_ORBIT_K = 0.008          # rad per pixel drag (~0.46 deg/px)
-_EL_CLAMP = 1.5           # elevation limit (rad, ~86 deg) — never reach the pole
-_PAN_K = 0.0015           # pan fraction of radius per pixel
-_ZOOM_STEP = 0.9          # radius *= 0.9**wheel_dy
 
 _HELP_LINES = [
     "",
-    "Mouse:  left-drag orbit  |  ctrl / middle / right-drag pan  |  wheel zoom",
-    "        (camera is roll-locked: it orbits and pans but never twists)",
+    "Mouse:  left-drag orbit  |  ctrl / middle-drag pan  |  wheel zoom",
+    "        (the view auto-levels each frame so it never rolls/twists)",
     "Key:    H  this help",
     "",
     "Status   fps, frame/seq-gap/drop/crc/raw counters, current usecase + color.",
@@ -101,12 +96,27 @@ _HELP_LINES = [
 ]
 
 
-def _orbit_eye(target, az, el, radius):
-    """Camera eye position for a turntable orbit: azimuth `az`/elevation `el`
-    (radians) at `radius` from `target`. With a fixed world-up in look_at, this
-    can never introduce roll. Pure — unit-tested."""
-    d = np.array([np.cos(el) * np.sin(az), np.sin(el), np.cos(el) * np.cos(az)])
-    return np.asarray(target, dtype=np.float64) + radius * d
+def _level_up(model_matrix, world_up):
+    """Given a camera-to-world 4x4 (model matrix) and the desired world-up,
+    return the roll-free up-vector for the camera's current forward direction,
+    or None if already level / looking near-straight up-down. Pure — unit-tested.
+    Column convention (verified): [:,3]=eye, [:,2]=back, so forward=-[:,2]."""
+    m = np.asarray(model_matrix, dtype=np.float64)
+    forward = -m[:3, 2]
+    fn = np.linalg.norm(forward)
+    if fn < 1e-9:
+        return None
+    forward = forward / fn
+    up = np.asarray(world_up, dtype=np.float64)
+    if abs(float(np.dot(forward, up))) > 0.999:      # near the pole -> world-up degenerates
+        return None
+    right = np.cross(forward, up)
+    right /= np.linalg.norm(right) + 1e-9
+    new_up = np.cross(right, forward)
+    new_up /= np.linalg.norm(new_up) + 1e-9
+    if float(np.dot(m[:3, 1], new_up)) > 0.99999:    # already level
+        return None
+    return new_up
 
 
 def _rot_xy(pts, k):
@@ -238,11 +248,6 @@ class ControlPanel:
         self.deproj: Deprojector | None = None
         self.pcd = o3d.geometry.PointCloud()
         self._camera_set = False
-        self._cam_target = None             # turntable camera state (world-up locked, no roll)
-        self._cam_az = 0.0
-        self._cam_el = 0.35
-        self._cam_radius = 1.0
-        self._drag = None
         self._rot = 0                       # 90 deg CCW turns applied to cloud + IR pane
         self._last_item = None              # last (header, outputs) rendered — reused on rotate
         self._latest_outputs: dict | None = None
@@ -296,9 +301,6 @@ class ControlPanel:
         self.scene_widget = gui.SceneWidget()
         self.scene_widget.scene = self.rendering.Open3DScene(self.window.renderer)
         self.scene_widget.scene.set_background(_BG_DARK)
-        # Own the camera nav so it can't roll: our set_on_mouse handles orbit/pan/
-        # zoom and returns HANDLED, preempting the built-in twisting arcball.
-        self.scene_widget.set_on_mouse(self._on_mouse)
         self.window.add_child(self.scene_widget)
 
     def _group(self, title, *, open=True):
@@ -519,6 +521,8 @@ class ControlPanel:
         if item is not None:
             self._render_frame(item)
             redraw = True
+        if self._level_camera():                 # keep the horizon level (no roll)
+            redraw = True
         now = time.monotonic()
         # debounced exposure send
         if self._pending_exposure is not None:
@@ -576,63 +580,29 @@ class ControlPanel:
 
     def _reset_camera(self):
         bounds = self.pcd.get_axis_aligned_bounding_box()
-        ext = float(bounds.get_extent().max())
-        if ext <= 0:
+        if bounds.get_extent().max() <= 0:
             return
-        self.scene_widget.setup_camera(60.0, bounds, bounds.get_center())  # projection + near/far
-        self._cam_target = np.asarray(bounds.get_center(), dtype=np.float64)
-        self._cam_radius = ext * 1.8
-        self._cam_az, self._cam_el = 0.0, 0.35
-        self._apply_camera()
+        self.scene_widget.setup_camera(60.0, bounds, bounds.get_center())
         self._camera_set = True
 
-    def _apply_camera(self):
-        if self._cam_target is None:
-            return
-        eye = _orbit_eye(self._cam_target, self._cam_az, self._cam_el, self._cam_radius)
-        self.scene_widget.look_at(self._cam_target.astype(np.float32),
-                                  eye.astype(np.float32), _WORLD_UP)   # fixed up -> never rolls
-
-    def _on_mouse(self, e):
-        gui = self._gui
-        res = gui.SceneWidget.EventCallbackResult
-        if self._cam_target is None:
-            return res.IGNORED
-        et = e.type
-        if et == gui.MouseEvent.Type.WHEEL:
-            if e.wheel_dy:
-                self._cam_radius = max(self._cam_radius * (_ZOOM_STEP ** e.wheel_dy), 1e-3)
-                self._apply_camera()
-            return res.HANDLED
-        if et == gui.MouseEvent.Type.BUTTON_DOWN:
-            self._drag = (e.x, e.y)
-            return res.HANDLED
-        if et == gui.MouseEvent.Type.BUTTON_UP:
-            self._drag = None
-            return res.HANDLED
-        if et == gui.MouseEvent.Type.DRAG and self._drag is not None:
-            dx, dy = e.x - self._drag[0], e.y - self._drag[1]
-            self._drag = (e.x, e.y)
-            pan = (e.is_modifier_down(gui.KeyModifier.CTRL)
-                   or e.is_button_down(gui.MouseButton.MIDDLE)
-                   or e.is_button_down(gui.MouseButton.RIGHT))
-            if pan:
-                self._pan(dx, dy)
-            else:                                   # orbit only — no roll term exists
-                self._cam_az -= dx * _ORBIT_K
-                self._cam_el = float(np.clip(self._cam_el + dy * _ORBIT_K, -_EL_CLAMP, _EL_CLAMP))
-            self._apply_camera()
-            return res.HANDLED
-        return res.IGNORED
-
-    def _pan(self, dx, dy):
-        eye = _orbit_eye(self._cam_target, self._cam_az, self._cam_el, self._cam_radius)
-        fwd = self._cam_target - eye
-        fwd /= np.linalg.norm(fwd) + 1e-9
-        right = np.cross(fwd, _WORLD_UP.astype(np.float64))
-        right /= np.linalg.norm(right) + 1e-9
-        cam_up = np.cross(right, fwd)
-        self._cam_target = self._cam_target + (-dx * right + dy * cam_up) * (self._cam_radius * _PAN_K)
+    def _level_camera(self) -> bool:
+        """Remove any camera roll each tick: read the current pose and re-issue
+        look_at with the up-vector re-leveled to world-up. The built-in arcball
+        drives orbit/pan/zoom; this keeps the horizon level (no twist) without
+        having to suppress the default controller. Returns True when it re-leveled
+        (caller redraws), False when already level / at a pole / no camera yet."""
+        if not self._camera_set:
+            return False
+        m = np.asarray(self.scene_widget.scene.camera.get_model_matrix(), dtype=np.float64)
+        new_up = _level_up(m, _WORLD_UP)
+        if new_up is None:
+            return False
+        eye = m[:3, 3]
+        forward = -m[:3, 2]
+        forward = forward / (np.linalg.norm(forward) + 1e-9)
+        self.scene_widget.look_at((eye + forward).astype(np.float32), eye.astype(np.float32),
+                                  new_up.astype(np.float32))
+        return True
 
     def _update_status(self):
         now, mark = time.monotonic(), self._shown
