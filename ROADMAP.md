@@ -431,6 +431,35 @@ and config persistence host-side.
   `transform_prepare` → restart. Watch for leaks in the opaque transform handle across cycles.
 - CDC RX side appears here for the first time — until now the device only transmits.
 
+### Phase 3.5 (interlude) — GUI control panel + 2D IR monitor ← **host-complete; live hardware run pending**
+
+Plan: `docs/superpowers/plans/2026-07-09-phase3.5-gui-panel.md`, branch `phase3.5-gui-panel`. Owner
+elected this next (2026-07-09), deferring Phase 4 (IKS4A1). Replaces the classic keyboard-only Open3D
+window with an `open3d.visualization.gui` control panel — `roomscan-panel` (or `roomscan-view --panel`);
+the classic `roomscan-view` window stays the default. Presentation layer only: `TransformStage`,
+`CommandClient`/`CommandDispatcher`, `Deprojector`, `sources`/`pump`, `config`, `Stats`/`StreamDecoder`
+are all reused unchanged (no wire change; `docs/protocol.md` untouched).
+
+- **Panel groups:** Status (fps/frames/gaps/drops/crc/raw, usecase+color), Device (Ping/CALIB/Reinit
+  buttons, usecase combobox, debounced exposure slider — all via the shared `CommandDispatcher`, so keys
+  and buttons run one busy-guarded off-thread dispatch path), View (color mode, point size, background,
+  reset-view), **IR Monitor** (scope addition — a live 2D reflectance image, nearest-neighbor upscaled
+  from the 54×42 zone grid, gray/turbo, per-frame auto-range with a freeze toggle, "IR unavailable"
+  placeholder on depth-only replay), Capture (mid-stream Record via a `Recorder` tee; replay pause +
+  fps slider), Events (scrolling device-EVENT / command-result log via an in-process `LogBus`).
+- **Threading:** render on the GUI main thread via `Window.set_on_tick_event` (polls the reader's
+  latest-wins slot; labels/IR/log at ≤4 Hz); reader thread + command worker threads keep serial writes
+  off the reader per the standing contract.
+- **Support layer:** five file-disjoint TDD'd modules — `ir_image.py` (reflectance→RGB), `logbus.py`,
+  `config.py` (+`point_size`/`ir_colormap`/`ir_freeze_range`/`panel_width`), `sources.py` `Recorder`,
+  `control.py` `CommandDispatcher`.
+- **Verified:** host suite 150 passed, ruff clean; headless `run_one_tick` smoke against
+  `captures/e2e_p2.bin` rendered 194 frames (2257-pt cloud), reflectance present, IR auto-range + freeze,
+  all callbacks functional, reader thread joins clean. **Open:** live on-hardware run (buttons against a
+  live board, visual check of the IR pane, config persistence round-trip) — owner-supervised, pending.
+  Known cosmetic: an Open3D filament-teardown "Fatal Python error" can print at interpreter exit
+  (post-functional; watch for it on the supervised close).
+
 ### Phase 4 — Integrate X-NUCLEO-IKS4A1  *(swapped with Ethernet 2026-07-09, owner decision — sensors next)*
 
 IMU (LSM6DSV16X hardware SFLP quaternions) / mag / baro drivers; fuse readings into the payload with

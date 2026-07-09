@@ -203,6 +203,8 @@ def main(argv=None) -> int:
             "  P ping device    C request calibration    R sensor reinit\n"
             "  1 usecase AR_RANGE (~32 fps)    2 usecase AR_PRECISION (~28 fps)\n"
             "  H this help    (stats print here once per second; close window to exit)\n"
+            "  tip: run `roomscan-panel` (or `roomscan-view --panel`) for a button/slider\n"
+            "       control panel with a live 2D IR monitor pane\n"
             "================================"
         )
         return False
