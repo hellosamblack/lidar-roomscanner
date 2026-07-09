@@ -100,6 +100,26 @@ def test_ir_range_frozen_from_config_persists_across_frames():
     assert frozen == (10.0, 20.0)
 
 
+# --- run(): graceful failure when the scanner port is busy -------------------
+
+def test_run_reports_busy_port_cleanly(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    import roomscan.panel as panel
+
+    class _BusyPort:
+        def __init__(self, *a, **k):
+            raise Exception("could not open port 'COM99': PermissionError(13, 'Access is denied.')")
+
+    monkeypatch.setattr(panel, "SerialSource", _BusyPort)
+    args = panel._resolve([])          # no --replay -> live path -> SerialSource
+    args.port = "COM99"
+    rc = panel.run(args)
+    assert rc == 1                     # clean exit, not an uncaught traceback
+    err = capsys.readouterr().err
+    assert "could not open the scanner" in err
+    assert "close any other" in err    # busy-port hint shown
+
+
 # --- _run_reader routing -----------------------------------------------------
 
 class _OneShotSource:

@@ -25,6 +25,7 @@ Threading model (hard rules, mirrors the classic viewer's hard-won contract):
 from __future__ import annotations
 
 import queue
+import sys
 import threading
 import time
 from pathlib import Path
@@ -753,7 +754,15 @@ def run(args, *, smoke_ticks: int = 0) -> int:
 
     _fill_panel_fields(args)   # viewer-delegated args arrive without the panel-only fields
 
-    source = FileSource(args.replay) if args.replay else SerialSource(args.port, args.baud)
+    try:
+        source = FileSource(args.replay) if args.replay else SerialSource(args.port, args.baud)
+    except Exception as exc:  # port busy/missing, bad replay path: report cleanly, no traceback
+        hint = ""
+        if not args.replay and "Access is denied" in str(exc):
+            hint = ("\n       The scanner port is already open by another program — close any other "
+                    "roomscan\n       viewer/panel window (only one can hold the port at a time), then retry.")
+        print(f"error: could not open the scanner: {exc}{hint}", file=sys.stderr)
+        return 1
     client = CommandClient(source.write) if isinstance(source, SerialSource) else None
     dll = Transform.available()
     outputs = ("depth", "reflectance", "confidence") if dll else ("depth",)
@@ -784,5 +793,4 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    import sys
     sys.exit(main())
