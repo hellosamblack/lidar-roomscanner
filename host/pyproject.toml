@@ -10,6 +10,7 @@ dev = ["pytest>=8", "ruff>=0.4"]
 
 [project.scripts]
 roomscan-view = "roomscan.viewer:main"
+roomscan-panel = "roomscan.panel:main"
 roomscan-ctl = "roomscan.control:main"
 
 [build-system]

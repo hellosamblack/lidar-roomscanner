@@ -12,7 +12,7 @@ import numpy as np
 
 from .colors import turbo
 from .config import ViewerConfig, apply_config_defaults
-from .control import CommandClient
+from .control import CommandClient, CommandDispatcher
 from .decoder import StreamDecoder
 from .deproject import Deprojector
 from .pipeline import TransformStage
@@ -39,45 +39,27 @@ class Stats:
 class CommandKeyState:
     """Fire-and-forget command dispatch for the viewer's key bindings.
 
-    Each key press hands its command off to a short-lived worker thread so
-    the render loop never blocks on ``CommandClient.send()`` (up to its 2 s
-    timeout) -- see ``roomscan.control``'s thread-contract note: send() must
-    never run on the frame-feeding thread. A single in-flight-guard flag
-    rejects a second press while one command is still pending (prints
-    "busy", drops the new press) instead of queuing it.
+    Thin wrapper over the shared ``CommandDispatcher`` (roomscan.control): the
+    only viewer-specific behavior is the console ``[cmd]`` prefix. The panel
+    reuses the same dispatcher with a log-bus sink instead of print, so keys
+    and buttons share ONE busy-guarded, off-thread dispatch path (Phase 3.5).
 
-    `client is None` means replay mode (no live device to command): every
-    dispatch just prints that commands aren't available and returns.
+    Each press hands its command to a short-lived worker thread so the render
+    loop never blocks on ``CommandClient.send()`` (its 2 s timeout) -- see
+    control.py's thread-contract note. A single in-flight guard drops a second
+    press while one is pending ("busy") rather than queuing it. `client is
+    None` (replay) makes every dispatch print that commands are unavailable.
     """
 
     def __init__(self, client: CommandClient | None):
-        self.client = client
-        self._lock = threading.Lock()
-        self._busy = False
+        self._dispatcher = CommandDispatcher(client, on_message=lambda m: print(f"\n[cmd] {m}"))
+
+    @property
+    def _busy(self) -> bool:
+        return self._dispatcher.busy
 
     def dispatch(self, cmd: int, param: int, label: str) -> None:
-        if self.client is None:
-            print(f"\n[cmd] {label} -> not available in replay")
-            return
-        with self._lock:
-            if self._busy:
-                print(f"\n[cmd] {label} -> busy, command already in flight")
-                return
-            self._busy = True
-
-        def worker() -> None:
-            try:
-                result, applied = self.client.send(cmd, param)
-                print(f"\n[cmd] {label} -> {result.name} applied={applied}")
-            except TimeoutError as exc:
-                print(f"\n[cmd] {label} -> TIMEOUT {exc}")
-            except Exception as exc:  # e.g. SerialException on a dead port: report, don't traceback
-                print(f"\n[cmd] {label} -> ERROR {exc!r}")
-            finally:
-                with self._lock:
-                    self._busy = False
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._dispatcher.dispatch(cmd, param, label)
 
 
 def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dict,
@@ -149,6 +131,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                     help="colorize the cloud by z-depth (default) or by an aux transform plane")
     ap.add_argument("--save-config", action="store_true",
                     help="persist the effective color/fov/replay-fps/port settings to roomscan.toml")
+    ap.add_argument("--panel", action="store_true",
+                    help="use the Open3D gui control panel instead of the classic keyboard-only window")
     return ap
 
 
@@ -170,6 +154,10 @@ def resolve_args(argv=None, config_path=None) -> argparse.Namespace:
 
 def main(argv=None) -> int:
     args = resolve_args(argv)
+
+    if getattr(args, "panel", False):
+        from .panel import run as panel_run   # deferred: pulls in the gui stack only when asked
+        return panel_run(args)
 
     import open3d as o3d   # deferred: heavy import
 
