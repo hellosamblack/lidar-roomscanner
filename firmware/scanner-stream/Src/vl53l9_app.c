@@ -336,8 +336,11 @@ static uint32_t rs_pack_status(const vl53l9_status_t *s) {
  * into handle_error(). Acknowledging both events right before the fresh trigger ensures
  * the next wait can only be satisfied by a genuinely new edge.
  *
- * calib_data is written in place (the caller owns the buffer and re-sends it over CDC
- * after this returns -- calibration may have changed across a physical reset).
+ * calib_data is written in place, and the CALLER RETRANSMITS it over CDC after a
+ * successful return (calibration may have changed across a physical reset) -- every
+ * caller honors this: rs_apply_pending_config()'s two direct call sites send CALIB
+ * explicitly, and rs_recover() retransmits on its success path so all
+ * handle_error()-driven recoveries inherit it (see its comment).
  * Returns 0 on success, the first non-zero vl53l9_error on failure (VL53L9_ERROR_* per
  * vl53l9.h:47-53) -- INCLUDING a failed seed trigger: rs_trigger_next() (Task 5) now
  * returns its error code instead of calling handle_error() itself, and this function
@@ -434,7 +437,25 @@ static int rs_recover(void) {
         HAL_Delay(backoff_ms);
         int ret = rs_sensor_reinit(&device[CONF_DEVICE_ID], calib_data);
         if (ret == 0) {
-            return 0; /* streaming again, frame 1 already triggered inside rs_sensor_reinit */
+            /* Streaming again, frame 1 already triggered inside rs_sensor_reinit -- which
+             * also re-read calib_data across the physical reset, so RETRANSMIT it here
+             * (rs_sensor_reinit's contract: the caller owning the recovery retransmits).
+             * Doing it INSIDE rs_recover, not at handle_error()'s or any other caller's
+             * level, means every recovery path inherits it structurally (same
+             * self-contained-envelope principle as rs_sensor_reinit's post-start tail) --
+             * without this, a handle_error()-driven recovery would leave the host
+             * deprojecting with possibly-stale calibration for up to 63 frames until the
+             * periodic CALIB cadence fires. Width/height are derived from the active
+             * profile's binning (fixed at 2 -> 54x42) so this function stays
+             * parameter-free for its no-context caller. seq = g_last_seq: no new frame
+             * exists yet post-reinit, and the next RAW's counter is unknowable here (the
+             * sensor's counter restarts across the reset); the last captured seq is the
+             * spec-consistent stand-in, same as EVENT frames use. */
+            uint8_t w = 0, h = 0;
+            vl53l9_utils_get_resolution(g_active_profile.binning, &w, &h);
+            rs_send_frame_cdc(RS_STREAM_CALIB, g_last_seq, 0u, calib_data,
+                              VL53L9_CALIB_DATA_SIZE, w, h);
+            return 0;
         }
         rs_send_event(RS_EVT_SENSOR_INIT_FAIL, (uint32_t)attempt, NULL);
     }
@@ -870,7 +891,13 @@ void vl53l9_app() {
         in_height = 1;
 #endif
     } else {
-        handle_error(); /* unsupported binning */
+        /* Unsupported binning: effectively unreachable (CONF_USECASE is compile-time and
+         * every table profile is binning 2 or 4). NOTE (raw-only builds): handle_error()'s
+         * recovery here runs with g_active_profile still uninitialized (it is seeded just
+         * before the raw-only loop) and is guaranteed to fail into the terminal spin
+         * ~3 s later -- acceptable for a can't-happen site, documented so it isn't
+         * mistaken for a real recovery path. */
+        handle_error();
     }
 
     /* Boot bring-up: reset -> I3C address -> init -> calib -> profile-apply. Raw-only
@@ -893,7 +920,13 @@ void vl53l9_app() {
              * receive this. The retry is the actual fix; the event is a diagnostic for
              * the rare case a debug probe is already watching the CDC port this early. */
             rs_send_event(RS_EVT_SENSOR_INIT_FAIL, (uint32_t)attempt, NULL);
-            HAL_Delay(100u << (attempt - 1)); /* 100,200,400,800,1600 ms -- same shape as rs_recover() */
+            HAL_Delay(100u << (attempt - 1)); /* 100,200,400,800,1600 ms -- same ladder as
+                                                * rs_recover(), placed AFTER the failed
+                                                * attempt here (attempt 1 runs immediately
+                                                * on a cold boot) vs rs_recover()'s
+                                                * delay-BEFORE-each-attempt (a mid-stream
+                                                * fault wants settle time before touching
+                                                * the sensor again) */
         }
         if (boot_ret) {
             /* 5 attempts exhausted: the sensor will not come up at all. Last resort,
@@ -1513,6 +1546,11 @@ static memory_t allocate_memory(uint16_t size) {
     memory.size = size;
     memory.data = malloc(size);
     if (memory.data == NULL) {
+        /* Effectively unreachable (two fixed ~15 KB buffers against 640 KB SRAM). NOTE
+         * (raw-only builds): handle_error()'s sensor recovery is irrelevant to a malloc
+         * failure; in the pre-loop call context g_active_profile is also still
+         * uninitialized, so recovery fails into the terminal spin ~3 s later -- the
+         * de-facto behavior is "spin on OOM", same as before Task 5, just delayed. */
         handle_error();
     }
     return memory;
@@ -1525,9 +1563,12 @@ static memory_t allocate_memory(uint16_t size) {
  * treats that as "resume via `continue`", see the design comment above rs_recover()).
  * On-board-transform builds (CONF_TRANSFORM_ONBOARD=1, the golden-pair regeneration
  * path) keep the original, unmodified terminal spin -- no EVENT, no recovery -- per the
- * brief's "golden-path stability" call; that build has no rs_recover()/rs_send_event
- * available to it (both live inside the !CONF_TRANSFORM_ONBOARD guard) and this function
- * is the only place that distinction has to be made explicit.
+ * brief's "golden-path stability" call. rs_recover() lives inside the
+ * !CONF_TRANSFORM_ONBOARD guard so that build genuinely cannot call it;
+ * rs_send_event() is file-scope (it sits with the other generic senders, above the
+ * guard) but is deliberately not called from the dual-stream build either -- hence
+ * that build's expected unused-function warning for it. This function is the only
+ * place the two builds' fault policies have to be made explicit.
  *
  * Exhaustion (either build): drop off the USB bus (this spin never services tud_task, so
  * leaving the D+ pull-up asserted would present a dead device to the host, Code 43;

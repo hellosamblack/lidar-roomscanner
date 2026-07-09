@@ -12,7 +12,7 @@ One frame = 32-byte header, payload, CRC32. See the `protocol-change` skill befo
 | 5      | 1    | `frame_type`  | `1` = DATA, `2` = EVENT (device error/log), `3` = COMMAND (host→device), `4` = ACK (device→host) |
 | 6      | 1    | `stream_id`   | see Stream registry below; ignored for COMMAND/ACK           |
 | 7      | 1    | `flags`       | bit0 = DROPPED (DATA/EVENT only); COMMAND/ACK = 0            |
-| 8      | 4    | `seq`         | DATA: sensor `frame_counter`. COMMAND: host-chosen token. ACK: echoes the COMMAND token (not a frame counter). |
+| 8      | 4    | `seq`         | DATA: sensor `frame_counter`. COMMAND: host-chosen token. ACK: echoes the COMMAND token (not a frame counter). Host requirement: `seq` may **restart** (jump backwards, typically to a low value) after a device recovery or REINIT — hosts must treat a backwards jump as a single discontinuity, never as an error or a huge gap. |
 | 12     | 8    | `t_us`        | u64 µs since boot (v1 source: `HAL_GetTick()*1000`, 1 ms resolution; a TIM-backed µs clock is planned with Phase 5 IMU fusion); ignored for COMMAND/ACK |
 | 20     | 2    | `width`       | zones (DATA/EVENT); 0 for COMMAND/ACK                        |
 | 22     | 2    | `height`      | zones (DATA/EVENT); 0 for COMMAND/ACK                        |
@@ -65,7 +65,10 @@ Firmware emission (Phase 3 Task 5, raw-only builds only — `CONF_TRANSFORM_ONBO
 command<<16 | firmware`) then runs a bounded recovery loop — up to 5 full sensor
 re-init attempts (100/200/400/800/1600 ms backoff), emitting `SENSOR_INIT_FAIL` per
 *failed* attempt with detail = that attempt's 1-based index — before giving up and
-disconnecting. The same bounded-retry shape wraps the pre-loop boot sequence, turning
+disconnecting. On successful recovery the device retransmits a CALIB frame (calibration
+is re-read during re-init and may have changed across the physical reset) before RAW
+streaming resumes; its `seq` carries the last captured frame's counter (like EVENT
+frames — the next RAW's restarted counter is unknowable at send time). The same bounded-retry shape wraps the pre-loop boot sequence, turning
 the historical ~1-in-5 first-power-up failure into a self-healing delay; boot-time
 `SENSOR_INIT_FAIL` events are emitted but drop silently (no host is attached yet at that
 point in boot). `TRIGGER_TIMEOUT`/`DMA_TIMEOUT` are emitted at their respective retry
