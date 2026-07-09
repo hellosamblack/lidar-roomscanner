@@ -54,16 +54,25 @@ Event-code registry:
 
 | code | Name               | detail meaning                     |
 |------|--------------------|--------------------------------------|
-| 1 | SENSOR_INIT_FAIL   | vl53l9 status word                  |
+| 1 | SENSOR_INIT_FAIL   | 1-based attempt number within the bounded boot/recovery retry cycle (see below) |
 | 2 | TRIGGER_TIMEOUT    | retry count at exhaustion           |
-| 3 | DMA_TIMEOUT        | retry count at exhaustion           |
+| 3 | DMA_TIMEOUT        | retry count at exhaustion (currently always 1 — no internal retry loop precedes this timeout) |
 | 4 | SENSOR_ERROR_STATUS| vl53l9 status word from handle path |
 | 5 | TX_OVERFLOW        | frames dropped since last report    |
 
-Rationale: firmware today spins in `handle_error()`; emitting an EVENT first is the planned
-recovery-path upgrade (ROADMAP "reference-firmware bugs" #2 + Task 8's 1-in-5 boot-failure
-follow-up). This task defines the wire contract only; firmware emission is wired when the
-recovery work lands.
+Firmware emission (Phase 3 Task 5, raw-only builds only — `CONF_TRANSFORM_ONBOARD=0`):
+`handle_error()` emits `SENSOR_ERROR_STATUS` (detail = packed status word: `fsm<<24 |
+command<<16 | firmware`) then runs a bounded recovery loop — up to 5 full sensor
+re-init attempts (100/200/400/800/1600 ms backoff), emitting `SENSOR_INIT_FAIL` per
+*failed* attempt with detail = that attempt's 1-based index — before giving up and
+disconnecting. The same bounded-retry shape wraps the pre-loop boot sequence, turning
+the historical ~1-in-5 first-power-up failure into a self-healing delay; boot-time
+`SENSOR_INIT_FAIL` events are emitted but drop silently (no host is attached yet at that
+point in boot). `TRIGGER_TIMEOUT`/`DMA_TIMEOUT` are emitted at their respective retry
+exhaustion points immediately before `handle_error()` runs. On-board-transform builds
+(`CONF_TRANSFORM_ONBOARD=1`, the golden-pair regeneration path) are unchanged: no EVENT
+emission, `handle_error()` still spins forever on any fault — golden-path stability, not
+a wire-format distinction.
 
 ## COMMAND frame payload (frame_type = 3)
 
@@ -143,3 +152,4 @@ specced with the Phase 4 transport work).
 - **v1 rev 2026-07-08 (b)**: additive — RAW_3DMD (7) and CALIB (8) allocated for the PC-side-transform architecture. No layout change.
 - **v1 rev 2026-07-08 (c)**: additive — COMMAND (frame_type=3) and ACK (frame_type=4) frame types, command registry v1 (PING/SEND_CALIB/SET_USECASE/SET_FRAME_PERIOD_US/SET_EXPOSURE_MS/REINIT), result-code registry. No layout change.
 - **v1 rev 2026-07-08 (d)**: semantics clarification (additive, no wire change) — SET_FRAME_PERIOD_US is stored and echoed but has no observable fps effect under the app's always-manual sync mode (driver: period governs AUTONOMOUS mode only); documented in the command-registry row, discovered during Phase 3 Task 4 hardware verification.
+- **v1 rev 2026-07-08 (e)**: semantics pinned (additive, no wire change) — EVENT emission wired in firmware (Phase 3 Task 5, raw-only builds): `SENSOR_INIT_FAIL`'s detail is the bounded-retry attempt number (not a status word, superseding the earlier placeholder wording), emission points and the `handle_error()` bounded-recovery design documented in the EVENT section above.

@@ -117,6 +117,52 @@ static void rs_send_frame_cdc(uint8_t stream_id, uint32_t seq, uint8_t flags, co
     pending_dropped = ok ? 0u : 1u;
 }
 
+/* Last successfully captured frame's counter. EVENT frames carry this as their header
+ * `seq` (docs/protocol.md: "an EVENT does not increment it -- it carries the seq of the
+ * last captured frame"). Stays 0 before any frame is ever captured (boot bring-up, or an
+ * early boot-retry attempt) -- correct per the same spec sentence, there IS no captured
+ * frame yet. Updated by the raw-only loop right after each successful
+ * vl53l9_utils_parse_frame() (see its call site below); the on-board-transform loop does
+ * not update it because that loop never calls rs_send_event (Task 5 scope is raw-only). */
+static uint32_t g_last_seq = 0;
+
+/* Calibration blob buffer, per-device (VL53L9_CALIB_DATA_SIZE bytes). File-scope rather
+ * than a vl53l9_app() stack local (as it was before Task 5) so handle_error()'s bounded
+ * recovery (raw-only builds only, see handle_error()'s definition) can hand it straight
+ * to rs_sensor_reinit() without threading a pointer down from vl53l9_app()'s stack,
+ * across a function (handle_error) that many call sites invoke with no arguments at all.
+ * Declared unconditionally (not inside the !CONF_TRANSFORM_ONBOARD guard) so both build
+ * modes share one definition; every existing consumer already takes/passes `calib_data`
+ * as an explicit parameter and is unaffected by it now living at file scope instead of on
+ * vl53l9_app()'s stack. */
+static uint8_t calib_data[VL53L9_CALIB_DATA_SIZE];
+
+/* rs_send_event(): builds an EVENT frame (frame_type RS_FRAME_EVENT; payload = u32 code +
+ * u32 detail + optional ASCII message, docs/protocol.md) and sends it via the shared
+ * generic CDC sender. stream_id/width/height are always 0 for EVENT (ignored fields per
+ * the spec). Not-connected sends drop silently through rs_send_generic_cdc's own
+ * tud_cdc_connected() gate -- existing, deliberate policy: boot-time events emitted
+ * before a host has attached are lost (there is no one to read them), which is fine
+ * because the bounded recovery itself -- not the diagnostic -- is what fixes the boot
+ * hang; events exist to make an already-recovering device observable, not to guarantee
+ * delivery. msg may be NULL for a 0-length message tail (every call site in this task
+ * passes NULL: the numeric code+detail carry what a recovery/fault needs, and adding
+ * human-readable text is a cheap future addition, not required for this pass). */
+static void rs_send_event(uint32_t code, uint32_t detail, const char *msg) {
+    uint8_t payload[8 + 64];
+    size_t msg_len = msg ? strlen(msg) : 0u;
+    if (msg_len > 64u) {
+        msg_len = 64u; /* defensive cap matching the fixed local buffer; no call site
+                         * in this task passes a message at all */
+    }
+    rs_put_u32(payload + 0, code);
+    rs_put_u32(payload + 4, detail);
+    if (msg_len) {
+        memcpy(payload + 8, msg, msg_len);
+    }
+    (void)rs_send_generic_cdc(RS_FRAME_EVENT, 0u, g_last_seq, 0u, payload, (uint32_t)(8u + msg_len), 0u, 0u);
+}
+
 /* Wait for a platform event in short slices, pumping TinyUSB between slices so
  * USB control transfers are serviced within host timeouts. Safe with the
  * platform event semantics: the ISR-set flag in g_platform_evt persists until
@@ -157,13 +203,17 @@ static int rs_wait_event_usb(uint32_t evt, uint32_t timeout_ms) {
  * it to a visible stall rather than a lost frame, and this is the knob to raise back to
  * 5. (HAL_Delay(n) actually waits n+1 ticks, so 2 here means ~3 ms wall time.) */
 #define RS_TRIGGER_SETTLE_MS (2u)
-static void rs_trigger_next(vl53l9_device_t *p_dev) {
-    int ret;
+/* Returns the vl53l9 error code (0 on success) instead of dead-ending into
+ * handle_error() itself (Task 5 recursion guard -- see the block comment above
+ * rs_recover() below for the full reasoning): rs_sensor_reinit()'s own post-start tail
+ * calls this to seed frame 1, and rs_sensor_reinit() is itself called BY handle_error()'s
+ * recovery loop -- if this function called handle_error() on failure, a sensor that keeps
+ * coming up trigger-broken would recurse handle_error -> rs_sensor_reinit ->
+ * rs_trigger_next -> handle_error without bound. Every ordinary (non-recovery) call site
+ * below still routes a failure through handle_error() explicitly, exactly as before. */
+static int rs_trigger_next(vl53l9_device_t *p_dev) {
     HAL_Delay(RS_TRIGGER_SETTLE_MS);
-    ret = vl53l9_trigger_frame(p_dev);
-    if (ret) {
-        handle_error();
-    }
+    return vl53l9_trigger_frame(p_dev);
 }
 
 /* ---- Host->device command channel (Phase 3 Task 2) --------------------------------
@@ -289,8 +339,11 @@ static uint32_t rs_pack_status(const vl53l9_status_t *s) {
  * calib_data is written in place (the caller owns the buffer and re-sends it over CDC
  * after this returns -- calibration may have changed across a physical reset).
  * Returns 0 on success, the first non-zero vl53l9_error on failure (VL53L9_ERROR_* per
- * vl53l9.h:47-53). NOTE: rs_trigger_next() itself dead-ends in handle_error() on
- * trigger failure -- acceptable while that is the global policy (Task 5 revisits). */
+ * vl53l9.h:47-53) -- INCLUDING a failed seed trigger: rs_trigger_next() (Task 5) now
+ * returns its error code instead of calling handle_error() itself, and this function
+ * propagates it like any other stage failure. This is deliberate (recursion guard, see
+ * rs_recover()'s comment): this function must never call handle_error(), because
+ * handle_error()'s own recovery loop is what calls this function. */
 static int rs_sensor_reinit(vl53l9_device_t *p_dev, uint8_t *calib_data) {
     int ret;
 
@@ -330,13 +383,107 @@ static int rs_sensor_reinit(vl53l9_device_t *p_dev, uint8_t *calib_data) {
 
     /* Post-start tail (the safety envelope -- see the function comment): settle margin
      * matching the pre-loop boot sequence's HAL_Delay(50), clear any stale latched
-     * events from the reset, then seed the first frame. */
+     * events from the reset, then seed the first frame. A failed seed trigger is
+     * propagated to our own caller (recursion guard -- see the function comment and
+     * rs_trigger_next's own comment); it is NOT retried here. */
     HAL_Delay(50);
     platform_acknowledge_event(PLATFORM_GPIO_IT_EVT);
     platform_acknowledge_event(PLATFORM_I3C_DMA_RX_EVT);
-    rs_trigger_next(p_dev);
+    return rs_trigger_next(p_dev);
+}
 
-    return 0;
+/* ---- Bounded sensor recovery (Phase 3 Task 5) --------------------------------------
+ *
+ * Recursion guard, spelled out (the residual flagged in Task 4's review): the naive
+ * version of this feature has handle_error() call rs_sensor_reinit() to recover, and
+ * rs_sensor_reinit()'s own tail calls rs_trigger_next() to seed frame 1. If
+ * rs_trigger_next() dead-ended into handle_error() on failure (as it used to), a sensor
+ * that keeps coming up trigger-broken would recurse handle_error -> rs_sensor_reinit ->
+ * rs_trigger_next -> handle_error -> rs_sensor_reinit -> ... without bound (each level
+ * consuming stack, never unwinding). Fixed structurally, not by convention:
+ * rs_trigger_next() and rs_sensor_reinit() now both return ordinary error codes and
+ * NEITHER of them ever calls handle_error(). rs_recover() below is the ONLY function
+ * that calls rs_sensor_reinit() in a retry loop, and rs_recover() itself never calls
+ * handle_error() or itself -- it is the bottom of this call chain, not a link in it.
+ *
+ * Resume-the-loop design: handle_error() (below) either (a) recovers via rs_recover()
+ * and returns normally, or (b) exhausts recovery, disconnects, and spins forever -- it
+ * never "returns false" or signals failure some other way. Every call site in the
+ * raw-only loop that used to read `if (ret) handle_error();` and fall through becomes
+ * `if (ret) { handle_error(); continue; }` (or an equivalent flag-then-continue for
+ * sites nested inside an inner retry loop) -- the `continue` restarts the OUTERMOST
+ * while(1) iteration from its top, deliberately abandoning whatever local state (a
+ * partially retried wait, a parsed frame, a pending command) belonged to the pre-fault
+ * sensor generation. This is safe because rs_sensor_reinit() (which the recovery calls)
+ * leaves the sensor with frame 1 ALREADY TRIGGERED and both stale platform events
+ * acknowledged (its own safety envelope) -- exactly the state the top of the raw-only
+ * loop expects when it begins by waiting on PLATFORM_GPIO_IT_EVT. A command that was
+ * mid-apply when the fault hit gets no ACK; the host's CommandClient times out and the
+ * user can retry -- simpler and safer than trying to reconstruct a coherent ACK for a
+ * config change that may not have taken effect on the now-fully-reset sensor.
+ *
+ * Event semantics (a judgment call, documented here because it reads as a deviation from
+ * docs/protocol.md's event-code table): the table lists SENSOR_INIT_FAIL's detail as "vl53l9
+ * status word", written before this task pinned actual emission. This task's own brief is
+ * more specific for the recovery loop ("EVENT per attempt, code SENSOR_INIT_FAIL, detail =
+ * attempt#") and that is what's implemented below -- detail is the 1-based attempt number,
+ * not a packed status word. docs/protocol.md is updated alongside this change to match. */
+static int rs_recover(void) {
+    for (int attempt = 1; attempt <= 5; attempt++) {
+        uint32_t backoff_ms = 100u << (attempt - 1); /* 100, 200, 400, 800, 1600 ms */
+        HAL_Delay(backoff_ms);
+        int ret = rs_sensor_reinit(&device[CONF_DEVICE_ID], calib_data);
+        if (ret == 0) {
+            return 0; /* streaming again, frame 1 already triggered inside rs_sensor_reinit */
+        }
+        rs_send_event(RS_EVT_SENSOR_INIT_FAIL, (uint32_t)attempt, NULL);
+    }
+    return -1; /* 5 attempts exhausted */
+}
+
+/* Boot bring-up (Task 5): reset -> I3C address -> init -> calib -> profile-apply ->
+ * sync-mode -> start -- the full sequence vl53l9_app() used to run inline exactly once,
+ * with no error recovery on any step. Its call site in vl53l9_app() wraps this in the
+ * SAME bounded-retry shape as rs_recover() (5 attempts, 100/200/400/800/1600 ms
+ * backoff), which is what converts the historical ~1-in-5 first-power-up failure into a
+ * self-healing delay instead of an immediate handle_error() hang.
+ *
+ * Deliberately NOT rs_sensor_reinit(): that function's post-start tail also seeds frame
+ * 1's trigger and clears stale platform events -- correct for REINIT/recovery, where the
+ * caller is about to resume the acquisition loop immediately, but wrong here. Boot
+ * bring-up runs BEFORE vl53l9_app()'s own buffer allocation, tud_connect(), and
+ * DTR-gate-then-trigger-frame-1 sequence (further down, unchanged) -- triggering frame 1
+ * this early would race those steps and risk an unwanted second trigger once the main
+ * loop seeds frame 1 itself. This function leaves the sensor in STANDBY, matching
+ * exactly what the original inline boot sequence did (out_calib_data is written in
+ * place, as before). */
+static int rs_boot_bringup(vl53l9_device_t *p_dev, uint8_t *out_calib_data, vl53l9_profile_t *p_profile) {
+    platform_power_reset(CONF_DEVICE_ID);
+    if (p_dev->bus_type & PLATFORM_BUS_I3C) {
+        platform_assign_dynamic_address();
+    }
+
+    int ret = vl53l9_init(p_dev);
+    if (ret) {
+        return ret;
+    }
+
+    ret = vl53l9_get_calib_data(p_dev, out_calib_data);
+    if (ret) {
+        return ret;
+    }
+
+    ret = vl53l9_utils_set_profile(p_dev, p_profile);
+    if (ret) {
+        return ret;
+    }
+
+    ret = vl53l9_set_sync_mode(p_dev, VL53L9_SYNC_MANUAL);
+    if (ret) {
+        return ret;
+    }
+
+    return vl53l9_start(p_dev);
 }
 
 /* ACK sender: builds the 12-byte (cmd, result, applied) payload and sends an RS_FRAME_ACK
@@ -446,11 +593,24 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
  * block comment on rs_pending above for why here is safe). Sends the deferred ACK for
  * whatever command was pending, then clears the slot. seq_for_calib carries the current
  * frame's counter, reused as the seq on a REINIT's re-sent CALIB frame (no "next frame"
- * counter exists yet at this point in the iteration). */
-static void rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data, uint16_t out_width,
+ * counter exists yet at this point in the iteration).
+ *
+ * Return value (Task 5): true means a fault occurred mid-apply and handle_error()'s
+ * bounded recovery already got the sensor back to a known-good streaming state (frame 1
+ * already triggered inside rs_sensor_reinit) -- the caller MUST `continue` its own
+ * while(1) loop immediately rather than fall through to code that assumes the command
+ * completed (see the resume-the-loop design comment above rs_recover()). false means
+ * normal completion (success or a cleanly-handled/acked failure) -- the caller proceeds
+ * as usual. handle_error() itself never "returns false" (it recovers and returns, or
+ * spins forever) -- every `handle_error(); return true;` pair below is this function's
+ * half of that contract. A command abandoned via `return true` gets no ACK: the host's
+ * CommandClient times out and the user can retry, simpler and safer than reconstructing
+ * a coherent ACK for a config change that may not have taken effect on the now-fully-
+ * reset sensor. */
+static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data, uint16_t out_width,
                                     uint16_t out_height, uint32_t seq_for_calib) {
     if (!rs_pending.pending) {
-        return;
+        return false;
     }
 
     uint32_t cmd = rs_pending.cmd;
@@ -463,9 +623,10 @@ static void rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
         if (ret) {
             /* Full re-init failed outright (not a "restore the old profile" situation --
              * there is no known-good state to fall back to short of trying again).
-             * Task 5 owns bounded retry; for now this is the same terminal spin
-             * handle_error() already uses elsewhere, per the brief. */
+             * handle_error() runs its own bounded recovery (a FRESH rs_recover() cycle,
+             * independent of this failed attempt) and either resumes or never returns. */
             handle_error();
+            return true;
         }
         /* rs_sensor_reinit() returned with the sensor streaming and frame 1 already
          * triggered (settle + stale-event clear + trigger are inside it -- its safety
@@ -476,7 +637,7 @@ static void rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
         rs_send_frame_cdc(RS_STREAM_CALIB, seq_for_calib, 0u, calib_data, VL53L9_CALIB_DATA_SIZE, out_width,
                           out_height);
         rs_send_ack(token, cmd, RS_RESULT_OK, 0u);
-        return;
+        return false;
     }
 
     /* SET_USECASE / SET_FRAME_PERIOD_US / SET_EXPOSURE_MS: build a candidate profile
@@ -515,13 +676,16 @@ static void rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
         vl53l9_get_status(p_dev, &status);
         rs_send_ack(token, cmd, RS_RESULT_SENSOR_ERROR, rs_pack_status(&status));
         if (rs_sensor_reinit(p_dev, calib_data)) {
+            /* the direct best-effort reinit above also failed: hand off to
+             * handle_error()'s own (fresh) bounded recovery loop */
             handle_error();
+            return true;
         }
         /* recovered: sensor streaming again on the old profile, frame 1 triggered
          * inside rs_sensor_reinit; calib may have changed across the reset */
         rs_send_frame_cdc(RS_STREAM_CALIB, seq_for_calib, 0u, calib_data, VL53L9_CALIB_DATA_SIZE, out_width,
                           out_height);
-        return;
+        return false;
     }
 
     ret = vl53l9_utils_set_profile(p_dev, &candidate);
@@ -530,10 +694,10 @@ static void rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
         /* restore the previous (known-good) profile before leaving standby */
         int restore_ret = vl53l9_utils_set_profile(p_dev, &g_active_profile);
         if (restore_ret) {
-            /* double failure: no known-good profile could be re-applied. Task 5 owns
-             * bounded recovery; for now this is the same terminal spin handle_error()
-             * already uses elsewhere, per the brief. */
+            /* double failure: no known-good profile could be re-applied.
+             * handle_error()'s bounded recovery is the only way back. */
             handle_error();
+            return true;
         }
     }
 
@@ -544,8 +708,9 @@ static void rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
     int start_ret = vl53l9_start(p_dev);
     if (sync_ret || start_ret) {
         /* Could not get back to streaming at all (neither candidate nor restored
-         * profile). Task 5 owns bounded recovery; terminal spin for now. */
+         * profile). handle_error()'s bounded recovery is the only way back. */
         handle_error();
+        return true;
     }
 
     /* Post-restart settle + stale-event clear -- see the identical comments on the
@@ -557,13 +722,16 @@ static void rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
     HAL_Delay(50);
     platform_acknowledge_event(PLATFORM_GPIO_IT_EVT);
     platform_acknowledge_event(PLATFORM_I3C_DMA_RX_EVT);
-    rs_trigger_next(p_dev); /* seed the first frame under whichever profile is now active */
+    if (rs_trigger_next(p_dev)) { /* seed the first frame under whichever profile is now active */
+        handle_error();
+        return true;
+    }
 
     if (!applied_ok) {
         vl53l9_status_t status = { 0 };
         vl53l9_get_status(p_dev, &status);
         rs_send_ack(token, cmd, RS_RESULT_SENSOR_ERROR, rs_pack_status(&status));
-        return;
+        return false;
     }
 
     g_active_profile = candidate; /* adopt only now that the sensor has accepted it */
@@ -585,6 +753,7 @@ static void rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
         applied = readback;
     }
     rs_send_ack(token, cmd, RS_RESULT_OK, applied);
+    return false;
 }
 
 static void rs_poll_commands(const uint8_t *calib_data, uint16_t out_width, uint16_t out_height,
@@ -704,25 +873,55 @@ void vl53l9_app() {
         handle_error(); /* unsupported binning */
     }
 
-    /* sensor reset */
+    /* Boot bring-up: reset -> I3C address -> init -> calib -> profile-apply. Raw-only
+     * builds also fold sync-mode + start in here (via rs_boot_bringup(), see its
+     * comment) and wrap the whole sequence in the same bounded retry as mid-stream
+     * recovery (rs_recover()) -- this is what converts the historical ~1-in-5 boot hang
+     * (Task 8/prior reports) into a self-healing delay. On-board-transform builds keep
+     * the original unretried inline sequence verbatim (sync-mode + start stay at their
+     * original position, further down) -- golden-path stability, per the brief. */
+#if !CONF_TRANSFORM_ONBOARD
+    {
+        int boot_ret = -1;
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            boot_ret = rs_boot_bringup(p_dev, calib_data, p_profile);
+            if (boot_ret == 0) {
+                break;
+            }
+            /* Dropped silently: tud_connect() has not run yet at this point in boot (by
+             * design -- see its call site further down), so no host is attached to
+             * receive this. The retry is the actual fix; the event is a diagnostic for
+             * the rare case a debug probe is already watching the CDC port this early. */
+            rs_send_event(RS_EVT_SENSOR_INIT_FAIL, (uint32_t)attempt, NULL);
+            HAL_Delay(100u << (attempt - 1)); /* 100,200,400,800,1600 ms -- same shape as rs_recover() */
+        }
+        if (boot_ret) {
+            /* 5 attempts exhausted: the sensor will not come up at all. Last resort,
+             * matching the legacy immediate-hang contract -- there is no acquisition
+             * loop yet to resume. */
+            tud_disconnect();
+            while (1)
+                ;
+        }
+    }
+#else
     platform_power_reset(CONF_DEVICE_ID);
     if (p_dev->bus_type & PLATFORM_BUS_I3C) {
         platform_assign_dynamic_address();
     }
 
-    /* initialize sensor and retrieve calibration data */
     ret = vl53l9_init(p_dev);
     if (ret) {
         handle_error();
     }
 
-    uint8_t calib_data[VL53L9_CALIB_DATA_SIZE];
     ret = vl53l9_get_calib_data(p_dev, calib_data);
     if (ret) {
         handle_error();
     }
 
     vl53l9_utils_set_profile(p_dev, p_profile);
+#endif
 
 #if CONF_TRANSFORM_ONBOARD
     /* initialize processing pipeline */
@@ -827,6 +1026,9 @@ void vl53l9_app() {
                                         .item_size = sizeof(stream_buffer_t) };
 #endif /* CONF_TRANSFORM_ONBOARD */
 
+#if CONF_TRANSFORM_ONBOARD
+    /* raw-only builds already did this inside rs_boot_bringup() above (folded in
+     * there so the whole boot sequence shares one bounded-retry wrapper) */
     ret = vl53l9_set_sync_mode(p_dev, VL53L9_SYNC_MANUAL);
     if (ret) {
         handle_error();
@@ -836,6 +1038,7 @@ void vl53l9_app() {
     if (ret) {
         handle_error();
     }
+#endif
 
     platform_profiler_enable();
     uint32_t start_time = platform_profiler_get_timestamp();
@@ -1083,7 +1286,9 @@ void vl53l9_app() {
      * commands only ever mutate this local copy, never g_ranging_profiles[] itself. */
     g_active_profile = *p_profile;
 
-    rs_trigger_next(p_dev); /* seed trigger for frame 1 */
+    if (rs_trigger_next(p_dev)) { /* seed trigger for frame 1 */
+        handle_error(); /* recovers (re-triggers frame 1 itself) or never returns */
+    }
 
     while (1) {
 
@@ -1096,6 +1301,17 @@ void vl53l9_app() {
          * FRAME_READY, then fall through and ack, clearing any late edge so it cannot
          * leak into the next iteration). */
         int rs_attempts = 0;
+        bool rs_fault_recovered = false; /* set when handle_error() ran and recovered
+                                           * (never left true across a handle_error()
+                                           * that exhausts -- that path never returns) --
+                                           * checked right after the loop below to
+                                           * `continue` the OUTER while(1) from a clean
+                                           * iteration instead of trusting any state
+                                           * computed in this one (see the design
+                                           * comment above rs_recover()). A plain
+                                           * `continue` inside this inner for(;;) cannot
+                                           * reach the outer loop directly in C, hence
+                                           * the flag. */
         for (;;) {
             ret = rs_wait_event_usb(PLATFORM_GPIO_IT_EVT, 1000);
             if (ret) {
@@ -1103,9 +1319,17 @@ void vl53l9_app() {
                 (void)vl53l9_poll_frame(p_dev, &rs_is_ready);
                 if (!rs_is_ready) {
                     if (++rs_attempts > 3) {
+                        rs_send_event(RS_EVT_TRIGGER_TIMEOUT, (uint32_t)rs_attempts, NULL);
                         handle_error();
+                        rs_fault_recovered = true;
+                        break;
                     }
-                    rs_trigger_next(p_dev); /* trigger lost: re-trigger (no event to ack) */
+                    if (rs_trigger_next(p_dev)) { /* trigger lost: re-trigger (no event to ack) */
+                        rs_send_event(RS_EVT_TRIGGER_TIMEOUT, (uint32_t)rs_attempts, NULL);
+                        handle_error();
+                        rs_fault_recovered = true;
+                        break;
+                    }
                     continue;
                 }
             }
@@ -1117,25 +1341,38 @@ void vl53l9_app() {
                 /* early edge: FRAME_READY not visible yet, give it a moment (Task 8) */
                 if (++rs_attempts > 8) {
                     handle_error();
+                    rs_fault_recovered = true;
+                    break;
                 }
                 HAL_Delay(1);
                 ret = vl53l9_get_frame_async(p_dev, in_raw_mem[raw_mem_index].data, in_raw_mem[raw_mem_index].size);
             }
             if (ret) {
                 handle_error();
+                rs_fault_recovered = true;
+                break;
             }
             break;
+        }
+        if (rs_fault_recovered) {
+            continue; /* resume the outer while(1) from a clean iteration */
         }
 
         ret = rs_wait_event_usb(PLATFORM_I3C_DMA_RX_EVT, 1000);
         if (ret) {
+            rs_send_event(RS_EVT_DMA_TIMEOUT, 1u, NULL); /* single 1000 ms wait, no
+                                                            * internal retry at this
+                                                            * point -- detail is a
+                                                            * constant attempt count */
             handle_error();
+            continue;
         }
         platform_acknowledge_event(PLATFORM_I3C_DMA_RX_EVT);
 
         ret = vl53l9_get_frame_async_ack(p_dev, in_raw_mem[raw_mem_index].data, in_raw_mem[raw_mem_index].size);
         if (ret) {
             handle_error();
+            continue;
         }
 
         /* parse frame N's metadata (pure in-memory reads; buffer complete after the
@@ -1144,8 +1381,10 @@ void vl53l9_app() {
         ret = vl53l9_utils_parse_frame(in_raw_mem[raw_mem_index].data, in_raw_mem[raw_mem_index].size, &frame);
         if (ret) {
             handle_error();
+            continue;
         }
         uint32_t rs_counter = (uint32_t)frame.p_metadata->frame_counter;
+        g_last_seq = rs_counter; /* EVENT frames from here on carry this as their seq */
 
         /* Command-channel poll point: BEFORE this iteration's trigger-for-N+1 (moved
          * here from after it -- see the empirical finding below), after frame N's DMA
@@ -1181,12 +1420,21 @@ void vl53l9_app() {
         if (rs_pending.pending) {
             /* rs_apply_pending_config() triggers its own first frame under whichever
              * profile ends up active before returning -- this REPLACES the normal
-             * rs_trigger_next(N+1) call below for this iteration. */
-            rs_apply_pending_config(p_dev, calib_data, out_width, out_height, rs_counter);
+             * rs_trigger_next(N+1) call below for this iteration. A `true` return means
+             * a fault hit mid-apply and handle_error() already recovered the sensor via
+             * its OWN reinit -- this iteration's frame N send below would be reading
+             * stale/irrelevant buffers, so abandon it and resume the loop fresh (see
+             * the design comment above rs_recover()). */
+            if (rs_apply_pending_config(p_dev, calib_data, out_width, out_height, rs_counter)) {
+                continue;
+            }
         } else {
             /* trigger frame N+1 now (settle enforced inside): the sensor integrates
              * while the CDC sends below are in flight */
-            rs_trigger_next(p_dev);
+            if (rs_trigger_next(p_dev)) {
+                handle_error();
+                continue;
+            }
         }
 
         /* send frame N (and the periodic CALIB before it, so a host joining at frame 1
@@ -1270,13 +1518,36 @@ static memory_t allocate_memory(uint16_t size) {
     return memory;
 }
 
+/* Fault entry point for every driver-call failure in the app. Raw-only builds (Task 5):
+ * emit an EVENT carrying the sensor's status word, then run rs_recover()'s bounded
+ * retry (5 attempts, 100/200/400/800/1600 ms backoff, its own SENSOR_INIT_FAIL EVENT per
+ * failed attempt) -- on success this function RETURNS NORMALLY (every call site above
+ * treats that as "resume via `continue`", see the design comment above rs_recover()).
+ * On-board-transform builds (CONF_TRANSFORM_ONBOARD=1, the golden-pair regeneration
+ * path) keep the original, unmodified terminal spin -- no EVENT, no recovery -- per the
+ * brief's "golden-path stability" call; that build has no rs_recover()/rs_send_event
+ * available to it (both live inside the !CONF_TRANSFORM_ONBOARD guard) and this function
+ * is the only place that distinction has to be made explicit.
+ *
+ * Exhaustion (either build): drop off the USB bus (this spin never services tud_task, so
+ * leaving the D+ pull-up asserted would present a dead device to the host, Code 43;
+ * harmless if called before tud_connect, pull-up already off) and spin forever -- the
+ * unchanged last-resort contract this function has always had. */
 static void handle_error(void) {
-    /* Drop off the USB bus: this spin never services tud_task, so leaving the
-     * D+ pull-up asserted would present a dead device to the host (Code 43).
-     * Harmless if called before tud_connect (pull-up already off). */
-    tud_disconnect();
+#if !CONF_TRANSFORM_ONBOARD
     vl53l9_status_t status = { 0 };
     vl53l9_get_status(&device[CONF_DEVICE_ID], &status);
+    rs_send_event(RS_EVT_SENSOR_ERROR_STATUS, rs_pack_status(&status), NULL);
+
+    if (rs_recover() == 0) {
+        return; /* recovered: caller resumes via `continue` */
+    }
+    /* 5 attempts exhausted: fall through to the same terminal spin as the
+     * on-board-transform build below -- last resort, unchanged. */
+#endif
+    tud_disconnect();
+    vl53l9_status_t final_status = { 0 };
+    vl53l9_get_status(&device[CONF_DEVICE_ID], &final_status);
     while (1)
         ;
 }
