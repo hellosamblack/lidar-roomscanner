@@ -31,7 +31,6 @@ from pathlib import Path
 
 import numpy as np
 
-from .colors import turbo
 from .config import ViewerConfig, apply_config_defaults
 from .control import CommandClient, CommandDispatcher
 from .decoder import StreamDecoder
@@ -41,6 +40,8 @@ from .logbus import LogBus
 from .native import Transform
 from .pipeline import TransformStage
 from .protocol import CommandCode, FrameType, ProtocolError, parse_event
+from .shading import MODES as _NEAR_MODES
+from .shading import cloud_colors
 from .sources import FileSource, Recorder, SerialSource, pump
 from .viewer import Stats, _build_arg_parser
 
@@ -55,6 +56,34 @@ _UI_PERIOD = 0.25               # <=4 Hz label / IR / log refresh
 _EXPOSURE_DEBOUNCE = 0.4        # s to settle before sending a dragged exposure value
 _BG_DARK = [0.05, 0.05, 0.08, 1.0]
 _BG_LIGHT = [0.90, 0.90, 0.92, 1.0]
+
+_HELP_LINES = [
+    "",
+    "Mouse:  left-drag orbit  |  ctrl/middle-drag pan  |  wheel zoom",
+    "Key:    H  this help",
+    "",
+    "Status   fps, frame/seq-gap/drop/crc/raw counters, current usecase + color.",
+    "Device   Ping / Request CALIB / Reinit; usecase; exposure (ms, sent on release).",
+    "         (device controls are inactive in replay.)",
+    "View     color mode (depth / reflectance IR / confidence);",
+    "         point size (raise it to close the gaps between zones);",
+    "         Near contrast (see below); dark background; Reset view.",
+    "",
+    "Near contrast -- spend more of the colormap on close targets (e.g. a face",
+    "in front of a wall) so facial relief stands out:",
+    "  window   : color only points within the cutoff distance and grey the rest",
+    "             (slider = cutoff metres). Best for isolating a person.",
+    "  emphasis : nonlinear boost of near depths (slider = strength); wall stays",
+    "             colored but compressed.",
+    "  equalize : auto histogram-equalize -- dense surfaces stretch, flat compress.",
+    "  off      : plain linear depth coloring.",
+    "",
+    "IR Monitor  live 2D reflectance image; gray/turbo; Freeze holds the range.",
+    "Capture     Record to captures/*.bin; replay adds Pause + fps.",
+    "Events      device EVENTs, command results, connect/disconnect.",
+    "",
+    "Run with --save-config to persist the current view/IR/near settings.",
+]
 
 
 def _ir_freeze_range(freeze, frozen, auto):
@@ -186,6 +215,10 @@ class ControlPanel:
         self.color_mode = args.color if args.color in _COLOR_MODES else "depth"
         self.ir_colormap = args.ir_colormap if getattr(args, "ir_colormap", None) in _IR_COLORMAPS else "gray"
         self.ir_freeze = bool(getattr(args, "ir_freeze_range", False))
+        # near-contrast state
+        self.near_mode = args.near_mode if getattr(args, "near_mode", None) in _NEAR_MODES else "window"
+        self.near_cutoff_m = float(getattr(args, "near_cutoff_m", 1.5) or 1.5)
+        self.near_emphasis = float(getattr(args, "near_emphasis", 0.5) or 0.5)
         self._ir_last_auto: tuple[float, float] | None = None
         self._ir_frozen: tuple[float, float] | None = None
         self._ir_unavailable_shown = False
@@ -203,7 +236,7 @@ class ControlPanel:
         self.window = gui.Application.instance.create_window("roomscan panel", 1280, 800)
         self.material = rendering.MaterialRecord()
         self.material.shader = "defaultUnlit"
-        self.material.point_size = float(getattr(args, "point_size", 3.0))
+        self.material.point_size = float(getattr(args, "point_size", 5.0))
         self._dark_bg = True
 
         self._build_scene()
@@ -211,6 +244,7 @@ class ControlPanel:
         self.window.set_on_layout(self._on_layout)
         self.window.set_on_close(self._on_close)
         self.window.set_on_tick_event(self._on_tick)
+        self.window.set_on_key(self._on_key)   # H -> help dialog
         self.bus.publish(f"connected: {'replay ' + str(args.replay) if self.is_replay else 'live ' + str(getattr(source, 'port', '?'))}")
 
     # ---- construction -------------------------------------------------------
@@ -290,20 +324,48 @@ class ControlPanel:
         ps_row = gui.Horiz(0.25 * em)
         ps_row.add_child(gui.Label("Point size"))
         self.sl_point = gui.Slider(gui.Slider.INT)
-        self.sl_point.set_limits(1, 8)
+        self.sl_point.set_limits(1, 20)     # wide enough to close the inter-zone gaps
         self.sl_point.int_value = int(self.material.point_size)
         self.sl_point.set_on_value_changed(self._on_point_size)
         ps_row.add_child(self.sl_point)
         view.add_child(ps_row)
+
+        # Near contrast: give close targets (a person) more of the colormap so
+        # facial relief stands out instead of washing into the wall's range.
+        nc_row = gui.Horiz(0.25 * em)
+        nc_row.add_child(gui.Label("Near contrast"))
+        self.cb_near = gui.Combobox()
+        for m in _NEAR_MODES:
+            self.cb_near.add_item(m)
+        self.cb_near.selected_index = _NEAR_MODES.index(self.near_mode)
+        self.cb_near.set_on_selection_changed(self._on_near_mode)
+        nc_row.add_child(self.cb_near)
+        view.add_child(nc_row)
+
+        na_row = gui.Horiz(0.25 * em)
+        self.lbl_near = gui.Label("cutoff m")
+        na_row.add_child(self.lbl_near)
+        self.sl_near = gui.Slider(gui.Slider.DOUBLE)
+        self.sl_near.set_on_value_changed(self._on_near_value)
+        na_row.add_child(self.sl_near)
+        self.lbl_near_val = gui.Label("")
+        na_row.add_child(self.lbl_near_val)
+        view.add_child(na_row)
+        self._sync_near_slider()
 
         self.chk_bg = gui.Checkbox("Dark background")
         self.chk_bg.checked = True
         self.chk_bg.set_on_checked(self._on_bg)
         view.add_child(self.chk_bg)
 
+        vb_row = gui.Horiz(0.25 * em)
         reset = gui.Button("Reset view")
         reset.set_on_clicked(self._on_reset_view)
-        view.add_child(reset)
+        vb_row.add_child(reset)
+        help_btn = gui.Button("Help (?)")
+        help_btn.set_on_clicked(self._show_help)
+        vb_row.add_child(help_btn)
+        view.add_child(vb_row)
         self.panel.add_child(view)
 
         # --- IR Monitor ---
@@ -396,7 +458,9 @@ class ControlPanel:
                 color=self.color_mode, fov_h=self.args.fov_h, fov_v=self.args.fov_v,
                 replay_fps=self.args.replay_fps, port=self.args.port,
                 point_size=self.material.point_size, ir_colormap=self.ir_colormap,
-                ir_freeze_range=self.ir_freeze, panel_width=int(getattr(self.args, "panel_width", 340)))
+                ir_freeze_range=self.ir_freeze, panel_width=int(getattr(self.args, "panel_width", 340)),
+                near_mode=self.near_mode, near_cutoff_m=self.near_cutoff_m,
+                near_emphasis=self.near_emphasis)
             path = cfg.save()
             self.bus.publish(f"saved config to {path}")
         except Exception as exc:  # never let a config write block window close
@@ -458,8 +522,9 @@ class ControlPanel:
                     self.bus.publish(f"no '{self.color_mode}' plane in stream — coloring by depth")
                     self._color_fallback_warned = True
                 vals = pts[:, 2]
-            vn = (vals - vals.min()) / max(float(np.ptp(vals)), 1e-6)
-            self.pcd.colors = o3d.utility.Vector3dVector(turbo(vn))
+            colors = cloud_colors(vals, pts[:, 2], mode=self.near_mode,
+                                  cutoff_m=self.near_cutoff_m, emphasis=self.near_emphasis)
+            self.pcd.colors = o3d.utility.Vector3dVector(colors)
         else:
             self.pcd.colors = o3d.utility.Vector3dVector(np.zeros((0, 3)))
         self._show_cloud()
@@ -561,6 +626,63 @@ class ControlPanel:
         self._camera_set = False
         self._reset_camera()
 
+    def _sync_near_slider(self):
+        """Point the shared near-contrast slider at the control the current mode
+        uses: distance cutoff (window), strength (emphasis), or disabled."""
+        if self.near_mode == "window":
+            self.lbl_near.text = "cutoff m"
+            self.sl_near.enabled = True
+            self.sl_near.set_limits(0.3, 5.0)
+            self.sl_near.double_value = self.near_cutoff_m
+            self.lbl_near_val.text = f"{self.near_cutoff_m:.1f}"
+        elif self.near_mode == "emphasis":
+            self.lbl_near.text = "strength"
+            self.sl_near.enabled = True
+            self.sl_near.set_limits(0.0, 1.0)
+            self.sl_near.double_value = self.near_emphasis
+            self.lbl_near_val.text = f"{self.near_emphasis:.2f}"
+        else:                                    # off / equalize -> no scalar to tune
+            self.lbl_near.text = "(no control)" if self.near_mode == "equalize" else "(off)"
+            self.sl_near.enabled = False
+            self.lbl_near_val.text = ""
+
+    def _on_near_mode(self, text, index):
+        self.near_mode = text
+        self._sync_near_slider()
+        self.bus.publish(f"near contrast -> {text}")
+
+    def _on_near_value(self, value):
+        if self.near_mode == "window":
+            self.near_cutoff_m = float(value)
+            self.lbl_near_val.text = f"{self.near_cutoff_m:.1f}"
+        elif self.near_mode == "emphasis":
+            self.near_emphasis = float(value)
+            self.lbl_near_val.text = f"{self.near_emphasis:.2f}"
+
+    def _show_help(self, *_):
+        gui = self._gui
+        em = self.window.theme.font_size
+        dlg = gui.Dialog("Help")
+        v = gui.Vert(0.3 * em, gui.Margins(em, em, em, em))
+        v.add_child(gui.Label("roomscan control panel"))
+        for line in _HELP_LINES:
+            v.add_child(gui.Label(line))
+        ok = gui.Button("Close")
+        ok.set_on_clicked(self.window.close_dialog)
+        row = gui.Horiz()
+        row.add_stretch()
+        row.add_child(ok)
+        v.add_child(row)
+        dlg.add_child(v)
+        self.window.show_dialog(dlg)
+
+    def _on_key(self, event):
+        # H toggles the help dialog; let everything else fall through to the scene.
+        if event.type == self._gui.KeyEvent.DOWN and event.key == self._gui.KeyName.H:
+            self._show_help()
+            return True
+        return False
+
     def _on_ir_colormap(self, text, index):
         self.ir_colormap = text
 
@@ -601,7 +723,8 @@ class ControlPanel:
 
 
 # ---- entry points -----------------------------------------------------------
-_PANEL_FIELDS = ("point_size", "ir_colormap", "ir_freeze_range", "panel_width")
+_PANEL_FIELDS = ("point_size", "ir_colormap", "ir_freeze_range", "panel_width",
+                 "near_mode", "near_cutoff_m", "near_emphasis")
 
 
 def _fill_panel_fields(args) -> None:

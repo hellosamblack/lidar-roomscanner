@@ -33,7 +33,7 @@ def test_load_missing_file_returns_builtin_defaults(tmp_path):
     assert cfg.fov_v == 42.0
     assert cfg.replay_fps == 0.0
     assert cfg.port is None
-    assert cfg.point_size == 3.0
+    assert cfg.point_size == 5.0
     assert cfg.ir_colormap == "gray"
     assert cfg.ir_freeze_range is False
     assert cfg.panel_width == 340
@@ -41,7 +41,7 @@ def test_load_missing_file_returns_builtin_defaults(tmp_path):
 
 def test_panel_fields_have_expected_defaults_on_fresh_config():
     cfg = ViewerConfig()
-    assert cfg.point_size == 3.0
+    assert cfg.point_size == 5.0
     assert cfg.ir_colormap == "gray"
     assert cfg.ir_freeze_range is False
     assert cfg.panel_width == 340
@@ -70,7 +70,8 @@ def test_save_then_load_roundtrip_with_none_port(tmp_path):
 def test_save_then_load_roundtrip_panel_fields(tmp_path):
     path = tmp_path / "roomscan.toml"
     original = ViewerConfig(ir_colormap="turbo", ir_freeze_range=True,
-                             point_size=5.0, panel_width=400)
+                             point_size=8.0, panel_width=400,
+                             near_mode="emphasis", near_cutoff_m=2.25, near_emphasis=0.8)
     saved_path = original.save(path)
     assert saved_path == path
 
@@ -78,8 +79,11 @@ def test_save_then_load_roundtrip_panel_fields(tmp_path):
     assert loaded == original
     assert loaded.ir_colormap == "turbo"
     assert loaded.ir_freeze_range is True
-    assert loaded.point_size == 5.0
+    assert loaded.point_size == 8.0
     assert loaded.panel_width == 400
+    assert loaded.near_mode == "emphasis"
+    assert loaded.near_cutoff_m == 2.25
+    assert loaded.near_emphasis == 0.8
 
 
 def test_load_old_config_file_missing_panel_keys_falls_back_to_defaults(tmp_path):
@@ -98,7 +102,7 @@ def test_load_old_config_file_missing_panel_keys_falls_back_to_defaults(tmp_path
     )
     cfg = ViewerConfig.load(path)
     assert cfg.color == "reflectance"  # old fields still honored
-    assert cfg.point_size == 3.0
+    assert cfg.point_size == 5.0
     assert cfg.ir_colormap == "gray"
     assert cfg.ir_freeze_range is False
     assert cfg.panel_width == 340

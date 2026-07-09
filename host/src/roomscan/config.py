@@ -42,10 +42,13 @@ class ViewerConfig:
     fov_v: float = 42.0
     replay_fps: float = 0.0
     port: Optional[str] = None
-    point_size: float = 3.0
+    point_size: float = 5.0            # larger default closes the inter-zone gaps
     ir_colormap: str = "gray"
     ir_freeze_range: bool = False
     panel_width: int = 340
+    near_mode: str = "window"          # near-contrast: off|window|emphasis|equalize
+    near_cutoff_m: float = 1.5         # window-mode near/far boundary (metres)
+    near_emphasis: float = 0.5         # emphasis-mode strength 0..1
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "ViewerConfig":

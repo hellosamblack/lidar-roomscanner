@@ -41,13 +41,14 @@ from PIL import Image, ImageDraw
 # roomscan is importable as an installed package; add src for direct `python tools/...` runs too.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from roomscan.colors import turbo                       # noqa: E402
 from roomscan.deproject import Deprojector              # noqa: E402
 from roomscan.decoder import StreamDecoder              # noqa: E402
 from roomscan.ir_image import ir_range, reflectance_to_rgb  # noqa: E402
 from roomscan.native import Transform                   # noqa: E402
 from roomscan.panel import _COLOR_MODES, _IR_UPSCALE, _USECASES  # noqa: E402
 from roomscan.pipeline import TransformStage            # noqa: E402
+from roomscan.shading import MODES as NEAR_MODES        # noqa: E402
+from roomscan.shading import cloud_colors               # noqa: E402
 from roomscan.sources import FileSource, pump           # noqa: E402
 
 W, H = 1280, 800
@@ -113,16 +114,13 @@ def compute_frame(capture, frame_index: int = 120, fov_h: float = 55.0,
                  raw=stage.raw_transformed, gaps=gaps, crc=dec.crc_failures, events=events, dll=dll)
 
 
-def _cloud_colors(depth, plane, max_range_mm, pts):
-    """Turbo colors for the deprojected points -- mirrors roomscan.panel._render_frame
+def _cloud_vals(depth, plane, max_range_mm, pts):
+    """The per-point values to colorize -- mirrors roomscan.panel._render_frame
     (aux plane filtered by the identical validity mask so it stays point-aligned)."""
     if plane is not None:
         valid = np.isfinite(depth) & (depth > 0.0) & (depth < max_range_mm)
-        vals = plane[valid].astype(np.float64, copy=False)
-    else:
-        vals = pts[:, 2]
-    vn = (vals - vals.min()) / max(float(np.ptp(vals)), 1e-6)
-    return turbo(vn)
+        return plane[valid].astype(np.float64, copy=False)
+    return pts[:, 2]
 
 
 # ---- cloud projection + raster (CPU stand-in for the GPU SceneWidget) -------
@@ -144,13 +142,13 @@ def _project(pts, width, height, azim=-35.0, elev=20.0, margin=0.10):
     return sx, sy, order
 
 
-def _draw_cloud(draw, pts, colors, x0, y0, w, h):
+def _draw_cloud(draw, pts, colors, x0, y0, w, h, point_size=6):
     draw.rectangle([x0, y0, x0 + w, y0 + h], fill=BG)
     if len(pts) == 0:
         draw.text((x0 + w // 2 - 40, y0 + h // 2), "(no points)", fill=DIM)
         return
     sx, sy, order = _project(pts, w, h)
-    r = 2
+    r = max(1, int(round(point_size)))       # square half-extent; raise to close gaps
     for i in order:
         px, py = x0 + sx[i], y0 + sy[i]
         col = tuple(int(255 * v) for v in colors[i])
@@ -177,20 +175,30 @@ def _button(draw, x, y, w, h, label, on=False):
 
 def render_snapshot(frame: Frame, *, color: str = "depth", ir_colormap: str = "gray",
                     ir_freeze: bool = False, fov_h: float = 55.0, fov_v: float = 42.0,
-                    usecase: int = 1, out="panel_snapshot.png") -> Path:
+                    usecase: int = 1, point_size: int = 6, near_mode: str = "window",
+                    near_cutoff_m: float = 1.5, near_emphasis: float = 0.5,
+                    out="panel_snapshot.png") -> Path:
     """Compose the panel snapshot PNG from a real Frame + the chosen view state."""
     depth = frame.depth
     h, w = depth.shape
     deproj = Deprojector(w, h, fov_h, fov_v)
     pts = deproj(depth)
     plane = None if color == "depth" else frame.outputs.get(color)
-    colors = _cloud_colors(depth, plane, deproj.max_range_mm, pts) if len(pts) else np.zeros((0, 3))
+    if len(pts):
+        vals = _cloud_vals(depth, plane, deproj.max_range_mm, pts)
+        colors = cloud_colors(vals, pts[:, 2], mode=near_mode, cutoff_m=near_cutoff_m,
+                              emphasis=near_emphasis)
+    else:
+        colors = np.zeros((0, 3))
     color_available = color == "depth" or plane is not None
 
     img = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(img)
-    _draw_cloud(draw, pts, colors, 0, 0, CLOUD_W, H)
-    draw.text((10, 10), f"3D cloud  |  {len(pts)} pts  |  color: {color}"
+    _draw_cloud(draw, pts, colors, 0, 0, CLOUD_W, H, point_size)
+    near_txt = {"window": f"window<{near_cutoff_m:.1f}m", "emphasis": f"emphasis {near_emphasis:.2f}",
+                "equalize": "equalize", "off": "off"}.get(near_mode, near_mode)
+    draw.text((10, 10), f"3D cloud  |  {len(pts)} pts  |  color: {color}  |  near: {near_txt}"
+              f"  |  pt {point_size}"
               + ("" if color_available else "  (plane absent -> depth fallback)"),
               fill=FG if color_available else (255, 180, 90))
     draw.text((10, H - 22), "CPU orthographic stand-in for the Open3D SceneWidget (Filament offscreen"
@@ -220,10 +228,14 @@ def render_snapshot(frame: Frame, *, color: str = "depth", ir_colormap: str = "g
     y += 104
 
     # View
+    near_ctl = {"window": f"cutoff {near_cutoff_m:.1f} m", "emphasis": f"strength {near_emphasis:.2f}",
+                "equalize": "(auto)", "off": "(off)"}.get(near_mode, "")
     y = _group(draw, gx, y, gw, "View", [
         ("color:  " + "  ".join(("[%s]" % m if m == color else m) for m in _COLOR_MODES), FG),
-        ("point size 3   dark bg [x]   [Reset view]", DIM),
-    ], 60)
+        (f"point size {point_size}   dark bg [x]   [Reset view] [Help]", DIM),
+        ("near:  " + "  ".join(("[%s]" % m if m == near_mode else m) for m in NEAR_MODES), FG),
+        (f"       {near_ctl}", DIM),
+    ], 90)
 
     # IR Monitor (real image)
     ir_h = 150
@@ -255,11 +267,14 @@ def render_snapshot(frame: Frame, *, color: str = "depth", ir_colormap: str = "g
 
 
 def snapshot_from_replay(capture, *, frame_index=120, color="depth", ir_colormap="gray",
-                         ir_freeze=False, fov_h=55.0, fov_v=42.0, usecase=1,
+                         ir_freeze=False, fov_h=55.0, fov_v=42.0, usecase=1, point_size=6,
+                         near_mode="window", near_cutoff_m=1.5, near_emphasis=0.5,
                          out="panel_snapshot.png") -> Path:
     frame = compute_frame(capture, frame_index, fov_h, fov_v)
     return render_snapshot(frame, color=color, ir_colormap=ir_colormap, ir_freeze=ir_freeze,
-                           fov_h=fov_h, fov_v=fov_v, usecase=usecase, out=out)
+                           fov_h=fov_h, fov_v=fov_v, usecase=usecase, point_size=point_size,
+                           near_mode=near_mode, near_cutoff_m=near_cutoff_m,
+                           near_emphasis=near_emphasis, out=out)
 
 
 def contact_sheet(capture, *, frame_index=120, out="panel_contact.png") -> Path:
@@ -295,6 +310,11 @@ def _main(argv=None) -> int:
     ap.add_argument("--fov-h", type=float, default=55.0)
     ap.add_argument("--fov-v", type=float, default=42.0)
     ap.add_argument("--usecase", type=int, default=1)
+    ap.add_argument("--point-size", type=int, default=6, help="cloud point square size (px)")
+    ap.add_argument("--near-mode", choices=NEAR_MODES, default="window",
+                    help="near-contrast mode (more colormap on close targets)")
+    ap.add_argument("--near-cutoff", type=float, default=1.5, help="window-mode cutoff (m)")
+    ap.add_argument("--near-emphasis", type=float, default=0.5, help="emphasis-mode strength 0..1")
     ap.add_argument("--contact", action="store_true", help="render the color x IR grid instead")
     ap.add_argument("--out", default="panel_snapshot.png")
     a = ap.parse_args(argv)
@@ -303,7 +323,8 @@ def _main(argv=None) -> int:
     else:
         p = snapshot_from_replay(a.replay, frame_index=a.frame, color=a.color, ir_colormap=a.ir,
                                  ir_freeze=a.freeze, fov_h=a.fov_h, fov_v=a.fov_v, usecase=a.usecase,
-                                 out=a.out)
+                                 point_size=a.point_size, near_mode=a.near_mode,
+                                 near_cutoff_m=a.near_cutoff, near_emphasis=a.near_emphasis, out=a.out)
     print(f"wrote {p}")
     return 0
 

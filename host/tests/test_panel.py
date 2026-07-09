@@ -30,8 +30,9 @@ from roomscan.viewer import Stats
 # --- _fill_panel_fields ------------------------------------------------------
 
 def _bare_args(**over):
-    ns = argparse.Namespace(point_size=None, ir_colormap=None,
-                            ir_freeze_range=None, panel_width=None)
+    ns = argparse.Namespace(point_size=None, ir_colormap=None, ir_freeze_range=None,
+                            panel_width=None, near_mode=None, near_cutoff_m=None,
+                            near_emphasis=None)
     for k, v in over.items():
         setattr(ns, k, v)
     return ns
@@ -41,10 +42,13 @@ def test_fill_panel_fields_uses_builtin_defaults_when_no_config(tmp_path, monkey
     monkeypatch.setenv("APPDATA", str(tmp_path))   # empty dir -> no roomscan.toml
     args = _bare_args()
     _fill_panel_fields(args)
-    assert args.point_size == 3.0
+    assert args.point_size == 5.0
     assert args.ir_colormap == "gray"
     assert args.ir_freeze_range is False
     assert args.panel_width == 340
+    assert args.near_mode == "window"
+    assert args.near_cutoff_m == 1.5
+    assert args.near_emphasis == 0.5
 
 
 def test_fill_panel_fields_pulls_from_config_file(tmp_path, monkeypatch):
