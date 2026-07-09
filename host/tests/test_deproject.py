@@ -81,3 +81,17 @@ def test_grid_center_zone_matches_call():
     pts_grid, valid = d.grid(depth)
     assert valid.all()
     assert np.allclose(pts_grid[1, 1], [0.0, 0.0, 2.0], atol=1e-9)
+
+
+def test_grid_invalid_cells_are_finite_even_at_boresight_with_nan_depth():
+    # Regression: row/col 1 of a 3x3, 90deg-FOV grid has tan_x=tan_y=0.0 (the
+    # sensor boresight). A naive `z * 0.0` with a NaN/Inf z leaks NaN into the
+    # "garbage" output there (NaN * 0.0 == NaN in IEEE-754) -- grid() must
+    # sanitize z before that multiply so invalid cells are always finite.
+    d = Deprojector(width=3, height=3, fov_h_deg=90.0, fov_v_deg=90.0)
+    depth = np.full((3, 3), 1000.0, dtype=np.float32)
+    depth[1, 1] = np.nan   # sits exactly on the zero-tan boresight cell
+    pts_grid, valid = d.grid(depth)
+    assert not valid[1, 1]
+    assert np.isfinite(pts_grid[1, 1]).all()
+    assert np.allclose(pts_grid[1, 1], [0.0, 0.0, 0.0])

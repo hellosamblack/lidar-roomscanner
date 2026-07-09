@@ -56,12 +56,20 @@ class Deprojector:
         output. Returns (pts, valid): pts is (h, w, 3) metres, with garbage
         (not NaN, cheap) at invalid cells -- callers must consult `valid`
         before using a cell. valid is the (h, w) bool mask __call__ already
-        computed internally, just not returned there."""
+        computed internally, just not returned there.
+
+        Invalid depth values (NaN/Inf, out-of-range) are replaced with 0.0
+        before computing x/y and before being returned as the z-channel --
+        without this, a NaN/Inf depth at a zero-tan cell (the sensor
+        boresight row/col) would leak NaN into the "garbage" output via
+        `NaN * 0.0 == NaN` in IEEE-754, breaking the finite-garbage
+        guarantee this method promises callers."""
         z = depth_mm.astype(np.float64, copy=False)
         valid = np.isfinite(z) & (z > 0.0) & (z < self.max_range_mm)
-        x = np.broadcast_to(z * self._tan_x, z.shape)
-        y = np.broadcast_to(z * self._tan_y, z.shape)
-        return np.stack([x, y, z], axis=-1) / 1000.0, valid
+        z_safe = np.where(valid, z, 0.0)
+        x = np.broadcast_to(z_safe * self._tan_x, z.shape)
+        y = np.broadcast_to(z_safe * self._tan_y, z.shape)
+        return np.stack([x, y, z_safe], axis=-1) / 1000.0, valid
 
     def __call__(self, depth_mm: np.ndarray) -> np.ndarray:
         pts, valid = self.grid(depth_mm)
