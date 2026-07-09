@@ -53,6 +53,9 @@ Found during review of `<APP>/Src/vl53l9_app.c`; fix these in our fork, leave th
    discarded and the stale `ret` from `vl53l9_start` is tested — trigger failures pass silently.
 2. **`handle_error()` spins forever** (`vl53l9_app.c:317-322`): fine for a demo, wrong for a scanner. Our
    firmware must emit an error/event frame to the host and attempt sensor re-init before giving up.
+   **✅ Fixed in our fork, Phase 3 Task 5** (raw-only build): EVENT emission + bounded re-init recovery
+   (5 attempts, 100 ms→1.6 s backoff), boot bring-up wrapped the same way (10/10 boot soak, was ~80%) —
+   see the Phase 3 status block below.
 3. **`print_frame` divide-by-zero on flat scenes** (`vl53l9_app.c:296`): `(max - min)` is the divisor; a
    uniform depth field makes it 0. Also `min - average` underflows `uint32_t` when `average > min`
    (`vl53l9_app.c:288`). Moot once ASCII printing is replaced, but don't copy the pattern.
@@ -310,7 +313,105 @@ planned. Left open at the time: the connect-time transient and CALIB-on-DTR-conn
 carried forward unchanged from Phase 2 — the connect-time transient was later root-caused and resolved
 in Phase 3 Task 6 (see the updated bullet above).
 
-### Phase 3 — UI & runtime configuration
+### Phase 3 — UI & runtime configuration ← **✅ Complete** (plan: `docs/superpowers/plans/2026-07-08-phase3-runtime-config-robustness.md`)
+
+> **Status 2026-07-08:** verified end-to-end on hardware, branch `phase3-runtime-config`, 7 tasks.
+>
+> **Protocol** (Task 1): `frame_type` 3 = COMMAND (host→device), 4 = ACK (device→host) — additive to v1,
+> no version bump. Command registry 1-6 (PING, SEND_CALIB, SET_USECASE, SET_FRAME_PERIOD_US,
+> SET_EXPOSURE_MS, REINIT), result registry 0-5 (OK, UNKNOWN_CMD, BAD_PARAM, REJECTED_BINNING,
+> SENSOR_ERROR, BUSY). Full spec + version-history entries in `docs/protocol.md`.
+>
+> **Firmware command channel** (Tasks 2, 4): TinyUSB CDC RX + a bounded fixed-size frame parser
+> (magic/CRC-checked, malformed input dropped and counted, polled once per acquisition-loop iteration —
+> never blocks acquisition). PING/SEND_CALIB need no reconfig; usecase/exposure/period/REINIT
+> reconfigure the sensor at a safe point (stop → re-profile → restart) via a factored-out
+> `rs_sensor_reinit()` that Task 5's recovery path reuses directly. **Binning stays fixed at 2**
+> (owner scope) — `SET_USECASE` rejects any binning-4 profile with `REJECTED_BINNING` without ever
+> touching the sensor.
+>
+> **Measured per-usecase fps** (Task 4, [HW], board reset between measurements):
+>
+> | usecase | id | binning | result | measured fps |
+> |---|---|---|---|---|
+> | AR_RANGE | 0 | 2 | OK | **32.1-32.3** |
+> | AR_PRECISION (shipped compile-time default) | 1 | 2 | OK | **27.8-28.6** |
+> | AF_RANGE | 2 | 4 | **REJECTED_BINNING** | n/a — no full-res (binning-2) profile exists for this usecase |
+> | AF | 3 | 4 | **REJECTED_BINNING** | n/a — no full-res (binning-2) profile exists for this usecase |
+>
+> `SET_FRAME_PERIOD_US` applies and reads back faithfully (e.g. `50000` → ack `applied=50000`) but has
+> **no observable effect on fps** in this app's always-`VL53L9_SYNC_MANUAL` design — the driver's own doc
+> comment (`vl53l9.h:248`) says the field only governs autonomous sync mode. Documented as a spec-honest
+> no-op (the ACK contract — apply + read back — is still met), not a bug; would need
+> `VL53L9_SYNC_AUTONOMOUS` (a bigger, unattempted change) to actually govern fps. `SET_EXPOSURE_MS` *does*
+> change fps measurably (5 ms → 28.6 fps, 15 ms → 25.6 fps).
+>
+> **Device robustness** (Task 5): `rs_send_event()` emits EVENT frames
+> (`SENSOR_INIT_FAIL`/`TRIGGER_TIMEOUT`/`DMA_TIMEOUT`/`SENSOR_ERROR_STATUS`) on every fault path,
+> replacing reference-firmware bug #2's silent infinite spin — **bug #2 (above) is now fixed in our
+> fork** for the raw-only build. Bounded recovery: up to 5 re-init attempts, 100 ms→1.6 s backoff,
+> shared by both the boot path and runtime `handle_error()`; a successful recovery retransmits CALIB and
+> resumes streaming (seq restarts — a documented, host-tolerated discontinuity, not an error). **Boot
+> soak: 10/10** consecutive SWD resets reached streaming, both before and after the final commit
+> (historical baseline ~80% first-attempt success). Live recovery exercised via a temporary,
+> since-removed fault-injection hook across 9 forced faults plus 1 hook-independent natural fault, all
+> recovering within ~2 s (EVENT → CALIB retransmit → seq restart → clean streaming). One anomalous
+> ~100 s hang on the very first post-flash boot did not reproduce in any of the 9 subsequent runs
+> (including one with an identical fault signature) — disclosed honestly, not root-caused, tracked below.
+>
+> **Connect-time transient — root-caused, characterized-cosmetic** (Task 6,
+> `docs/connect-transient-forensics.md`): byte-exact forensics over both e2e captures found the
+> *identical* signature in each — a well-formed `RAW_3DMD seq=1` header truncated ~2.8 KB short by the
+> pre-existing `rs_cdc_send()` 100 ms mid-frame-abort policy, racing host-startup latency on connect (not
+> stale TX FIFO residue, not a DTR race, not the separate mid-stream-reattach bug). Costs exactly one RAW
+> frame, self-heals with no seq gap, never recurs — no wire or firmware fix needed. The **CALIB-on-DTR-
+> connect** item (mid-stream reattach discarding up to 63 blind-start RAW frames) remains open — see the
+> deferred list below.
+>
+> **Host — viewer keys + config persistence** (Task 7, this entry): `roomscan-view` now opens an
+> `o3d.visualization.VisualizerWithKeyCallback` window wired to a `CommandClient` on the same open serial
+> port (live mode only — `--replay` prints "not available in replay" for every key press, verified). Each
+> key press runs on a fire-and-forget worker thread so the render loop never blocks on `send()`'s
+> up-to-2 s timeout, guarded by a single busy flag that rejects a second press while one command is still
+> in flight (prints `busy, command already in flight`, verified live with a rapid double `R` press).
+>
+> | key | command | live-session result observed |
+> |---|---|---|
+> | `P` | PING | `ping -> OK applied=1` |
+> | `C` | SEND_CALIB | `calib -> OK applied=0` |
+> | `1` | SET_USECASE 0 (AR_RANGE) | `usecase 0 -> OK applied=0`; HUD fps rose into the ~32 fps band |
+> | `2` | SET_USECASE 1 (AR_PRECISION) | `usecase 1 -> OK applied=1`; HUD fps returned to the ~28 fps band |
+> | `R` | REINIT | `reinit -> OK applied=0`; brief fps dip (~21 fps) then clean resume; a second `R` pressed before the first completed correctly printed the busy line instead of double-sending |
+>
+> `roomscan.toml` (`%APPDATA%/roomscan/roomscan.toml`, one `[viewer]` table) persists `color`/`fov_h`/
+> `fov_v`/`replay_fps`/`port`. Read with stdlib `tomllib`; written by a small hand-rolled TOML emitter (no
+> third-party TOML-writer dependency taken — see `host/src/roomscan/config.py`). `--save-config` writes
+> the effective settings. Priority: **CLI flag > config file > built-in default**, implemented via
+> argparse's `None` sentinel + `apply_config_defaults()`.
+>
+> **60 s soak** (Task 7, [HW], immediately following the key session above, board left on the default
+> AR_PRECISION profile): observed for 131 consecutive 1 Hz HUD samples (>2× the required window) —
+> steady **27.6-29.1 fps** (one transient 21.0 fps sample during the preceding REINIT's settle, not part
+> of the steady-state band), **0 new seq gaps** and **0 new CRC failures** for the entire session (the
+> single CRC failure and the stable `raw-skip 44` present throughout are the pre-existing, already-tracked
+> connect-time transient and mid-cycle-attach behavior, not new occurrences).
+>
+> Suite: **97 passed** (73 baseline + 15 `config.py` tests + 9 viewer-key/command-routing tests).
+>
+> **Deferred / honestly open** (not blockers for calling Phase 3 done):
+> - **CALIB-on-DTR-connect auto-fix** (device aborts any in-flight frame and sends CALIB immediately on
+>   DTR rising, via `tud_cdc_line_state_cb`): evaluated Task 6, needs new synchronization between a
+>   TinyUSB callback context and the main loop's send/trigger state — not small/safe enough to land in
+>   Phase 3. Specced as a Phase 3/4 follow-up. `SEND_CALIB` (the `C` key / `roomscan-ctl calib`) is the
+>   shipped manual mitigation for the same blind-start problem.
+> - **`SET_FRAME_PERIOD_US` is a spec-compliant no-op** in this app's always-manual-sync design (see the
+>   fps table above) — the command does exactly what the protocol promises (apply + read back), it just
+>   doesn't control fps here; would need an autonomous-sync redesign to matter.
+> - **One 100 s post-flash boot-recovery hang** (Task 5) was observed once, did not reproduce in 9
+>   subsequent identical-scenario runs, and was not root-caused — tracked as a low-confidence anomaly,
+>   not a confirmed defect.
+> - **AF_RANGE / AF usecases are unusable** at the project's fixed full-resolution binning-2 constraint —
+>   an owner-scoped design decision (binning stays fixed at 2 for all of Phase 3), not a bug.
 
 Host→device **control channel** to set usecase / binning / active streams at runtime. Recording/playback
 and config persistence host-side.

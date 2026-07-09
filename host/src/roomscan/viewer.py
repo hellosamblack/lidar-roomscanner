@@ -11,10 +11,12 @@ import time
 import numpy as np
 
 from .colors import turbo
+from .config import ViewerConfig, apply_config_defaults
+from .control import CommandClient
 from .decoder import StreamDecoder
 from .deproject import Deprojector
 from .pipeline import TransformStage
-from .protocol import FLAG_DROPPED, FrameType, ProtocolError, parse_event
+from .protocol import CommandCode, FLAG_DROPPED, FrameType, ProtocolError, parse_event
 from .sources import FileSource, SerialSource, pump
 
 
@@ -34,8 +36,51 @@ class Stats:
         self._last_seq = header.seq
 
 
+class CommandKeyState:
+    """Fire-and-forget command dispatch for the viewer's key bindings.
+
+    Each key press hands its command off to a short-lived worker thread so
+    the render loop never blocks on ``CommandClient.send()`` (up to its 2 s
+    timeout) -- see ``roomscan.control``'s thread-contract note: send() must
+    never run on the frame-feeding thread. A single in-flight-guard flag
+    rejects a second press while one command is still pending (prints
+    "busy", drops the new press) instead of queuing it.
+
+    `client is None` means replay mode (no live device to command): every
+    dispatch just prints that commands aren't available and returns.
+    """
+
+    def __init__(self, client: CommandClient | None):
+        self.client = client
+        self._lock = threading.Lock()
+        self._busy = False
+
+    def dispatch(self, cmd: int, param: int, label: str) -> None:
+        if self.client is None:
+            print(f"\n[cmd] {label} -> not available in replay")
+            return
+        with self._lock:
+            if self._busy:
+                print(f"\n[cmd] {label} -> busy, command already in flight")
+                return
+            self._busy = True
+
+        def worker() -> None:
+            try:
+                result, applied = self.client.send(cmd, param)
+                print(f"\n[cmd] {label} -> {result.name} applied={applied}")
+            except TimeoutError as exc:
+                print(f"\n[cmd] {label} -> TIMEOUT {exc}")
+            finally:
+                with self._lock:
+                    self._busy = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+
 def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dict,
-            min_interval: float = 0.0, stage: TransformStage | None = None):
+            min_interval: float = 0.0, stage: TransformStage | None = None,
+            client: CommandClient | None = None):
     if stage is None:
         stage = TransformStage()
     last = 0.0
@@ -48,6 +93,14 @@ def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dic
                     print(f"\n[device event] code={code} detail={detail} {msg}")
                 except ProtocolError:
                     print(f"\n[device event] undecodable payload ({len(frame.payload)} B)")
+                continue
+            if frame.header.frame_type == FrameType.ACK:
+                # Command-channel replies: matched against a pending
+                # CommandClient.send() by token, never rendered. Live mode
+                # only -- client is None in replay, so ACKs (which can't
+                # occur in a recording anyway) would just fall through below.
+                if client is not None:
+                    client.offer(frame)
                 continue
             if frame.header.frame_type != FrameType.DATA:
                 continue
@@ -75,23 +128,55 @@ def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dic
         fault["error"] = exc
 
 
-def main(argv=None) -> int:
+def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="roomscan-view")
     ap.add_argument("--port")
     ap.add_argument("--baud", type=int, default=921600)
     ap.add_argument("--replay")
     ap.add_argument("--record")
-    ap.add_argument("--fov-h", type=float, default=55.0)
-    ap.add_argument("--fov-v", type=float, default=42.0)
-    ap.add_argument("--replay-fps", type=float, default=0.0,
+    # fov-h/fov-v/replay-fps/color/port default to None (argparse's "not
+    # passed" sentinel): apply_config_defaults() below fills anything still
+    # None from the loaded roomscan.toml, which itself already carries the
+    # built-in defaults for anything absent from the file. Net priority:
+    # CLI flag > config file > built-in default.
+    ap.add_argument("--fov-h", type=float, default=None)
+    ap.add_argument("--fov-v", type=float, default=None)
+    ap.add_argument("--replay-fps", type=float, default=None,
                     help="pace file replay at N fps (0 = as fast as it decodes)")
-    ap.add_argument("--color", choices=("depth", "reflectance", "confidence"), default="depth",
+    ap.add_argument("--color", choices=("depth", "reflectance", "confidence"), default=None,
                     help="colorize the cloud by z-depth (default) or by an aux transform plane")
-    args = ap.parse_args(argv)
+    ap.add_argument("--save-config", action="store_true",
+                    help="persist the effective color/fov/replay-fps/port settings to roomscan.toml")
+    return ap
+
+
+def resolve_args(argv=None, config_path=None) -> argparse.Namespace:
+    """Parse argv, then merge in roomscan.toml for any flag left at its None
+    sentinel, optionally persisting the result via --save-config. Pure aside
+    from the config file's own read/write -- no serial port, no open3d
+    import -- the testable seam for config load/save/priority."""
+    args = _build_arg_parser().parse_args(argv)
+    cfg = ViewerConfig.load(config_path)
+    apply_config_defaults(args, cfg)
+    if args.save_config:
+        effective = ViewerConfig(color=args.color, fov_h=args.fov_h, fov_v=args.fov_v,
+                                  replay_fps=args.replay_fps, port=args.port)
+        saved_path = effective.save(config_path)
+        print(f"saved config to {saved_path}")
+    return args
+
+
+def main(argv=None) -> int:
+    args = resolve_args(argv)
 
     import open3d as o3d   # deferred: heavy import
 
     source = FileSource(args.replay) if args.replay else SerialSource(args.port, args.baud)
+    # Command channel rides the SAME open port: only meaningful for a live
+    # SerialSource (replay has no device to command, so client stays None
+    # and CommandKeyState prints "not available in replay" for every key).
+    client = CommandClient(source.write) if isinstance(source, SerialSource) else None
+    cmd_state = CommandKeyState(client)
     decoder = StreamDecoder()
     stats = Stats()
     # Always need "depth" for point positions; add the color channel if it's a different plane.
@@ -101,11 +186,24 @@ def main(argv=None) -> int:
     fault: dict = {}
     min_interval = 1.0 / args.replay_fps if (args.replay and args.replay_fps > 0) else 0.0
     threading.Thread(target=_reader,
-                     args=(source, decoder, slot, stats, args.record, fault, min_interval, stage),
+                     args=(source, decoder, slot, stats, args.record, fault, min_interval, stage, client),
                      daemon=True).start()
 
-    vis = o3d.visualization.Visualizer()
+    vis = o3d.visualization.VisualizerWithKeyCallback()
     vis.create_window("roomscan", width=1280, height=800)
+
+    def _key(cmd: int, param: int, label: str):
+        def handler(_vis) -> bool:
+            cmd_state.dispatch(cmd, param, label)
+            return False   # result prints asynchronously; no redraw needed here
+        return handler
+
+    vis.register_key_callback(ord("P"), _key(CommandCode.PING, 0, "ping"))
+    vis.register_key_callback(ord("C"), _key(CommandCode.SEND_CALIB, 0, "calib"))
+    vis.register_key_callback(ord("R"), _key(CommandCode.REINIT, 0, "reinit"))
+    vis.register_key_callback(ord("1"), _key(CommandCode.SET_USECASE, 0, "usecase 0"))
+    vis.register_key_callback(ord("2"), _key(CommandCode.SET_USECASE, 1, "usecase 1"))
+
     opt = vis.get_render_option()
     opt.point_size = 3.0
     opt.background_color = np.asarray([0.05, 0.05, 0.08])
