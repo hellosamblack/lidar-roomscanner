@@ -57,6 +57,25 @@ _BG_DARK = [0.05, 0.05, 0.08, 1.0]
 _BG_LIGHT = [0.90, 0.90, 0.92, 1.0]
 
 
+def _ir_freeze_range(freeze, frozen, auto):
+    """Resolve the IR pane's display range for one frame (pure, unit-tested).
+
+    `auto` is this frame's percentile auto-range; `frozen` is the currently
+    captured frozen range or None. Returns `(vmin, vmax, frozen_out)`.
+
+    When `freeze` is set, reuse `frozen` if present, else lazily capture this
+    frame's `auto` as the frozen range and return it -- this is what makes freeze
+    engage when it was set from config (the checkbox `.checked=True` never fires
+    the toggle handler) or toggled before any reflectance frame arrived (nothing
+    to freeze yet). When not frozen, pass `frozen` through untouched so a later
+    re-freeze via the toggle handler still has the last value to fall back on.
+    """
+    if freeze:
+        frozen = auto if frozen is None else frozen
+        return frozen[0], frozen[1], frozen
+    return auto[0], auto[1], frozen
+
+
 class _Pacer:
     """Mutable replay-pacing + pause control shared with the reader thread.
 
@@ -162,9 +181,10 @@ class ControlPanel:
         self._fault_reported = False
         self._last_ui = 0.0
 
-        # view/config-backed state
+        # view/config-backed state (normalize out-of-set values so a hand-edited
+        # config can't feed an unknown colormap into reflectance_to_rgb every tick)
         self.color_mode = args.color if args.color in _COLOR_MODES else "depth"
-        self.ir_colormap = getattr(args, "ir_colormap", "gray")
+        self.ir_colormap = args.ir_colormap if getattr(args, "ir_colormap", None) in _IR_COLORMAPS else "gray"
         self.ir_freeze = bool(getattr(args, "ir_freeze_range", False))
         self._ir_last_auto: tuple[float, float] | None = None
         self._ir_frozen: tuple[float, float] | None = None
@@ -363,8 +383,24 @@ class ControlPanel:
             self.recorder.close()
         except Exception:
             pass
+        if getattr(self.args, "save_config", False):
+            self._persist_config()
         self._gui.Application.instance.quit()
         return True
+
+    def _persist_config(self):
+        """Honor --save-config in panel mode: write the effective settings,
+        including the runtime-adjusted panel fields, back to roomscan.toml."""
+        try:
+            cfg = ViewerConfig(
+                color=self.color_mode, fov_h=self.args.fov_h, fov_v=self.args.fov_v,
+                replay_fps=self.args.replay_fps, port=self.args.port,
+                point_size=self.material.point_size, ir_colormap=self.ir_colormap,
+                ir_freeze_range=self.ir_freeze, panel_width=int(getattr(self.args, "panel_width", 340)))
+            path = cfg.save()
+            self.bus.publish(f"saved config to {path}")
+        except Exception as exc:  # never let a config write block window close
+            self.bus.publish(f"config save failed: {exc!r}")
 
     # ---- reader thread ------------------------------------------------------
     def _reader_loop(self):
@@ -474,11 +510,9 @@ class ControlPanel:
                 self._ir_unavailable_shown = True
             return
         self._ir_unavailable_shown = False
-        if self.ir_freeze and self._ir_frozen is not None:
-            vmin, vmax = self._ir_frozen
-        else:
-            vmin, vmax = ir_range(refl)
-            self._ir_last_auto = (vmin, vmax)
+        auto = ir_range(refl)
+        self._ir_last_auto = auto
+        vmin, vmax, self._ir_frozen = _ir_freeze_range(self.ir_freeze, self._ir_frozen, auto)
         rgb = reflectance_to_rgb(refl, colormap=self.ir_colormap,
                                  vmin=vmin, vmax=vmax, upscale=_IR_UPSCALE)
         self.ir_widget.update_image(self._o3d.geometry.Image(np.ascontiguousarray(rgb)))

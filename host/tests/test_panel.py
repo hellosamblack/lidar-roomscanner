@@ -13,7 +13,7 @@ import time
 from roomscan.config import ViewerConfig
 from roomscan.decoder import StreamDecoder
 from roomscan.logbus import LogBus
-from roomscan.panel import _Pacer, _fill_panel_fields, _run_reader
+from roomscan.panel import _Pacer, _fill_panel_fields, _ir_freeze_range, _run_reader
 from roomscan.pipeline import TransformStage
 from roomscan.protocol import (
     CommandCode,
@@ -65,6 +65,35 @@ def test_fill_panel_fields_leaves_already_set_values(tmp_path, monkeypatch):
     args = _bare_args(ir_colormap="gray")   # already resolved -> must win
     _fill_panel_fields(args)
     assert args.ir_colormap == "gray"
+
+
+# --- _ir_freeze_range (IR pane freeze state machine) -------------------------
+
+def test_ir_range_auto_when_not_frozen():
+    vmin, vmax, frozen = _ir_freeze_range(False, None, (10.0, 20.0))
+    assert (vmin, vmax) == (10.0, 20.0)
+    assert frozen is None                      # nothing captured while auto
+
+
+def test_ir_range_lazy_captures_when_frozen_but_none():
+    # freeze set from config / before any frame: frozen starts None -> capture this frame
+    vmin, vmax, frozen = _ir_freeze_range(True, None, (10.0, 20.0))
+    assert (vmin, vmax) == (10.0, 20.0)
+    assert frozen == (10.0, 20.0)
+
+
+def test_ir_range_reuses_frozen_ignoring_new_auto():
+    vmin, vmax, frozen = _ir_freeze_range(True, (10.0, 20.0), (99.0, 200.0))
+    assert (vmin, vmax) == (10.0, 20.0)        # frozen wins over the new auto-range
+    assert frozen == (10.0, 20.0)
+
+
+def test_ir_range_frozen_from_config_persists_across_frames():
+    # simulate the config-freeze path across two frames with drifting auto-ranges
+    _, _, frozen = _ir_freeze_range(True, None, (10.0, 20.0))       # frame 1 captures
+    vmin, vmax, frozen = _ir_freeze_range(True, frozen, (50.0, 90.0))  # frame 2 drifts
+    assert (vmin, vmax) == (10.0, 20.0)        # still the captured range, not frame 2's
+    assert frozen == (10.0, 20.0)
 
 
 # --- _run_reader routing -----------------------------------------------------
