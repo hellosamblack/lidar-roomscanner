@@ -21,7 +21,8 @@ Engineering conventions live in [`docs/engineering-practices.md`](./docs/enginee
   is resolved — IKS4A1 rides the ToF's I3C1 bus as legacy-I2C targets (shared PB8/PB9), no separate
   peripheral; stacking recipe + bench checklist in `docs/iks4a1-stacking.md`.
 - **Sequencing rule (owner):** mature the visualizer + UI/config on the **ToF sensor alone** before adding
-  the IKS4A1 board.
+  the IKS4A1 board. *(Satisfied as of Phase 3, 2026-07-09 — visualizer, runtime config, and robustness
+  are done; owner swapped IKS4A1 up to Phase 4, ahead of Ethernet.)*
 - **Protocol rule:** design the frame protocol transport-agnostic from day one —
   `magic + version + seq + timestamp + payload + CRC32`, multi-stream, little-endian — so the Ethernet
   cutover (Phase 4) is plumbing, not a redesign. Spec lives in `docs/protocol.md`; any wire change bumps
@@ -430,10 +431,32 @@ and config persistence host-side.
   `transform_prepare` → restart. Watch for leaks in the opaque transform handle across cycles.
 - CDC RX side appears here for the first time — until now the device only transmits.
 
-### Phase 4 — Transport cutover to Ethernet
+### Phase 4 — Integrate X-NUCLEO-IKS4A1  *(swapped with Ethernet 2026-07-09, owner decision — sensors next)*
+
+IMU (LSM6DSV16X hardware SFLP quaternions) / mag / baro drivers; fuse readings into the payload with
+hardware timestamps. New streams = new `stream_id`s + a version bump per the protocol rule.
+*(Older docs/reports may still call this "Phase 5" and Ethernet "Phase 4" — the swap reversed the
+numbers; content is unchanged.)* The USB CDC link carries the added IMU/env traffic easily (~KB/s on
+top of 445 KB/s raw), so nothing here waits on Ethernet.
+
+- **Bus topology — resolved** (`docs/iks4a1-stacking.md`): the IKS4A1 shares the ToF's **I3C1** bus as
+  legacy-I2C targets (`I3C1.BusUsage=MixedUsage` already set in the `.ioc`), not a separate I2C peripheral.
+  No static-address collision (ToF `0x29` vs IKS4A1 `0x1E`/`0x38`/`0x5C-5D`/`0x6A-6B`); keep IKS4A1 INT
+  lines off the ToF control pins PB1/PB5/PB6/PB7, and match both boards' bus I/O rail to 3.3 V. The driver
+  must assign the ToF's I3C dynamic address clear of the IKS4A1 statics and declare them as legacy-I2C
+  targets.
+- SFLP quaternion wire format: **IEEE binary16 (fp16), not fixed-point int16** — the research doc mislabels
+  this; document the encoding in `docs/protocol.md` and test the fp16 decode path with a golden vector.
+- IMU sample rate (~100+ Hz) ≠ ToF frame rate: IMU frames are independent small frames with their own
+  timestamps, not fields bolted onto depth frames — SLAM interpolates host-side.
+- Edge-AI (MLC/ISPU) belongs in-sensor at this tier, not on the M33.
+
+### Phase 5 — Transport cutover to Ethernet  *(swapped with IKS4A1 2026-07-09 — see Phase 4 note)*
 
 Enable the ETH MAC + lwIP (RMII pins already muxed; LAN8742 PHY on-board), move the frame protocol onto
-UDP, add hardware PTP (IEEE 1588) timestamping.
+UDP, add hardware PTP (IEEE 1588) timestamping. Post-swap rationale: with the send off the raw-only
+critical path (P2.5), Ethernet's value is ~60-80 Hz-class rates, PTP sync (which matters MORE once IMU
+streams exist — good ordering), and the zero-config link; none of it blocks the sensor work.
 
 - Protocol payload is unchanged by design — this phase is transport plumbing + a UDP source class in the
   host app (dgram boundaries replace the byte-stream resync logic).
@@ -452,23 +475,6 @@ UDP, add hardware PTP (IEEE 1588) timestamping.
   - Discovery: mDNS (lwIP's mdns app) advertising `roomscanner.local` + a service record; the host app
     resolves it (fallback: the fixed /30 device address). `SerialSource`-style auto-find for the network.
   - PTP master on the PC, as before.
-
-### Phase 5 — Integrate X-NUCLEO-IKS4A1
-
-IMU (LSM6DSV16X hardware SFLP quaternions) / mag / baro drivers; fuse readings into the payload with
-hardware timestamps. New streams = new `stream_id`s + a version bump per the protocol rule.
-
-- **Bus topology — resolved** (`docs/iks4a1-stacking.md`): the IKS4A1 shares the ToF's **I3C1** bus as
-  legacy-I2C targets (`I3C1.BusUsage=MixedUsage` already set in the `.ioc`), not a separate I2C peripheral.
-  No static-address collision (ToF `0x29` vs IKS4A1 `0x1E`/`0x38`/`0x5C-5D`/`0x6A-6B`); keep IKS4A1 INT
-  lines off the ToF control pins PB1/PB5/PB6/PB7, and match both boards' bus I/O rail to 3.3 V. The driver
-  must assign the ToF's I3C dynamic address clear of the IKS4A1 statics and declare them as legacy-I2C
-  targets.
-- SFLP quaternion wire format: **IEEE binary16 (fp16), not fixed-point int16** — the research doc mislabels
-  this; document the encoding in `docs/protocol.md` and test the fp16 decode path with a golden vector.
-- IMU sample rate (~100+ Hz) ≠ ToF frame rate: IMU frames are independent small frames with their own
-  timestamps, not fields bolted onto depth frames — SLAM interpolates host-side.
-- Edge-AI (MLC/ISPU) belongs in-sensor at this tier, not on the M33.
 
 ### Phase 6 — Real-time SLAM (PC)
 

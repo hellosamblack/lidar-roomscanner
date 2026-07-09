@@ -83,8 +83,8 @@ Full detail in `ROADMAP.md`. Summary:
 - **Phase 1 — real-time 3D visualizer.** Replace ASCII with a **versioned binary frame protocol** (magic + seq + timestamp + payload + CRC32) over a link fast enough for real-time (VCOM @115200 ≈ 1 fps for a 9 KB frame — inadequate; use **native USB CDC FS** now, Ethernet later). PC app deprojects depth → point cloud and renders live (Python + Open3D, or a custom viewer). First capture what the transform library exposes: the app prints available **streams and controls** at startup via `streams_inspect`/`controls_inspect` — that list (depth/reflectance/confidence/possibly XYZ) decides what can be streamed and whether deprojection happens on-MCU or PC-side.
 - **Phase 2 — IR + additional sensor streams.** Extend protocol + PC UI for IR reflectance, confidence, ambient; colorize the cloud by IR. Multi-stream from the start.
 - **Phase 3 — UI & runtime configuration.** Host→device control channel to set usecase/binning/streams at runtime (transform lib exposes `controls`); recording/playback; config persistence.
-- **Phase 4 — transport upgrade to Ethernet** (lwIP/UDP + PTP) once bandwidth/sync demands it.
-- **Phase 5 — integrate X-NUCLEO-IKS4A1**: IMU/mag/baro drivers, fuse into the payload with hardware timestamps. Edge-AI (in-sensor MLC/ISPU) belongs here, not on the M33 — see the edge-ai-tooling memory.
+- **Phase 4 — integrate X-NUCLEO-IKS4A1** (swapped ahead of Ethernet 2026-07-09): IMU/mag/baro drivers, fuse into the payload with hardware timestamps. Edge-AI (in-sensor MLC/ISPU) belongs here, not on the M33 — see the edge-ai-tooling memory.
+- **Phase 5 — transport upgrade to Ethernet** (lwIP/UDP + PTP + zero-config direct link). Older docs may use the pre-swap numbering (Ethernet=4, IKS4A1=5).
 - **Phase 6 — real-time SLAM** on PC: SFLP rotation prior, 3-DoF G-ICP, scalable TSDF, IR-as-intensity, baro Z-constraint.
 - **Phase 7 — offline**: COLMAP pose priors + depth-regularized 3D Gaussian Splatting.
 
