@@ -97,7 +97,7 @@ via a new frame revision.
 | 1   | PING              | ignored       | firmware protocol version (u32) |
 | 2   | SEND_CALIB        | ignored       | 0 — device transmits a CALIB frame immediately; lets a late-attaching host obtain calibration immediately instead of waiting the ≤63-frame retransmit cadence (closes ROADMAP's CALIB-on-DTR-connect item when wired in firmware) |
 | 3   | SET_USECASE       | usecase ID (u16) | applied usecase ID (u16) |
-| 4   | SET_FRAME_PERIOD_US | period in µs (u32) | applied period (u32) |
+| 4   | SET_FRAME_PERIOD_US | period in µs (u32) | applied period (u32) — stored and echoed (read back from the sensor), but has no observable effect while the app uses `VL53L9_SYNC_MANUAL` (vl53l9.h:248 — period governs AUTONOMOUS mode only); retained for the future autonomous-mode option |
 | 5   | SET_EXPOSURE_MS   | exposure in ms (u32) | applied exposure (u32) |
 | 6   | REINIT            | ignored       | 0                |
 
@@ -142,3 +142,4 @@ specced with the Phase 4 transport work).
   DROPPED/oversize semantics clarified, ZF32 no-return sentinel documented. No layout change.
 - **v1 rev 2026-07-08 (b)**: additive — RAW_3DMD (7) and CALIB (8) allocated for the PC-side-transform architecture. No layout change.
 - **v1 rev 2026-07-08 (c)**: additive — COMMAND (frame_type=3) and ACK (frame_type=4) frame types, command registry v1 (PING/SEND_CALIB/SET_USECASE/SET_FRAME_PERIOD_US/SET_EXPOSURE_MS/REINIT), result-code registry. No layout change.
+- **v1 rev 2026-07-08 (d)**: semantics clarification (additive, no wire change) — SET_FRAME_PERIOD_US is stored and echoed but has no observable fps effect under the app's always-manual sync mode (driver: period governs AUTONOMOUS mode only); documented in the command-registry row, discovered during Phase 3 Task 4 hardware verification.
