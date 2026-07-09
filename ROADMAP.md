@@ -233,14 +233,27 @@ a live-rendered point cloud.
 >   1e-6-digit micro-variation is actually a packed filter-status code, not a confidence score) is
 >   documented in `docs/deprojector-validation.md`'s confidence-channel section. Depth-sentinel gating
 >   remains the correct exclusion mechanism, not the ZAPC confidence field.
-> - **Open — connect-time CRC/DROPPED transient** (first observed Phase 2 Task 7): still unexplained;
->   reproduced again in this task's 60 s soak (1 CRC failure + 1 dropped flag, both at connection time,
->   first-occurrence-transient class — no recurrence within any run so far). Tracked alongside the
->   ~1-in-5 boot hang (candidate common root: sensor bring-up timing); to be investigated with the
->   EVENT-frame/recovery work.
-> - **Open — CALIB-on-DTR-connect**: CALIB retransmit cadence means a host attaching mid-cycle discards
->   up to 63 RAW frames (~2.3 s blind start at 27.76 fps); improvement: firmware sends CALIB immediately
->   on DTR-connect (cheap — the connect wait already exists). Not yet implemented. Live evidence of the
+> - **✅ Resolved — connect-time CRC/DROPPED transient** (first observed Phase 2 Task 7): root-caused
+>   Phase 3 Task 6 by byte-exact forensics on both recorded instances (`captures/e2e_p2.bin`,
+>   `captures/e2e_p25.bin`) — full writeup `docs/connect-transient-forensics.md`. Both captures show the
+>   *identical* signature down to the byte: a perfectly well-formed RAW_3DMD seq=1 header immediately
+>   after CALIB seq=1, truncated ~2.8 KB short of its declared payload+CRC, followed by `FLAG_DROPPED` on
+>   seq=2. This is the pre-existing `rs_cdc_send()` 100 ms mid-frame-abort/DROPPED-flag mechanism (the
+>   same one the stall/recover experiments deliberately trigger) firing once, for free, because the
+>   host's own startup latency between DTR-assert (on port open) and its first live `.read()` can exceed
+>   the firmware's 100 ms per-write budget on frame 1. **Characterized-cosmetic**: costs exactly one RAW
+>   frame, self-heals with no seq gap, never recurs within a session, no wire/decoder change needed. Not
+>   the mid-stream-reattach mechanism (see the CALIB-on-DTR-connect item below) — the CALIB `seq=1` and
+>   early `t_us` in both captures prove these are genuinely fresh boots, not stale reconnects.
+> - **Open — CALIB-on-DTR-connect** (mid-stream reattach, architecturally distinct from the item above —
+>   see `docs/connect-transient-forensics.md`'s "DTR-gate one-shot" section): CALIB retransmit cadence
+>   means a host attaching mid-cycle discards up to 63 RAW frames (~2.3 s blind start at 27.76 fps).
+>   **Partially mitigated**: Phase 3 Task 2 shipped `SEND_CALIB` (`roomscan-ctl calib`) — a host can now
+>   request CALIB on demand instead of waiting out the cadence. An automatic fix (device aborts any
+>   in-flight frame and sends CALIB immediately on DTR rising, via `tud_cdc_line_state_cb`) was evaluated
+>   Task 6 and found **not** small/safe enough to land there — it needs new synchronization between a
+>   TinyUSB callback context and the main loop's send/trigger state (`raw_mem_index`, `rs_calib_countdown`,
+>   in-flight `rs_cdc_send()`); specced as a Phase 3/4 follow-up, not implemented. Live evidence of the
 >   blind start this fix addresses: Phase 2.5 Task 5's `--color` run attached mid-cycle and observed
 >   `raw-skip 37` (stable, within the documented ≤63 ceiling).
 
@@ -293,8 +306,9 @@ traceback; stall/recover quick check (2 s read → 5 s not-reading, port held op
 reproduced the established drop-policy behavior exactly (one seq gap, one `FLAG_DROPPED` on the
 recovery frame, one transient CRC failure, then clean contiguous decoding with all post-recovery depth
 frames finite/non-negative). `docs/protocol.md` verified unchanged — no wire change in this phase, as
-planned. Left open: the connect-time transient and CALIB-on-DTR-connect (both above), carried forward
-unchanged from Phase 2.
+planned. Left open at the time: the connect-time transient and CALIB-on-DTR-connect (both above),
+carried forward unchanged from Phase 2 — the connect-time transient was later root-caused and resolved
+in Phase 3 Task 6 (see the updated bullet above).
 
 ### Phase 3 — UI & runtime configuration
 
