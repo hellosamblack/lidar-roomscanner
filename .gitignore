@@ -57,6 +57,9 @@ Thumbs.db
 .env
 .env.local
 
+# git worktrees (superpowers:using-git-worktrees)
+.worktrees/
+
 # golden test fixtures are deliberately tracked despite *.bin above
 !host/tests/fixtures/*.bin
 
