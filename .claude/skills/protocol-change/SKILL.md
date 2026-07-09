@@ -12,6 +12,11 @@ The protocol has four synchronized artifacts. A change lands in **one commit** t
 3. **Host decoder** — `host/src/roomscan/protocol.py` (+ `decoder.py` if framing changed).
 4. **Golden vectors** — `host/tests/fixtures/*.bin` + the tests that assert exact bytes.
 
+The lockstep set also includes the **enum registries** — `CommandCode`/`ResultCode`/`EventCode`/
+`StreamId` — which each live in three places (`docs/protocol.md`'s registry tables, `rs_protocol.h`'s
+`#define`s, `protocol.py`'s `IntEnum`s): adding or renumbering a value is the same one-commit,
+all-artifacts discipline as a layout change, even though it doesn't itself bump `RS_PROTO_VERSION`.
+
 ## Rules
 
 - **Layout change ⇒ version bump.** Any change to header size, field order/width, payload encoding, or
