@@ -60,9 +60,19 @@ _EXPOSURE_DEBOUNCE = 0.4        # s to settle before sending a dragged exposure 
 _BG_DARK = [0.05, 0.05, 0.08, 1.0]
 _BG_LIGHT = [0.90, 0.90, 0.92, 1.0]
 
+# Constrained turntable camera: orbit (azimuth/elevation) + pan + zoom, world-up
+# locked so the view can never roll/twist (the default arcball can). Sensitivities
+# are in radians (orbit) / fraction (pan,zoom) per pixel or wheel-notch.
+_WORLD_UP = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+_ORBIT_K = 0.008          # rad per pixel drag (~0.46 deg/px)
+_EL_CLAMP = 1.5           # elevation limit (rad, ~86 deg) — never reach the pole
+_PAN_K = 0.0015           # pan fraction of radius per pixel
+_ZOOM_STEP = 0.9          # radius *= 0.9**wheel_dy
+
 _HELP_LINES = [
     "",
-    "Mouse:  left-drag orbit  |  ctrl/middle-drag pan  |  wheel zoom",
+    "Mouse:  left-drag orbit  |  ctrl / middle / right-drag pan  |  wheel zoom",
+    "        (camera is roll-locked: it orbits and pans but never twists)",
     "Key:    H  this help",
     "",
     "Status   fps, frame/seq-gap/drop/crc/raw counters, current usecase + color.",
@@ -70,7 +80,9 @@ _HELP_LINES = [
     "         (device controls are inactive in replay.)",
     "View     color mode (depth / reflectance IR / confidence);",
     "         point size (raise it to close the gaps between zones);",
-    "         Near contrast (see below); dark background; Reset view.",
+    "         Near contrast (see below); dark background;",
+    "         Rotate 90 (turns the cloud AND the IR pane, e.g. sideways mount);",
+    "         Reset view.",
     "",
     "Near contrast -- spend more of the colormap on close targets (e.g. a face",
     "in front of a wall) so facial relief stands out:",
@@ -87,6 +99,27 @@ _HELP_LINES = [
     "",
     "Run with --save-config to persist the current view/IR/near settings.",
 ]
+
+
+def _orbit_eye(target, az, el, radius):
+    """Camera eye position for a turntable orbit: azimuth `az`/elevation `el`
+    (radians) at `radius` from `target`. With a fixed world-up in look_at, this
+    can never introduce roll. Pure — unit-tested."""
+    d = np.array([np.cos(el) * np.sin(az), np.sin(el), np.cos(el) * np.cos(az)])
+    return np.asarray(target, dtype=np.float64) + radius * d
+
+
+def _rot_xy(pts, k):
+    """Rotate (N,3) points by k*90 deg CCW about the viewing (z) axis, leaving z
+    (depth) untouched so coloring/near-contrast are unaffected. Used to upright a
+    sideways-mounted sensor; kept in lockstep with the IR pane's np.rot90."""
+    k %= 4
+    if k == 0 or len(pts) == 0:
+        return pts
+    x, y, z = pts[:, 0].copy(), pts[:, 1].copy(), pts[:, 2]
+    for _ in range(k):
+        x, y = -y, x
+    return np.stack([x, y, z], axis=1)
 
 
 def _ir_freeze_range(freeze, frozen, auto):
@@ -205,6 +238,13 @@ class ControlPanel:
         self.deproj: Deprojector | None = None
         self.pcd = o3d.geometry.PointCloud()
         self._camera_set = False
+        self._cam_target = None             # turntable camera state (world-up locked, no roll)
+        self._cam_az = 0.0
+        self._cam_el = 0.35
+        self._cam_radius = 1.0
+        self._drag = None
+        self._rot = 0                       # 90 deg CCW turns applied to cloud + IR pane
+        self._last_item = None              # last (header, outputs) rendered — reused on rotate
         self._latest_outputs: dict | None = None
         self._color_fallback_warned = False
         self._shown = 0
@@ -256,30 +296,110 @@ class ControlPanel:
         self.scene_widget = gui.SceneWidget()
         self.scene_widget.scene = self.rendering.Open3DScene(self.window.renderer)
         self.scene_widget.scene.set_background(_BG_DARK)
+        # Own the camera nav so it can't roll: our set_on_mouse handles orbit/pan/
+        # zoom and returns HANDLED, preempting the built-in twisting arcball.
+        self.scene_widget.set_on_mouse(self._on_mouse)
         self.window.add_child(self.scene_widget)
+
+    def _group(self, title, *, open=True):
+        """A collapsable group added to the panel, with consistent margins."""
+        gui = self._gui
+        em = self.window.theme.font_size
+        g = gui.CollapsableVert(title, 0.15 * em, gui.Margins(0.5 * em, 0.15 * em, 0, 0.15 * em))
+        g.set_is_open(open)
+        self.panel.add_child(g)
+        return g
+
+    def _labeled_grid(self):
+        """A 2-column label|control grid — the columns size to content so the
+        label and its control never overlap (the cause of the old crowding)."""
+        gui = self._gui
+        em = self.window.theme.font_size
+        return gui.VGrid(2, 0.5 * em, gui.Margins(0, 0.15 * em, 0, 0.15 * em))
 
     def _build_panel(self):
         gui = self._gui
         em = self.window.theme.font_size
-        margin = gui.Margins(em, em, em, em)
-        self.panel = gui.ScrollableVert(0.5 * em, margin)
+        self.panel = gui.ScrollableVert(0.15 * em, gui.Margins(0.4 * em, 0.4 * em, 0.4 * em, 0.4 * em))
 
-        # --- Status ---
-        st = gui.CollapsableVert("Status", 0.25 * em, gui.Margins(em, 0, 0, 0))
+        # --- Status (live readout only — no usecase/color echo; those live in the
+        #     View/Device controls that already show them) ---
+        st = self._group("Status")
         self.lbl_conn = gui.Label("connecting...")
-        self.lbl_fps = gui.Label("fps: --")
-        self.lbl_counts = gui.Label("frames 0 | gaps 0 | drops 0 | crc 0")
-        self.lbl_mode = gui.Label(f"usecase --  |  color {self.color_mode}")
-        for w in (self.lbl_conn, self.lbl_fps, self.lbl_counts, self.lbl_mode):
+        self.lbl_counts = gui.Label("frames 0")
+        self.lbl_counts2 = gui.Label("")
+        for w in (self.lbl_conn, self.lbl_counts, self.lbl_counts2):
             st.add_child(w)
-        self.panel.add_child(st)
+
+        # --- View (used most -> near the top) ---
+        view = self._group("View")
+        vg = self._labeled_grid()
+        vg.add_child(gui.Label("Color"))
+        self.cb_color = gui.Combobox()
+        for m in _COLOR_MODES:
+            self.cb_color.add_item(m)
+        self.cb_color.selected_index = _COLOR_MODES.index(self.color_mode)
+        self.cb_color.set_on_selection_changed(self._on_color)
+        vg.add_child(self.cb_color)
+        vg.add_child(gui.Label("Point size"))
+        self.sl_point = gui.Slider(gui.Slider.INT)
+        self.sl_point.set_limits(1, 20)          # wide enough to close the inter-zone gaps
+        self.sl_point.int_value = int(self.material.point_size)
+        self.sl_point.set_on_value_changed(self._on_point_size)
+        vg.add_child(self.sl_point)
+        vg.add_child(gui.Label("Near contrast"))
+        self.cb_near = gui.Combobox()
+        for m in _NEAR_MODES:
+            self.cb_near.add_item(m)
+        self.cb_near.selected_index = _NEAR_MODES.index(self.near_mode)
+        self.cb_near.set_on_selection_changed(self._on_near_mode)
+        vg.add_child(self.cb_near)
+        self.lbl_near = gui.Label("cutoff m")    # relabeled per mode; slider shows the value
+        vg.add_child(self.lbl_near)
+        self.sl_near = gui.Slider(gui.Slider.DOUBLE)
+        self.sl_near.set_on_value_changed(self._on_near_value)
+        vg.add_child(self.sl_near)
+        view.add_child(vg)
+        self._sync_near_slider()
+        self.chk_bg = gui.Checkbox("Dark background")
+        self.chk_bg.checked = True
+        self.chk_bg.set_on_checked(self._on_bg)
+        view.add_child(self.chk_bg)
+        vrow = gui.Horiz(0.25 * em)
+        for text, cb in (("Rotate 90", self._on_rotate), ("Reset", self._on_reset_view),
+                         ("Help", self._show_help)):
+            b = gui.Button(text)
+            b.horizontal_padding_em = 0.4
+            b.set_on_clicked(cb)
+            vrow.add_child(b)
+        view.add_child(vrow)
+
+        # --- IR Monitor ---
+        ir = self._group("IR Monitor")
+        blank = self._o3d.geometry.Image(
+            np.zeros((42 * _IR_UPSCALE, 54 * _IR_UPSCALE, 3), dtype=np.uint8))
+        self.ir_widget = gui.ImageWidget(blank)
+        ir.add_child(self.ir_widget)
+        ig = self._labeled_grid()
+        ig.add_child(gui.Label("Map"))
+        self.cb_ir = gui.Combobox()
+        for m in _IR_COLORMAPS:
+            self.cb_ir.add_item(m)
+        self.cb_ir.selected_index = _IR_COLORMAPS.index(self.ir_colormap) if self.ir_colormap in _IR_COLORMAPS else 0
+        self.cb_ir.set_on_selection_changed(self._on_ir_colormap)
+        ig.add_child(self.cb_ir)
+        ir.add_child(ig)
+        self.chk_freeze = gui.Checkbox("Freeze range")
+        self.chk_freeze.checked = self.ir_freeze
+        self.chk_freeze.set_on_checked(self._on_ir_freeze)
+        ir.add_child(self.chk_freeze)
 
         # --- Device ---
-        dev = gui.CollapsableVert("Device", 0.25 * em, gui.Margins(em, 0, 0, 0))
+        dev = self._group("Device")
         row = gui.Horiz(0.25 * em)
         for text, cmd, param, label in (
             ("Ping", CommandCode.PING, 0, "ping"),
-            ("Request CALIB", CommandCode.SEND_CALIB, 0, "calib"),
+            ("CALIB", CommandCode.SEND_CALIB, 0, "calib"),
             ("Reinit", CommandCode.REINIT, 0, "reinit"),
         ):
             b = gui.Button(text)
@@ -287,113 +407,26 @@ class ControlPanel:
             b.set_on_clicked(lambda c=cmd, p=param, lb=label: self.dispatcher.dispatch(c, p, lb))
             row.add_child(b)
         dev.add_child(row)
-
-        uc_row = gui.Horiz(0.25 * em)
-        uc_row.add_child(gui.Label("Usecase"))
+        dg = self._labeled_grid()
+        dg.add_child(gui.Label("Usecase"))
         self.cb_usecase = gui.Combobox()
         for _id, name in _USECASES:
             self.cb_usecase.add_item(name)
         self.cb_usecase.selected_index = 1 if str(getattr(self.args, "usecase", "")) != "0" else 0
         self.cb_usecase.set_on_selection_changed(self._on_usecase)
-        uc_row.add_child(self.cb_usecase)
-        dev.add_child(uc_row)
-
-        ex_row = gui.Horiz(0.25 * em)
-        ex_row.add_child(gui.Label("Exposure ms"))
+        dg.add_child(self.cb_usecase)
+        dg.add_child(gui.Label("Exposure ms"))
         self.sl_exposure = gui.Slider(gui.Slider.INT)
         self.sl_exposure.set_limits(1, 30)
         self.sl_exposure.int_value = 5
         self.sl_exposure.set_on_value_changed(self._on_exposure_changed)
-        ex_row.add_child(self.sl_exposure)
-        self.lbl_exposure = gui.Label("5")
-        ex_row.add_child(self.lbl_exposure)
-        dev.add_child(ex_row)
+        dg.add_child(self.sl_exposure)
+        dev.add_child(dg)
         if self.is_replay:
-            dev.add_child(gui.Label("(device controls inactive in replay)"))
-        self.panel.add_child(dev)
-
-        # --- View ---
-        view = gui.CollapsableVert("View", 0.25 * em, gui.Margins(em, 0, 0, 0))
-        c_row = gui.Horiz(0.25 * em)
-        c_row.add_child(gui.Label("Color"))
-        self.cb_color = gui.Combobox()
-        for m in _COLOR_MODES:
-            self.cb_color.add_item(m)
-        self.cb_color.selected_index = _COLOR_MODES.index(self.color_mode)
-        self.cb_color.set_on_selection_changed(self._on_color)
-        c_row.add_child(self.cb_color)
-        view.add_child(c_row)
-
-        ps_row = gui.Horiz(0.25 * em)
-        ps_row.add_child(gui.Label("Point size"))
-        self.sl_point = gui.Slider(gui.Slider.INT)
-        self.sl_point.set_limits(1, 20)     # wide enough to close the inter-zone gaps
-        self.sl_point.int_value = int(self.material.point_size)
-        self.sl_point.set_on_value_changed(self._on_point_size)
-        ps_row.add_child(self.sl_point)
-        view.add_child(ps_row)
-
-        # Near contrast: give close targets (a person) more of the colormap so
-        # facial relief stands out instead of washing into the wall's range.
-        nc_row = gui.Horiz(0.25 * em)
-        nc_row.add_child(gui.Label("Near contrast"))
-        self.cb_near = gui.Combobox()
-        for m in _NEAR_MODES:
-            self.cb_near.add_item(m)
-        self.cb_near.selected_index = _NEAR_MODES.index(self.near_mode)
-        self.cb_near.set_on_selection_changed(self._on_near_mode)
-        nc_row.add_child(self.cb_near)
-        view.add_child(nc_row)
-
-        na_row = gui.Horiz(0.25 * em)
-        self.lbl_near = gui.Label("cutoff m")
-        na_row.add_child(self.lbl_near)
-        self.sl_near = gui.Slider(gui.Slider.DOUBLE)
-        self.sl_near.set_on_value_changed(self._on_near_value)
-        na_row.add_child(self.sl_near)
-        self.lbl_near_val = gui.Label("")
-        na_row.add_child(self.lbl_near_val)
-        view.add_child(na_row)
-        self._sync_near_slider()
-
-        self.chk_bg = gui.Checkbox("Dark background")
-        self.chk_bg.checked = True
-        self.chk_bg.set_on_checked(self._on_bg)
-        view.add_child(self.chk_bg)
-
-        vb_row = gui.Horiz(0.25 * em)
-        reset = gui.Button("Reset view")
-        reset.set_on_clicked(self._on_reset_view)
-        vb_row.add_child(reset)
-        help_btn = gui.Button("Help (?)")
-        help_btn.set_on_clicked(self._show_help)
-        vb_row.add_child(help_btn)
-        view.add_child(vb_row)
-        self.panel.add_child(view)
-
-        # --- IR Monitor ---
-        ir = gui.CollapsableVert("IR Monitor", 0.25 * em, gui.Margins(em, 0, 0, 0))
-        blank = self._o3d.geometry.Image(
-            np.zeros((42 * _IR_UPSCALE, 54 * _IR_UPSCALE, 3), dtype=np.uint8))
-        self.ir_widget = gui.ImageWidget(blank)
-        ir.add_child(self.ir_widget)
-        map_row = gui.Horiz(0.25 * em)
-        map_row.add_child(gui.Label("Map"))
-        self.cb_ir = gui.Combobox()
-        for m in _IR_COLORMAPS:
-            self.cb_ir.add_item(m)
-        self.cb_ir.selected_index = _IR_COLORMAPS.index(self.ir_colormap) if self.ir_colormap in _IR_COLORMAPS else 0
-        self.cb_ir.set_on_selection_changed(self._on_ir_colormap)
-        map_row.add_child(self.cb_ir)
-        ir.add_child(map_row)
-        self.chk_freeze = gui.Checkbox("Freeze range")
-        self.chk_freeze.checked = self.ir_freeze
-        self.chk_freeze.set_on_checked(self._on_ir_freeze)
-        ir.add_child(self.chk_freeze)
-        self.panel.add_child(ir)
+            dev.add_child(gui.Label("(inactive in replay)"))
 
         # --- Capture ---
-        cap = gui.CollapsableVert("Capture", 0.25 * em, gui.Margins(em, 0, 0, 0))
+        cap = self._group("Capture", open=not self.is_replay)
         self.btn_record = gui.Button("Record")
         self.btn_record.toggleable = True
         self.btn_record.set_on_clicked(self._on_record)
@@ -403,22 +436,20 @@ class ControlPanel:
             self.btn_pause.toggleable = True
             self.btn_pause.set_on_clicked(self._on_pause)
             cap.add_child(self.btn_pause)
-            fps_row = gui.Horiz(0.25 * em)
-            fps_row.add_child(gui.Label("Replay fps"))
+            fg = self._labeled_grid()
+            fg.add_child(gui.Label("Replay fps"))
             self.sl_fps = gui.Slider(gui.Slider.INT)
             self.sl_fps.set_limits(0, 60)
             self.sl_fps.int_value = int(1.0 / self.pacer.interval) if self.pacer.interval > 0 else 0
             self.sl_fps.set_on_value_changed(self._on_fps)
-            fps_row.add_child(self.sl_fps)
-            cap.add_child(fps_row)
-        self.panel.add_child(cap)
+            fg.add_child(self.sl_fps)
+            cap.add_child(fg)
 
-        # --- Events ---
-        ev = gui.CollapsableVert("Events", 0.25 * em, gui.Margins(em, 0, 0, 0))
+        # --- Events (collapsed by default — expand to watch the log) ---
+        ev = self._group("Events", open=False)
         self.lv_events = gui.ListView()
         self.lv_events.set_items([])
         ev.add_child(self.lv_events)
-        self.panel.add_child(ev)
 
         self.window.add_child(self.panel)
 
@@ -508,13 +539,13 @@ class ControlPanel:
     def _render_frame(self, item):
         o3d = self._o3d
         header, outputs = item
+        self._last_item = item
         self._latest_outputs = outputs
         depth = outputs["depth"]
         h, w = depth.shape
         if self.deproj is None:
             self.deproj = Deprojector(w, h, self.args.fov_h, self.args.fov_v)
         pts = self.deproj(depth)
-        self.pcd.points = o3d.utility.Vector3dVector(pts)
         if len(pts):
             plane = None if self.color_mode == "depth" else outputs.get(self.color_mode)
             if plane is not None:
@@ -525,10 +556,12 @@ class ControlPanel:
                     self.bus.publish(f"no '{self.color_mode}' plane in stream — coloring by depth")
                     self._color_fallback_warned = True
                 vals = pts[:, 2]
-            colors = cloud_colors(vals, pts[:, 2], mode=self.near_mode,
+            colors = cloud_colors(vals, pts[:, 2], mode=self.near_mode,   # z-based, so pre-rotation
                                   cutoff_m=self.near_cutoff_m, emphasis=self.near_emphasis)
+            self.pcd.points = o3d.utility.Vector3dVector(_rot_xy(pts, self._rot))
             self.pcd.colors = o3d.utility.Vector3dVector(colors)
         else:
+            self.pcd.points = o3d.utility.Vector3dVector(pts)
             self.pcd.colors = o3d.utility.Vector3dVector(np.zeros((0, 3)))
         self._show_cloud()
         self._shown += 1
@@ -543,10 +576,63 @@ class ControlPanel:
 
     def _reset_camera(self):
         bounds = self.pcd.get_axis_aligned_bounding_box()
-        if bounds.get_extent().max() <= 0:
+        ext = float(bounds.get_extent().max())
+        if ext <= 0:
             return
-        self.scene_widget.setup_camera(60.0, bounds, bounds.get_center())
+        self.scene_widget.setup_camera(60.0, bounds, bounds.get_center())  # projection + near/far
+        self._cam_target = np.asarray(bounds.get_center(), dtype=np.float64)
+        self._cam_radius = ext * 1.8
+        self._cam_az, self._cam_el = 0.0, 0.35
+        self._apply_camera()
         self._camera_set = True
+
+    def _apply_camera(self):
+        if self._cam_target is None:
+            return
+        eye = _orbit_eye(self._cam_target, self._cam_az, self._cam_el, self._cam_radius)
+        self.scene_widget.look_at(self._cam_target.astype(np.float32),
+                                  eye.astype(np.float32), _WORLD_UP)   # fixed up -> never rolls
+
+    def _on_mouse(self, e):
+        gui = self._gui
+        res = gui.SceneWidget.EventCallbackResult
+        if self._cam_target is None:
+            return res.IGNORED
+        et = e.type
+        if et == gui.MouseEvent.Type.WHEEL:
+            if e.wheel_dy:
+                self._cam_radius = max(self._cam_radius * (_ZOOM_STEP ** e.wheel_dy), 1e-3)
+                self._apply_camera()
+            return res.HANDLED
+        if et == gui.MouseEvent.Type.BUTTON_DOWN:
+            self._drag = (e.x, e.y)
+            return res.HANDLED
+        if et == gui.MouseEvent.Type.BUTTON_UP:
+            self._drag = None
+            return res.HANDLED
+        if et == gui.MouseEvent.Type.DRAG and self._drag is not None:
+            dx, dy = e.x - self._drag[0], e.y - self._drag[1]
+            self._drag = (e.x, e.y)
+            pan = (e.is_modifier_down(gui.KeyModifier.CTRL)
+                   or e.is_button_down(gui.MouseButton.MIDDLE)
+                   or e.is_button_down(gui.MouseButton.RIGHT))
+            if pan:
+                self._pan(dx, dy)
+            else:                                   # orbit only — no roll term exists
+                self._cam_az -= dx * _ORBIT_K
+                self._cam_el = float(np.clip(self._cam_el + dy * _ORBIT_K, -_EL_CLAMP, _EL_CLAMP))
+            self._apply_camera()
+            return res.HANDLED
+        return res.IGNORED
+
+    def _pan(self, dx, dy):
+        eye = _orbit_eye(self._cam_target, self._cam_az, self._cam_el, self._cam_radius)
+        fwd = self._cam_target - eye
+        fwd /= np.linalg.norm(fwd) + 1e-9
+        right = np.cross(fwd, _WORLD_UP.astype(np.float64))
+        right /= np.linalg.norm(right) + 1e-9
+        cam_up = np.cross(right, fwd)
+        self._cam_target = self._cam_target + (-dx * right + dy * cam_up) * (self._cam_radius * _PAN_K)
 
     def _update_status(self):
         now, mark = time.monotonic(), self._shown
@@ -555,17 +641,14 @@ class ControlPanel:
         if dt >= 0.5:
             self._fps = (mark - m0) / dt
             self._fps_mark = (now, mark)
-        self.lbl_conn.text = ("replay: " + str(self.args.replay)) if self.is_replay \
-            else ("live: " + str(getattr(self.source, "port", "?")))
-        self.lbl_fps.text = f"fps: {self._fps:5.1f}"
-        line = (f"frames {self.stats.frames} | gaps {self.stats.seq_gaps} "
-                f"| drops {self.stats.dropped_flags} | crc {self.decoder.crc_failures} "
-                f"| raw {self.stage.raw_transformed}")
+        where = str(self.args.replay) if self.is_replay else str(getattr(self.source, "port", "?"))
+        self.lbl_conn.text = f"{'replay' if self.is_replay else 'live'}: {where}    {self._fps:.1f} fps"
+        self.lbl_counts.text = (f"frames {self.stats.frames}  raw {self.stage.raw_transformed}  "
+                                f"gaps {self.stats.seq_gaps}")
+        line2 = f"drops {self.stats.dropped_flags}  crc {self.decoder.crc_failures}"
         if self.stage.raw_skipped_awaiting_calib:
-            line += f" | raw-skip {self.stage.raw_skipped_awaiting_calib}"
-        self.lbl_counts.text = line
-        uc = _USECASES[self.cb_usecase.selected_index][1].split()[0]
-        self.lbl_mode.text = f"usecase {uc}  |  color {self.color_mode}"
+            line2 += f"  raw-skip {self.stage.raw_skipped_awaiting_calib}"
+        self.lbl_counts2.text = line2
 
     def _update_ir(self):
         outputs = self._latest_outputs
@@ -583,6 +666,8 @@ class ControlPanel:
         vmin, vmax, self._ir_frozen = _ir_freeze_range(self.ir_freeze, self._ir_frozen, auto)
         rgb = reflectance_to_rgb(refl, colormap=self.ir_colormap,
                                  vmin=vmin, vmax=vmax, upscale=_IR_UPSCALE)
+        if self._rot:
+            rgb = np.rot90(rgb, self._rot)     # keep the IR pane aligned with the rotated cloud
         self.ir_widget.update_image(self._o3d.geometry.Image(np.ascontiguousarray(rgb)))
 
     def _ir_placeholder(self):
@@ -607,13 +692,18 @@ class ControlPanel:
         self.dispatcher.dispatch(CommandCode.SET_USECASE, _USECASES[index][0], f"usecase {_USECASES[index][0]}")
 
     def _on_exposure_changed(self, value):
-        v = int(value)
-        self.lbl_exposure.text = str(v)
-        self._pending_exposure = (v, time.monotonic())
+        self._pending_exposure = (int(value), time.monotonic())   # slider shows the value itself
 
     def _on_color(self, text, index):
         self.color_mode = text
         self.bus.publish(f"color -> {text}")
+
+    def _on_rotate(self, *_):
+        self._rot = (self._rot + 1) % 4
+        self.bus.publish(f"rotated {self._rot * 90} deg")
+        if self._last_item is not None:   # re-apply now (also covers a paused replay)
+            self._render_frame(self._last_item)
+        self._update_ir()
 
     def _on_point_size(self, value):
         self.material.point_size = float(int(value))
@@ -637,17 +727,14 @@ class ControlPanel:
             self.sl_near.enabled = True
             self.sl_near.set_limits(0.3, 5.0)
             self.sl_near.double_value = self.near_cutoff_m
-            self.lbl_near_val.text = f"{self.near_cutoff_m:.1f}"
         elif self.near_mode == "emphasis":
             self.lbl_near.text = "strength"
             self.sl_near.enabled = True
             self.sl_near.set_limits(0.0, 1.0)
             self.sl_near.double_value = self.near_emphasis
-            self.lbl_near_val.text = f"{self.near_emphasis:.2f}"
         else:                                    # off / equalize -> no scalar to tune
-            self.lbl_near.text = "(no control)" if self.near_mode == "equalize" else "(off)"
+            self.lbl_near.text = "near " + ("(auto)" if self.near_mode == "equalize" else "(off)")
             self.sl_near.enabled = False
-            self.lbl_near_val.text = ""
 
     def _on_near_mode(self, text, index):
         self.near_mode = text
@@ -657,10 +744,8 @@ class ControlPanel:
     def _on_near_value(self, value):
         if self.near_mode == "window":
             self.near_cutoff_m = float(value)
-            self.lbl_near_val.text = f"{self.near_cutoff_m:.1f}"
         elif self.near_mode == "emphasis":
             self.near_emphasis = float(value)
-            self.lbl_near_val.text = f"{self.near_emphasis:.2f}"
 
     def _show_help(self, *_):
         gui = self._gui

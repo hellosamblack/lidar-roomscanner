@@ -13,7 +13,16 @@ import time
 from roomscan.config import ViewerConfig
 from roomscan.decoder import StreamDecoder
 from roomscan.logbus import LogBus
-from roomscan.panel import _Pacer, _fill_panel_fields, _ir_freeze_range, _run_reader
+import numpy as np
+
+from roomscan.panel import (
+    _Pacer,
+    _fill_panel_fields,
+    _ir_freeze_range,
+    _orbit_eye,
+    _rot_xy,
+    _run_reader,
+)
 from roomscan.pipeline import TransformStage
 from roomscan.protocol import (
     CommandCode,
@@ -69,6 +78,50 @@ def test_fill_panel_fields_leaves_already_set_values(tmp_path, monkeypatch):
     args = _bare_args(ir_colormap="gray")   # already resolved -> must win
     _fill_panel_fields(args)
     assert args.ir_colormap == "gray"
+
+
+# --- _rot_xy (cloud rotation) ------------------------------------------------
+
+def test_rot_xy_identity_and_wrap():
+    pts = np.array([[1.0, 0.0, 5.0], [0.0, 2.0, 7.0]])
+    assert np.allclose(_rot_xy(pts, 0), pts)
+    assert np.allclose(_rot_xy(pts, 4), pts)      # 4x90 = full turn
+
+
+def test_rot_xy_90_ccw_leaves_z():
+    pts = np.array([[1.0, 0.0, 5.0]])
+    out = _rot_xy(pts, 1)                          # (x,y)->(-y,x): (1,0)->(0,1)
+    assert np.allclose(out, [[0.0, 1.0, 5.0]])
+    assert out[0, 2] == 5.0                        # depth untouched
+
+
+def test_rot_xy_180():
+    pts = np.array([[1.0, 2.0, 9.0]])
+    assert np.allclose(_rot_xy(pts, 2), [[-1.0, -2.0, 9.0]])
+
+
+def test_rot_xy_empty():
+    assert _rot_xy(np.zeros((0, 3)), 1).shape == (0, 3)
+
+
+# --- _orbit_eye (roll-locked turntable camera) -------------------------------
+
+def test_orbit_eye_radius_and_axis():
+    target = np.array([1.0, 2.0, 3.0])
+    # az=0, el=0 -> eye is +radius along z from target
+    eye = _orbit_eye(target, 0.0, 0.0, 5.0)
+    assert np.allclose(eye, [1.0, 2.0, 8.0])
+    # distance from target is always the radius, at any angle
+    for az, el in [(0.5, 0.3), (2.0, -0.4), (-1.0, 1.4)]:
+        e = _orbit_eye(target, az, el, 4.2)
+        assert abs(np.linalg.norm(e - target) - 4.2) < 1e-9
+
+
+def test_orbit_eye_elevation_sign():
+    target = np.zeros(3)
+    up = _orbit_eye(target, 0.0, 0.5, 1.0)      # positive elevation -> eye above
+    down = _orbit_eye(target, 0.0, -0.5, 1.0)
+    assert up[1] > 0 and down[1] < 0
 
 
 # --- _ir_freeze_range (IR pane freeze state machine) -------------------------

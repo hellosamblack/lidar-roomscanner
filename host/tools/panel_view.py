@@ -45,7 +45,7 @@ from roomscan.deproject import Deprojector              # noqa: E402
 from roomscan.decoder import StreamDecoder              # noqa: E402
 from roomscan.ir_image import ir_range, reflectance_to_rgb  # noqa: E402
 from roomscan.native import Transform                   # noqa: E402
-from roomscan.panel import _COLOR_MODES, _IR_UPSCALE, _USECASES  # noqa: E402
+from roomscan.panel import _COLOR_MODES, _IR_UPSCALE, _USECASES, _rot_xy  # noqa: E402
 from roomscan.pipeline import TransformStage            # noqa: E402
 from roomscan.shading import MODES as NEAR_MODES        # noqa: E402
 from roomscan.shading import cloud_colors               # noqa: E402
@@ -176,7 +176,7 @@ def _button(draw, x, y, w, h, label, on=False):
 def render_snapshot(frame: Frame, *, color: str = "depth", ir_colormap: str = "gray",
                     ir_freeze: bool = False, fov_h: float = 55.0, fov_v: float = 42.0,
                     usecase: int = 1, point_size: int = 6, near_mode: str = "window",
-                    near_cutoff_m: float = 1.5, near_emphasis: float = 0.5,
+                    near_cutoff_m: float = 1.5, near_emphasis: float = 0.5, rot: int = 0,
                     out="panel_snapshot.png") -> Path:
     """Compose the panel snapshot PNG from a real Frame + the chosen view state."""
     depth = frame.depth
@@ -188,6 +188,7 @@ def render_snapshot(frame: Frame, *, color: str = "depth", ir_colormap: str = "g
         vals = _cloud_vals(depth, plane, deproj.max_range_mm, pts)
         colors = cloud_colors(vals, pts[:, 2], mode=near_mode, cutoff_m=near_cutoff_m,
                               emphasis=near_emphasis)
+        pts = _rot_xy(pts, rot)          # Rotate-90 button: roll cloud + IR together
     else:
         colors = np.zeros((0, 3))
     color_available = color == "depth" or plane is not None
@@ -246,6 +247,8 @@ def render_snapshot(frame: Frame, *, color: str = "depth", ir_colormap: str = "g
     if refl is not None:
         rng = ir_range(refl)
         rgb = reflectance_to_rgb(refl, colormap=ir_colormap, vmin=rng[0], vmax=rng[1], upscale=_IR_UPSCALE)
+        if rot:
+            rgb = np.rot90(rgb, rot)
         ir_img = Image.fromarray(np.ascontiguousarray(rgb)).resize((gw - 16, ir_h), Image.NEAREST)
         img.paste(ir_img, (gx + 8, iy))
         draw.text((gx + 12, y + ir_h + 24),
@@ -268,13 +271,13 @@ def render_snapshot(frame: Frame, *, color: str = "depth", ir_colormap: str = "g
 
 def snapshot_from_replay(capture, *, frame_index=120, color="depth", ir_colormap="gray",
                          ir_freeze=False, fov_h=55.0, fov_v=42.0, usecase=1, point_size=6,
-                         near_mode="window", near_cutoff_m=1.5, near_emphasis=0.5,
+                         near_mode="window", near_cutoff_m=1.5, near_emphasis=0.5, rot=0,
                          out="panel_snapshot.png") -> Path:
     frame = compute_frame(capture, frame_index, fov_h, fov_v)
     return render_snapshot(frame, color=color, ir_colormap=ir_colormap, ir_freeze=ir_freeze,
                            fov_h=fov_h, fov_v=fov_v, usecase=usecase, point_size=point_size,
                            near_mode=near_mode, near_cutoff_m=near_cutoff_m,
-                           near_emphasis=near_emphasis, out=out)
+                           near_emphasis=near_emphasis, rot=rot, out=out)
 
 
 def contact_sheet(capture, *, frame_index=120, out="panel_contact.png") -> Path:
@@ -315,6 +318,7 @@ def _main(argv=None) -> int:
                     help="near-contrast mode (more colormap on close targets)")
     ap.add_argument("--near-cutoff", type=float, default=1.5, help="window-mode cutoff (m)")
     ap.add_argument("--near-emphasis", type=float, default=0.5, help="emphasis-mode strength 0..1")
+    ap.add_argument("--rot", type=int, default=0, help="90-deg turns to roll cloud + IR (0..3)")
     ap.add_argument("--contact", action="store_true", help="render the color x IR grid instead")
     ap.add_argument("--out", default="panel_snapshot.png")
     a = ap.parse_args(argv)
@@ -324,7 +328,8 @@ def _main(argv=None) -> int:
         p = snapshot_from_replay(a.replay, frame_index=a.frame, color=a.color, ir_colormap=a.ir,
                                  ir_freeze=a.freeze, fov_h=a.fov_h, fov_v=a.fov_v, usecase=a.usecase,
                                  point_size=a.point_size, near_mode=a.near_mode,
-                                 near_cutoff_m=a.near_cutoff, near_emphasis=a.near_emphasis, out=a.out)
+                                 near_cutoff_m=a.near_cutoff, near_emphasis=a.near_emphasis,
+                                 rot=a.rot, out=a.out)
     print(f"wrote {p}")
     return 0
 
