@@ -60,14 +60,30 @@ _EXPOSURE_DEBOUNCE = 0.4        # s to settle before sending a dragged exposure 
 _BG_DARK = [0.05, 0.05, 0.08, 1.0]
 _BG_LIGHT = [0.90, 0.90, 0.92, 1.0]
 
-# World-up the camera is re-leveled to each tick so the view never rolls/twists
-# (the built-in arcball still drives orbit/pan/zoom; _level_camera removes roll).
-_WORLD_UP = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+# Constrained turntable camera: azimuth-only orbit (no elevation/tilt term exists)
+# + pan + zoom, world-up fixed in look_at so the view can never roll or pitch --
+# it always faces the scene the same way the flat IR monitor does. Sensitivities
+# are in radians (orbit) / fraction (pan, zoom) per pixel or wheel-notch.
+#
+# Up is -Y, not +Y: the sensor's own frame is a standard CV/camera convention
+# (x-right, y-DOWN, z-forward -- ZAPC-validated, docs/deprojector-validation.md
+# "y axis increases monotonically with row", row 0 = top = negative y), so +Y
+# in point-cloud space is physically down. az=0 also looks along +Z (the
+# sensor's own forward/depth axis), not -Z, so the default view is from the
+# sensor's own side, not from behind it. Both were verified empirically against
+# an Open3D view matrix: with fwd=-Z/up=+Y (the old values) a corner at
+# (row0,col0) -- top-left in the IR monitor -- rendered bottom-left (a vertical
+# flip); fwd=+Z/up=-Y renders it top-left, matching the IR monitor exactly on
+# all four corners.
+_WORLD_UP = np.array([0.0, -1.0, 0.0], dtype=np.float32)
+_ORBIT_K = 0.008          # rad per pixel drag (~0.46 deg/px)
+_PAN_K = 0.0015           # pan fraction of radius per pixel
+_ZOOM_STEP = 0.9          # radius *= 0.9**wheel_dy
 
 _HELP_LINES = [
     "",
-    "Mouse:  left-drag orbit  |  ctrl / middle-drag pan  |  wheel zoom",
-    "        (the view auto-levels each frame so it never rolls/twists)",
+    "Mouse:  left-drag orbit (yaw only)  |  ctrl / middle-drag pan  |  wheel zoom",
+    "        (camera is tilt-locked: it spins level and pans but never tips)",
     "Key:    H  this help",
     "",
     "Status   fps, frame/seq-gap/drop/crc/raw counters, current usecase + color.",
@@ -96,27 +112,16 @@ _HELP_LINES = [
 ]
 
 
-def _level_up(model_matrix, world_up):
-    """Given a camera-to-world 4x4 (model matrix) and the desired world-up,
-    return the roll-free up-vector for the camera's current forward direction,
-    or None if already level / looking near-straight up-down. Pure — unit-tested.
-    Column convention (verified): [:,3]=eye, [:,2]=back, so forward=-[:,2]."""
-    m = np.asarray(model_matrix, dtype=np.float64)
-    forward = -m[:3, 2]
-    fn = np.linalg.norm(forward)
-    if fn < 1e-9:
-        return None
-    forward = forward / fn
-    up = np.asarray(world_up, dtype=np.float64)
-    if abs(float(np.dot(forward, up))) > 0.999:      # near the pole -> world-up degenerates
-        return None
-    right = np.cross(forward, up)
-    right /= np.linalg.norm(right) + 1e-9
-    new_up = np.cross(right, forward)
-    new_up /= np.linalg.norm(new_up) + 1e-9
-    if float(np.dot(m[:3, 1], new_up)) > 0.99999:    # already level
-        return None
-    return new_up
+def _orbit_eye(target, az, radius):
+    """Camera eye position for a level turntable orbit: azimuth `az` (radians)
+    at `radius` from `target`, always at the target's height -- there is no
+    elevation term, so no drag input can ever tilt the camera. az=0 puts the
+    eye on the -Z side looking along +Z, the sensor's own forward/depth axis,
+    so the default view faces the scene the same way the sensor (and the IR
+    monitor) does. With a fixed world-up in look_at, this also can never
+    introduce roll. Pure — unit-tested."""
+    d = np.array([-np.sin(az), 0.0, -np.cos(az)])
+    return np.asarray(target, dtype=np.float64) + radius * d
 
 
 def _rot_xy(pts, k):
@@ -248,6 +253,10 @@ class ControlPanel:
         self.deproj: Deprojector | None = None
         self.pcd = o3d.geometry.PointCloud()
         self._camera_set = False
+        self._cam_target = None             # turntable camera state (world-up locked, no tilt)
+        self._cam_az = 0.0
+        self._cam_radius = 1.0
+        self._drag = None
         self._rot = 0                       # 90 deg CCW turns applied to cloud + IR pane
         self._last_item = None              # last (header, outputs) rendered — reused on rotate
         self._latest_outputs: dict | None = None
@@ -301,6 +310,11 @@ class ControlPanel:
         self.scene_widget = gui.SceneWidget()
         self.scene_widget.scene = self.rendering.Open3DScene(self.window.renderer)
         self.scene_widget.scene.set_background(_BG_DARK)
+        # Own the camera nav so it can't tilt: our set_on_mouse handles orbit/pan/
+        # zoom and returns CONSUMED, replacing the built-in arcball entirely (a
+        # HANDLED return still lets the arcball run afterward -- that's what let
+        # it fight our leveling and produce the jitter; CONSUMED stops it).
+        self.scene_widget.set_on_mouse(self._on_mouse)
         self.window.add_child(self.scene_widget)
 
     def _group(self, title, *, open=True):
@@ -521,8 +535,6 @@ class ControlPanel:
         if item is not None:
             self._render_frame(item)
             redraw = True
-        if self._level_camera():                 # keep the horizon level (no roll)
-            redraw = True
         now = time.monotonic()
         # debounced exposure send
         if self._pending_exposure is not None:
@@ -580,29 +592,62 @@ class ControlPanel:
 
     def _reset_camera(self):
         bounds = self.pcd.get_axis_aligned_bounding_box()
-        if bounds.get_extent().max() <= 0:
+        ext = float(bounds.get_extent().max())
+        if ext <= 0:
             return
-        self.scene_widget.setup_camera(60.0, bounds, bounds.get_center())
+        self.scene_widget.setup_camera(60.0, bounds, bounds.get_center())  # projection + near/far
+        self._cam_target = np.asarray(bounds.get_center(), dtype=np.float64)
+        self._cam_radius = ext * 1.8
+        self._cam_az = 0.0
+        self._apply_camera()
         self._camera_set = True
 
-    def _level_camera(self) -> bool:
-        """Remove any camera roll each tick: read the current pose and re-issue
-        look_at with the up-vector re-leveled to world-up. The built-in arcball
-        drives orbit/pan/zoom; this keeps the horizon level (no twist) without
-        having to suppress the default controller. Returns True when it re-leveled
-        (caller redraws), False when already level / at a pole / no camera yet."""
-        if not self._camera_set:
-            return False
-        m = np.asarray(self.scene_widget.scene.camera.get_model_matrix(), dtype=np.float64)
-        new_up = _level_up(m, _WORLD_UP)
-        if new_up is None:
-            return False
-        eye = m[:3, 3]
-        forward = -m[:3, 2]
-        forward = forward / (np.linalg.norm(forward) + 1e-9)
-        self.scene_widget.look_at((eye + forward).astype(np.float32), eye.astype(np.float32),
-                                  new_up.astype(np.float32))
-        return True
+    def _apply_camera(self):
+        if self._cam_target is None:
+            return
+        eye = _orbit_eye(self._cam_target, self._cam_az, self._cam_radius)
+        self.scene_widget.look_at(self._cam_target.astype(np.float32),
+                                  eye.astype(np.float32), _WORLD_UP)   # fixed up -> never tilts/rolls
+
+    def _on_mouse(self, e):
+        gui = self._gui
+        res = gui.SceneWidget.EventCallbackResult
+        if self._cam_target is None:
+            return res.IGNORED
+        et = e.type
+        if et == gui.MouseEvent.Type.WHEEL:
+            if e.wheel_dy:
+                self._cam_radius = max(self._cam_radius * (_ZOOM_STEP ** e.wheel_dy), 1e-3)
+                self._apply_camera()
+            return res.CONSUMED
+        if et == gui.MouseEvent.Type.BUTTON_DOWN:
+            self._drag = (e.x, e.y)
+            return res.CONSUMED
+        if et == gui.MouseEvent.Type.BUTTON_UP:
+            self._drag = None
+            return res.CONSUMED
+        if et == gui.MouseEvent.Type.DRAG and self._drag is not None:
+            dx, dy = e.x - self._drag[0], e.y - self._drag[1]
+            self._drag = (e.x, e.y)
+            pan = (e.is_modifier_down(gui.KeyModifier.CTRL)
+                   or e.is_button_down(gui.MouseButton.MIDDLE)
+                   or e.is_button_down(gui.MouseButton.RIGHT))
+            if pan:
+                self._pan(dx, dy)
+            else:                                   # yaw only -- no elevation/tilt term exists
+                self._cam_az -= dx * _ORBIT_K
+            self._apply_camera()
+            return res.CONSUMED
+        return res.IGNORED
+
+    def _pan(self, dx, dy):
+        eye = _orbit_eye(self._cam_target, self._cam_az, self._cam_radius)
+        fwd = self._cam_target - eye
+        fwd /= np.linalg.norm(fwd) + 1e-9
+        right = np.cross(fwd, _WORLD_UP.astype(np.float64))
+        right /= np.linalg.norm(right) + 1e-9
+        cam_up = np.cross(right, fwd)
+        self._cam_target = self._cam_target + (-dx * right + dy * cam_up) * (self._cam_radius * _PAN_K)
 
     def _update_status(self):
         now, mark = time.monotonic(), self._shown

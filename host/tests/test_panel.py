@@ -19,7 +19,7 @@ from roomscan.panel import (
     _Pacer,
     _fill_panel_fields,
     _ir_freeze_range,
-    _level_up,
+    _orbit_eye,
     _rot_xy,
     _run_reader,
 )
@@ -34,16 +34,6 @@ from roomscan.protocol import (
 )
 from roomscan.sources import Recorder
 from roomscan.viewer import Stats
-
-_WORLD_UP = np.array([0.0, 1.0, 0.0])
-
-
-def _model_matrix(right, up, back, eye):
-    """Assemble a camera-to-world model matrix from its column vectors."""
-    m = np.eye(4)
-    m[:3, 0], m[:3, 1], m[:3, 2], m[:3, 3] = right, up, back, eye
-    return m
-
 
 # --- _fill_panel_fields ------------------------------------------------------
 
@@ -113,39 +103,27 @@ def test_rot_xy_empty():
     assert _rot_xy(np.zeros((0, 3)), 1).shape == (0, 3)
 
 
-# --- _level_up (roll removal) ------------------------------------------------
+# --- _orbit_eye (tilt-locked turntable camera) -------------------------------
 
-def test_level_up_already_level_returns_none():
-    # camera looking down -Z, up already +Y -> nothing to correct
-    m = _model_matrix([1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, 10])
-    assert _level_up(m, _WORLD_UP) is None
-
-
-def test_level_up_removes_roll():
-    # rolled 90 deg about the view axis: up is +X instead of +Y (forward still -Z)
-    m = _model_matrix([0, 1, 0], [1, 0, 0], [0, 0, 1], [0, 0, 10])
-    new_up = _level_up(m, _WORLD_UP)
-    assert new_up is not None
-    assert np.allclose(new_up, [0, 1, 0], atol=1e-6)     # re-leveled to world-up
-    assert abs(np.linalg.norm(new_up) - 1.0) < 1e-9
+def test_orbit_eye_radius_and_axis():
+    target = np.array([1.0, 2.0, 3.0])
+    # az=0 -> eye is -radius along z from target (looking along +z, the
+    # sensor's own forward axis, to match the IR monitor's orientation)
+    eye = _orbit_eye(target, 0.0, 5.0)
+    assert np.allclose(eye, [1.0, 2.0, -2.0])
+    # distance from target is always the radius, at any azimuth
+    for az in (0.5, 2.0, -1.0, 3.7):
+        e = _orbit_eye(target, az, 4.2)
+        assert abs(np.linalg.norm(e - target) - 4.2) < 1e-9
 
 
-def test_level_up_stays_perpendicular_to_forward():
-    # tilted view (forward has a y component); new up must be unit and ⟂ forward
-    fwd = np.array([0.0, 0.5, -1.0])
-    fwd /= np.linalg.norm(fwd)
-    back = -fwd
-    m = _model_matrix([1, 0, 0], [0.2, 0.9, 0.1], back, [0, 0, 8])
-    new_up = _level_up(m, _WORLD_UP)
-    assert new_up is not None
-    assert abs(np.dot(new_up, fwd)) < 1e-6               # perpendicular to forward
-    assert abs(np.linalg.norm(new_up) - 1.0) < 1e-9
-
-
-def test_level_up_pole_returns_none():
-    # looking straight down (forward = -Y) -> world-up degenerates, skip
-    m = _model_matrix([1, 0, 0], [0, 0, -1], [0, 1, 0], [0, 10, 0])
-    assert _level_up(m, _WORLD_UP) is None
+def test_orbit_eye_never_tilts():
+    # no elevation term exists -> eye height always matches the target's,
+    # at any azimuth, so the camera can never pitch/tilt
+    target = np.array([0.0, 3.0, 0.0])
+    for az in (0.0, 0.8, -2.1, 5.5):
+        eye = _orbit_eye(target, az, 2.5)
+        assert eye[1] == target[1]
 
 
 # --- _ir_freeze_range (IR pane freeze state machine) -------------------------
