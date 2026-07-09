@@ -42,6 +42,10 @@ class ViewerConfig:
     fov_v: float = 42.0
     replay_fps: float = 0.0
     port: Optional[str] = None
+    point_size: float = 3.0
+    ir_colormap: str = "gray"
+    ir_freeze_range: bool = False
+    panel_width: int = 340
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "ViewerConfig":

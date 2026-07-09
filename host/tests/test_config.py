@@ -1,4 +1,3 @@
-import pytest
 
 from roomscan.config import ViewerConfig, apply_config_defaults, config_dir, config_path
 
@@ -34,6 +33,18 @@ def test_load_missing_file_returns_builtin_defaults(tmp_path):
     assert cfg.fov_v == 42.0
     assert cfg.replay_fps == 0.0
     assert cfg.port is None
+    assert cfg.point_size == 3.0
+    assert cfg.ir_colormap == "gray"
+    assert cfg.ir_freeze_range is False
+    assert cfg.panel_width == 340
+
+
+def test_panel_fields_have_expected_defaults_on_fresh_config():
+    cfg = ViewerConfig()
+    assert cfg.point_size == 3.0
+    assert cfg.ir_colormap == "gray"
+    assert cfg.ir_freeze_range is False
+    assert cfg.panel_width == 340
 
 
 def test_save_then_load_roundtrip(tmp_path):
@@ -54,6 +65,43 @@ def test_save_then_load_roundtrip_with_none_port(tmp_path):
     original.save(path)
     loaded = ViewerConfig.load(path)
     assert loaded.port is None
+
+
+def test_save_then_load_roundtrip_panel_fields(tmp_path):
+    path = tmp_path / "roomscan.toml"
+    original = ViewerConfig(ir_colormap="turbo", ir_freeze_range=True,
+                             point_size=5.0, panel_width=400)
+    saved_path = original.save(path)
+    assert saved_path == path
+
+    loaded = ViewerConfig.load(path)
+    assert loaded == original
+    assert loaded.ir_colormap == "turbo"
+    assert loaded.ir_freeze_range is True
+    assert loaded.point_size == 5.0
+    assert loaded.panel_width == 400
+
+
+def test_load_old_config_file_missing_panel_keys_falls_back_to_defaults(tmp_path):
+    """An old [viewer] table written before the panel fields existed --
+    round-tripping through it must not raise, and the new fields should
+    come back at their built-in defaults."""
+    path = tmp_path / "roomscan.toml"
+    path.write_text(
+        '[viewer]\n'
+        'color = "reflectance"\n'
+        'fov_h = 54.65\n'
+        'fov_v = 42.50\n'
+        'replay_fps = 25.0\n'
+        'port = "COM7"\n',
+        encoding="utf-8",
+    )
+    cfg = ViewerConfig.load(path)
+    assert cfg.color == "reflectance"  # old fields still honored
+    assert cfg.point_size == 3.0
+    assert cfg.ir_colormap == "gray"
+    assert cfg.ir_freeze_range is False
+    assert cfg.panel_width == 340
 
 
 def test_load_corrupt_file_tolerated(tmp_path):
@@ -88,6 +136,35 @@ def test_load_wrong_type_value_tolerated(tmp_path):
     path.write_text('[viewer]\ncolor = "depth"\n', encoding="utf-8")
     cfg = ViewerConfig.load(path)
     assert cfg.color == "depth"
+
+
+def test_load_malformed_viewer_shape_with_panel_key_falls_back_to_all_defaults(tmp_path):
+    # dataclasses don't runtime-validate field types, so e.g. panel_width as
+    # a string constructs fine (see test_load_wrong_type_value_tolerated) --
+    # the actual "wrong shape" guard that forces an all-defaults fallback is
+    # `viewer` itself not being a dict (TOML array-of-tables `[[viewer]]`
+    # instead of `[viewer]`). Exercise it with a new field's key present to
+    # confirm the new fields fall back the same way old ones already do.
+    path = tmp_path / "roomscan.toml"
+    path.write_text(
+        '[[viewer]]\ncolor = "confidence"\npanel_width = "not a number"\n',
+        encoding="utf-8",
+    )
+    cfg = ViewerConfig.load(path)
+    assert cfg == ViewerConfig()
+    assert cfg.panel_width == 340
+    assert cfg.color == "depth"
+
+
+def test_load_wrong_type_panel_field_value_is_tolerated_not_validated(tmp_path):
+    # Documents current behavior for the new fields, mirroring
+    # test_load_wrong_type_value_tolerated: a value of the "wrong" type for
+    # a known field is accepted as-is at construction (no runtime type
+    # checking) rather than raising -- it is not coerced or rejected.
+    path = tmp_path / "roomscan.toml"
+    path.write_text('[viewer]\npanel_width = "400"\n', encoding="utf-8")
+    cfg = ViewerConfig.load(path)
+    assert cfg.panel_width == "400"
 
 
 def test_apply_config_defaults_cli_wins_over_config():

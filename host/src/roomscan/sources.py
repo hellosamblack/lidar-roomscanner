@@ -1,6 +1,7 @@
 """Byte sources and the frame pump. All I/O lives here — decoder/deproject stay pure."""
 from __future__ import annotations
 
+import threading
 from typing import Iterator, Optional
 
 from .decoder import StreamDecoder
@@ -67,7 +68,81 @@ class SerialSource:
         self._ser.close()
 
 
-def pump(source, decoder: StreamDecoder, record_path=None) -> Iterator[Frame]:
+class Recorder:
+    """Thread-safe mid-stream recording handle for the GUI's Record button.
+
+    The reader thread calls `write()` on every raw chunk unconditionally; it
+    is a no-op while not recording. The UI thread calls `start()`/`stop()` to
+    toggle recording at any point. All state transitions are guarded by a
+    single lock so a `stop()` racing a `write()` can never write to (or
+    close) a half-closed file.
+
+    Design choice: `start()` while already recording does NOT raise — it
+    closes the current file and switches to the new path. This is the
+    friendlier behavior for a UI Record button (e.g. double-click, or
+    starting a new take without an explicit Stop first) than forcing the
+    caller to stop() before every start().
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._f = None
+        self._path = None
+
+    @property
+    def active(self) -> bool:
+        with self._lock:
+            return self._f is not None
+
+    @property
+    def path(self):
+        with self._lock:
+            return self._path
+
+    def start(self, path) -> None:
+        with self._lock:
+            if self._f is not None:
+                self._f.close()
+            self._f = open(path, "wb")
+            self._path = path
+
+    def stop(self) -> None:
+        with self._lock:
+            if self._f is not None:
+                self._f.close()
+                self._f = None
+                self._path = None
+
+    def write(self, data: bytes) -> None:
+        with self._lock:
+            if self._f is not None:
+                self._f.write(data)
+                self._f.flush()   # keep on-disk bytes current while still "active" (readable mid-recording)
+
+    def close(self) -> None:
+        """Final teardown; safe to call multiple times (alias for stop())."""
+        self.stop()
+
+
+def pump(source, decoder: StreamDecoder, record_path=None, recorder: Optional[Recorder] = None) -> Iterator[Frame]:
+    """Read raw chunks from `source`, tee them to recording sink(s), decode, yield frames.
+
+    `record_path`, if given, opens a file at pump start and writes every raw
+    chunk to it for the whole run (legacy all-or-nothing recording); pump
+    owns that file's lifecycle and closes it in `finally`, exactly as before.
+
+    `recorder`, if given, is a `Recorder` the caller starts/stops from
+    another thread (e.g. a GUI Record button) to capture only part of the
+    stream. Every raw chunk is teed to `recorder.write()`, which is a no-op
+    while the recorder is inactive. Pump does NOT own `recorder`'s lifecycle:
+    it never calls start/stop/close on it, so the recorder is left exactly
+    as the caller last set it (active or not) when pump exits — the caller
+    may keep using it across multiple pump() calls.
+
+    Both may be passed at once (record_path captures everything, recorder
+    captures a caller-controlled sub-range); normal panel usage passes only
+    `recorder`.
+    """
     rec = None
     try:
         if record_path:
@@ -80,6 +155,8 @@ def pump(source, decoder: StreamDecoder, record_path=None) -> Iterator[Frame]:
                 continue
             if rec:
                 rec.write(data)
+            if recorder is not None:
+                recorder.write(data)
             yield from decoder.feed(data)
     finally:
         if rec:

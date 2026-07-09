@@ -95,6 +95,67 @@ class CommandClient:
         return ResultCode(result_code), applied
 
 
+class CommandDispatcher:
+    """Fire-and-forget command dispatch, shared by the viewer's key bindings
+    and the Phase 3.5 GUI control panel.
+
+    Generalizes ``roomscan.viewer.CommandKeyState``: identical busy-guard and
+    worker-thread mechanics (a single in-flight-guard flag under a lock,
+    set/checked synchronously in `dispatch()` before any thread is spawned;
+    the actual `CommandClient.send()` call -- up to its 2 s ACK timeout --
+    runs on a short-lived daemon worker thread so the caller never blocks).
+    The only difference: results/errors go through an injected `on_message`
+    callback instead of a hardcoded `print`, so a GUI panel can route them
+    to its event-log bus while the classic viewer just passes `print`.
+
+    Message convention: this class always emits bare `f"{label} -> ..."`
+    strings -- no leading marker. Callers that want one (e.g. the viewer's
+    "[cmd] " prefix) add it in their `on_message` callback; that keeps this
+    class's wording identical to `CommandKeyState`'s today, so a caller can
+    swap `CommandKeyState` for `CommandDispatcher(client, lambda m: print(f"\\n[cmd] {m}"))`
+    with no observable change in output.
+
+    `client is None` means replay mode (no live device to command): every
+    dispatch just reports that commands aren't available and returns (no
+    worker thread, `busy` stays False).
+    """
+
+    def __init__(self, client: CommandClient | None, on_message: Callable[[str], None] = print):
+        self.client = client
+        self.on_message = on_message
+        self._lock = threading.Lock()
+        self._busy = False
+
+    @property
+    def busy(self) -> bool:
+        with self._lock:
+            return self._busy
+
+    def dispatch(self, cmd: int, param: int, label: str) -> None:
+        if self.client is None:
+            self.on_message(f"{label} -> not available in replay")
+            return
+        with self._lock:
+            if self._busy:
+                self.on_message(f"{label} -> busy, command already in flight")
+                return
+            self._busy = True
+
+        def worker() -> None:
+            try:
+                result, applied = self.client.send(cmd, param)
+                self.on_message(f"{label} -> {result.name} applied={applied}")
+            except TimeoutError as exc:
+                self.on_message(f"{label} -> TIMEOUT {exc}")
+            except Exception as exc:  # e.g. SerialException on a dead port: report, don't traceback
+                self.on_message(f"{label} -> ERROR {exc!r}")
+            finally:
+                with self._lock:
+                    self._busy = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+
 # --- roomscan-ctl CLI --------------------------------------------------------
 
 _ACTION_COMMANDS = {
