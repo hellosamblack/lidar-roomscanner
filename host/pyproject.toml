@@ -7,6 +7,9 @@ dependencies = ["numpy>=1.26", "pyserial>=3.5", "open3d>=0.18"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.4"]
+# Headless panel snapshotter (tools/panel_view.py) — CPU render for viewing the
+# gui without a display (Open3D Filament offscreen needs a GPU/display).
+tools = ["Pillow>=10"]
 
 [project.scripts]
 roomscan-view = "roomscan.viewer:main"
