@@ -111,7 +111,7 @@ via a new frame revision.
 | 3   | SET_USECASE       | usecase ID (u16) | applied usecase ID (u16) |
 | 4   | SET_FRAME_PERIOD_US | period in µs (u32) | applied period (u32) — stored and echoed (read back from the sensor), but has no observable effect while the app uses `VL53L9_SYNC_MANUAL` (vl53l9.h:248 — period governs AUTONOMOUS mode only); retained for the future autonomous-mode option |
 | 5   | SET_EXPOSURE_MS   | exposure in ms (u32) | applied exposure (u32) |
-| 6   | REINIT            | ignored       | 0                |
+| 6   | REINIT            | ignored       | 0 — the ACK is sent **after** the re-init completes (normally well under the host's 2 s timeout); if the first re-init attempt itself faults, the device enters its bounded recovery ladder (up to ~3.1 s) and may finish successfully after the host has already timed out — hosts must treat a REINIT timeout as "outcome unknown", not "failed" (a late ACK is silently ignored by token matching) |
 
 ### Result-code registry
 

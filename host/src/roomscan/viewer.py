@@ -71,6 +71,8 @@ class CommandKeyState:
                 print(f"\n[cmd] {label} -> {result.name} applied={applied}")
             except TimeoutError as exc:
                 print(f"\n[cmd] {label} -> TIMEOUT {exc}")
+            except Exception as exc:  # e.g. SerialException on a dead port: report, don't traceback
+                print(f"\n[cmd] {label} -> ERROR {exc!r}")
             finally:
                 with self._lock:
                     self._busy = False
