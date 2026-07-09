@@ -206,6 +206,22 @@ def main(argv=None) -> int:
     vis.register_key_callback(ord("1"), _key(CommandCode.SET_USECASE, 0, "usecase 0"))
     vis.register_key_callback(ord("2"), _key(CommandCode.SET_USECASE, 1, "usecase 1"))
 
+    def _print_keymap(_vis=None) -> bool:
+        mode = "live" if args.replay is None else "replay (device keys inactive)"
+        print(
+            "\n=== roomscan viewer controls ===\n"
+            f"  mode: {mode}\n"
+            "  mouse: left-drag orbit | ctrl/middle-drag pan | wheel zoom\n"
+            "  P ping device    C request calibration    R sensor reinit\n"
+            "  1 usecase AR_RANGE (~32 fps)    2 usecase AR_PRECISION (~28 fps)\n"
+            "  H this help    (stats print here once per second; close window to exit)\n"
+            "================================"
+        )
+        return False
+
+    vis.register_key_callback(ord("H"), _print_keymap)
+    _print_keymap()  # discoverability: show the keymap banner at launch
+
     opt = vis.get_render_option()
     opt.point_size = 3.0
     opt.background_color = np.asarray([0.05, 0.05, 0.08])

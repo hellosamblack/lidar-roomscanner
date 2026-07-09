@@ -30,6 +30,7 @@ if not exist "%VENV_PY%" (
 )
 
 echo [run] Opening live viewer ^(close the window to exit^)...
+echo [keys] P=ping  C=calibration  R=reinit  1/2=usecase  H=help  ^| stats print in THIS console
 "%VENV_PY%" -m roomscan.viewer %*
 if errorlevel 1 (
     echo.
