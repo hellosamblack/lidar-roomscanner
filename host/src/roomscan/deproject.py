@@ -49,11 +49,20 @@ class Deprojector:
             self._tan_y = np.tan(ay)[:, None]   # (h, 1) -- broadcasts over cols
         self.max_range_mm = max_range_mm
 
-    def __call__(self, depth_mm: np.ndarray) -> np.ndarray:
+    def grid(self, depth_mm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Like __call__, but returns the full (h, w) raster shape instead of
+        filtering + flattening -- callers that need row/col adjacency (surface
+        triangulation) can't recover it from __call__'s already-flattened
+        output. Returns (pts, valid): pts is (h, w, 3) metres, with garbage
+        (not NaN, cheap) at invalid cells -- callers must consult `valid`
+        before using a cell. valid is the (h, w) bool mask __call__ already
+        computed internally, just not returned there."""
         z = depth_mm.astype(np.float64, copy=False)
         valid = np.isfinite(z) & (z > 0.0) & (z < self.max_range_mm)
-        x = z * self._tan_x
-        y = z * self._tan_y
-        y = np.broadcast_to(y, z.shape)
-        x = np.broadcast_to(x, z.shape)
-        return np.stack([x[valid], y[valid], z[valid]], axis=1) / 1000.0
+        x = np.broadcast_to(z * self._tan_x, z.shape)
+        y = np.broadcast_to(z * self._tan_y, z.shape)
+        return np.stack([x, y, z], axis=-1) / 1000.0, valid
+
+    def __call__(self, depth_mm: np.ndarray) -> np.ndarray:
+        pts, valid = self.grid(depth_mm)
+        return pts[valid]

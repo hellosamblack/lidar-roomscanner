@@ -62,3 +62,22 @@ def test_zone_tan_table_requires_both_or_neither():
         Deprojector(width=2, height=2, zone_tan_x=np.zeros((2, 2)))
     with pytest.raises(ValueError):
         Deprojector(width=2, height=2, zone_tan_y=np.zeros((2, 2)))
+
+
+def test_grid_matches_call_at_valid_cells():
+    d = Deprojector(width=3, height=3, fov_h_deg=90.0, fov_v_deg=90.0)
+    depth = np.array([[0.0, 1000.0, np.inf], [1500.0, np.nan, 2000.0], [500.0, 500.0, 500.0]],
+                     dtype=np.float32)
+    pts_grid, valid = d.grid(depth)
+    assert pts_grid.shape == (3, 3, 3)
+    assert valid.shape == (3, 3)
+    assert valid.tolist() == [[False, True, False], [True, False, True], [True, True, True]]
+    assert np.allclose(pts_grid[valid], d(depth))
+
+
+def test_grid_center_zone_matches_call():
+    d = Deprojector(width=3, height=3, fov_h_deg=90.0, fov_v_deg=90.0)
+    depth = np.full((3, 3), 2000.0, dtype=np.float32)
+    pts_grid, valid = d.grid(depth)
+    assert valid.all()
+    assert np.allclose(pts_grid[1, 1], [0.0, 0.0, 2.0], atol=1e-9)
