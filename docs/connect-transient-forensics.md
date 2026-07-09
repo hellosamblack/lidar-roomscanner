@@ -8,51 +8,95 @@ Two recorded instances exist: `captures/e2e_p2.bin` (Phase 2 Task 7) and
 
 ## Method
 
-A standalone byte-exact decoder (same resync/CRC logic as
-`host/src/roomscan/decoder.StreamDecoder`, reimplemented so it could log absolute file
-offsets for every anomaly) was run over both captures in full. It reports, for every
-CRC-failing/skipped byte run: the file offset where it starts and ends, the frame
-immediately before and after it (type/stream/seq/flags), and a hexdump of the
-boundary. Kept in the session scratchpad, not committed (one-off analysis, not a
-reusable tool — see "What was not committed" below).
+`host/tools/analyze_capture.py` (committed with this doc) runs the same
+magic-scan/CRC/resync policy as `host/src/roomscan/decoder.StreamDecoder` over a
+capture while tracking absolute file offsets. For every anomaly it reports: the file
+offset where it starts and ends, the frame immediately before and after it
+(type/stream/seq/flags), zero-run detection inside anomalous regions and inside the
+leading good RAW payloads, an optional per-frame inventory, and an optional boundary
+hexdump. Every number in this document is reproducible with:
+
+```
+host/.venv/Scripts/python host/tools/analyze_capture.py \
+    captures/e2e_p2.bin captures/e2e_p25.bin captures/golden_pairs.bin
+```
 
 ## Byte evidence
 
-Both files decode to **exactly one** CRC failure and **exactly one** skip run,
-byte-for-byte identical in position and length:
+Both files decode to **exactly one** CRC failure and **exactly one** connect-region
+skip run, identical in position and length (each file also ends with a
+`TRUNCATED_AT_EOF` tail — the recording process was killed mid-frame at the end of its
+soak; benign and unrelated). Verbatim `analyze_capture.py` output, abridged to the
+connect region:
 
-| | `e2e_p2.bin` | `e2e_p25.bin` |
-|---|---|---|
-| File size | 24,395,776 B | 27,598,848 B |
-| Frames decoded | 1660 | 1878 |
-| CRC failures | 1 | 1 |
-| Bytes skipped (mid-run) | 12,064 | 12,064 |
-| First frame (offset 0) | `CALIB` seq=1, plen=2332 | `CALIB` seq=1, plen=2332 |
-| Bad header (offset 2368) | `DATA/RAW_3DMD` seq=1, plen=14842 (declared), CRC mismatch | same |
-| Next good frame (offset 14432) | `DATA/RAW_3DMD` seq=2, **flags=0x01 (DROPPED)** | same |
+```
+=== captures/e2e_p2.bin ===
+file size: 24395776 bytes
+frames_decoded=1660 crc_failures=1 bytes_skipped=23556
+  {'kind': 'CRC_FAIL', 'offset': 2368, 'frame_type': 'DATA', 'stream_id': 'RAW_3DMD',
+   'seq': 1, 'flags': 0, 'declared_payload_len': 14842, 't_us': 11747000, 'w': 54, 'h': 42, ...}
+  SKIP RUN [2368, 14432) len=12064
+    prev good frame: off=0 DATA/CALIB seq=1 flags=0x00 plen=2332 ends_at=2368 (gap to run: 0 B)
+    next good frame: off=14432 DATA/RAW_3DMD seq=2 flags=0x01 plen=14842
+    zero-runs >= 50 B inside run (offsets relative to run start): [(9103, 2961)]
+  RAW seq=     2 flags=0x01 zero-runs (payload offsets): [(11321, 2287)]
+  RAW seq=     3 .. seq=     9: none
 
-Detail on the bad region (`e2e_p2.bin`; `e2e_p25.bin` is identical down to the offsets):
+=== captures/e2e_p25.bin ===
+file size: 27598848 bytes
+frames_decoded=1878 crc_failures=1 bytes_skipped=20754
+  {'kind': 'CRC_FAIL', 'offset': 2368, 'frame_type': 'DATA', 'stream_id': 'RAW_3DMD',
+   'seq': 1, 'flags': 0, 'declared_payload_len': 14842, 't_us': 16233000, 'w': 54, 'h': 42, ...}
+  SKIP RUN [2368, 14432) len=12064
+    prev good frame: off=0 DATA/CALIB seq=1 flags=0x00 plen=2332 ends_at=2368 (gap to run: 0 B)
+    next good frame: off=14432 DATA/RAW_3DMD seq=2 flags=0x01 plen=14842
+    zero-runs >= 50 B inside run (offsets relative to run start): [(9103, 851), (9955, 2109)]
+  RAW seq=     2 flags=0x01 zero-runs (payload offsets): [(11319, 2289)]
+  RAW seq=     3 .. seq=     9: none
 
-- The header at file offset 2368 is **perfectly well-formed**: magic, version,
-  `frame_type=DATA`, `stream_id=RAW_3DMD`, `w=54`, `h=42`, `plen=14842`, `seq=1`,
-  `t_us` one HAL tick (1 ms) after the preceding CALIB's `t_us` — i.e. this is
-  genuinely the device's real seq=1 RAW frame header, not garbage that happens to
-  spell "RSCN".
+=== captures/golden_pairs.bin ===
+file size: 17574502 bytes
+frames_decoded=1474 crc_failures=0 bytes_skipped=12320   (EOF tail only — connect region clean)
+  RAW seq=     1 flags=0x00 zero-runs (payload offsets): [(9071, 4537)]
+  RAW seq=     2 flags=0x00 zero-runs (payload offsets): [(11321, 2287)]
+  RAW seq=     3 .. seq=     8: none
+```
+
+Detail on the bad region:
+
+- The header at file offset 2368 is **perfectly well-formed** in both e2e captures:
+  magic, version, `frame_type=DATA`, `stream_id=RAW_3DMD`, `w=54`, `h=42`,
+  `plen=14842`, `seq=1`, with `t_us` in the same HAL tick as the preceding CALIB in
+  `e2e_p25.bin` and one tick (1 ms) later in `e2e_p2.bin` — i.e. this is genuinely the
+  device's real seq=1 RAW frame header, not garbage that happens to spell "RSCN".
 - A full frame at that offset would end at `2368 + 32 + 14842 + 4 = 17246`. The next
   real, CRC-valid frame instead starts at **14432** — 2814 bytes short of that. Only
   `14432 - 2368 - 32 = 12032` payload bytes ever arrived for this frame; no CRC tail
   was ever received for it.
-- Those 12,032 bytes are **not filler**: all 256 byte values appear, and the content
-  visually matches the same zone-intensity pattern seen in every neighboring good
-  RAW_3DMD payload (checked by hexdump comparison). This is the **front of a real,
-  in-progress payload send that stopped partway through**, not stale/garbage FIFO
-  content and not a decoder false-positive.
+- Those 12,032 bytes are **the genuine front of frame 1's payload**, proven by
+  comparison against `captures/golden_pairs.bin`, which contains a complete,
+  **CRC-valid** RAW seq=1 frame (also at file offset 2368 — same CALIB-then-RAW boot
+  layout). Frame-1 payloads legitimately contain a large zero block anchored at
+  payload offset **9071** (golden: 4,537 B of contiguous zeros — a sensor warm-up
+  characteristic, since seq=2 still shows a ~2,288 B run at offset ~11,320 in all
+  three captures and seq≥3 shows none). Both truncated payloads carry exactly that
+  signature: `e2e_p2` has a 2,961 B zero run starting at payload offset 9071,
+  `e2e_p25` has runs at 9071 (851 B) and 9923 (2,109 B) — and in **both** files the
+  final zero run ends at payload offset 12,032, the truncation point itself: the send
+  was cut off *inside* frame 1's characteristic zero region. Outside the zero block
+  the bytes are full-entropy zone data (all 256 byte values present). So this is the
+  front of a real, in-progress frame-1 send that stopped partway through — not
+  stale/garbage FIFO content and not a decoder false-positive. (An earlier draft of
+  this doc claimed the truncated content "matches neighboring good frames"; that was
+  imprecise — neighboring frames from seq 3 on have **no** large zero runs. The
+  golden frame-1 comparison above is the correct, stronger evidence.)
 - The very next successfully-decoded frame (seq=2) carries `flags=0x01`
   (`RS_FLAG_DROPPED`) — exactly the flag firmware sets on the frame after one it
   failed to fully transmit.
 - No other CRC failure or skip occurs anywhere else in either file (1660/1878 frames
-  decode cleanly for the rest of each run) — this is a one-time, non-recurring event,
-  confirming the "first-occurrence transient" characterization from prior reports.
+  decode cleanly for the rest of each run, EOF tail aside) — a one-time,
+  non-recurring event, confirming the "first-occurrence transient" characterization
+  from prior reports.
 
 ### Answers to the forensics questions
 
@@ -63,9 +107,10 @@ Detail on the bad region (`e2e_p2.bin`; `e2e_p25.bin` is identical down to the o
   4-byte CRC never arrived. The frame was cut off mid-*send*, not mid-*capture*.
 - **(c) `FLAG_DROPPED` on the next frame?** Yes, in both captures, on seq=2.
 - **(d) Same pattern in both captures?** Yes — identical offset (2368), identical run
-  length (12,064 B), identical frame-2 flag. Not just "the same class of event": the
-  same byte-for-byte shape twice, from two independently captured sessions weeks apart
-  in this project's timeline.
+  length (12,064 B), identical frame-2 flag, from two independently captured sessions.
+  (The payload *contents* differ as expected — different scenes, and slightly different
+  internal zero-run structure; it is the framing signature — offset, truncation length,
+  seq/flag sequence — that is exactly identical.)
 
 ## Root cause
 
@@ -90,20 +135,27 @@ an artificial pause, but from ordinary host-side startup latency:
    calls `serial.Serial(port, baud, timeout=...)`).
 2. Firmware then does a fixed `HAL_Delay(50)` "let the host's reader thread settle"
    grace period (`vl53l9_app.c:1103`), triggers frame 1's ranging, and as soon as it's
-   ready sends CALIB then RAW frame 1 at full speed — all before the *caller* of
-   `SerialSource(...)` (e.g. `roomscan.viewer`, which does further setup — decoder
-   construction, `TransformStage`/DLL load, window/thread startup — before its read loop
-   in `sources.pump()` ever calls `.read()`) has necessarily started pulling bytes off
-   the wire.
-3. If that host-side gap between "DTR asserted" and "first `.read()` call actually
-   draining the endpoint" exceeds the ~100 ms `rs_cdc_send()` budget, frame 1's send
-   aborts partway — exactly the byte-for-byte identical result seen in both captures,
-   because both captures used the same `roomscan.viewer --record` code path with
-   essentially the same fixed startup-latency profile on this machine.
+   ready sends CALIB then RAW frame 1 at full speed.
+3. On the host, `roomscan.viewer` starts its reader thread (`viewer.py:103-105`)
+   *before* it enters Open3D window setup (`vis.create_window`, `viewer.py:107-108`)
+   — the ordering is not sequential blocking. The plausible (not measured) mechanism
+   for a >100 ms gap between DTR-assert and the reader's first effective `.read()`
+   drain: the reader is a Python thread contending for the GIL, and immediately after
+   it is spawned the main thread dives into Open3D's native window-creation call;
+   OS thread-start scheduling latency plus GIL/native-call contention during that
+   window init can plausibly delay the reader's first read quantum past the firmware's
+   ~100 ms `rs_cdc_send()` budget for frame 1. Whatever the exact host-side delay
+   composition, the *firmware side* of the mechanism is not in doubt (the 100 ms
+   mid-frame abort is directly observed in the bytes), and both captures used the same
+   `roomscan.viewer --record` code path on the same machine — consistent with the
+   reproducible truncation length (both captures cut off at exactly 12,032 payload
+   bytes).
 
 This is **not** any of the brief's leading hypotheses:
-- **Not stale TX FIFO residue** — the truncated bytes are live, freshly-varying sensor
-  data matching the surrounding good frames' content, not stale/repeated bytes.
+- **Not stale TX FIFO residue** — the truncated bytes are a genuine frame-1 payload
+  prefix: full-entropy zone data plus the characteristic frame-1 warm-up zero block at
+  payload offset 9071, matching the intact CRC-valid frame 1 in
+  `captures/golden_pairs.bin` (see Byte evidence above) — not stale/repeated bytes.
 - **Not the "attach to an already-streaming board" bug** — that scenario (separately
   tracked, ledger-observed live) would show a **large** CALIB `seq` (reflecting a
   frame counter that has been running since boot) and `raw-skip` climbing toward the
@@ -150,8 +202,10 @@ and the first live read. It:
 - costs exactly one RAW frame (never more, in either recorded instance),
 - self-heals with no seq gap (the sensor's frame counter is untouched — only the CDC
   write was aborted) and no recurrence for the rest of the session,
-- is byte-for-byte reproducible, so it is not host-scheduling noise; it is a
-  deterministic property of this firmware/host pair's fixed startup timings.
+- reproduced with an identical framing signature (same offset, same 12,032 B
+  truncation point) across two independent sessions — consistent with a stable
+  host-startup latency profile on this machine, though the exact host-side delay
+  composition is inferred, not measured (see Root cause step 3).
 
 No wire-protocol or decoder change is needed — `docs/protocol.md`'s existing decoder
 requirements (resync on CRC failure, DROPPED-flag semantics) already describe exactly
@@ -205,12 +259,8 @@ changed its status this task:
   item updated with the `SEND_CALIB` mitigation and the follow-up spec for the
   DTR-callback auto-fix.
 - This document.
-- No firmware or host code changes (root cause is in already-shipped, already-correct
-  behavior; no fix needed).
-
-## What was not committed
-
-- The standalone forensics script used to produce the offsets/hexdumps above (session
-  scratchpad only) — one-off analysis over two fixed capture files, not a reusable
-  tool; the same resync/CRC logic already lives in `host/src/roomscan/decoder.py` for
-  production use.
+- `host/tools/analyze_capture.py`: the forensics tool that produced every number above
+  (committed after review so the analysis is reproducible — an earlier revision kept it
+  scratchpad-only).
+- No firmware changes and no host *pipeline* code changes (root cause is in
+  already-shipped, already-correct behavior; no fix needed).
