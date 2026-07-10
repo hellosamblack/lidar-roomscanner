@@ -42,6 +42,10 @@ major effort, before the next phase's plan executes.
 - [ ] **Review scrutiny — docs cite evidence that exists.** Any doc claim citing a prior result, a
   measured number, or a root cause must be checked against the artifact it cites (caught twice: false
   precedent in Phase 2 Task 7, false `conf_scaling` citation in Phase 2.5 Task 5).
+- [ ] **Status currency — ROADMAP.md/CLAUDE.md/memory match reality.** Every phase status block,
+  open-item list, and memory index line checked against what actually merged (drift caught 2026-07-10:
+  two phases complete but unmarked, stale predictions, memory contradicting hardware-verified fixes).
+  The `status-sync` skill is the per-merge mechanism; this line is the backstop.
 - [ ] **Review scrutiny — burst/adversarial input case for any parser of untrusted bytes.** Any new or
   touched parser of host↔device bytes needs a same-write burst (data larger than the parser's buffer)
   and a corrupted/malformed-input case exercised on hardware, not just a single well-formed sample

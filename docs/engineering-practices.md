@@ -12,6 +12,15 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
 - Commit style: conventional-commit-ish prefixes (`feat:`, `fix:`, `docs:`, `test:`, `chore:`), small and
   frequent. Never commit `build/` output or captured binary streams >1 MB (put large captures in
   `captures/` — gitignored — and check in only the small golden fixtures under `host/tests/fixtures/`).
+- **Docs move with the code (status-sync rule).** Any commit/PR that completes a phase, clears a
+  deferred item, changes a measured number, or invalidates a prediction updates `ROADMAP.md` (and
+  `CLAUDE.md`/memory when phase status changes) **in the same PR** — follow the `status-sync` skill
+  checklist. "Docs later" is how the 2026-07-10 drift happened.
+- **Branch discipline.** Work rides worktree branches → draft PRs. Never commit to local `main`, never
+  merge locally, never merge your own PR — merging is the owner's decision. Subagents don't commit;
+  the controlling session does.
+- **Path lengths.** Repo-relative paths stay ≤150 characters (longer breaks `git worktree add` and
+  fresh clones on default Windows git).
 
 ## Wire protocol
 
