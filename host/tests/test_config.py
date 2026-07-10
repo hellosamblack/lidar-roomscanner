@@ -2,6 +2,25 @@
 from roomscan.config import ViewerConfig, apply_config_defaults, config_dir, config_path
 
 
+def test_yaw_fusion_config_defaults():
+    c = ViewerConfig()
+    assert c.yaw_fusion is True
+    assert c.yaw_fusion_tau == 20.0
+    assert c.mag_cal_path == "mag_cal.json"
+    assert c.yaw_anomaly_frac == 0.3
+    assert c.yaw_motion_rate_dps == 40.0
+    assert c.yaw_gimbal_margin_deg == 15.0
+
+
+def test_yaw_fusion_config_roundtrip(tmp_path):
+    p = tmp_path / "cfg.toml"
+    ViewerConfig(yaw_fusion=False, yaw_fusion_tau=12.5, mag_cal_path="x.json").save(p)
+    back = ViewerConfig.load(p)
+    assert back.yaw_fusion is False
+    assert back.yaw_fusion_tau == 12.5
+    assert back.mag_cal_path == "x.json"
+
+
 class Args:
     """Minimal argparse.Namespace stand-in: only the 5 viewer-config attrs."""
 
