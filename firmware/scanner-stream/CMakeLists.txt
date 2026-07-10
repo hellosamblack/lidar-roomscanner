@@ -49,6 +49,10 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Src/vl53l9_app.c
     Src/rs_protocol.c
+    Src/rs_lsm.c
+
+    # LSM6DSV16X register driver (vendored from X-NUCLEO-IKS4A1, unedited)
+    Drivers/lsm6dsv16x/lsm6dsv16x_reg.c
 
     # Utilities
     ${PKG_ROOT}/Utilities/vl53l9-common/platform/platform_utils.c
@@ -92,6 +96,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     Inc
     Src
+    Drivers/lsm6dsv16x
     ${PKG_ROOT}/Drivers/BSP/Components/vl53l9
     ${PKG_ROOT}/Utilities/vl53l9-common
     ${PKG_ROOT}/Utilities/vl53l9-common/vl53l9
