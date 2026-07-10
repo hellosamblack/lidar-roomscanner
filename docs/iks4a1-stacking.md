@@ -202,18 +202,22 @@ under test:
 - [ ] **Dynamic address clear of statics:** confirm the ToF's assigned I3C dynamic address is not one of
       `0x1E / 0x38 / 0x5C / 0x5D / 0x6A / 0x6B`.
 
-## Why this branch stays firmware-untouched
+## Firmware ownership — fix lives in the fork, reference stays read-only
 
-The I3C dynamic-address assignment (`platform_assign_dynamic_address()`) lives in the read-only reference
-platform layer, and adding IKS4A1 target declarations / a presence probe is exactly what the Phase 4
-branch will implement — once a workaround from the list above is validated on the bench. Duplicating
-that work here would only create merge conflicts. Keeping this branch's firmware untouched means the
-ToF-only build is byte-for-byte unchanged and continues to function whether or not the IKS4A1 is
-stacked, regardless of which workaround eventually lands.
+*(This section originally argued the fix should stay out of firmware entirely, deferring to a Phase 4
+driver branch. The HUB1 native-I3C resolution above changed that — the fix DID land in firmware, but
+only in our fork, never in the reference. Updated to match.)*
 
-This doc used to describe an unvalidated paper design ("prep only"); it now reflects an actual bench
-result (see "Known conflict"). The open item is no longer "write the driver" — it's "pick and validate
-a workaround" per the ranked list above, before the Phase 4 driver branch starts.
+The I3C dynamic-address assignment the reference ships (`platform_assign_dynamic_address()` in the
+read-only `../53L9A1/` platform layer) is single-device and hardcodes the ToF at `0x52`. Rather than
+edit that reference (forbidden — see `CLAUDE.md`), the multi-device fix lives entirely in our fork:
+`rs_assign_dynamic_addresses()` in `firmware/scanner-stream/Src/vl53l9_app.c` (see "Resolved" above).
+The reference package is byte-for-byte untouched, and the single-ToF case still works — the new
+function assigns the ToF `0x52` exactly as before whether or not the IKS4A1 is stacked; it only adds
+the second device when one answers ENTDAA.
+
+The environmental-sensor driver work (LIS2MDL / LPS22DF / STTS22H / SHT40, via the LSM6DSV16X's own
+I2C sensor-hub) remains a separate, not-yet-started Phase 4 task.
 
 ## References
 
