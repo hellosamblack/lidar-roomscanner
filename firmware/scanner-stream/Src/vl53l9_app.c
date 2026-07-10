@@ -161,6 +161,34 @@ static void iks4a1_bus_probe(void) {
 #if CONF_IKS4A1_I3C_PROBE
 extern I3C_HandleTypeDef hi3c1; /* redundant extern kept local to this probe for clarity */
 
+/* Native-I3C PRIVATE register read (reg-pointer write then read), mirroring the reference
+ * ULD's _i3c_read() option flags (vl53l9_platform.c). reg_len selects the register-address
+ * width: 2 for the ToF's 16-bit map (e.g. MODEL_ID @0x0000), 1 for the LSM6DSV16X's 8-bit
+ * map (e.g. WHO_AM_I @0x0F). Returns 0 on success, negative on the failing HAL step. */
+static int i3c_priv_read(uint8_t addr7, const uint8_t *reg, uint8_t reg_len, uint8_t *out, uint8_t out_len) {
+    uint32_t cbw[1], sbw[1];
+    I3C_PrivateTypeDef pd_w = { addr7, { (uint8_t *)reg, reg_len }, { NULL, 0 }, HAL_I3C_DIRECTION_WRITE };
+    I3C_XferTypeDef ctx_w = { { &cbw[0], 1 }, { &sbw[0], 1 }, { (uint8_t *)reg, reg_len }, { NULL, 0 } };
+    if (HAL_I3C_AddDescToFrame(&hi3c1, NULL, &pd_w, &ctx_w, 1, I3C_PRIVATE_WITHOUT_ARB_RESTART) != HAL_OK) {
+        return -1;
+    }
+    if (HAL_I3C_Ctrl_Transmit(&hi3c1, &ctx_w, 100) != HAL_OK) {
+        return -2;
+    }
+    while ((HAL_I3C_GetState(&hi3c1) != HAL_I3C_STATE_READY) && (HAL_I3C_GetState(&hi3c1) != HAL_I3C_STATE_LISTEN)) {
+    }
+    uint32_t cbr[1], sbr[1];
+    I3C_PrivateTypeDef pd_r = { addr7, { NULL, 0 }, { out, out_len }, HAL_I3C_DIRECTION_READ };
+    I3C_XferTypeDef ctx_r = { { &cbr[0], 1 }, { &sbr[0], 1 }, { NULL, 0 }, { out, out_len } };
+    if (HAL_I3C_AddDescToFrame(&hi3c1, NULL, &pd_r, &ctx_r, 1, I3C_PRIVATE_WITHOUT_ARB_STOP) != HAL_OK) {
+        return -3;
+    }
+    if (HAL_I3C_Ctrl_Receive(&hi3c1, &ctx_r, 100) != HAL_OK) {
+        return -4;
+    }
+    return 0;
+}
+
 static void iks4a1_i3c_probe(void) {
     HAL_Delay(200);
     printf("\n[IKS4A1 I3C PROBE] attempting ENTDAA against the shared bus (LSM6DSV16X is I3C-capable)\n");
@@ -176,43 +204,63 @@ static void iks4a1_i3c_probe(void) {
     hi3c1.Init.CtrlBusCharacteristic.SCLODLowDuration = 0x7c;
     HAL_I3C_Init(&hi3c1);
 
+    /* Enumerate EVERY ENTDAA responder, giving each a DISTINCT dynamic address, then
+     * PRIVATE-read WHO_AM_I from each so we can positively identify which PartID belongs
+     * to which physical device. The plan's MIPIID discriminator turned out degenerate on
+     * this hardware -- the ToF and the LSM6DSV16X both report MIPIID=0x09 (and identical
+     * BCR/DCR/MIPIMID); PartID is the only field that differs, and this read maps each
+     * PartID to a real device (0x70 == LSM6DSV16X WHO_AM_I). */
     uint64_t payload = 0;
     HAL_StatusTypeDef daa_status;
-    int attempts = 0;
+    uint16_t resp_part_id[2] = { 0 };
+    uint8_t resp_addr[2] = { 0 };
+    uint32_t resp_bcr[2] = { 0 };
+    int n = 0;
     do {
+        payload = 0;
         daa_status = HAL_I3C_Ctrl_DynAddrAssign(&hi3c1, &payload, I3C_RSTDAA_THEN_ENTDAA, 5000);
-        attempts++;
-        printf("[IKS4A1 I3C PROBE] attempt %d: status=%d payload_hi=0x%08lX payload_lo=0x%08lX\n", attempts,
-               (int)daa_status, (unsigned long)(payload >> 32), (unsigned long)(payload & 0xFFFFFFFFu));
         if (daa_status == HAL_BUSY) {
-            HAL_I3C_Ctrl_SetDynAddr(&hi3c1, 0x52 & 0x7F); /* same address hint the ToF path uses */
+            I3C_ENTDAAPayloadTypeDef pinfo = { 0 };
+            HAL_I3C_Get_ENTDAA_Payload_Info(&hi3c1, payload, &pinfo);
+            uint32_t attempt_bcr = __HAL_I3C_GET_BCR(payload);
+            uint8_t assign = (n < 2) ? (uint8_t)(0x50 + 2 * n) : 0x50; /* 0x50, 0x52 -- distinct, clear of IKS4A1 static addrs */
+            printf("[IKS4A1 I3C PROBE] responder %d: PartID=0x%04X MIPIID=0x%02X BCR=0x%02lX DCR=0x%02lX -> assign 0x%02X\n",
+                   n, pinfo.PID.PartID, pinfo.PID.MIPIID, (unsigned long)attempt_bcr,
+                   (unsigned long)pinfo.DCR, assign);
+            if (n < 2) {
+                resp_part_id[n] = pinfo.PID.PartID;
+                resp_addr[n] = assign;
+                resp_bcr[n] = attempt_bcr;
+                n++;
+            }
+            HAL_I3C_Ctrl_SetDynAddr(&hi3c1, assign & 0x7F);
         }
-    } while (daa_status == HAL_BUSY && attempts < 5);
+    } while (daa_status == HAL_BUSY);
 
-    uint32_t bcr = __HAL_I3C_GET_BCR(payload);
-    printf("[IKS4A1 I3C PROBE] final status=%d BCR=0x%02lX IBI_capable=%d CR_capable=%d\n", (int)daa_status,
-           (unsigned long)bcr, (int)__HAL_I3C_GET_IBI_CAPABLE(bcr), (int)__HAL_I3C_GET_CR_CAPABLE(bcr));
+    printf("[IKS4A1 I3C PROBE] ENTDAA complete: %d responder(s), final status=%d\n", n, (int)daa_status);
 
     hi3c1.Init.CtrlBusCharacteristic.SCLPPLowDuration = 0x0a;
     hi3c1.Init.CtrlBusCharacteristic.SCLI3CHighDuration = 0x09;
     hi3c1.Init.CtrlBusCharacteristic.SCLODLowDuration = 0x59;
     HAL_I3C_Init(&hi3c1);
 
-    if (daa_status != HAL_OK || payload == 0) {
-        printf("[IKS4A1 I3C PROBE] ENTDAA found no real device -- nothing joined natively, halting probe\n");
+    if (n == 0) {
+        printf("[IKS4A1 I3C PROBE] no device answered ENTDAA -- halting probe\n");
         for (;;) {
             HAL_Delay(2000);
         }
     }
 
-    I3C_DeviceConfTypeDef DeviceConf = { 0 };
-    DeviceConf.DeviceIndex = 1;
-    DeviceConf.TargetDynamicAddr = 0x52 & 0x7F;
-    DeviceConf.IBIAck = __HAL_I3C_GET_IBI_CAPABLE(bcr);
-    DeviceConf.IBIPayload = __HAL_I3C_GET_IBI_PAYLOAD(bcr);
-    DeviceConf.CtrlRoleReqAck = __HAL_I3C_GET_CR_CAPABLE(bcr);
-    DeviceConf.CtrlStopTransfer = DISABLE;
-    if (HAL_I3C_Ctrl_ConfigBusDevices(&hi3c1, &DeviceConf, 1U) != HAL_OK) {
+    I3C_DeviceConfTypeDef dev_conf[2] = { 0 };
+    for (int i = 0; i < n; i++) {
+        dev_conf[i].DeviceIndex = (uint8_t)(i + 1);
+        dev_conf[i].TargetDynamicAddr = resp_addr[i] & 0x7F;
+        dev_conf[i].IBIAck = __HAL_I3C_GET_IBI_CAPABLE(resp_bcr[i]);
+        dev_conf[i].IBIPayload = __HAL_I3C_GET_IBI_PAYLOAD(resp_bcr[i]);
+        dev_conf[i].CtrlRoleReqAck = __HAL_I3C_GET_CR_CAPABLE(resp_bcr[i]);
+        dev_conf[i].CtrlStopTransfer = DISABLE;
+    }
+    if (HAL_I3C_Ctrl_ConfigBusDevices(&hi3c1, dev_conf, (uint8_t)n) != HAL_OK) {
         printf("[IKS4A1 I3C PROBE] ConfigBusDevices FAILED\n");
         for (;;) {
             HAL_Delay(2000);
@@ -220,31 +268,36 @@ static void iks4a1_i3c_probe(void) {
     }
 
     for (;;) {
-        uint8_t reg = 0x0F;
-        uint8_t val = 0xFF;
-        int ret = -1;
-        uint32_t cb1[1], sb1[1];
-        I3C_PrivateTypeDef pd_w = { 0x52, { &reg, 1 }, { NULL, 0 }, HAL_I3C_DIRECTION_WRITE };
-        I3C_XferTypeDef ctx_w = { { &cb1[0], 1 }, { &sb1[0], 1 }, { &reg, 1 }, { NULL, 0 } };
-        if (HAL_I3C_AddDescToFrame(&hi3c1, NULL, &pd_w, &ctx_w, 1, I3C_PRIVATE_WITHOUT_ARB_RESTART) == HAL_OK &&
-            HAL_I3C_Ctrl_Transmit(&hi3c1, &ctx_w, 100) == HAL_OK) {
-            while ((HAL_I3C_GetState(&hi3c1) != HAL_I3C_STATE_READY) &&
-                   (HAL_I3C_GetState(&hi3c1) != HAL_I3C_STATE_LISTEN)) {
+        for (int i = 0; i < n; i++) {
+            /* Positive ToF ID: 16-bit MODEL_ID @0x0000 (4 bytes) -- exactly what the working
+             * ULD driver reads. Only the VL53L9CX answers a 16-bit-addressed read sensibly. */
+            uint8_t reg16[2] = { 0x00, 0x00 };
+            uint8_t model[4] = { 0 };
+            int r16 = i3c_priv_read(resp_addr[i], reg16, 2, model, 4);
+            /* Positive LSM ID: 8-bit WHO_AM_I @0x0F -- only the LSM6DSV16X returns 0x70. */
+            uint8_t reg8 = 0x0F;
+            uint8_t wai = 0xFF;
+            int r8 = i3c_priv_read(resp_addr[i], &reg8, 1, &wai, 1);
+
+            const char *verdict =
+                (r8 == 0 && wai == 0x70) ? "LSM6DSV16X"
+                : (r16 == 0 && (model[0] || model[1] || model[2] || model[3])) ? "ToF (VL53L9CX)"
+                : "UNIDENTIFIED";
+            printf("[IKS4A1 I3C PROBE] PartID=0x%04X @0x%02X | MODEL_ID(16b)=", resp_part_id[i], resp_addr[i]);
+            if (r16 == 0) {
+                printf("0x%02X%02X%02X%02X", model[0], model[1], model[2], model[3]);
+            } else {
+                printf("FAIL(%d)", r16);
             }
-            uint32_t cb2[1], sb2[1];
-            I3C_PrivateTypeDef pd_r = { 0x52, { NULL, 0 }, { &val, 1 }, HAL_I3C_DIRECTION_READ };
-            I3C_XferTypeDef ctx_r = { { &cb2[0], 1 }, { &sb2[0], 1 }, { NULL, 0 }, { &val, 1 } };
-            if (HAL_I3C_AddDescToFrame(&hi3c1, NULL, &pd_r, &ctx_r, 1, I3C_PRIVATE_WITHOUT_ARB_STOP) == HAL_OK &&
-                HAL_I3C_Ctrl_Receive(&hi3c1, &ctx_r, 100) == HAL_OK) {
-                ret = 0;
+            printf(" | WHO_AM_I(8b)=");
+            if (r8 == 0) {
+                printf("0x%02X", wai);
+            } else {
+                printf("FAIL(%d)", r8);
             }
+            printf(" => %s\n", verdict);
         }
-        if (ret == 0) {
-            printf("[IKS4A1 I3C PROBE] native-I3C @0x52 reg 0x0F = 0x%02X (expect 0x70) %s\n", val,
-                   (val == 0x70) ? "PASS" : "MISMATCH");
-        } else {
-            printf("[IKS4A1 I3C PROBE] native-I3C @0x52: transfer FAILED\n");
-        }
+        printf("[IKS4A1 I3C PROBE] --- identify pass complete, repeating in 2s ---\n");
         HAL_Delay(2000);
     }
 }
