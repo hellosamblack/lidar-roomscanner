@@ -37,7 +37,7 @@ def config_path() -> Path:
 
 @dataclass
 class ViewerConfig:
-    color: str = "depth"
+    color: str = "reflectance"   # falls back to depth coloring when the plane is absent
     fov_h: float = 55.0
     fov_v: float = 42.0
     replay_fps: float = 0.0
