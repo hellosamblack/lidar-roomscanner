@@ -16,6 +16,11 @@ roomscan-view = "roomscan.viewer:main"
 roomscan-panel = "roomscan.panel:main"
 roomscan-ctl = "roomscan.control:main"
 
+[tool.pytest.ini_options]
+# Resolve `roomscan` from ./src and `tools` from ./ without relying on an
+# editable install (matters when running the suite from a git worktree).
+pythonpath = ["src", "."]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

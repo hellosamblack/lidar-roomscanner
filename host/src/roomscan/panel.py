@@ -46,7 +46,15 @@ from .native import Transform
 from . import portguard
 from .pipeline import TransformStage
 from .protocol import HEADER_SIZE, CommandCode, FrameType, ProtocolError, parse_event
-from .sensors import SensorState, gizmo_pose, tilt_compensated_heading
+from .magcal import MagCalibration
+from .sensors import (
+    AXIS_CONVENTION,
+    SensorState,
+    YawFusion,
+    absolute_heading,
+    gizmo_pose,
+    tilt_compensated_heading,
+)
 from .sensors_widgets import render_compass, render_sparkline
 from .shading import MODES as _NEAR_MODES
 from .shading import cloud_colors
@@ -275,10 +283,26 @@ class ControlPanel:
         self.is_replay = isinstance(source, FileSource)
 
         self.decoder = StreamDecoder()
-        self.sensor_state = SensorState()
         self.imu_gizmo = bool(getattr(args, "imu_gizmo", True))
         self.sensors_panel = bool(getattr(args, "sensors_panel", True))
         self.gizmo_scale = float(getattr(args, "gizmo_scale", 0.15) or 0.15)
+        self.yaw_fusion = bool(getattr(args, "yaw_fusion", True))
+        self._mag_cal = None
+        fusion = None
+        if self.yaw_fusion:
+            self._mag_cal = MagCalibration.load(
+                getattr(args, "mag_cal_path", "mag_cal.json") or "mag_cal.json")
+            fusion = YawFusion(
+                tau_s=float(getattr(args, "yaw_fusion_tau", 20.0) or 20.0),
+                calibration=self._mag_cal,
+                anomaly_frac=float(getattr(args, "yaw_anomaly_frac", 0.3) or 0.3),
+                motion_rate_dps=float(getattr(args, "yaw_motion_rate_dps", 40.0) or 40.0),
+                gimbal_margin_deg=float(getattr(args, "yaw_gimbal_margin_deg", 15.0) or 15.0),
+            )
+        self.sensor_state = SensorState(fusion=fusion)
+        # seed with "off" so the disabled case never publishes a status line;
+        # real transitions (init/active/gated:*) still log once each.
+        self._last_fusion_status = "off"
         self._gizmo_added = False
         self.stats = Stats()
         # metrics HUD: per-sensor rate meters + a background resource sampler.
@@ -912,7 +936,7 @@ class ControlPanel:
         from the latest orientation quaternion, and (if the
         Sensors panel group is enabled) the compass + pressure/temp sparklines.
         Graceful no-data: quietly does nothing until IMU_QUAT/ENV frames arrive."""
-        quat = self.sensor_state.latest_quat()
+        quat = self.sensor_state.fused_quat()
         if self.imu_gizmo and quat is not None:
             sc = self.scene_widget.scene
             if not self._gizmo_added:
@@ -921,11 +945,18 @@ class ControlPanel:
                 self._gizmo_added = True
             pose = gizmo_pose(quat, self.gizmo_scale, _GIZMO_ANCHOR)
             sc.set_geometry_transform(_GIZMO_GEOM, pose)
+        status = self.sensor_state.fusion_status()
+        if status != self._last_fusion_status:
+            self._last_fusion_status = status
+            self.bus.publish(f"yaw-fusion -> {status}")
         if not self.sensors_panel:
             return
         env = self.sensor_state.latest_env()
         if env is not None and quat is not None:
-            heading = tilt_compensated_heading(quat, env.mag_ut)
+            mag = env.mag_ut
+            if self._mag_cal is not None:
+                mag = tuple(AXIS_CONVENTION @ self._mag_cal.apply(mag))
+            heading = absolute_heading(quat, mag)
             self.compass_widget.update_image(self._np_to_o3d(render_compass(heading)))
         self.press_widget.update_image(self._np_to_o3d(render_sparkline(self.sensor_state.pressure_history())))
         self.temp_widget.update_image(self._np_to_o3d(render_sparkline(self.sensor_state.temp_history())))
@@ -1103,7 +1134,9 @@ class ControlPanel:
 _PANEL_FIELDS = ("point_size", "ir_colormap", "ir_freeze_range", "panel_width",
                  "near_mode", "near_cutoff_m", "near_emphasis",
                  "surface_enabled", "surface_mode", "surface_threshold_pct",
-                 "imu_gizmo", "sensors_panel", "gizmo_scale", "metrics_overlay")
+                 "imu_gizmo", "sensors_panel", "gizmo_scale", "metrics_overlay",
+                 "yaw_fusion", "yaw_fusion_tau", "mag_cal_path",
+                 "yaw_anomaly_frac", "yaw_motion_rate_dps", "yaw_gimbal_margin_deg")
 
 
 def _fill_panel_fields(args) -> None:
