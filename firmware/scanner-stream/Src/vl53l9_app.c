@@ -594,6 +594,93 @@ static uint32_t rs_pack_status(const vl53l9_status_t *s) {
  * propagates it like any other stage failure. This is deliberate (recursion guard, see
  * rs_recover()'s comment): this function must never call handle_error(), because
  * handle_error()'s own recovery loop is what calls this function. */
+
+/* ---- Multi-device I3C dynamic address assignment (IKS4A1 HUB1 native-I3C bus) ------
+ *
+ * Replaces platform_assign_dynamic_address() (platform_utils.c, read-only reference --
+ * never edited in place per CLAUDE.md) for boards where the IKS4A1's LSM6DSV16X (HUB1)
+ * shares I3C1 with the ToF as a genuine I3C target -- see docs/iks4a1-stacking.md. The
+ * reference's single-device function hardcodes "whoever answers ENTDAA first is the ToF,
+ * address 0x52" and registers only one device; with two real I3C arbiters that either
+ * assigns the wrong device to 0x52 or leaves the second unmanaged, which is why the boot
+ * sequence hung with both stacked (2026-07-09 bench session).
+ *
+ * Discriminates by PID.PartID, a stable 16-bit per-device value MEASURED and confirmed on
+ * hardware via the iks4a1_i3c_probe() diagnostic above (commit 43f42b9 / this plan's
+ * Task 1) with both devices stacked in HUB1-only jumper config:
+ *   ToF (VL53L9CX):  PartID 0x0102, MODEL_ID 0x394C3353 -> keeps 0x52 (VL53L9_DEFAULT_ADDRESS)
+ *   LSM6DSV16X:      PartID 0x0070, WHO_AM_I 0x70       -> assigned 0x50
+ * NB: the plan's original PID.MIPIID discriminator is degenerate on this hardware (identical
+ * BCR=0x07, near-identical MIPIID); PartID is the reliable key. A PartID that matches neither
+ * makes this bail with -2 rather than misconfigure the bus. */
+#define TOF_PART_ID                (0x0102) /* VL53L9CX, MODEL_ID 0x394C3353 -- measured Task 1 */
+#define IKS4A1_LSM6DSV16X_PART_ID  (0x0070) /* LSM6DSV16X, WHO_AM_I 0x70 -- measured Task 1 */
+#define IKS4A1_LSM6DSV16X_I3C_ADDR (0x50)   /* dynamic address for the LSM6DSV16X; avoids 0x52
+                                             * (ToF) and every IKS4A1 static address (0x1E/0x38/
+                                             * 0x5C/0x5D/0x6A/0x6B) per docs/iks4a1-stacking.md */
+
+static int rs_assign_dynamic_addresses(void) {
+    HAL_StatusTypeDef status;
+    uint64_t payload;
+    I3C_DeviceConfTypeDef dev_conf[2];
+    uint8_t nb_configured = 0;
+
+    hi3c1.Init.CtrlBusCharacteristic.SCLPPLowDuration = 0x7c;
+    hi3c1.Init.CtrlBusCharacteristic.SCLI3CHighDuration = 0x7c;
+    hi3c1.Init.CtrlBusCharacteristic.SCLODLowDuration = 0x7c;
+    if (HAL_I3C_Init(&hi3c1) != HAL_OK) {
+        return -1;
+    }
+
+    do {
+        payload = 0;
+        status = HAL_I3C_Ctrl_DynAddrAssign(&hi3c1, &payload, I3C_RSTDAA_THEN_ENTDAA, 5000);
+        if (status == HAL_BUSY) {
+            I3C_ENTDAAPayloadTypeDef pinfo = { 0 };
+            HAL_I3C_Get_ENTDAA_Payload_Info(&hi3c1, payload, &pinfo);
+            uint32_t bcr = __HAL_I3C_GET_BCR(payload);
+
+            uint8_t address;
+            if (pinfo.PID.PartID == TOF_PART_ID) {
+                address = VL53L9_DEFAULT_ADDRESS;
+            } else if (pinfo.PID.PartID == IKS4A1_LSM6DSV16X_PART_ID) {
+                address = IKS4A1_LSM6DSV16X_I3C_ADDR;
+            } else {
+                return -2; /* unrecognized device answered ENTDAA -- bail rather than guess */
+            }
+
+            HAL_I3C_Ctrl_SetDynAddr(&hi3c1, address & 0x7F);
+
+            if (nb_configured < 2) {
+                dev_conf[nb_configured].DeviceIndex = (uint8_t)(nb_configured + 1);
+                dev_conf[nb_configured].TargetDynamicAddr = address & 0x7F;
+                dev_conf[nb_configured].IBIAck = __HAL_I3C_GET_IBI_CAPABLE(bcr);
+                dev_conf[nb_configured].IBIPayload = __HAL_I3C_GET_IBI_PAYLOAD(bcr);
+                dev_conf[nb_configured].CtrlRoleReqAck = __HAL_I3C_GET_CR_CAPABLE(bcr);
+                dev_conf[nb_configured].CtrlStopTransfer = DISABLE;
+                nb_configured++;
+            }
+        }
+    } while (status == HAL_BUSY);
+
+    if (status != HAL_OK) {
+        return -3;
+    }
+
+    hi3c1.Init.CtrlBusCharacteristic.SCLPPLowDuration = 0x0a;
+    hi3c1.Init.CtrlBusCharacteristic.SCLI3CHighDuration = 0x09;
+    hi3c1.Init.CtrlBusCharacteristic.SCLODLowDuration = 0x59;
+    if (HAL_I3C_Init(&hi3c1) != HAL_OK) {
+        return -1;
+    }
+
+    if (nb_configured > 0 && HAL_I3C_Ctrl_ConfigBusDevices(&hi3c1, dev_conf, nb_configured) != HAL_OK) {
+        return -4;
+    }
+
+    return 0;
+}
+
 static int rs_sensor_reinit(vl53l9_device_t *p_dev, uint8_t *calib_data) {
     int ret;
 
