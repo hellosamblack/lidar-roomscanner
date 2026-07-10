@@ -406,6 +406,28 @@ class ControlPanel:
             vrow.add_child(b)
         view.add_child(vrow)
 
+        # --- Surface (opt-in: interpolate adjacent points into a mesh) ---
+        surf = self._group("Surface", open=False)
+        self.chk_surface = gui.Checkbox("Enable surface interpolation")
+        self.chk_surface.checked = self.surface_enabled
+        self.chk_surface.set_on_checked(self._on_surface_enabled)
+        surf.add_child(self.chk_surface)
+        sg = self._labeled_grid()
+        sg.add_child(gui.Label("Adjacency"))
+        self.cb_surface_mode = gui.Combobox()
+        for m in _SURFACE_MODES:
+            self.cb_surface_mode.add_item(m)
+        self.cb_surface_mode.selected_index = _SURFACE_MODES.index(self.surface_mode)
+        self.cb_surface_mode.set_on_selection_changed(self._on_surface_mode)
+        sg.add_child(self.cb_surface_mode)
+        sg.add_child(gui.Label("Threshold %"))
+        self.sl_surface_threshold = gui.Slider(gui.Slider.DOUBLE)
+        self.sl_surface_threshold.set_limits(0.5, 15.0)
+        self.sl_surface_threshold.double_value = self.surface_threshold_pct
+        self.sl_surface_threshold.set_on_value_changed(self._on_surface_threshold)
+        sg.add_child(self.sl_surface_threshold)
+        surf.add_child(sg)
+
         # --- IR Monitor ---
         ir = self._group("IR Monitor")
         blank = self._o3d.geometry.Image(
@@ -856,6 +878,20 @@ class ControlPanel:
             self.near_cutoff_m = float(value)
         elif self.near_mode == "emphasis":
             self.near_emphasis = float(value)
+
+    def _on_surface_enabled(self, checked):
+        self.surface_enabled = checked
+        self.bus.publish(f"surface interpolation -> {'on' if checked else 'off'}")
+        if not checked:
+            self._remove_mesh_geometry()
+
+    def _on_surface_mode(self, text, index):
+        self.surface_mode = text
+        self._last_surface_rebuild = 0.0   # force an immediate spatial rebuild on switch
+        self.bus.publish(f"surface adjacency -> {text}")
+
+    def _on_surface_threshold(self, value):
+        self.surface_threshold_pct = float(value)
 
     def _show_help(self, *_):
         gui = self._gui
