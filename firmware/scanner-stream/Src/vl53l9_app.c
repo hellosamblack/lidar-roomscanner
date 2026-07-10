@@ -50,11 +50,205 @@
 #include "tusb.h"
 
 extern UART_HandleTypeDef hcom_uart[];
+extern I3C_HandleTypeDef hi3c1;
 
 static void handle_error(void);
 
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
+
+/* ---- IKS4A1 bus probe (bench diagnostic) -------------------------------------------
+ *
+ * Standalone WHO_AM_I probe over I3C1's legacy-I2C private-transfer mode, bypassing
+ * vl53l9's ENTDAA/dynamic-address assignment entirely. Rationale: the IKS4A1's sensors
+ * are legacy-I2C only and can never answer ENTDAA (an I3C-only CCC), so the normal boot
+ * path (rs_boot_bringup -> platform_assign_dynamic_address) exhausts its 5-attempt retry
+ * and hangs in tud_disconnect()+while(1) before ever touching the IKS4A1's addresses --
+ * see docs/iks4a1-stacking.md "Known conflict". This probe never calls that path at all.
+ *
+ * Uses the exact I2C-legacy private-transfer pattern vl53l9_platform.c's _i3c_read()
+ * already uses for PLATFORM_BUS_PROPERTY_I3C_LEGACY devices (HAL_I3C_AddDescToFrame +
+ * Ctrl_Transmit/Ctrl_Receive with I2C_PRIVATE_WITHOUT_ARB_STOP), just with an 8-bit
+ * MEMS register address instead of the ToF's 16-bit one, and a bare 7-bit TargetAddr
+ * (no >>1 normalization needed since we pass it in already-7-bit here).
+ *
+ * Output goes over ST-Link VCOM (printf, COM1, set up by BSP_COM_Init in main() before
+ * vl53l9_app() runs) rather than native CDC -- VCOM needs no host enumeration/tud_connect,
+ * so it works even when the normal boot path never gets that far.
+ *
+ * Disabled by default. Flip to 1 for a bus bring-up bench session only; never ship 1. */
+#define CONF_IKS4A1_BUS_PROBE (0)
+
+#if CONF_IKS4A1_BUS_PROBE
+static int iks4a1_read_reg(uint8_t addr7, uint8_t reg, uint8_t *out) {
+    uint8_t reg_byte = reg;
+    uint32_t cb1[1], sb1[1];
+    I3C_PrivateTypeDef pd_w = { addr7, { &reg_byte, 1 }, { NULL, 0 }, HAL_I3C_DIRECTION_WRITE };
+    I3C_XferTypeDef ctx_w = { { &cb1[0], 1 }, { &sb1[0], 1 }, { &reg_byte, 1 }, { NULL, 0 } };
+    if (HAL_I3C_AddDescToFrame(&hi3c1, NULL, &pd_w, &ctx_w, 1, I2C_PRIVATE_WITHOUT_ARB_STOP) != HAL_OK) {
+        return -1;
+    }
+    if (HAL_I3C_Ctrl_Transmit(&hi3c1, &ctx_w, 100) != HAL_OK) {
+        return -2;
+    }
+    while ((HAL_I3C_GetState(&hi3c1) != HAL_I3C_STATE_READY) && (HAL_I3C_GetState(&hi3c1) != HAL_I3C_STATE_LISTEN)) {
+    }
+
+    uint32_t cb2[1], sb2[1];
+    I3C_PrivateTypeDef pd_r = { addr7, { NULL, 0 }, { out, 1 }, HAL_I3C_DIRECTION_READ };
+    I3C_XferTypeDef ctx_r = { { &cb2[0], 1 }, { &sb2[0], 1 }, { NULL, 0 }, { out, 1 } };
+    if (HAL_I3C_AddDescToFrame(&hi3c1, NULL, &pd_r, &ctx_r, 1, I2C_PRIVATE_WITHOUT_ARB_STOP) != HAL_OK) {
+        return -3;
+    }
+    if (HAL_I3C_Ctrl_Receive(&hi3c1, &ctx_r, 100) != HAL_OK) {
+        return -4;
+    }
+    return 0;
+}
+
+static void iks4a1_bus_probe(void) {
+    static const struct {
+        const char *name;
+        uint8_t addr7;
+        uint8_t reg;
+        uint8_t expect;
+    } targets[] = {
+        { "LSM6DSV16X SA0=0", 0x6A, 0x0F, 0x70 },
+        { "LSM6DSV16X SA0=1", 0x6B, 0x0F, 0x70 },
+        { "LIS2MDL", 0x1E, 0x4F, 0x40 },
+        { "LPS22DF SA0=0", 0x5C, 0x0F, 0xB4 },
+        { "LPS22DF SA0=1", 0x5D, 0x0F, 0xB4 },
+    };
+
+    HAL_Delay(200); /* let the bus settle post-boot before the first transfer */
+    printf("\n[IKS4A1 PROBE] starting -- I3C1 legacy-I2C WHO_AM_I probe (ToF path never touched)\n");
+
+    for (;;) {
+        for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
+            uint8_t val = 0xFF;
+            int ret = iks4a1_read_reg(targets[i].addr7, targets[i].reg, &val);
+            if (ret == 0) {
+                printf("[IKS4A1 PROBE] %-10s @0x%02X reg 0x%02X = 0x%02X (expect 0x%02X) %s\n", targets[i].name,
+                       targets[i].addr7, targets[i].reg, val, targets[i].expect,
+                       (val == targets[i].expect) ? "PASS" : "MISMATCH");
+            } else {
+                printf("[IKS4A1 PROBE] %-10s @0x%02X: I3C transfer FAILED (ret=%d)\n", targets[i].name,
+                       targets[i].addr7, ret);
+            }
+        }
+        printf("[IKS4A1 PROBE] --- pass complete, repeating in 2s ---\n");
+        HAL_Delay(2000);
+    }
+}
+#endif /* CONF_IKS4A1_BUS_PROBE */
+
+/* ---- IKS4A1 native-I3C ENTDAA probe (follow-up to iks4a1_bus_probe) -----------------
+ *
+ * The LSM6DSV16X (HUB1) datasheet confirms a genuine MIPI I3C v1.1 SDR slave interface
+ * (ENTDAA/SETDASA/RSTDAA CCCs, private read/write, IBI -- DS13510 sec 5.2) with
+ * WHO_AM_I (0Fh) fixed at 0x70 (sec 9.13). Unlike the legacy-I2C-only environmental
+ * sensors, it can legitimately answer the SAME ENTDAA broadcast the ToF normally uses --
+ * meaning it might already join the shared bus as a real I3C citizen (full 12.5 MHz PP
+ * speed, no legacy-I2C loading) with zero jumper/solder-bridge rework, before reaching
+ * for the Mode-3-sensor-hub rewire (docs/iks4a1-stacking.md candidate workaround list).
+ *
+ * Reuses platform_assign_dynamic_address() (platform_utils.c) verbatim -- the exact same
+ * ENTDAA call the ToF boot path already uses -- then attempts a genuine I3C PRIVATE
+ * (not I2C-legacy) WHO_AM_I read at the address that function hands out (hardcoded 0x52
+ * in the non-retry path; that's the assumption worth testing here). */
+#define CONF_IKS4A1_I3C_PROBE (0)
+
+#if CONF_IKS4A1_I3C_PROBE
+extern I3C_HandleTypeDef hi3c1; /* redundant extern kept local to this probe for clarity */
+
+static void iks4a1_i3c_probe(void) {
+    HAL_Delay(200);
+    printf("\n[IKS4A1 I3C PROBE] attempting ENTDAA against the shared bus (LSM6DSV16X is I3C-capable)\n");
+
+    platform_power_reset(CONF_DEVICE_ID);
+
+    /* Call the raw HAL directly (not platform_assign_dynamic_address()'s wrapper) so we can
+     * inspect the actual ENTDAA payload -- the wrapper never validates whether a real device
+     * answered before unconditionally registering address 0x52, so its "return 0" doesn't by
+     * itself prove real discovery happened. A nonzero payload with recognizable PID bytes does. */
+    hi3c1.Init.CtrlBusCharacteristic.SCLPPLowDuration = 0x7c;
+    hi3c1.Init.CtrlBusCharacteristic.SCLI3CHighDuration = 0x7c;
+    hi3c1.Init.CtrlBusCharacteristic.SCLODLowDuration = 0x7c;
+    HAL_I3C_Init(&hi3c1);
+
+    uint64_t payload = 0;
+    HAL_StatusTypeDef daa_status;
+    int attempts = 0;
+    do {
+        daa_status = HAL_I3C_Ctrl_DynAddrAssign(&hi3c1, &payload, I3C_RSTDAA_THEN_ENTDAA, 5000);
+        attempts++;
+        printf("[IKS4A1 I3C PROBE] attempt %d: status=%d payload_hi=0x%08lX payload_lo=0x%08lX\n", attempts,
+               (int)daa_status, (unsigned long)(payload >> 32), (unsigned long)(payload & 0xFFFFFFFFu));
+        if (daa_status == HAL_BUSY) {
+            HAL_I3C_Ctrl_SetDynAddr(&hi3c1, 0x52 & 0x7F); /* same address hint the ToF path uses */
+        }
+    } while (daa_status == HAL_BUSY && attempts < 5);
+
+    uint32_t bcr = __HAL_I3C_GET_BCR(payload);
+    printf("[IKS4A1 I3C PROBE] final status=%d BCR=0x%02lX IBI_capable=%d CR_capable=%d\n", (int)daa_status,
+           (unsigned long)bcr, (int)__HAL_I3C_GET_IBI_CAPABLE(bcr), (int)__HAL_I3C_GET_CR_CAPABLE(bcr));
+
+    hi3c1.Init.CtrlBusCharacteristic.SCLPPLowDuration = 0x0a;
+    hi3c1.Init.CtrlBusCharacteristic.SCLI3CHighDuration = 0x09;
+    hi3c1.Init.CtrlBusCharacteristic.SCLODLowDuration = 0x59;
+    HAL_I3C_Init(&hi3c1);
+
+    if (daa_status != HAL_OK || payload == 0) {
+        printf("[IKS4A1 I3C PROBE] ENTDAA found no real device -- nothing joined natively, halting probe\n");
+        for (;;) {
+            HAL_Delay(2000);
+        }
+    }
+
+    I3C_DeviceConfTypeDef DeviceConf = { 0 };
+    DeviceConf.DeviceIndex = 1;
+    DeviceConf.TargetDynamicAddr = 0x52 & 0x7F;
+    DeviceConf.IBIAck = __HAL_I3C_GET_IBI_CAPABLE(bcr);
+    DeviceConf.IBIPayload = __HAL_I3C_GET_IBI_PAYLOAD(bcr);
+    DeviceConf.CtrlRoleReqAck = __HAL_I3C_GET_CR_CAPABLE(bcr);
+    DeviceConf.CtrlStopTransfer = DISABLE;
+    if (HAL_I3C_Ctrl_ConfigBusDevices(&hi3c1, &DeviceConf, 1U) != HAL_OK) {
+        printf("[IKS4A1 I3C PROBE] ConfigBusDevices FAILED\n");
+        for (;;) {
+            HAL_Delay(2000);
+        }
+    }
+
+    for (;;) {
+        uint8_t reg = 0x0F;
+        uint8_t val = 0xFF;
+        int ret = -1;
+        uint32_t cb1[1], sb1[1];
+        I3C_PrivateTypeDef pd_w = { 0x52, { &reg, 1 }, { NULL, 0 }, HAL_I3C_DIRECTION_WRITE };
+        I3C_XferTypeDef ctx_w = { { &cb1[0], 1 }, { &sb1[0], 1 }, { &reg, 1 }, { NULL, 0 } };
+        if (HAL_I3C_AddDescToFrame(&hi3c1, NULL, &pd_w, &ctx_w, 1, I3C_PRIVATE_WITHOUT_ARB_RESTART) == HAL_OK &&
+            HAL_I3C_Ctrl_Transmit(&hi3c1, &ctx_w, 100) == HAL_OK) {
+            while ((HAL_I3C_GetState(&hi3c1) != HAL_I3C_STATE_READY) &&
+                   (HAL_I3C_GetState(&hi3c1) != HAL_I3C_STATE_LISTEN)) {
+            }
+            uint32_t cb2[1], sb2[1];
+            I3C_PrivateTypeDef pd_r = { 0x52, { NULL, 0 }, { &val, 1 }, HAL_I3C_DIRECTION_READ };
+            I3C_XferTypeDef ctx_r = { { &cb2[0], 1 }, { &sb2[0], 1 }, { NULL, 0 }, { &val, 1 } };
+            if (HAL_I3C_AddDescToFrame(&hi3c1, NULL, &pd_r, &ctx_r, 1, I3C_PRIVATE_WITHOUT_ARB_STOP) == HAL_OK &&
+                HAL_I3C_Ctrl_Receive(&hi3c1, &ctx_r, 100) == HAL_OK) {
+                ret = 0;
+            }
+        }
+        if (ret == 0) {
+            printf("[IKS4A1 I3C PROBE] native-I3C @0x52 reg 0x0F = 0x%02X (expect 0x70) %s\n", val,
+                   (val == 0x70) ? "PASS" : "MISMATCH");
+        } else {
+            printf("[IKS4A1 I3C PROBE] native-I3C @0x52: transfer FAILED\n");
+        }
+        HAL_Delay(2000);
+    }
+}
+#endif /* CONF_IKS4A1_I3C_PROBE */
 
 static uint64_t rs_time_us(void) {
     /* v1: HAL tick, 1 ms resolution widened to the u64 µs wire field.
@@ -857,6 +1051,13 @@ static void print_frame(float *p_frame, size_t height, size_t width);
 static memory_t allocate_memory(uint16_t size);
 
 void vl53l9_app() {
+
+#if CONF_IKS4A1_BUS_PROBE
+    iks4a1_bus_probe(); /* never returns -- diagnostic-only entry point */
+#endif
+#if CONF_IKS4A1_I3C_PROBE
+    iks4a1_i3c_probe(); /* never returns -- diagnostic-only entry point */
+#endif
 
     int ret;
 #if CONF_TRANSFORM_ONBOARD
