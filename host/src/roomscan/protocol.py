@@ -32,6 +32,8 @@ class StreamId(IntEnum):
     STATUS = 6
     RAW_3DMD = 7
     CALIB = 8
+    IMU_QUAT = 9
+    ENV = 10
 
 
 class EventCode(IntEnum):
@@ -63,6 +65,8 @@ class ResultCode(IntEnum):
 DEPTH_NO_RETURN_MM = 12000.0  # empirical no-return sentinel in DEPTH_ZF32 payloads (Task 8)
 RAW_3DMD_SIZE_BIN2 = 14842  # size in bytes at binning=2 (54×42 zones)
 CALIB_SIZE = 2332  # VL53L9_CALIB_DATA_SIZE per-device calibration blob
+IMU_QUAT_SIZE = 16  # 4x float32 [w, x, y, z], LSM body frame
+ENV_SIZE = 20       # pressure f32 (Pa) + mag 3xf32 (µT) + temp f32 (°C)
 
 
 class ProtocolError(Exception):
@@ -144,3 +148,19 @@ def parse_ack(payload: bytes) -> tuple[int, int, int]:
         raise ProtocolError(f"ACK payload must be exactly 12 bytes, got {len(payload)}")
     cmd, result, applied = struct.unpack("<III", payload)
     return cmd, result, applied
+
+
+def decode_imu_quat(payload: bytes) -> tuple[float, float, float, float]:
+    """Decode a stream 9 IMU_QUAT payload -> (w, x, y, z) unit quaternion."""
+    if len(payload) != IMU_QUAT_SIZE:
+        raise ProtocolError(f"IMU_QUAT payload must be {IMU_QUAT_SIZE} bytes, got {len(payload)}")
+    w, x, y, z = struct.unpack("<4f", payload)
+    return w, x, y, z
+
+
+def decode_env(payload: bytes) -> tuple[float, tuple[float, float, float], float]:
+    """Decode a stream 10 ENV payload -> (pressure_pa, (mx, my, mz) µT, temp_c)."""
+    if len(payload) != ENV_SIZE:
+        raise ProtocolError(f"ENV payload must be {ENV_SIZE} bytes, got {len(payload)}")
+    pressure, mx, my, mz, temp = struct.unpack("<5f", payload)
+    return pressure, (mx, my, mz), temp

@@ -24,8 +24,12 @@
 #define RS_STREAM_STATUS      (6u)
 #define RS_STREAM_RAW_3DMD    (7u) /* opaque vendor raw frame (transform input) */
 #define RS_STREAM_CALIB       (8u) /* per-device calibration blob */
+#define RS_STREAM_IMU_QUAT    (9u)  /* 4x float32 [w,x,y,z] quaternion, LSM body frame */
+#define RS_STREAM_ENV         (10u) /* f32 pressure(Pa) + 3xf32 mag(uT) + f32 temp(C) */
 #define RS_RAW_3DMD_SIZE_BIN2 (14842u)
 #define RS_CALIB_SIZE         (2332u)
+#define RS_IMU_QUAT_SIZE      (16u)
+#define RS_ENV_SIZE           (20u)
 
 /* EVENT (RS_FRAME_EVENT) payload: u32 code, u32 detail, optional ASCII message. */
 #define RS_EVT_SENSOR_INIT_FAIL    (1u)
