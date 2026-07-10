@@ -12,21 +12,30 @@ Engineering conventions live in [`docs/engineering-practices.md`](./docs/enginee
 
 ## Overriding architecture decisions
 
-- **Transport: Ethernet is the production link, not USB.** The board has a 10/100 MAC (RMII pins already
-  `AF11_ETH` in `Src/main.c`; MAC + lwIP not yet enabled). Target = lwIP/UDP with hardware PTP
-  (IEEE 1588) timestamping. Native USB CDC (`USB_DRD_FS`) is a bring-up/fallback link only. This voids the
-  USB-bandwidth and timestamp-drift bottlenecks in `references/roadmapResearch.md`.
+- **Transport: native USB CDC is the production link for now; Ethernet is shelved (owner, 2026-07-10).**
+  *(Revises the 2026-07 "Ethernet is the production link, not USB" decision.)* Measurement inverted the
+  original assumption: since Phase 2.5's trigger-early overlap, the CDC send is fully hidden inside the
+  sensor's ranging window — the bandwidth/latency wall is the **I3C sensor readout** (~60-80 Hz raw
+  ceiling at 12.5 MHz, estimate), not the USB link, so an Ethernet cutover buys no fps and no latency
+  today. The `roadmapResearch.md` USB-bandwidth and timestamp-drift concerns were already voided by the
+  raw-streaming architecture. Ethernet (Phase 5) stays fully specced but shelved; **revival triggers**:
+  (a) something lifts the I3C ceiling past what CDC FS carries (~60 Hz raw ≈ 890 KB/s), (b) multi-device
+  hardware time-sync (PTP) becomes a real requirement (e.g. Phase 6 SLAM needs tighter cross-sensor
+  ordering than USB timestamps give), or (c) the tether must outgrow USB cable lengths. The 10/100 MAC
+  is on-chip and the RMII pins stay muxed `AF11_ETH` — nothing is burned by waiting.
 - **Sensors: X-NUCLEO-IKS4A1** adds IMU (LSM6DSV16X, hardware SFLP orientation), magnetometer (yaw-drift
-  correction), barometer (Z-drift constraint), temp/humidity (thermal comp). Not yet in code. Bus-sharing
-  is resolved — IKS4A1 rides the ToF's I3C1 bus as legacy-I2C targets (shared PB8/PB9), no separate
-  peripheral; stacking recipe + bench checklist in `docs/iks4a1-stacking.md`.
+  correction), barometer (Z-drift constraint), temp/humidity (thermal comp). **Integrated as of Phase 4
+  (2026-07-10)** — LSM6DSV16X as a native I3C target sharing I3C1 with the ToF (HUB1-only routing,
+  multi-device ENTDAA), SFLP orientation on stream 9, sensor-hub env (baro/mag/temp) on stream 10;
+  stacking recipe + resolution history in `docs/iks4a1-stacking.md`. *(The original shared-bus
+  legacy-I2C plan failed at speed once stacked — see the Phase 4 status block.)*
 - **Sequencing rule (owner):** mature the visualizer + UI/config on the **ToF sensor alone** before adding
   the IKS4A1 board. *(Satisfied as of Phase 3, 2026-07-09 — visualizer, runtime config, and robustness
   are done; owner swapped IKS4A1 up to Phase 4, ahead of Ethernet.)*
 - **Protocol rule:** design the frame protocol transport-agnostic from day one —
-  `magic + version + seq + timestamp + payload + CRC32`, multi-stream, little-endian — so the Ethernet
-  cutover (Phase 4) is plumbing, not a redesign. Spec lives in `docs/protocol.md`; any wire change bumps
-  the version and follows the `protocol-change` skill checklist.
+  `magic + version + seq + timestamp + payload + CRC32`, multi-stream, little-endian — so an eventual
+  Ethernet cutover (Phase 5, shelved) is plumbing, not a redesign. Spec lives in `docs/protocol.md`; any
+  wire change bumps the version and follows the `protocol-change` skill checklist.
 - **Firmware fork rule:** our firmware lives in `roomscanner/firmware/` as a copy of `<APP>` that
   references the `53L9A1/` package in place for shared Drivers/Middlewares/Utilities. `<APP>` itself is
   never edited. Our copy is hand-maintained (we accept divorcing from CubeMX regeneration; keep the
@@ -37,9 +46,10 @@ Engineering conventions live in [`docs/engineering-practices.md`](./docs/enginee
   and fidelity-neutral micro-optimizations buy only ~5-10%). The MCU becomes a thin bridge: raw `3DMD`
   frames (14,842 B at full res, per `docs/vl53l9cx-datasheet-notes.md` p.20) + the calibration blob once
   at startup stream to the PC, which runs the same portable-C transform bit-exact at desktop speed. Raw
-  at 30 Hz ≈ 445 KB/s fits USB CDC today; ~100 Hz ≈ 1.5 MB/s is the Ethernet (Phase 4) trigger — note
-  I3C readout at 12.5 MHz makes 100 Hz raw marginal on this board (realistic I3C ceiling ~60-80 Hz,
-  estimate; the sensor's CSI-2 output is its true 100 Hz path but the H5 has no CSI-2 receiver).
+  at 30 Hz ≈ 445 KB/s fits USB CDC today; ~100 Hz ≈ 1.5 MB/s would be the Ethernet (Phase 5, shelved)
+  trigger — but I3C readout at 12.5 MHz makes 100 Hz raw unreachable on this board anyway (realistic I3C
+  ceiling ~60-80 Hz, estimate; the sensor's CSI-2 output is its true 100 Hz path but the H5 has no CSI-2
+  receiver), which is exactly why Ethernet is shelved (see the transport decision above).
 - **Deferred on-device optimizations** (recorded in case the on-MCU transform path is ever revived):
   `powf(x, const)` → multiplies in `ratenorm.c`/`sharpener.c` shadowed copies (verified `powf` survives
   in the ELF; est. 0.3-2 ms/frame), `-flto` (est. low single-digit %), SRAM bank placement for
@@ -64,6 +74,8 @@ Found during review of `<APP>/Src/vl53l9_app.c`; fix these in our fork, leave th
 
 1. **`vl53l9_trigger_frame` return value never checked** (`vl53l9_app.c:203-206`): the call's result is
    discarded and the stale `ret` from `vl53l9_start` is tested — trigger failures pass silently.
+   **✅ Fixed in our fork** — the trigger's return is captured and checked
+   (`firmware/scanner-stream/Src/vl53l9_app.c:1537` and the `:464` wrapper).
 2. **`handle_error()` spins forever** (`vl53l9_app.c:317-322`): fine for a demo, wrong for a scanner. Our
    firmware must emit an error/event frame to the host and attempt sensor re-init before giving up.
    **✅ Fixed in our fork, Phase 3 Task 5** (raw-only build): EVENT emission + bounded re-init recovery
@@ -73,11 +85,16 @@ Found during review of `<APP>/Src/vl53l9_app.c`; fix these in our fork, leave th
    uniform depth field makes it 0. Also `min - average` underflows `uint32_t` when `average > min`
    (`vl53l9_app.c:288`). Moot once ASCII printing is replaced, but don't copy the pattern.
 4. **`allocate_memory(uint16_t size)`** caps buffers at 64 KB — silent truncation risk if a future
-   profile/stream needs more. Widen to `size_t` in our fork.
+   profile/stream needs more. Widen to `size_t` in our fork. **⚠ Still inherited as of 2026-07-10**
+   (`firmware/scanner-stream/Src/vl53l9_app.c:1223`/`:1969` still take `uint16_t`) — safe today (largest
+   allocation is the 14,842 B raw buffer) but widen it before adding any larger buffer.
 5. **Blocking `printf` throttles the loop**: all output shares the 115200-baud VCOM. Any streaming path
    must be measured for TX-time vs frame-time and must drop frames rather than stall acquisition.
 6. **Resource frees commented out** (`vl53l9_app.c:263-269`): acceptable in a never-exiting loop, but our
    app gains stop/reconfigure paths in Phase 3 — the teardown sequence must actually work by then.
+   **✅ Addressed in our fork, Phase 3** — the raw-only build has no on-MCU transform to free, and the
+   sensor stop → re-profile → restart cycle (`rs_sensor_reinit()`) is exercised live by `SET_USECASE`/
+   `REINIT` and the recovery path.
 
 ## Cross-cutting risks (watch continuously)
 
@@ -443,7 +460,7 @@ and config persistence host-side.
   `transform_prepare` → restart. Watch for leaks in the opaque transform handle across cycles.
 - CDC RX side appears here for the first time — until now the device only transmits.
 
-### Phase 3.5 (interlude) — GUI control panel + 2D IR monitor ← **host-complete; live hardware run pending**
+### Phase 3.5 (interlude) — GUI control panel + 2D IR monitor ← **✅ Complete**
 
 Plan: `docs/superpowers/plans/2026-07-09-phase3.5-gui-panel.md`, branch `phase3.5-gui-panel`. Owner
 elected this next (2026-07-09), deferring Phase 4 (IKS4A1). Replaces the classic keyboard-only Open3D
@@ -474,12 +491,42 @@ are all reused unchanged (no wire change; `docs/protocol.md` untouched).
   on a locked box (`EGL Headless not supported`) — so the panel can be *seen* without a display.
 - **Verified:** host suite 162 passed, ruff clean; headless `run_one_tick` smoke against
   `captures/e2e_p2.bin` rendered 194 frames (2257-pt cloud), reflectance present, IR auto-range + freeze,
-  all callbacks functional, reader thread joins clean. **Open:** live on-hardware run (buttons against a
-  live board, visual check of the IR pane, config persistence round-trip) — owner-supervised, pending.
-  Known cosmetic: an Open3D filament-teardown "Fatal Python error" can print at interpreter exit
-  (post-functional; watch for it on the supervised close).
+  all callbacks functional, reader thread joins clean. The formerly-open live on-hardware run is
+  **✅ closed** — merged 2026-07-09 (branch `phase3.5-gui-panel`, since deleted) and the panel has been
+  the primary live surface for all Phase 4 hardware work since (IKS4A1 bring-up, sensors group,
+  yaw-fusion checks), including per-frame IR rendering (`7006dc5`-era perf fix on the metrics-HUD
+  branch). Known cosmetic: an Open3D filament-teardown "Fatal Python error" can print at interpreter
+  exit (post-functional).
 
-### Phase 4 — Integrate X-NUCLEO-IKS4A1  *(swapped with Ethernet 2026-07-09, owner decision — sensors next)*
+### Phase 4 — Integrate X-NUCLEO-IKS4A1  ← **✅ Complete** *(swapped with Ethernet 2026-07-09, owner decision — sensors next)*
+
+> **Status 2026-07-10:** verified on hardware — the full stack (ToF depth + SFLP orientation +
+> environmental) streams together at **27.85 fps, 0 CRC failures, 0 seq gaps** (no measurable fps cost
+> vs the ToF-alone 27.76-28.6 band).
+>
+> - **Bus** (per the HUB1 design below, plus one fix the plan missed): PartID-keyed multi-device ENTDAA
+>   (ToF `0x0102`→`0x52`, LSM6DSV16X `0x0070`→`0x50`). Stacked, the IKS4A1's NXS0108 auto-direction
+>   translator can't pass 12.5 MHz I3C push-pull, so `rs_assign_dynamic_addresses()` slows the PP clock
+>   **for ENTDAA only** (ranging stays full-speed) — ToF enumeration went intermittent → 105/105.
+>   Second independent fix: sensor-hub env sensors needed J4/J5 = 5-6 **only** and the LPS22DF barometer
+>   at `0x5D` (SA0=1 on this board). Full history: `docs/iks4a1-stacking.md` → "RESOLVED (2026-07-10)".
+> - **Streams** (protocol v1 rev 2026-07-09, additive): **IMU_QUAT (9)** — SFLP game-rotation quaternion,
+>   **4×float32, not the fp16 the research doc predicted** (the bullet below is kept for the record);
+>   **ENV (10)** — pressure/mag/temp via the LSM6DSV16X's I2C sensor hub. Both emit **one sample per ToF
+>   frame** (~28 Hz wire cadence; SFLP itself runs at 480 Hz on-chip) — a deliberate simplification of
+>   the "independent IMU frames at native rate" bullet below; revisit in Phase 6 only if SLAM measurably
+>   wants denser orientation samples.
+> - **Host:** Sensors panel group (orientation gizmo, tilt-compensated compass, pressure/temp
+>   sparklines); 9-axis magnetometer yaw-drift fusion (`docs/yaw-fusion.md`, PR #2) with
+>   ellipsoid-fit mag-calibration CLI. Suite: **240 passed**.
+>
+> **Open follow-ups (not blockers):**
+> - **On-rig mag calibration + `AXIS_CONVENTION` verification** (procedure in `docs/yaw-fusion.md`):
+>   until the calibration is collected on the assembled rig and the heading sanity-check is run, fused
+>   yaw is only as trustworthy as the raw magnetometer.
+> - **SHT40 humidity (and the remaining IKS4A1 sensors) are not streamed** — ENV carries
+>   pressure/mag/temp only. Add a field only when a consumer exists (protocol-change checklist applies).
+> - **Metrics HUD** (draft PR #1) — presentation-layer only, no wire change; review and merge.
 
 IMU (LSM6DSV16X hardware SFLP quaternions) / mag / baro drivers; fuse readings into the payload with
 hardware timestamps. New streams = new `stream_id`s + a version bump per the protocol rule.
@@ -501,15 +548,22 @@ top of 445 KB/s raw), so nothing here waits on Ethernet.
   (previously the boot hung), **0 CRC failures, 0 seq gaps, 28.24 fps interval / 28.13 fps wall-clock**
   over a 15 s capture (422 RAW + 7 CALIB frames). **Trade-off:** HUB1-only routing disconnects the
   environmental sensors (LPS22DF baro, LIS2MDL mag, STTS22H temp, SHT40 humidity) from the shared bus —
-  reading them needs the LSM6DSV16X's own I2C sensor-hub (mode 2), a separate follow-up driver task not
-  yet implemented.
-- SFLP quaternion wire format: **IEEE binary16 (fp16), not fixed-point int16** — the research doc mislabels
-  this; document the encoding in `docs/protocol.md` and test the fp16 decode path with a golden vector.
-- IMU sample rate (~100+ Hz) ≠ ToF frame rate: IMU frames are independent small frames with their own
-  timestamps, not fields bolted onto depth frames — SLAM interpolates host-side.
+  reading them needs the LSM6DSV16X's own I2C sensor-hub (mode 2). *(Since implemented and working —
+  ENV stream 10; see the status block above.)*
+- SFLP quaternion wire format: ~~IEEE binary16 (fp16)~~ — **superseded**: shipped as **4×float32**
+  (16 B, negligible on the wire at one-per-ToF-frame; skips an fp16 decode path entirely). Encoding +
+  golden vector in `docs/protocol.md` stream 9.
+- IMU sample rate (~100+ Hz) ≠ ToF frame rate — **superseded for now**: shipped one quat/ENV sample per
+  ToF frame (~28 Hz on the wire) rather than independent native-rate frames; revisit in Phase 6 if SLAM
+  wants denser samples (see the status block above).
 - Edge-AI (MLC/ISPU) belongs in-sensor at this tier, not on the M33.
 
-### Phase 5 — Transport cutover to Ethernet  *(swapped with IKS4A1 2026-07-09 — see Phase 4 note)*
+### Phase 5 — Transport cutover to Ethernet  ← **⏸ Shelved (owner, 2026-07-10)** *(swapped with IKS4A1 2026-07-09 — see Phase 4 note)*
+
+> **Shelved 2026-07-10 (owner decision):** bandwidth is constrained by the I3C sensor readout, not the
+> USB link — see the transport decision at the top of this doc, including the three revival triggers.
+> Nothing in Phases 6-7 depends on this phase; the spec below is kept current for whenever it revives.
+> **Phase 6 (SLAM) is next.**
 
 Enable the ETH MAC + lwIP (RMII pins already muxed; LAN8742 PHY on-board), move the frame protocol onto
 UDP, add hardware PTP (IEEE 1588) timestamping. Post-swap rationale: with the send off the raw-only
@@ -534,7 +588,7 @@ streams exist — good ordering), and the zero-config link; none of it blocks th
     resolves it (fallback: the fixed /30 device address). `SerialSource`-style auto-find for the network.
   - PTP master on the PC, as before.
 
-### Phase 6 — Real-time SLAM (PC)
+### Phase 6 — Real-time SLAM (PC)  ← **next up (2026-07-10)**
 
 SFLP quaternion as rotation prior → 3-DoF constrained Open3D Tensor G-ICP → scalable TSDF
 (VoxelBlockGrid), IR as intensity channel, barometer as soft 1-DoF Z constraint.

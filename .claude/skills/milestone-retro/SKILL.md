@@ -47,6 +47,33 @@ major effort, before the next phase's plan executes.
   and a corrupted/malformed-input case exercised on hardware, not just a single well-formed sample
   (caught in Phase 3 Task 2's parse-while-draining rework).
 
+## Executed 2026-07-10 (Phase 4 / IKS4A1 retro)
+
+Distinct from earlier retros: most friction was converted **during** the push, not after it — the
+`stack-electrical` skill, the vendored IKS4A1 drivers/datasheets/board model (`references/`), the I3C
+bench-probe diag tools, and the shared percentile-clip IR/cloud normalization helper all landed as part
+of the milestone commits (evidence the 07-09 retro's convert-don't-summarize rule took). This retro
+therefore extracted mostly guidance, not tooling:
+
+- **ROADMAP.md / CLAUDE.md trued up**: Phases 3.5 + 4 marked complete with status blocks; Ethernet
+  (Phase 5) **shelved** (owner, 2026-07-10 — I3C readout, not USB, is the bandwidth wall) with explicit
+  revival triggers; the top-level transport decision rewritten to match measured reality; two Phase 4
+  predictions marked superseded (quat shipped 4×float32, not fp16; IMU/ENV ride at per-ToF-frame
+  cadence, not independent native-rate frames); reference-bug ledger statuses added (#1 fixed, #4
+  still inherited — `allocate_memory` still `uint16_t`, #6 addressed).
+- **`firmware-loop` skill**: stacked-board capture expectations (streams 9/10 presence as the health
+  signal; ENTDAA/env-sensor failure signatures point at `docs/iks4a1-stacking.md`, not at hardware);
+  `roomscan-panel` noted as the preferred live surface.
+- **Windows path-length fix**: vendored datasheet PDFs with ~180-char paths made `git worktree add`
+  (and any fresh clone without `core.longpaths`) fail on Windows — renamed short (`dt0064-*`,
+  `dt0106-*`), `core.longpaths=true` set in the local repo config. Rule extracted: keep repo paths
+  ≤150 chars so worktree prefixes fit under Windows' 260-char limit.
+- **Repo-hygiene finding**: the metrics-HUD work existed both as unpushed commits on local `main` and
+  as draft PR #1, byte-identical (a worktree-subagent cwd slip — see the worktree-subagent-gotchas
+  memory); resolution = merge PR #1, then a plain `git pull` reconciles local main.
+- **Deliberately skipped**: no new scripts (capture.py / bench_commands.py covered every [HW] ritual
+  this push); no protocol-change edits (streams 9/10 already followed the checklist when they landed).
+
 ## Executed 2026-07-09 (Phase 3 retro)
 
 The 2026-07-08 known backlog (below) was executed in full at this retro:
