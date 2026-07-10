@@ -48,6 +48,7 @@
 #include "rs_protocol.h"
 #include "stm32h5xx_nucleo.h"
 #include "tusb.h"
+#include "rs_lsm.h"
 
 extern UART_HandleTypeDef hcom_uart[];
 extern I3C_HandleTypeDef hi3c1;
@@ -157,6 +158,7 @@ static void iks4a1_bus_probe(void) {
  * (not I2C-legacy) WHO_AM_I read at the address that function hands out (hardcoded 0x52
  * in the non-retry path; that's the assumption worth testing here). */
 #define CONF_IKS4A1_I3C_PROBE (0)
+#define CONF_LSM_PROBE (0) /* bench: assign addrs, init LSM SFLP, print quaternion over VCOM */
 
 #if CONF_IKS4A1_I3C_PROBE
 extern I3C_HandleTypeDef hi3c1; /* redundant extern kept local to this probe for clarity */
@@ -372,6 +374,7 @@ static void rs_send_frame_cdc(uint8_t stream_id, uint32_t seq, uint8_t flags, co
  * vl53l9_utils_parse_frame() (see its call site below); the on-board-transform loop does
  * not update it because that loop never calls rs_send_event (Task 5 scope is raw-only). */
 static uint32_t g_last_seq = 0;
+static uint8_t g_lsm_ok = 0; /* 1 once rs_lsm_init() succeeds; IMU/env streams are optional */
 
 /* Calibration blob buffer, per-device (VL53L9_CALIB_DATA_SIZE bytes). File-scope rather
  * than a vl53l9_app() stack local (as it was before Task 5) so handle_error()'s bounded
@@ -1203,6 +1206,27 @@ void vl53l9_app() {
 #if CONF_IKS4A1_I3C_PROBE
     iks4a1_i3c_probe(); /* never returns -- diagnostic-only entry point */
 #endif
+#if CONF_LSM_PROBE
+    {
+        platform_power_reset(CONF_DEVICE_ID);
+        int daa = rs_assign_dynamic_addresses(); /* ToF -> 0x52, LSM -> 0x50 */
+        HAL_Delay(50);
+        int ir = rs_lsm_init();
+        printf("\n[LSM PROBE] daa=%d init=%d (0=ok)\n", daa, ir);
+        for (;;) {
+            rs_lsm_sample_t s;
+            int rr = rs_lsm_read_latest(&s);
+            if (rr == 0 && s.have_quat) {
+                printf("[LSM PROBE] quat(x1000) w=%d x=%d y=%d z=%d\n",
+                       (int)(s.quat[0] * 1000.0f), (int)(s.quat[1] * 1000.0f),
+                       (int)(s.quat[2] * 1000.0f), (int)(s.quat[3] * 1000.0f));
+            } else {
+                printf("[LSM PROBE] no quat (rr=%d)\n", rr);
+            }
+            HAL_Delay(200);
+        }
+    }
+#endif
 
     int ret;
 #if CONF_TRANSFORM_ONBOARD
@@ -1282,6 +1306,9 @@ void vl53l9_app() {
             while (1)
                 ;
         }
+        /* LSM6DSV16X (IKS4A1 HUB1) is at 0x50 now -- bring up SFLP/sensor-hub. Optional:
+         * a failure just means no IMU/env streams; the ToF stream is never blocked. */
+        g_lsm_ok = (rs_lsm_init() == 0) ? 1u : 0u;
     }
 #else
     platform_power_reset(CONF_DEVICE_ID);
@@ -1829,6 +1856,25 @@ void vl53l9_app() {
             rs_send_frame_cdc(RS_STREAM_RAW_3DMD, rs_counter, 0u,
                               (const uint8_t *)in_raw_mem[raw_mem_index].data,
                               raw_buffer_size, out_width, out_height);
+        }
+
+        /* IMU orientation + env, paired with this ToF frame (LSM6DSV16X). Read failures
+         * skip this frame's IMU/env only -- the ToF stream above is already sent. */
+        if (g_lsm_ok) {
+            rs_lsm_sample_t lsm;
+            if (rs_lsm_read_latest(&lsm) == 0) {
+                if (lsm.have_quat) {
+                    rs_send_frame_cdc(RS_STREAM_IMU_QUAT, rs_counter, 0u,
+                                      (const uint8_t *)lsm.quat, RS_IMU_QUAT_SIZE, 0u, 0u);
+                }
+                if (lsm.have_env) {
+                    uint8_t env[RS_ENV_SIZE];
+                    memcpy(env + 0, &lsm.pressure_pa, 4);
+                    memcpy(env + 4, lsm.mag_ut, 12);
+                    memcpy(env + 16, &lsm.temp_c, 4);
+                    rs_send_frame_cdc(RS_STREAM_ENV, rs_counter, 0u, env, RS_ENV_SIZE, 0u, 0u);
+                }
+            }
         }
 
         /* measure frame rate */
