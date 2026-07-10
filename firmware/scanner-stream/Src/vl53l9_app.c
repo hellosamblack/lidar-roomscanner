@@ -556,45 +556,6 @@ static uint32_t rs_pack_status(const vl53l9_status_t *s) {
     return ((uint32_t)s->fsm << 24) | ((uint32_t)s->command << 16) | (uint32_t)s->firmware;
 }
 
-/* Full sensor re-init cycle, SELF-CONTAINED through to a running stream: reset -> I3C
- * address -> init -> calib re-read -> apply the CURRENT g_active_profile -> re-assert
- * manual sync -> start -> settle -> stale-event clear -> first trigger. Mirrors
- * vl53l9_app()'s own pre-loop setup sequence (reset/platform_assign_dynamic_address/
- * vl53l9_init/vl53l9_get_calib_data/vl53l9_utils_set_profile/vl53l9_set_sync_mode/
- * vl53l9_start, above) so REINIT is a faithful "do the boot sequence again" rather than
- * a partial reset -- and this is exactly the sequence Task 5's bounded-retry recovery
- * needs, hence factored out as a standalone callable. The post-start tail (settle +
- * event-ack + trigger) lives INSIDE this function deliberately: it is the safety
- * envelope for the stale-event hardware bug documented below, and any future caller
- * (Task 5's recovery path) must inherit it structurally rather than having to know to
- * replicate it. On success the sensor is streaming with frame 1 already triggered --
- * the caller resumes the normal wait-for-GPIO-event loop directly.
- *
- * Stale-event hazard (empirical, Task 4 hardware finding): platform_power_reset()
- * toggles XSHUT (platform_utils.c:75-81) and platform_assign_dynamic_address() re-inits
- * the I3C peripheral -- either can put a spurious edge on the sensor's interrupt line
- * that the EXTI ISR latches into g_platform_evt with no real frame behind it. Left
- * uncleared, the main loop's next rs_wait_event_usb(PLATFORM_GPIO_IT_EVT, ...) consumes
- * that stale flag immediately and vl53l9_get_frame_async() correctly reports
- * VL53L9_ERROR_INVALID_STATE (vl53l9.c:706-711: FRAME_READY register reads 0) --
- * reproduced on hardware: the re-init and seeded trigger both succeeded, then the very
- * next frame read failed this way and the loop's retry budget (Task 8's 1 ms/8-attempt
- * window, sized for the sub-millisecond real race, not a fully stale flag) exhausted
- * into handle_error(). Acknowledging both events right before the fresh trigger ensures
- * the next wait can only be satisfied by a genuinely new edge.
- *
- * calib_data is written in place, and the CALLER RETRANSMITS it over CDC after a
- * successful return (calibration may have changed across a physical reset) -- every
- * caller honors this: rs_apply_pending_config()'s two direct call sites send CALIB
- * explicitly, and rs_recover() retransmits on its success path so all
- * handle_error()-driven recoveries inherit it (see its comment).
- * Returns 0 on success, the first non-zero vl53l9_error on failure (VL53L9_ERROR_* per
- * vl53l9.h:47-53) -- INCLUDING a failed seed trigger: rs_trigger_next() (Task 5) now
- * returns its error code instead of calling handle_error() itself, and this function
- * propagates it like any other stage failure. This is deliberate (recursion guard, see
- * rs_recover()'s comment): this function must never call handle_error(), because
- * handle_error()'s own recovery loop is what calls this function. */
-
 /* ---- Multi-device I3C dynamic address assignment (IKS4A1 HUB1 native-I3C bus) ------
  *
  * Replaces platform_assign_dynamic_address() (platform_utils.c, read-only reference --
@@ -681,12 +642,53 @@ static int rs_assign_dynamic_addresses(void) {
     return 0;
 }
 
+/* Full sensor re-init cycle, SELF-CONTAINED through to a running stream: reset -> I3C
+ * address -> init -> calib re-read -> apply the CURRENT g_active_profile -> re-assert
+ * manual sync -> start -> settle -> stale-event clear -> first trigger. Mirrors
+ * vl53l9_app()'s own pre-loop setup sequence (reset/platform_assign_dynamic_address/
+ * vl53l9_init/vl53l9_get_calib_data/vl53l9_utils_set_profile/vl53l9_set_sync_mode/
+ * vl53l9_start, above) so REINIT is a faithful "do the boot sequence again" rather than
+ * a partial reset -- and this is exactly the sequence Task 5's bounded-retry recovery
+ * needs, hence factored out as a standalone callable. The post-start tail (settle +
+ * event-ack + trigger) lives INSIDE this function deliberately: it is the safety
+ * envelope for the stale-event hardware bug documented below, and any future caller
+ * (Task 5's recovery path) must inherit it structurally rather than having to know to
+ * replicate it. On success the sensor is streaming with frame 1 already triggered --
+ * the caller resumes the normal wait-for-GPIO-event loop directly.
+ *
+ * Stale-event hazard (empirical, Task 4 hardware finding): platform_power_reset()
+ * toggles XSHUT (platform_utils.c:75-81) and platform_assign_dynamic_address() re-inits
+ * the I3C peripheral -- either can put a spurious edge on the sensor's interrupt line
+ * that the EXTI ISR latches into g_platform_evt with no real frame behind it. Left
+ * uncleared, the main loop's next rs_wait_event_usb(PLATFORM_GPIO_IT_EVT, ...) consumes
+ * that stale flag immediately and vl53l9_get_frame_async() correctly reports
+ * VL53L9_ERROR_INVALID_STATE (vl53l9.c:706-711: FRAME_READY register reads 0) --
+ * reproduced on hardware: the re-init and seeded trigger both succeeded, then the very
+ * next frame read failed this way and the loop's retry budget (Task 8's 1 ms/8-attempt
+ * window, sized for the sub-millisecond real race, not a fully stale flag) exhausted
+ * into handle_error(). Acknowledging both events right before the fresh trigger ensures
+ * the next wait can only be satisfied by a genuinely new edge.
+ *
+ * calib_data is written in place, and the CALLER RETRANSMITS it over CDC after a
+ * successful return (calibration may have changed across a physical reset) -- every
+ * caller honors this: rs_apply_pending_config()'s two direct call sites send CALIB
+ * explicitly, and rs_recover() retransmits on its success path so all
+ * handle_error()-driven recoveries inherit it (see its comment).
+ * Returns 0 on success, the first non-zero vl53l9_error on failure (VL53L9_ERROR_* per
+ * vl53l9.h:47-53) -- INCLUDING a failed seed trigger: rs_trigger_next() (Task 5) now
+ * returns its error code instead of calling handle_error() itself, and this function
+ * propagates it like any other stage failure. This is deliberate (recursion guard, see
+ * rs_recover()'s comment): this function must never call handle_error(), because
+ * handle_error()'s own recovery loop is what calls this function. */
 static int rs_sensor_reinit(vl53l9_device_t *p_dev, uint8_t *calib_data) {
     int ret;
 
     platform_power_reset(CONF_DEVICE_ID);
     if (p_dev->bus_type & PLATFORM_BUS_I3C) {
-        platform_assign_dynamic_address();
+        int daa_ret = rs_assign_dynamic_addresses();
+        if (daa_ret) {
+            return daa_ret;
+        }
     }
 
     ret = vl53l9_init(p_dev);
@@ -815,7 +817,10 @@ static int rs_recover(void) {
 static int rs_boot_bringup(vl53l9_device_t *p_dev, uint8_t *out_calib_data, vl53l9_profile_t *p_profile) {
     platform_power_reset(CONF_DEVICE_ID);
     if (p_dev->bus_type & PLATFORM_BUS_I3C) {
-        platform_assign_dynamic_address();
+        int daa_ret = rs_assign_dynamic_addresses();
+        if (daa_ret) {
+            return daa_ret;
+        }
     }
 
     int ret = vl53l9_init(p_dev);
