@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from roomscan.magcal import MagCalibration
+from roomscan.magcal import MagCalibration, fit_ellipsoid
 
 
 def test_apply_offset_and_matrix():
@@ -33,3 +33,30 @@ def test_load_corrupt_returns_none(tmp_path):
     p = tmp_path / "bad.json"
     p.write_text("{not json", encoding="utf-8")
     assert MagCalibration.load(p) is None
+
+
+def _distorted_sphere(n=500, radius=45.0, offset=(5.0, -3.0, 2.0),
+                      soft=((1.3, 0.1, 0.0), (0.1, 0.9, 0.05), (0.0, 0.05, 1.1)), seed=0):
+    rng = np.random.default_rng(seed)
+    dirs = rng.normal(size=(n, 3))
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    clean = dirs * radius                      # perfect sphere
+    A = np.asarray(soft)
+    raw = clean @ A.T + np.asarray(offset)     # apply soft-iron then hard-iron
+    return raw, np.asarray(offset)
+
+
+def test_fit_recovers_center_and_spherizes():
+    raw, offset = _distorted_sphere()
+    cal = fit_ellipsoid(raw)
+    # center (hard-iron) recovered
+    assert np.allclose(cal.offset, offset, atol=1.0)
+    # calibrated samples have near-constant magnitude ~ field_ut
+    norms = np.linalg.norm(np.array([cal.apply(r) for r in raw]), axis=1)
+    assert np.std(norms) / np.mean(norms) < 0.02
+    assert np.mean(norms) == pytest.approx(cal.field_ut, rel=0.05)
+
+
+def test_fit_too_few_points_raises():
+    with pytest.raises(ValueError):
+        fit_ellipsoid(np.zeros((5, 3)))
