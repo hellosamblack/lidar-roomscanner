@@ -65,3 +65,13 @@ def test_tilt_compensated_heading_level_north():
     # Level device (identity), mag pointing +X (north-ish) -> heading 0
     h = tilt_compensated_heading((1.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
     assert h == pytest.approx(0.0, abs=1.0) or h == pytest.approx(360.0, abs=1.0)
+
+
+def test_gizmo_pose_identity():
+    from roomscan.sensors import gizmo_pose
+    m = gizmo_pose((1.0, 0.0, 0.0, 0.0), scale=0.2, anchor=(1.0, 2.0, 3.0))
+    # scale on the diagonal of the rotation block
+    assert m[0, 0] == pytest.approx(0.2)
+    # translation column
+    assert np.allclose(m[:3, 3], [1.0, 2.0, 3.0])
+    assert m[3, 3] == pytest.approx(1.0)

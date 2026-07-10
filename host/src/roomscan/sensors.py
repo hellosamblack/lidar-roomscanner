@@ -84,3 +84,13 @@ def tilt_compensated_heading(
     m_world = r @ np.array(mag_ut, dtype=np.float64)
     heading = np.degrees(np.arctan2(m_world[1], m_world[0]))
     return float(heading % 360.0)
+
+
+def gizmo_pose(quat: tuple[float, float, float, float], scale: float,
+               anchor: tuple[float, float, float]) -> np.ndarray:
+    """4x4 pose for the orientation gizmo: rotation from quaternion, uniform scale, placed
+    at anchor. Suitable for Open3D geometry.transform()."""
+    m = np.eye(4)
+    m[:3, :3] = quat_to_matrix(*quat) * scale
+    m[:3, 3] = np.array(anchor, dtype=np.float64)
+    return m

@@ -52,6 +52,9 @@ class ViewerConfig:
     surface_enabled: bool = False
     surface_mode: str = "grid"          # "grid" | "spatial"
     surface_threshold_pct: float = 4.0
+    imu_gizmo: bool = True             # show the orientation gizmo in the scene
+    sensors_panel: bool = True         # show the Sensors panel group
+    gizmo_scale: float = 0.15          # gizmo axis length (metres)
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "ViewerConfig":
