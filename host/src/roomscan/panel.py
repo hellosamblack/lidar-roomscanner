@@ -43,6 +43,8 @@ from .native import Transform
 from . import portguard
 from .pipeline import TransformStage
 from .protocol import CommandCode, FrameType, ProtocolError, parse_event
+from .sensors import SensorState, gizmo_pose, tilt_compensated_heading
+from .sensors_widgets import render_compass, render_sparkline
 from .shading import MODES as _NEAR_MODES
 from .shading import cloud_colors
 from .sources import FileSource, Recorder, SerialSource, pump
@@ -58,6 +60,8 @@ _SURFACE_MODES = ("grid", "spatial")
 _IR_UPSCALE = 6                 # 54x42 zones -> 324x252 px, nearest-neighbor
 _GEOM = "cloud"
 _MESH_GEOM = "surface"
+_GIZMO_GEOM = "__imu_gizmo__"
+_GIZMO_ANCHOR = np.array([0.0, 0.0, 0.0], dtype=np.float64)  # fixed scene anchor; calibrate later
 _UI_PERIOD = 0.25               # <=4 Hz label / IR / log refresh
 _EXPOSURE_DEBOUNCE = 0.4        # s to settle before sending a dragged exposure value
 _BG_DARK = [0.05, 0.05, 0.08, 1.0]
@@ -173,14 +177,17 @@ class _Pacer:
 
 
 def _run_reader(source, decoder, stage, stats, slot, fault, bus, client, recorder,
-                pacer, is_stopped):
+                pacer, is_stopped, state=None):
     """Reader-thread body (module-level so it's unit-testable without a window).
 
     Owns source+decoder+transform; routes device EVENT -> log bus, ACK ->
     CommandClient, and each transformed DATA frame -> the latest-wins render
     slot. Honors the pacer's live `interval` (replay fps) and `paused` gate, and
     tees raw bytes into `recorder`. Any exception is surfaced via `fault` (unless
-    we're stopping) exactly like the classic viewer's reader.
+    we're stopping) exactly like the classic viewer's reader. `state` (a
+    SensorState, optional -- defaults to None for callers that don't care about
+    IMU/env streams, e.g. existing tests) is fed every DATA frame; it ignores
+    any stream that isn't IMU_QUAT/ENV, mirroring `stage.feed`'s own filtering.
     """
     last_pace = 0.0
     last_paced_seq = None
@@ -202,6 +209,8 @@ def _run_reader(source, decoder, stage, stats, slot, fault, bus, client, recorde
                 continue
             if ft != FrameType.DATA:
                 continue
+            if state is not None:
+                state.feed(frame)   # streams 9/10 -> SensorState; ignores others
             result = stage.feed(frame)
             if result is None:
                 continue
@@ -246,6 +255,11 @@ class ControlPanel:
         self.is_replay = isinstance(source, FileSource)
 
         self.decoder = StreamDecoder()
+        self.sensor_state = SensorState()
+        self.imu_gizmo = bool(getattr(args, "imu_gizmo", True))
+        self.sensors_panel = bool(getattr(args, "sensors_panel", True))
+        self.gizmo_scale = float(getattr(args, "gizmo_scale", 0.15) or 0.15)
+        self._gizmo_added = False
         self.stats = Stats()
         self.slot: queue.Queue = queue.Queue(maxsize=1)
         self.fault: dict = {}
@@ -430,8 +444,7 @@ class ControlPanel:
 
         # --- IR Monitor ---
         ir = self._group("IR Monitor")
-        blank = self._o3d.geometry.Image(
-            np.zeros((42 * _IR_UPSCALE, 54 * _IR_UPSCALE, 3), dtype=np.uint8))
+        blank = self._np_to_o3d(np.zeros((42 * _IR_UPSCALE, 54 * _IR_UPSCALE, 3), dtype=np.uint8))
         self.ir_widget = gui.ImageWidget(blank)
         ir.add_child(self.ir_widget)
         ig = self._labeled_grid()
@@ -447,6 +460,19 @@ class ControlPanel:
         self.chk_freeze.checked = self.ir_freeze
         self.chk_freeze.set_on_checked(self._on_ir_freeze)
         ir.add_child(self.chk_freeze)
+
+        # --- Sensors (LSM6DSV16X: tilt-compensated heading + pressure/temp) ---
+        if self.sensors_panel:
+            sg = self._group("Sensors")
+            self.compass_widget = gui.ImageWidget(self._np_to_o3d(render_compass(0.0)))
+            sg.add_child(gui.Label("Heading (tilt-compensated)"))
+            sg.add_child(self.compass_widget)
+            self.press_widget = gui.ImageWidget(self._np_to_o3d(render_sparkline(np.zeros(2))))
+            sg.add_child(gui.Label("Pressure (Pa)"))
+            sg.add_child(self.press_widget)
+            self.temp_widget = gui.ImageWidget(self._np_to_o3d(render_sparkline(np.zeros(2))))
+            sg.add_child(gui.Label("Temperature (°C)"))
+            sg.add_child(self.temp_widget)
 
         # --- Device ---
         dev = self._group("Device")
@@ -548,7 +574,9 @@ class ControlPanel:
                 point_size=self.material.point_size, ir_colormap=self.ir_colormap,
                 ir_freeze_range=self.ir_freeze, panel_width=int(getattr(self.args, "panel_width", 340)),
                 near_mode=self.near_mode, near_cutoff_m=self.near_cutoff_m,
-                near_emphasis=self.near_emphasis)
+                near_emphasis=self.near_emphasis,
+                imu_gizmo=self.imu_gizmo, sensors_panel=self.sensors_panel,
+                gizmo_scale=self.gizmo_scale)
             path = cfg.save()
             self.bus.publish(f"saved config to {path}")
         except Exception as exc:  # never let a config write block window close
@@ -558,7 +586,7 @@ class ControlPanel:
     def _reader_loop(self):
         _run_reader(self.source, self.decoder, self.stage, self.stats, self.slot,
                     self.fault, self.bus, self.client, self.recorder, self.pacer,
-                    lambda: self._stop)
+                    lambda: self._stop, self.sensor_state)
 
     # ---- tick (GUI main thread) --------------------------------------------
     def _on_tick(self):
@@ -586,6 +614,7 @@ class ControlPanel:
             self._last_ui = now
             self._update_status()
             self._update_ir()
+            self._update_sensors()
             self._drain_log()
             redraw = True
         return redraw
@@ -782,6 +811,11 @@ class ControlPanel:
             line2 += f"  raw-skip {self.stage.raw_skipped_awaiting_calib}"
         self.lbl_counts2.text = line2
 
+    def _np_to_o3d(self, rgb: np.ndarray):
+        """(H,W,3) uint8 RGB -> o3d.geometry.Image, the shape gui.ImageWidget /
+        update_image expect. Shared by the IR monitor and the Sensors widgets."""
+        return self._o3d.geometry.Image(np.ascontiguousarray(rgb))
+
     def _update_ir(self):
         outputs = self._latest_outputs
         if outputs is None:
@@ -800,12 +834,35 @@ class ControlPanel:
                                  vmin=vmin, vmax=vmax, upscale=_IR_UPSCALE)
         if self._rot:
             rgb = np.rot90(rgb, self._rot)     # keep the IR pane aligned with the rotated cloud
-        self.ir_widget.update_image(self._o3d.geometry.Image(np.ascontiguousarray(rgb)))
+        self.ir_widget.update_image(self._np_to_o3d(rgb))
 
     def _ir_placeholder(self):
         img = np.zeros((42 * _IR_UPSCALE, 54 * _IR_UPSCALE, 3), dtype=np.uint8)
         img[:, :, 0] = 40  # dim maroon = "no IR"
-        return self._o3d.geometry.Image(img)
+        return self._np_to_o3d(img)
+
+    def _update_sensors(self):
+        """Called from the same <=4 Hz tick as `_update_ir`: refresh the scene
+        gizmo's transform from the latest orientation quaternion, and (if the
+        Sensors panel group is enabled) the compass + pressure/temp sparklines.
+        Graceful no-data: quietly does nothing until IMU_QUAT/ENV frames arrive."""
+        quat = self.sensor_state.latest_quat()
+        if self.imu_gizmo and quat is not None:
+            sc = self.scene_widget.scene
+            if not self._gizmo_added:
+                self._gizmo = self._o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)
+                sc.add_geometry(_GIZMO_GEOM, self._gizmo, self.mesh_material)
+                self._gizmo_added = True
+            pose = gizmo_pose(quat, self.gizmo_scale, _GIZMO_ANCHOR)
+            sc.set_geometry_transform(_GIZMO_GEOM, pose)
+        if not self.sensors_panel:
+            return
+        env = self.sensor_state.latest_env()
+        if env is not None and quat is not None:
+            heading = tilt_compensated_heading(quat, env.mag_ut)
+            self.compass_widget.update_image(self._np_to_o3d(render_compass(heading)))
+        self.press_widget.update_image(self._np_to_o3d(render_sparkline(self.sensor_state.pressure_history())))
+        self.temp_widget.update_image(self._np_to_o3d(render_sparkline(self.sensor_state.temp_history())))
 
     def _drain_log(self):
         new = self.bus.drain(self._log_sub)
@@ -911,9 +968,18 @@ class ControlPanel:
         self.window.show_dialog(dlg)
 
     def _on_key(self, event):
-        # H toggles the help dialog; let everything else fall through to the scene.
-        if event.type == self._gui.KeyEvent.DOWN and event.key == self._gui.KeyName.H:
+        # H toggles the help dialog, G the orientation gizmo; everything else
+        # falls through to the scene.
+        gui = self._gui
+        if event.type == gui.KeyEvent.DOWN and event.key == gui.KeyName.H:
             self._show_help()
+            return True
+        if event.type == gui.KeyEvent.DOWN and event.key == gui.KeyName.G:
+            self.imu_gizmo = not self.imu_gizmo
+            if not self.imu_gizmo and self._gizmo_added:
+                self.scene_widget.scene.remove_geometry(_GIZMO_GEOM)
+                self._gizmo_added = False
+            self.bus.publish(f"IMU gizmo -> {'on' if self.imu_gizmo else 'off'}")
             return True
         return False
 
@@ -959,7 +1025,8 @@ class ControlPanel:
 # ---- entry points -----------------------------------------------------------
 _PANEL_FIELDS = ("point_size", "ir_colormap", "ir_freeze_range", "panel_width",
                  "near_mode", "near_cutoff_m", "near_emphasis",
-                 "surface_enabled", "surface_mode", "surface_threshold_pct")
+                 "surface_enabled", "surface_mode", "surface_threshold_pct",
+                 "imu_gizmo", "sensors_panel", "gizmo_scale")
 
 
 def _fill_panel_fields(args) -> None:
