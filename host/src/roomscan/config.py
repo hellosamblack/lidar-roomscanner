@@ -55,6 +55,12 @@ class ViewerConfig:
     imu_gizmo: bool = True             # show the orientation gizmo in the scene
     sensors_panel: bool = True         # show the Sensors panel group
     gizmo_scale: float = 0.15          # gizmo axis length (metres)
+    yaw_fusion: bool = True                 # graft mag heading onto SFLP yaw
+    yaw_fusion_tau: float = 20.0            # complementary-filter time constant (s)
+    mag_cal_path: str = "mag_cal.json"      # hard/soft-iron calibration JSON
+    yaw_anomaly_frac: float = 0.3           # |mag| deviation from field to reject
+    yaw_motion_rate_dps: float = 40.0       # quat angular rate above which to freeze
+    yaw_gimbal_margin_deg: float = 15.0     # freeze within this of |pitch|=90
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "ViewerConfig":
