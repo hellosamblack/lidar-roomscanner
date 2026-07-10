@@ -12,7 +12,7 @@ the next free ID, a date, and a file reference where the problem lives.
 
 | ID      | Status  | Area          | Title |
 |---------|---------|---------------|-------|
-| BUG-001 | open    | host/viewer   | Spatial surface mode floods console with Open3D "invalid tetra" warnings |
+| BUG-001 | fixed   | host/viewer   | Spatial surface mode floods console with Open3D "invalid tetra" warnings |
 | BUG-002 | open    | host/viewer   | Spatial surface mode pins many CPU cores; GPU sits idle |
 | BUG-003 | fixed   | host/viewer   | View color defaulted to depth instead of reflectance |
 | BUG-004 | open    | host/sensors  | Yaw fusion needs on-rig mag calibration + axis-convention check |
@@ -24,7 +24,7 @@ the next free ID, a date, and a file reference where the problem lives.
 
 ## BUG-001 — Spatial surface mode floods console with Open3D "invalid tetra" warnings
 
-- **Status:** open · **Reported:** 2026-07-10 (owner) · **Area:** host/viewer
+- **Status:** **fixed** 2026-07-10 (this branch) · **Reported:** 2026-07-10 (owner) · **Area:** host/viewer
 - **Where:** `host/src/roomscan/surface.py` (`alpha_shape_mesh`), called from
   `panel.py` `_rebuild_spatial_mesh`
 
@@ -37,10 +37,9 @@ tetrahedralization of the cloud. Our deprojected zone grid is locally near-copla
 patches sampled on a regular 54×42 lattice), which yields many degenerate / near-zero-volume
 tetrahedra; Open3D warns once per bad tetra instead of once per call.
 
-**Mitigation options:** wrap the call in
-`o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Error)` to silence it (the mesh
-that comes back is still usable — degenerate tetras are simply skipped); longer-term, see BUG-002,
-whose fix likely replaces the alpha-shape backend entirely.
+**Fix:** Wrapped the Open3D `create_from_point_cloud_alpha_shape` call in
+`o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Error)` to silence the warning
+spams. The mesh that comes back is still completely usable as the degenerate tetras are simply skipped.
 
 ## BUG-002 — Spatial surface mode pins many CPU cores; GPU sits idle
 

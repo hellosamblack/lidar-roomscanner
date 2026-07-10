@@ -77,7 +77,8 @@ def alpha_shape_mesh(pcd, threshold_m: float):
     if n < 4:
         return empty, covered
     try:
-        mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcd, alpha=threshold_m)
+        with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Error):
+            mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcd, alpha=threshold_m)
     except RuntimeError:
         return empty, covered
     mesh_verts = np.asarray(mesh.vertices)
