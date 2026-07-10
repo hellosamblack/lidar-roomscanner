@@ -149,6 +149,18 @@ def tilt_compensated_heading(
     return float(heading % 360.0)
 
 
+def absolute_heading(quat, mag_ut) -> float:
+    """Drift-free magnetic heading in degrees [0,360): de-tilt the mag using ONLY
+    the orientation's roll/pitch (yaw stripped), so the result depends on the
+    device's true heading and tilt but NOT on any yaw drift in `quat`.
+
+    This is the yaw reference the fusion steers toward. Passing the full quat to
+    `tilt_compensated_heading` instead would rotate the mag by the drifting yaw
+    too, re-injecting exactly the drift the fusion exists to remove."""
+    tilt_only = graft_yaw(quat, -quat_yaw_deg(quat))
+    return tilt_compensated_heading(tilt_only, mag_ut)
+
+
 def gizmo_pose(quat: tuple[float, float, float, float], scale: float,
                anchor: tuple[float, float, float]) -> np.ndarray:
     """4x4 pose for the orientation gizmo: rotation from quaternion, uniform scale, placed
@@ -216,7 +228,7 @@ class YawFusion:
             self.status = "gated:anomaly"
             self._last_t = t_us
             return
-        heading = tilt_compensated_heading(quat, tuple(cal_mag))
+        heading = absolute_heading(quat, tuple(cal_mag))
         yaw = quat_yaw_deg(quat)
         if not self._have_delta:
             self._delta = wrap180(heading - yaw)   # snap on first valid sample

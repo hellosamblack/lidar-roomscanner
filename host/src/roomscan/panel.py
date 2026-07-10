@@ -48,8 +48,8 @@ from .sensors import (
     AXIS_CONVENTION,
     SensorState,
     YawFusion,
+    absolute_heading,
     gizmo_pose,
-    tilt_compensated_heading,
 )
 from .sensors_widgets import render_compass, render_sparkline
 from .shading import MODES as _NEAR_MODES
@@ -282,7 +282,9 @@ class ControlPanel:
                 gimbal_margin_deg=float(getattr(args, "yaw_gimbal_margin_deg", 15.0) or 15.0),
             )
         self.sensor_state = SensorState(fusion=fusion)
-        self._last_fusion_status = None
+        # seed with "off" so the disabled case never publishes a status line;
+        # real transitions (init/active/gated:*) still log once each.
+        self._last_fusion_status = "off"
         self._gizmo_added = False
         self.stats = Stats()
         self.slot: queue.Queue = queue.Queue(maxsize=1)
@@ -890,7 +892,7 @@ class ControlPanel:
             mag = env.mag_ut
             if self._mag_cal is not None:
                 mag = tuple(AXIS_CONVENTION @ self._mag_cal.apply(mag))
-            heading = tilt_compensated_heading(quat, mag)
+            heading = absolute_heading(quat, mag)
             self.compass_widget.update_image(self._np_to_o3d(render_compass(heading)))
         self.press_widget.update_image(self._np_to_o3d(render_sparkline(self.sensor_state.pressure_history())))
         self.temp_widget.update_image(self._np_to_o3d(render_sparkline(self.sensor_state.temp_history())))

@@ -57,6 +57,26 @@ def test_lowpass_tracks_moving_target():
     assert wrap180(quat_yaw_deg(f.fused_quat()) - 90.0) == pytest.approx(0.0, abs=1.0)
 
 
+def test_rejects_sflp_yaw_drift():
+    # THE property the feature exists to provide: with the device physically
+    # STATIC (mag fixed in the body frame), a drifting SFLP yaw must NOT drag the
+    # fused yaw along. The buggy full-quat de-tilt made fused_yaw follow the drift.
+    f = YawFusion(tau_s=0.3, calibration=IDENT_CAL)
+    mag_body = _mag_for_heading(20.0)   # body-fixed field; device truly static
+    t = 0
+    # SFLP yaw ramps 0 -> 40 deg (pure drift), then holds at 40 to let it settle
+    for i in range(200):
+        t += 10_000
+        d = math.radians(40.0 * i / 200) / 2
+        f.update((math.cos(d), 0.0, 0.0, math.sin(d)), mag_body, t)
+    for _ in range(300):
+        t += 10_000
+        d = math.radians(40.0) / 2
+        f.update((math.cos(d), 0.0, 0.0, math.sin(d)), mag_body, t)
+    # fused yaw stays at the absolute heading (~20), NOT dragged to 20+40=60
+    assert wrap180(quat_yaw_deg(f.fused_quat()) - 20.0) == pytest.approx(0.0, abs=2.0)
+
+
 def test_snaps_on_first_valid_sample():
     f = YawFusion(tau_s=100.0, calibration=IDENT_CAL)
     f.update(LEVEL, _mag_for_heading(80.0), 10_000)   # first: init, no dt

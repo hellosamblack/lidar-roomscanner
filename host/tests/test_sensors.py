@@ -114,6 +114,18 @@ def test_quat_mul_identity():
     assert quat_mul((1.0, 0.0, 0.0, 0.0), q) == pytest.approx(q)
 
 
+def test_absolute_heading_independent_of_yaw():
+    # Body-fixed mag: absolute_heading must be the same regardless of the quat's
+    # (drifting) yaw, since it de-tilts with yaw stripped. This is what makes the
+    # fusion reference drift-free.
+    from roomscan.sensors import absolute_heading
+    mag_body = (30.0, 10.0, 0.0)
+    h0 = absolute_heading((1.0, 0.0, 0.0, 0.0), mag_body)          # yaw 0
+    s = np.sqrt(0.5)
+    h90 = absolute_heading((s, 0.0, 0.0, s), mag_body)             # yaw 90, same tilt
+    assert h0 == pytest.approx(h90, abs=1e-6)
+
+
 def test_fused_quat_falls_back_to_raw_without_fusion():
     st = SensorState()
     st.feed(_frame(StreamId.IMU_QUAT, struct.pack("<4f", 1.0, 0.0, 0.0, 0.0)))
