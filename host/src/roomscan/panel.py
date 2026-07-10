@@ -59,7 +59,7 @@ from .sensors_widgets import render_compass, render_sparkline
 from .shading import MODES as _NEAR_MODES
 from .shading import cloud_colors
 from .sources import FileSource, Recorder, SerialSource, pump
-from .surface import alpha_shape_mesh, grid_triangles
+from .surface import grid_triangles, grid_triangles_3d
 from .viewer import Stats, _build_arg_parser
 
 # Usecase id -> label (only binning-2 profiles are usable at full res; see ROADMAP
@@ -354,8 +354,7 @@ class ControlPanel:
         self.surface_enabled = bool(getattr(args, "surface_enabled", False))
         self.surface_mode = args.surface_mode if getattr(args, "surface_mode", None) in _SURFACE_MODES else "grid"
         self.surface_threshold_pct = float(getattr(args, "surface_threshold_pct", 4.0) or 4.0)
-        self._last_surface_rebuild = 0.0       # spatial-mode throttle timer
-        self._surface_covered: np.ndarray | None = None
+
 
         # command state
         self._pending_exposure: tuple[int, float] | None = None
@@ -781,47 +780,29 @@ class ControlPanel:
         _show_geometries(rot_pts) afterward with the FULL point set so camera
         framing isn't affected by the split."""
         h, w = depth.shape
+        pts_grid, valid_grid = self.deproj.grid(depth)
+
         if self.surface_mode == "spatial":
-            now = time.monotonic()
-            if now - self._last_surface_rebuild >= _UI_PERIOD:
-                self._rebuild_spatial_mesh(rot_pts, colors)
-                self._last_surface_rebuild = now
-            covered = self._surface_covered
-            if covered is None or len(covered) != len(rot_pts):
-                covered = np.zeros(len(rot_pts), dtype=bool)
+            # Spatial mode: grid adjacency with a 3D distance threshold (in meters)
+            mean_z = float(np.mean(pts_grid[valid_grid, 2])) if np.any(valid_grid) else 1.0
+            threshold_m = max((self.surface_threshold_pct / 100.0) * mean_z, 1e-6)
+            triangles, covered_grid = grid_triangles_3d(pts_grid, valid_grid, threshold_m)
         else:
-            pts_grid, valid_grid = self.deproj.grid(depth)
+            # Grid mode: grid adjacency with relative depth percentage threshold
             triangles, covered_grid = grid_triangles(pts_grid, valid_grid, self.surface_threshold_pct)
-            covered = covered_grid[valid_grid.ravel()]
-            mesh_verts = _rot_xy(pts_grid.reshape(-1, 3), self._rot)
-            colors_grid = np.zeros((h * w, 3), dtype=np.float64)
-            colors_grid[valid_grid.ravel()] = colors
-            self.mesh.vertices = self._o3d.utility.Vector3dVector(mesh_verts)
-            self.mesh.vertex_colors = self._o3d.utility.Vector3dVector(colors_grid)
-            self.mesh.triangles = self._o3d.utility.Vector3iVector(triangles.astype(np.int32))
-            self._show_mesh_geometry()
+
+        covered = covered_grid[valid_grid.ravel()]
+        mesh_verts = _rot_xy(pts_grid.reshape(-1, 3), self._rot)
+        colors_grid = np.zeros((h * w, 3), dtype=np.float64)
+        colors_grid[valid_grid.ravel()] = colors
+        self.mesh.vertices = self._o3d.utility.Vector3dVector(mesh_verts)
+        self.mesh.vertex_colors = self._o3d.utility.Vector3dVector(colors_grid)
+        self.mesh.triangles = self._o3d.utility.Vector3iVector(triangles.astype(np.int32))
+        self._show_mesh_geometry()
+
         self.pcd.points = self._o3d.utility.Vector3dVector(rot_pts[~covered])
         self.pcd.colors = self._o3d.utility.Vector3dVector(colors[~covered])
 
-    def _rebuild_spatial_mesh(self, rot_pts, colors):
-        """Throttled to ~_UI_PERIOD by the caller -- alpha shape's 3D
-        triangulation is real per-call cost, unlike grid mode's vectorized
-        numpy pass."""
-        o3d = self._o3d
-        if len(rot_pts) < 4:
-            self._surface_covered = np.zeros(len(rot_pts), dtype=bool)
-            self._remove_mesh_geometry()
-            return
-        pcd_src = o3d.geometry.PointCloud()
-        pcd_src.points = o3d.utility.Vector3dVector(rot_pts)
-        pcd_src.colors = o3d.utility.Vector3dVector(colors)
-        threshold_m = max((self.surface_threshold_pct / 100.0) * float(np.mean(rot_pts[:, 2])), 1e-6)
-        mesh, covered = alpha_shape_mesh(pcd_src, threshold_m)
-        self.mesh.vertices = mesh.vertices
-        self.mesh.vertex_colors = mesh.vertex_colors
-        self.mesh.triangles = mesh.triangles
-        self._surface_covered = covered
-        self._show_mesh_geometry()
 
     def _apply_camera(self):
         if self._cam_target is None:
@@ -1046,8 +1027,8 @@ class ControlPanel:
 
     def _on_surface_mode(self, text, index):
         self.surface_mode = text
-        self._last_surface_rebuild = 0.0   # force an immediate spatial rebuild on switch
         self.bus.publish(f"surface adjacency -> {text}")
+
 
     def _on_surface_threshold(self, value):
         self.surface_threshold_pct = float(value)
