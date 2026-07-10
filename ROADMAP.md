@@ -240,7 +240,7 @@ a live-rendered point cloud.
 > noted still-open:**
 > - ✅ **Reflectance/confidence/ambient/`--color` viewer support** — shipped Phase 2.5 Task 2: the shim
 >   grew a mask-selection API (`rst_create2`/`rst_process2`, `DEPTH|REFLECTANCE|CONFIDENCE|AMBIENT|ZAPC`)
->   and the viewer gained `--color {depth,reflectance,confidence}` (default `depth`, no behavior change)
+>   and the viewer gained `--color {depth,reflectance,confidence}` (default changed to `reflectance` in bug tracker branch, falls back to `depth` if absent)
 >   with a one-time stderr fallback notice if the requested plane is absent from the stream. Verified live
 >   on hardware (Task 5, this doc's Phase 2.5 note below): IR-shaded cloud renders, no fallback warning,
 >   no traceback.
