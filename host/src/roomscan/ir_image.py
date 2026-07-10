@@ -6,26 +6,18 @@ from __future__ import annotations
 
 import numpy as np
 
-from .colors import turbo
+from .colors import percentile_range, turbo
 
 
 def ir_range(refl: np.ndarray, lo_pct: float = 2.0, hi_pct: float = 98.0) -> tuple[float, float]:
     """Return (vmin, vmax) as the lo_pct/hi_pct percentiles of the finite values in `refl`.
 
-    Degenerate cases (no finite values, or vmin == vmax) return a safe unit-wide window
-    so downstream normalization never divides by zero: (0.0, 1.0) when nothing is finite,
-    or (v, v + 1.0) when every finite value is identical.
+    Thin wrapper over `colors.percentile_range` (the shared auto-range also used by the
+    point-cloud coloring in `shading`) so the IR monitor and the cloud stay in lockstep.
+    Degenerate cases return a safe unit-wide window so downstream normalization never
+    divides by zero: (0.0, 1.0) when nothing is finite, (v, v + 1.0) when all-equal.
     """
-    arr = np.asarray(refl, dtype=np.float64)
-    finite = arr[np.isfinite(arr)]
-    if finite.size == 0:
-        return (0.0, 1.0)
-    vmin, vmax = np.percentile(finite, [lo_pct, hi_pct])
-    vmin = float(vmin)
-    vmax = float(vmax)
-    if vmin == vmax:
-        return (vmin, vmin + 1.0)
-    return (vmin, vmax)
+    return percentile_range(refl, lo_pct, hi_pct)
 
 
 def reflectance_to_rgb(

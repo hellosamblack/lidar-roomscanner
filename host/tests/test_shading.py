@@ -33,6 +33,19 @@ def test_off_is_linear_full_range():
     assert np.abs(out[0] - out[-1]).max() > 0.3
 
 
+def test_off_ignores_extreme_outliers():
+    # The reflectance-detail bug: a handful of specular fliers (orders of magnitude
+    # above the scene) must NOT collapse the real points' contrast. Percentile
+    # clipping (matching the IR monitor) rejects the fliers so the body keeps its
+    # colormap span; raw min/max would crush it to ~one color.
+    body = np.linspace(1.0, 2.0, 100)          # the real scene (face / picture frames)
+    z = np.full(102, 1.5)                       # all at one depth -> coloring is by vals
+    with_fliers = cloud_colors(np.concatenate([body, [500.0, 501.0]]), z, mode="off")[:100]
+    without = cloud_colors(body, np.full(100, 1.5), mode="off")
+    # two specular fliers barely change how the 100 real points are colored
+    assert _path_len(with_fliers) > 0.5 * _path_len(without)
+
+
 def test_window_greys_far_and_colors_near():
     z, vals = _ramp()
     out = cloud_colors(vals, z, mode="window", cutoff_m=1.5)

@@ -15,7 +15,10 @@ opt-in ways to spend more of the colormap on close targets (see the panel's
 - ``equalize``: per-frame histogram equalization (CDF rank) — dense surfaces (the
   person's face, many points over a small depth span) auto-stretch; flat regions
   compress. No tuning.
-- ``off``: the original linear normalize.
+- ``off``: a percentile-clipped linear stretch (2nd–98th percentile), the SAME
+  auto-range the IR monitor uses. A few outliers (specular reflectance returns,
+  stray far points) saturate instead of crushing the scene's contrast — without
+  this, coloring by reflectance loses all the detail the IR image shows.
 
 The value being colored (``vals``) and the per-point depth (``z_m``, metres, used
 for the window cutoff) are passed separately so windowing works even when
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from .colors import normalize as _norm
 from .colors import turbo
 
 # Muted grey for beyond-cutoff points in window mode -- reads as "background",
@@ -32,11 +36,6 @@ from .colors import turbo
 FAR_GREY = (0.30, 0.30, 0.34)
 
 MODES = ("off", "window", "emphasis", "equalize")
-
-
-def _norm(vals: np.ndarray) -> np.ndarray:
-    """Linear normalize to [0, 1] with a flat-field divide guard."""
-    return (vals - vals.min()) / max(float(np.ptp(vals)), 1e-6)
 
 
 def cloud_colors(vals, z_m, *, mode: str = "off", cutoff_m: float = 1.5,
