@@ -160,6 +160,7 @@ def gizmo_pose(quat: tuple[float, float, float, float], scale: float,
 
 
 AXIS_CONVENTION = np.eye(3)   # mag-mounting-vs-IMU sign/permutation; resolved on-target
+AXIS_CONVENTION.setflags(write=False)   # module constant — guard against in-place mutation
 
 
 class YawFusion:
@@ -222,7 +223,9 @@ class YawFusion:
             self._have_delta = True
         else:
             gain = dt / (self.tau_s + dt)
-            self._delta += gain * wrap180(heading - (yaw + self._delta))
+            # first-order low-pass toward the mag heading; re-wrap so delta stays
+            # in [-180, 180) even after many ±180 crossings (diagnostic sanity).
+            self._delta = wrap180(self._delta + gain * wrap180(heading - (yaw + self._delta)))
         self.status = "active"
         self._last_t = t_us
 
