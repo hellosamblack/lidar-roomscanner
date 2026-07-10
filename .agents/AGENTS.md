@@ -21,3 +21,8 @@ This document aligns agent behavior, guidance, memories, and skills with those o
 - The unit of "done" is code + the doc deltas it implies.
 - When wrapping up a feature, phase, or before opening a PR, use the `status-sync` skill (re-routed from `.claude/skills/status-sync`) to update [ROADMAP.md](file:///f:/git/personal/lidar/roomscanner/ROADMAP.md), [CLAUDE.md](file:///f:/git/personal/lidar/roomscanner/CLAUDE.md), and project memories.
 - Run `milestone-retro` at the end of each major milestone.
+
+## 5. Python Environment and Running Tests
+- The Python virtual environment is located at `host/.venv`.
+- **Running Pytest**: Always execute `pytest` with the working directory (`Cwd`) set to the `host` directory (`f:/git/personal/lidar/roomscanner/host`) using the command `.\.venv\Scripts\pytest`. Do NOT run it from the workspace root, as this causes import errors for `tests` and `tools`.
+- **Running Python Scripts**: Use `host\.venv\Scripts\python` to execute Python scripts (such as validation and capture tools) from the workspace root or their respective directories.

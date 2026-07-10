@@ -50,6 +50,7 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
   reset. Rapid flash/reset cycles during probing can wedge the independently-powered ToF/LSM on the shared
   I3C bus; if `capture.py` and `-hardRst` both fail to bring the CDC back but `uwTick` still advances, it's
   that warm-wedge — ask for a replug, don't keep resetting.
+- **ST-Link power and clock dependency:** The target MCU's main system clock is configured to use the ST-Link's Master Clock Output (MCO) via `RCC_HSE_BYPASS_DIGITAL`. If the ST-Link USB cable is unplugged, the ST-Link chip is unpowered, the 8 MHz clock signal is lost, and the MCU halts in `Error_Handler()` inside `SystemClock_Config()`. Furthermore, an unpowered ST-Link pulls the target MCU's `NRST` line low (resetting it). Therefore, both USB USER and ST-Link cables must be connected (or ST-Link powered externally) for the board to run.
 - Keep `USER CODE BEGIN/END` guards intact in CubeMX-generated files even in our fork.
 - Error policy: no silent failures. Every `vl53l9_*`/`transform_*` call's return value is checked at the
   call site (watch reference bug #1 — a dropped assignment defeats the check). Streaming errors become

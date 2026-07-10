@@ -165,13 +165,20 @@ def gizmo_pose(quat: tuple[float, float, float, float], scale: float,
                anchor: tuple[float, float, float]) -> np.ndarray:
     """4x4 pose for the orientation gizmo: rotation from quaternion, uniform scale, placed
     at anchor. Suitable for Open3D geometry.transform()."""
+    R_align = np.array([
+        [1.0,  0.0,  0.0],
+        [0.0,  0.0, -1.0],
+        [0.0, -1.0,  0.0]
+    ])
+    r = quat_to_matrix(*quat)
+    r_mapped = R_align @ r @ R_align.T
     m = np.eye(4)
-    m[:3, :3] = quat_to_matrix(*quat) * scale
+    m[:3, :3] = r_mapped * scale
     m[:3, 3] = np.array(anchor, dtype=np.float64)
     return m
 
 
-AXIS_CONVENTION = np.eye(3)   # mag-mounting-vs-IMU sign/permutation; resolved on-target
+AXIS_CONVENTION = np.diag([1.0, -1.0, -1.0])   # mag-mounting-vs-IMU sign/permutation; resolved on-target
 AXIS_CONVENTION.setflags(write=False)   # module constant — guard against in-place mutation
 
 

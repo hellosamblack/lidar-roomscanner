@@ -135,6 +135,7 @@ reporting one bare "fps" number (this exact ambiguity caused real confusion in t
   (see `docs/protocol.md`; `roomscan.sources.SerialSource.find_port()` / `CDC_VID`/`CDC_PID`). On this
   machine they've typically enumerated as CDC = COM15, ST-Link VCOM = COM14 — examples, not guarantees;
   always resolve by VID/PID, never hardcode a COM number.
+- **ST-Link power and clock dependency:** The target MCU's clock configuration uses `RCC_HSE_BYPASS_DIGITAL` which relies on the 8 MHz clock output (MCO) from the ST-Link debugger chip. If the ST-Link USB is unplugged, the ST-Link chip is unpowered, the external clock is lost, and the target MCU halts in `Error_Handler()` at boot. Furthermore, an unpowered ST-Link pulls the target's `NRST` line low, resetting it. Both USB USER and ST-Link cables must be connected (or ST-Link powered externally) for the board to run.
 - After flashing or resetting, the app may wait on sensor init — no output for ~1 s is normal; the
   internal boot retry means a slow-but-successful bring-up can take several seconds before the first
   frame, which is expected, not a hang, as long as frames eventually arrive.

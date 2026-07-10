@@ -259,13 +259,12 @@ a live-rendered point cloud.
 >   row 0, col 53, vs. 12-20 mm center-region) and doesn't improve with a global FoV tweak, so the linear
 >   defaults stand and an **optional per-zone tan-table path** was added to `Deprojector` (constructor arg,
 >   linear stays default) for future consumers needing corner accuracy. Full numbers, conventions, and the
->   decision writeup: `docs/deprojector-validation.md`. **Vendor-bug note**: ZAPC's 4th (confidence)
+>   decision writeup: `docs/deprojector-validation.md`. ~~**Vendor-bug note**: ZAPC's 4th (confidence)
 >   channel is structurally ~1.0 on every zone including no-return sentinels — not usable as a validity
 >   gate. Root cause (uninitialized `conf_scaling` divisor, never assigned anywhere in the `53L9A1/`
 >   tree — the channel is structurally constant, no capture can change it; the sentinel zones'
 >   1e-6-digit micro-variation is actually a packed filter-status code, not a confidence score) is
->   documented in `docs/deprojector-validation.md`'s confidence-channel section. Depth-sentinel gating
->   remains the correct exclusion mechanism, not the ZAPC confidence field.
+>   documented in `docs/deprojector-validation.md`'s confidence-channel section.~~ **Resolved**: The uninitialized `conf_scaling` divisor in the reference transform library was fixed by initializing it to `1.0f` in `radial_to_perp.c`, allowing the ZAPC confidence channel to dynamically vary and discriminate correctly (verified via `validate_deprojector_zapc.py`). Depth-sentinel gating remains a robust fallback mechanism.
 > - **✅ Resolved — connect-time CRC/DROPPED transient** (first observed Phase 2 Task 7): root-caused
 >   Phase 3 Task 6 by byte-exact forensics on both recorded instances (`captures/e2e_p2.bin`,
 >   `captures/e2e_p25.bin`) — full writeup `docs/connect-transient-forensics.md`. Both captures show the
@@ -314,11 +313,11 @@ for free; multi-stream firmware plumbing is no longer needed.
   not firmware features. The `ZAPC` point-cloud format now also runs on the PC and was used (Phase 2.5
   Task 3) to validate the host `Deprojector`'s linear-FoV model against calibrated intrinsics — datasheet
   defaults confirmed, optional per-zone tan-table added for corner accuracy (`docs/deprojector-validation.md`).
-  **Vendor bug**: ZAPC's per-zone confidence channel is structurally ~1.0 everywhere (uninitialized
+  ~~**Vendor bug**: ZAPC's per-zone confidence channel is structurally ~1.0 everywhere (uninitialized
   `conf_scaling` divisor in the library, never assigned) and does not discriminate valid/invalid zones —
   don't gate on it; use the depth sentinel instead (root cause + measurements in
   `docs/deprojector-validation.md`'s confidence-channel section; see also the Phase 2.5 deferred-list
-  entry above).
+  entry above).~~ **Fixed**: The uninitialized `conf_scaling` divisor has been set to `1.0f` in the library; the confidence channel now varies dynamically.
 - Bandwidth: only the raw stream crosses the wire (14,842 B/frame — 1.63× the old depth payload,
   regardless of how many output streams the PC computes). 30 Hz ≈ 445 KB/s fits CDC FS; beyond ~60 Hz
   wants Phase 4's Ethernet (and I3C readout itself tops out ~60-80 Hz, estimate — see the architecture
@@ -521,9 +520,8 @@ are all reused unchanged (no wire change; `docs/protocol.md` untouched).
 >   ellipsoid-fit mag-calibration CLI. Suite: **240 passed**.
 >
 > **Open follow-ups (not blockers):**
-> - **On-rig mag calibration + `AXIS_CONVENTION` verification** (procedure in `docs/yaw-fusion.md`):
->   until the calibration is collected on the assembled rig and the heading sanity-check is run, fused
->   yaw is only as trustworthy as the raw magnetometer.
+> - **[RESOLVED 2026-07-10] On-rig mag calibration + `AXIS_CONVENTION` verification**:
+>   calibration generated `mag_cal.json` (residual std/mean < 0.02, field_ut ~49.87 uT), `AXIS_CONVENTION` verified and set to `np.diag([1.0, -1.0, -1.0])` (representing `[x, -y, -z]`), and visual yaw-as-roll mapping resolved in `gizmo_pose`.
 > - **SHT40 humidity (and the remaining IKS4A1 sensors) are not streamed** — ENV carries
 >   pressure/mag/temp only. Add a field only when a consumer exists (protocol-change checklist applies).
 > - **Metrics HUD** (draft PR #1) — presentation-layer only, no wire change; review and merge.

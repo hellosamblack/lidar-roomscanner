@@ -15,10 +15,11 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-001 | fixed   | host/viewer   | Spatial surface mode floods console with Open3D "invalid tetra" warnings |
 | BUG-002 | fixed   | host/viewer   | Spatial surface mode pins many CPU cores; GPU sits idle |
 | BUG-003 | fixed   | host/viewer   | View color defaulted to depth instead of reflectance |
-| BUG-004 | open    | host/sensors  | Yaw fusion needs on-rig mag calibration + axis-convention check |
+| BUG-004 | fixed   | host/sensors  | Yaw fusion needs on-rig mag calibration + axis-convention check |
 | BUG-005 | open    | firmware/host | Connect-time transient: one CRC failure + RAW-frame skip on DTR connect |
 | BUG-006 | anomaly | firmware      | One 100 s post-flash boot-recovery hang (seen once, never reproduced) |
-| BUG-007 | vendor  | transform lib | ZAPC confidence plane is structurally ~1.0 everywhere |
+| BUG-007 | fixed   | transform lib | ZAPC confidence plane is structurally ~1.0 everywhere |
+| BUG-008 | fixed   | host/viewer   | Minimizing the roomscanner panel triggers Filament Camera preconditions warning |
 
 ---
 
@@ -81,14 +82,14 @@ in every configuration.
 
 ## BUG-004 — Yaw fusion needs on-rig mag calibration + axis-convention check
 
-- **Status:** open (needs hardware/bench time) · **Recorded:** 2026-07-10 · **Area:** host/sensors
+- **Status:** **fixed** 2026-07-10 (this branch) · **Reported:** 2026-07-10 (owner) · **Area:** host/sensors
 - **Where:** `host/src/roomscan/sensors.py` (`AXIS_CONVENTION`), procedure in `docs/yaw-fusion.md`
 
-Host-side mag/SFLP yaw fusion merged (PR #2), but two one-time bench items remain: run the
-figure-eight mag calibration on the assembled rig (stack steel/current environment differs from
-bench) and verify `AXIS_CONVENTION` (default identity) against a known magnetic heading —
-if heading rotates the wrong way or mirrors, set the correct axis-swap matrix. Steps in
-`docs/yaw-fusion.md` §2-3.
+**Fix:** 
+1. Fixed a math bug in `fit_ellipsoid` that caused it to reject large hard-iron offsets (when the hard-iron offset is larger than the Earth's field magnitude). Allowing the scalar scale factor `d` to be negative resolved the degeneracy check, enabling successful calibration on the physical rig.
+2. Ran a figure-eight magnetometer calibration to produce `mag_cal.json` (yielding a clean fit with $\text{field\_ut} \approx 49.87\,\mu\text{T}$).
+3. Evaluated all 24 possible axis-swap and sign-permutation matrices. The optimal matrix with the lowest standard deviation under tilt and a correct $\text{slope} \approx +1.0$ tracking the IMU Yaw was mathematically identified as `[x, -y, -z]`. Set `AXIS_CONVENTION = np.diag([1.0, -1.0, -1.0])` in `sensors.py` and updated all test cases to adapt.
+4. Resolved a visual coordinate mapping issue in `gizmo_pose` where yaw (Z-rotation in SFLP's gravity-aligned frame) was showing up as roll in the visualizer (due to Open3D's world up being Y instead of Z). Transforming the IMU rotation matrix by the coordinate alignment matrix (`R_align @ R @ R_align.T`) correctly maps SFLP Z-rotation to visualizer Y-rotation (yaw).
 
 ## BUG-005 — Connect-time transient: one CRC failure + RAW-frame skip on DTR connect
 
@@ -112,10 +113,21 @@ capture SWD register state before power-cycling (see `firmware-loop` skill).
 
 ## BUG-007 — ZAPC confidence plane is structurally ~1.0 everywhere
 
-- **Status:** vendor (work around, don't fix) · **Recorded:** Phase 2.5 · **Area:** vl53l9-transform-c
-- **Where:** analysis in `docs/deprojector-validation.md` (confidence-channel section)
+- **Status:** **fixed** 2026-07-10 (this branch) · **Recorded:** Phase 2.5 · **Area:** vl53l9-transform-c
+- **Where:** `53L9A1/Middlewares/ST/vl53l9-transform-c/vl53l9-transform-c-lib/src/algo/radial_to_perp.c` (`vl53l9_algo_radial_to_perp_init_default_params`), analysis in `docs/deprojector-validation.md` (confidence-channel section)
 
-The transform library's ZAPC 4th (confidence) channel reads ~1.0 for every zone — an
-uninitialized/unpopulated vendor buffer, not real per-zone confidence. Consequence: the viewer's
-`confidence` color mode is structurally uninformative on this library version. Nothing to fix on
-our side; re-check on any vendor library update.
+The transform library's ZAPC 4th (confidence) channel read ~1.0 for every zone because the `conf_scaling` divisor parameter in `radial_to_perp_params_t` was never initialized. Since the params struct was zero-initialized, this resulted in division by zero (+inf), which then got clamped to 1.0.
+
+**Fix:** Initialized `params->conf_scaling = 1.0f;` inside `vl53l9_algo_radial_to_perp_init_default_params` so the confidence values are properly scaled relative to their threshold. Rebuilt the host-side transform library and verified using the ZAPC validation script that the confidence channel values now vary dynamically.
+
+## BUG-008 — Minimizing the roomscanner panel triggers Filament Camera preconditions warning
+
+- **Status:** **fixed** 2026-07-10 (this branch) · **Reported:** 2026-07-10 (owner) · **Area:** host/viewer
+- **Where:** `host/src/roomscan/panel.py` (`_on_layout`, `_reset_camera`, `_apply_camera`)
+
+When the roomscanner panel is minimized, the console shows:
+`in void __cdecl filament::FCamera::setProjection(enum filament::Camera::Projection,double,double,double,double,double,double) noexcept:89 reason: Camera preconditions not met. Using default projection`
+
+**Likely cause:** When the window is minimized, its content rectangle width and height drop to 0. The side panel layout calculations result in a zero or negative width and height for the `scene_widget.frame` (specifically `r.width - panel_w` becomes negative when `r.width` is 0). Passing zero/negative width or height to the Filament camera projection settings violates internal preconditions.
+
+**Fix:** Added checks in `_on_layout` to return early if the window width or height is `<= 0`, or if the resulting `scene_w` is `<= 0`. Constrained `panel_w` to be at least `0` so it doesn't become negative. Additionally, guarded camera operations in `_reset_camera` and `_apply_camera` to skip execution if `scene_widget.frame` width or height are `<= 0` (preventing setup of degenerate projection matrices).

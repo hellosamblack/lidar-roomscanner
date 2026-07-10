@@ -304,6 +304,7 @@ class ControlPanel:
         # real transitions (init/active/gated:*) still log once each.
         self._last_fusion_status = "off"
         self._gizmo_added = False
+        self._baseline_quat = None
         self.stats = Stats()
         # metrics HUD: per-sensor rate meters + a background resource sampler.
         # Fed from the reader thread; read on the UI tick. Overlay is toggleable.
@@ -539,6 +540,9 @@ class ControlPanel:
             self.temp_widget = gui.ImageWidget(self._np_to_o3d(render_sparkline(np.zeros(2))))
             sg.add_child(gui.Label("Temperature (°C)"))
             sg.add_child(self.temp_widget)
+            self.btn_reset_orientation = gui.Button("Reset Baseline")
+            self.btn_reset_orientation.set_on_clicked(self._on_reset_orientation)
+            sg.add_child(self.btn_reset_orientation)
 
         # --- Device ---
         dev = self._group("Device")
@@ -602,9 +606,17 @@ class ControlPanel:
     def _on_layout(self, ctx):
         gui = self._gui
         r = self.window.content_rect
+        # Return early if window is minimized or has degenerate dimensions
+        if r.width <= 0 or r.height <= 0:
+            return
         panel_w = int(getattr(self.args, "panel_width", 340))
-        panel_w = min(panel_w, r.width - 100)
-        self.scene_widget.frame = gui.Rect(r.x, r.y, r.width - panel_w, r.height)
+        # Prevent panel_w from going negative or exceeding window bounds
+        panel_w = max(0, min(panel_w, r.width - 100))
+        scene_w = r.width - panel_w
+        # Prevent degenerate 3D viewport frames
+        if scene_w <= 0:
+            return
+        self.scene_widget.frame = gui.Rect(r.x, r.y, scene_w, r.height)
         self.panel.frame = gui.Rect(r.x + r.width - panel_w, r.y, panel_w, r.height)
         # metrics HUD image: pinned to the scene's top-left at its native size
         w, h = self._overlay_size
@@ -758,6 +770,9 @@ class ControlPanel:
             sc.remove_geometry(_MESH_GEOM)
 
     def _reset_camera(self):
+        # Do not configure camera if the viewport is minimized or degenerate
+        if self.scene_widget.frame.width <= 0 or self.scene_widget.frame.height <= 0:
+            return
         all_pts = self._last_all_pts
         if all_pts is None or len(all_pts) == 0:
             return
@@ -805,6 +820,9 @@ class ControlPanel:
 
 
     def _apply_camera(self):
+        # Do not apply camera look-at if the viewport is minimized or degenerate
+        if self.scene_widget.frame.width <= 0 or self.scene_widget.frame.height <= 0:
+            return
         if self._cam_target is None:
             return
         eye = _orbit_eye(self._cam_target, self._cam_az, self._cam_radius)
@@ -918,13 +936,19 @@ class ControlPanel:
         Sensors panel group is enabled) the compass + pressure/temp sparklines.
         Graceful no-data: quietly does nothing until IMU_QUAT/ENV frames arrive."""
         quat = self.sensor_state.fused_quat()
-        if self.imu_gizmo and quat is not None:
+        quat_display = quat
+        if quat is not None and self._baseline_quat is not None:
+            from .sensors import quat_mul
+            qb = self._baseline_quat
+            qb_inv = (qb[0], -qb[1], -qb[2], -qb[3])
+            quat_display = quat_mul(quat, qb_inv)
+        if self.imu_gizmo and quat_display is not None:
             sc = self.scene_widget.scene
             if not self._gizmo_added:
                 self._gizmo = self._o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)
                 sc.add_geometry(_GIZMO_GEOM, self._gizmo, self.mesh_material)
                 self._gizmo_added = True
-            pose = gizmo_pose(quat, self.gizmo_scale, _GIZMO_ANCHOR)
+            pose = gizmo_pose(quat_display, self.gizmo_scale, _GIZMO_ANCHOR)
             sc.set_geometry_transform(_GIZMO_GEOM, pose)
         status = self.sensor_state.fusion_status()
         if status != self._last_fusion_status:
@@ -990,6 +1014,12 @@ class ControlPanel:
     def _on_reset_view(self):
         self._camera_set = False
         self._reset_camera()
+
+    def _on_reset_orientation(self):
+        quat = self.sensor_state.fused_quat()
+        if quat is not None:
+            self._baseline_quat = quat
+            self.bus.publish("yaw-fusion -> baseline reset")
 
     def _sync_near_slider(self):
         """Point the shared near-contrast slider at the control the current mode

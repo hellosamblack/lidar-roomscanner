@@ -39,18 +39,47 @@ def main(argv=None) -> int:
     ap.add_argument("--port", default=None)
     args = ap.parse_args(argv)
 
+    import sys
     from roomscan.sources import SerialSource  # deferred: no pyserial in tests
     src = SerialSource(port=args.port)
     dec = StreamDecoder()
     print(f"Rotate the rig through ALL orientations for {args.seconds:.0f} s...")
     samples: list[tuple[float, float, float]] = []
     t0 = time.monotonic()
+    last_print = 0.0
     while time.monotonic() - t0 < args.seconds:
-        for fr in dec.feed(src.read()):
+        data = src.read()
+        if not data:
+            time.sleep(0.01)
+            continue
+        for fr in dec.feed(data):
             if fr.header.frame_type == FrameType.DATA and fr.header.stream_id == StreamId.ENV:
                 _, mag, _ = decode_env(fr.payload)
                 samples.append(mag)
+        
+        # Live visual display in terminal
+        now = time.monotonic()
+        if now - last_print > 0.1 and samples:
+            last_print = now
+            arr = np.array(samples)
+            mins = arr.min(axis=0)
+            maxs = arr.max(axis=0)
+            spans = maxs - mins
+            current = samples[-1]
+            elapsed = now - t0
+            remaining = max(0.0, args.seconds - elapsed)
+            
+            # Print a neat 80-character live status line
+            sys.stdout.write(
+                f"\rTime remaining: {remaining:4.1f}s | "
+                f"X: {current[0]:6.1f} (span {spans[0]:5.1f}) | "
+                f"Y: {current[1]:6.1f} (span {spans[1]:5.1f}) | "
+                f"Z: {current[2]:6.1f} (span {spans[2]:5.1f})"
+            )
+            sys.stdout.flush()
+
     src.close()
+    print()  # Newline after carriage return loop
     arr = np.asarray(samples, dtype=np.float64).reshape(-1, 3)
     print(f"collected {arr.shape[0]} mag samples")
     cal = calibrate(arr, args.out)

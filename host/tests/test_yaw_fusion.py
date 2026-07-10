@@ -14,9 +14,12 @@ LEVEL = (1.0, 0.0, 0.0, 0.0)
 
 def _mag_for_heading(deg):
     # level device: world == body; mag in horizontal plane pointing so that
-    # tilt_compensated_heading returns `deg` (atan2(my, mx)).
+    # tilt_compensated_heading returns `deg` (atan2(my, mx)) after AXIS_CONVENTION.
+    from roomscan.sensors import AXIS_CONVENTION
     r = math.radians(deg)
-    return (50.0 * math.cos(r), 50.0 * math.sin(r), 0.0)
+    target = np.array([50.0 * math.cos(r), 50.0 * math.sin(r), 0.0])
+    mag = np.linalg.solve(AXIS_CONVENTION, target)
+    return tuple(mag)
 
 
 def test_converges_to_mag_heading_when_static():

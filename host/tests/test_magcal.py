@@ -73,3 +73,14 @@ def test_fit_degenerate_planar_raises():
                               np.zeros_like(theta)])
     with pytest.raises(ValueError):
         fit_ellipsoid(planar)
+
+
+def test_fit_large_offset_succeeds():
+    # Verify that a sphere with a hard-iron offset larger than the radius
+    # (very common on real rigs) compiles and fits correctly.
+    raw, offset = _distorted_sphere(radius=45.0, offset=(80.0, -40.0, -80.0))
+    cal = fit_ellipsoid(raw)
+    assert np.allclose(cal.offset, offset, atol=1.0)
+    norms = np.linalg.norm(np.array([cal.apply(r) for r in raw]), axis=1)
+    assert np.std(norms) / np.mean(norms) < 0.02
+    assert np.mean(norms) == pytest.approx(cal.field_ut, rel=0.05)

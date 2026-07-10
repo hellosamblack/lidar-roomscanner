@@ -73,8 +73,8 @@ def fit_ellipsoid(samples: np.ndarray) -> MagCalibration:
     except np.linalg.LinAlgError as exc:
         raise ValueError("degenerate ellipsoid fit (singular shape matrix)") from exc
     d = 1.0 + center @ Q @ center
-    if d <= 0:
-        raise ValueError("degenerate ellipsoid fit (non-positive scale)")
+    if abs(d) < 1e-9:
+        raise ValueError("degenerate ellipsoid fit (zero scale)")
     Q_n = Q / d
     evals, evecs = np.linalg.eigh(Q_n)
     if np.any(evals <= 0):

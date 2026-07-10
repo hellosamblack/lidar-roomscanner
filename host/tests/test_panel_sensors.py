@@ -43,12 +43,13 @@ def test_panel_graceful_no_data():
 def test_fused_quat_seam_uses_correction():
     import math
     from roomscan.magcal import MagCalibration
-    from roomscan.sensors import SensorState, YawFusion, gizmo_pose, quat_yaw_deg, wrap180
+    from roomscan.sensors import SensorState, YawFusion, gizmo_pose, quat_yaw_deg, wrap180, AXIS_CONVENTION
     cal = MagCalibration(offset=(0.0, 0.0, 0.0),
                          matrix=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
                          field_ut=50.0)
     st = SensorState(fusion=YawFusion(tau_s=0.5, calibration=cal))
-    mag = (50.0 * math.cos(math.radians(60.0)), 50.0 * math.sin(math.radians(60.0)), 0.0)
+    target_mag = np.array([50.0 * math.cos(math.radians(60.0)), 50.0 * math.sin(math.radians(60.0)), 0.0])
+    mag = tuple(AXIS_CONVENTION @ target_mag)
     for i in range(300):
         st.feed(_env_frame(101325.0, mag, 20.0))
         h = FrameHeader(FrameType.DATA, StreamId.IMU_QUAT, 0, 1, (i + 1) * 10_000, 0, 0, 16)
