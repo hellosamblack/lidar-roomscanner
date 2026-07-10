@@ -1,3 +1,4 @@
+import math
 import struct
 
 import numpy as np
@@ -12,6 +13,7 @@ from roomscan.protocol import (
 from roomscan.sensors import (
     SensorState,
     graft_yaw,
+    ir_gravity_rot,
     quat_mul,
     quat_pitch_deg,
     quat_to_matrix,
@@ -169,3 +171,40 @@ def test_fused_quat_applies_yaw_correction():
         st.feed(Frame(h, struct.pack("<4f", 1.0, 0.0, 0.0, 0.0)))
     assert st.fusion_status() == "active"
     assert wrap180(quat_yaw_deg(st.fused_quat()) - 60.0) == pytest.approx(0.0, abs=1.5)
+
+
+# ---------------------------------------------------------------------------
+# ir_gravity_rot: in-plane roll snap tests
+# ---------------------------------------------------------------------------
+
+def _roll_quat(roll_deg: float) -> tuple[float, float, float, float]:
+    """Quaternion representing a pure sensor roll about the depth axis.
+    The sensor depth axis = SFLP body Y axis, so we rotate about Y."""
+    a = math.radians(roll_deg) / 2.0
+    return (math.cos(a), 0.0, math.sin(a), 0.0)  # w, x, y, z  (rot about Y)
+
+
+def test_ir_gravity_rot_level():
+    """No roll: gravity exactly along body -Z (image down) -> 0 extra turns."""
+    q = (1.0, 0.0, 0.0, 0.0)  # identity
+    assert ir_gravity_rot(q) == 0
+
+
+def test_ir_gravity_rot_roll_90_cw():
+    """Sensor rolled 90 deg CW (viewed from front) -> 1 extra CCW turn needed.
+    CW roll about depth = +90 deg about SFLP Y -> gravity moves to body +X."""
+    q = _roll_quat(90.0)
+    assert ir_gravity_rot(q) == 1
+
+
+def test_ir_gravity_rot_upside_down():
+    """Sensor fully upside-down (180 deg roll) -> 2 extra turns."""
+    q = _roll_quat(180.0)
+    assert ir_gravity_rot(q) == 2
+
+
+def test_ir_gravity_rot_roll_90_ccw():
+    """Sensor rolled 90 deg CCW (viewed from front) -> 3 extra CCW turns needed.
+    CCW roll about depth = -90 deg about SFLP Y -> gravity moves to body -X."""
+    q = _roll_quat(-90.0)
+    assert ir_gravity_rot(q) == 3

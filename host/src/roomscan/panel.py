@@ -1022,8 +1022,20 @@ class ControlPanel:
         vmin, vmax, self._ir_frozen = _ir_freeze_range(self.ir_freeze, self._ir_frozen, auto)
         rgb = reflectance_to_rgb(refl, colormap=self.ir_colormap,
                                  vmin=vmin, vmax=vmax, upscale=_IR_UPSCALE)
-        if self._rot:
-            rgb = np.rot90(rgb, self._rot)     # keep the IR pane aligned with the rotated cloud
+        # Combine the manual 90° rotation with the gravity-derived in-plane roll so
+        # the IR image "down" matches the physical down shown in the 3D view.
+        quat_display = self.sensor_state.fused_quat()
+        if quat_display is not None and self._baseline_yaw is not None:
+            from .sensors import graft_yaw
+            quat_display = graft_yaw(quat_display, -self._baseline_yaw)
+        if quat_display is not None:
+            from .sensors import ir_gravity_rot
+            gravity_steps = ir_gravity_rot(quat_display)
+        else:
+            gravity_steps = 0
+        total_rot = (self._rot + gravity_steps) % 4
+        if total_rot:
+            rgb = np.rot90(rgb, total_rot)     # keep the IR pane aligned with the rotated cloud
         self.ir_widget.update_image(self._np_to_o3d(rgb))
 
     def _ir_placeholder(self):
