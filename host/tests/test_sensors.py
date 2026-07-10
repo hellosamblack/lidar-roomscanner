@@ -11,8 +11,13 @@ from roomscan.protocol import (
 )
 from roomscan.sensors import (
     SensorState,
+    graft_yaw,
+    quat_mul,
+    quat_pitch_deg,
     quat_to_matrix,
+    quat_yaw_deg,
     tilt_compensated_heading,
+    wrap180,
 )
 
 
@@ -75,3 +80,35 @@ def test_gizmo_pose_identity():
     # translation column
     assert np.allclose(m[:3, 3], [1.0, 2.0, 3.0])
     assert m[3, 3] == pytest.approx(1.0)
+
+
+def test_wrap180():
+    assert wrap180(190.0) == pytest.approx(-170.0)
+    assert wrap180(-190.0) == pytest.approx(170.0)
+    assert wrap180(30.0) == pytest.approx(30.0)
+
+
+def test_quat_yaw_of_z_rotation():
+    s = np.sqrt(0.5)  # 90 deg about +Z
+    assert quat_yaw_deg((s, 0.0, 0.0, s)) == pytest.approx(90.0, abs=1e-4)
+
+
+def test_graft_yaw_adds_heading_preserves_tilt():
+    import math
+    a = math.radians(30.0) / 2  # 30 deg pitch about +Y, no yaw
+    q = (math.cos(a), 0.0, math.sin(a), 0.0)
+    grafted = graft_yaw(q, 40.0)
+    # pitch unchanged (tilt preserved), yaw increased by ~40 deg
+    assert quat_pitch_deg(grafted) == pytest.approx(quat_pitch_deg(q), abs=0.5)
+    assert wrap180(quat_yaw_deg(grafted) - quat_yaw_deg(q)) == pytest.approx(40.0, abs=0.5)
+
+
+def test_graft_yaw_zero_is_noop():
+    q = (0.9238795, 0.0, 0.0, 0.3826834)  # 45 deg about Z
+    g = graft_yaw(q, 0.0)
+    assert np.allclose(g, q, atol=1e-6)
+
+
+def test_quat_mul_identity():
+    q = (0.5, 0.5, 0.5, 0.5)
+    assert quat_mul((1.0, 0.0, 0.0, 0.0), q) == pytest.approx(q)
