@@ -47,7 +47,7 @@ Three components, each independently understandable and testable:
  SFLP → FIFO tag 0x13  ─────┐        acquisition loop, per ToF frame:     frame path:
  SHUB → FIFO tags 0x0E-10 ──┴─(I3C)→  drain FIFO, demux by tag,      (CDC)  decode stream 9 → quaternion
  (baro/mag/temp masters)             emit stream 9 (quat) every frame ───→  decode stream 10 → env sample
-                                     emit stream 10 (env) every N frames    ├─ scene gizmo (orientation)
+                                     emit stream 10 (env) every frame too    ├─ scene gizmo (orientation)
                                                                             └─ Sensors group (compass +
                                                                                pressure/temp sparklines)
 ```
@@ -59,7 +59,8 @@ Three components, each independently understandable and testable:
 - **Bring-up** (after the ToF is up and `rs_assign_dynamic_addresses()` has put the LSM at `0x50`):
   - Enable SFLP: `SFLP_ODR ≈ 120 Hz`, game-rotation-vector batched to FIFO (tag `0x13`).
   - Configure SHUB: 3 slaves (LPS22DF `0x5C`, LIS2MDL `0x1E`, STTS22H `0x38`) via
-    `MASTER_CONFIG` + `SLV0..2_ADD/SUBADD/CONFIG`, `SHUB_ODR ≈ 15–30 Hz` (well below SFLP), results
+    `MASTER_CONFIG` + `SLV0..2_ADD/SUBADD/CONFIG`, `SHUB_ODR ≈ 60 Hz` (≥ the ToF frame rate so every
+    emitted ENV frame carries a fresh sample; still below the 120 Hz SFLP rate), results
     batched to FIFO (tags `0x0E–0x10`). One-time per-slave power-up writes via the `DATAWRITE_SLV0` +
     `WRITE_ONCE` channel (sequenced during bring-up, since only one write-once channel exists), or rely
     on sensor defaults where sufficient.
@@ -68,8 +69,10 @@ Three components, each independently understandable and testable:
   - All LSM register I/O uses the existing native-I3C private read/write to `0x50` (the same transfer
     helpers the probe already exercised).
 - **Steady state:** each ToF frame, drain the FIFO and demux by tag — keep the latest quaternion and the
-  latest env sample. Emit **stream 9 (quaternion) every ToF frame**; emit **stream 10 (env) every N
-  frames** (N chosen so ENV lands near its `SHUB_ODR`, e.g. every ~2nd frame).
+  latest env sample. Emit **stream 9 (quaternion) and stream 10 (env) every ToF frame** — one paired set
+  per frame. With `SHUB_ODR ≥ frame rate` the per-frame env values are fresh; per-frame ENV keeps the
+  data frequent enough to serve later as a SLAM input (baro Z-drift constraint, mag heading) without a
+  separate low-rate path.
 - **Error isolation (hard requirement):** any SFLP/SHUB failure (init error, empty FIFO, NACK tag
   `0x19`) skips that frame's IMU/ENV emission and **never** blocks, delays, or corrupts the ToF RAW/CALIB
   stream. A boot-time SFLP/SHUB init failure emits an EVENT (diagnostic) and the ToF stream proceeds
@@ -83,9 +86,10 @@ firmware C + host Python + golden vectors in lockstep).
 
 - **stream 9 `IMU_QUAT`** — payload = 4×float32 `[w, x, y, z]` (16 B), unit quaternion, LSM body frame.
   `t_us` = capture time. Cadence: one per ToF frame.
-- **stream 10 `ENV`** — payload = pressure float32 (hPa) + magnetic field 3×float32 `[x, y, z]` + temp
-  float32 (°C) (20 B). Exact scale/units pinned against each sensor's datasheet and frozen in the golden
-  vector. `t_us` = capture time. Cadence: env rate (slower than ToF).
+- **stream 10 `ENV`** — payload = pressure float32 (**Pa**) + magnetic field 3×float32 `[x, y, z]`
+  (**µT**) + temperature float32 (**°C**) (20 B), standard scientific units. Each sensor's native-LSB →
+  unit conversion is pinned against its datasheet and frozen in the golden vector. `t_us` = capture time.
+  Cadence: **one per ToF frame** (paired with `IMU_QUAT`), keeping env frequent enough for later SLAM use.
 
 The stream registry table gets two rows; the payloads are pinned (not TBD) since we define them here.
 
@@ -105,8 +109,9 @@ frame. It rotates live with the device in the same space as the cloud.
 
 **Sensors panel group:** a new collapsible `_group("Sensors")` mirroring the IR-Monitor pattern
 (`numpy` render → `gui.ImageWidget`, updated each tick):
-- **Compass dial** — magnetometer heading (from the horizontal mag components; optionally
-  tilt-compensated using the orientation quaternion later).
+- **Compass dial** — **tilt-compensated** magnetometer heading: the raw mag vector is de-tilted using
+  the SFLP orientation quaternion (roll/pitch) before the heading is computed, so the dial stays correct
+  when the device is not level.
 - **Pressure sparkline** — trend over the history ring (doubles as the eventual baro Z-drift indicator).
 - **Temperature sparkline** — trend over the history ring.
 
@@ -117,11 +122,28 @@ frame. It rotates live with the device in the same space as the cloud.
 the gizmo stays hidden and the sensor widgets show a neutral "no data" state — the point cloud and all
 existing panel features are unaffected.
 
+### Orientation drift & the magnetometer (verified)
+
+The LSM6DSV16X's SFLP is a **6-axis game rotation vector** (accelerometer + gyroscope only) — confirmed
+against DS13510 (§2.8; FIFO tag `0x13` is the *only* rotation-vector tag) and the reg driver (only
+`sflp_game_en`). **The chip does not fuse the magnetometer into the quaternion**, and no on-chip
+FSM/MLC/SFLP path produces a mag-corrected orientation. Consequence: **pitch and roll are gravity-bounded
+and stable; yaw/heading drifts slowly and is uncorrected by the chip** (~0.5°/5 min — a drift rate, not
+an absolute bound).
+
+**Design decision (this visualization-only scope): accept the yaw drift.** It is cosmetic for a live
+preview, and SLAM/G-ICP corrects heading in Phase 6 regardless. But **stream the LIS2MDL magnetometer
+anyway** — it already comes for free with the SHUB env slice (stream 10). That makes host-side yaw
+correction ("game rotation vector + tilt-compensated magnetic heading → geomagnetic heading") a
+**pure-software fast-follow** whenever Phase 6 wants it: no firmware rework is ever needed because the mag
+is already on the wire. The tilt-compensated compass widget is the visible, independent absolute-heading
+reference in the meantime.
+
 ## Data flow
 
 1. LSM continuously runs SFLP (→FIFO 0x13) and SHUB (→FIFO 0x0E–0x10) internally.
 2. Firmware acquisition loop, per ToF frame: capture ToF RAW as today; drain LSM FIFO; demux tags; keep
-   latest quaternion + env sample; emit stream 9 every frame and stream 10 every N frames over CDC.
+   latest quaternion + env sample; emit stream 9 and stream 10 (one paired set per frame) over CDC.
 3. Host decodes streams 9/10 alongside RAW/CALIB; updates the scene gizmo transform and the Sensors
    widgets each render tick.
 
@@ -131,9 +153,9 @@ existing panel features are unaffected.
   the decode path; a replay capture with synthetic IMU/ENV frames appended; unit tests for
   quaternion→gizmo-transform math, env decode/scale, and widget rendering via the existing headless
   snapshotter. Host suite stays green.
-- **Firmware (on-bench, owner):** rotate the board → gizmo tracks; env values plausible (baro ~1013 hPa,
-  room temp, non-zero mag); **critical bench gate — ToF cadence unchanged** (~28 fps, 0 CRC, 0 gaps with
-  SHUB + SFLP active), directly testing the one documentation-unanswerable risk.
+- **Firmware (on-bench, owner):** rotate the board → gizmo tracks; env values plausible (baro ~101325 Pa,
+  room temp in °C, non-zero mag in µT); **critical bench gate — ToF cadence unchanged** (~28 fps, 0 CRC,
+  0 gaps with SHUB + SFLP active), directly testing the one documentation-unanswerable risk.
 - **End-to-end:** both boards stacked, panel shows live gizmo + Sensors widgets while the cloud streams.
 
 ## Scope / landable slices (one spec)
@@ -156,6 +178,7 @@ Firmware SFLP and SHUB naturally land together on-bench; the host slices are ind
 
 - **Bench:** SHUB traffic vs ToF cadence — must confirm ~28 fps / 0 CRC holds with SHUB active.
 - **Coordinate-frame alignment:** body→world mapping default now, calibrated fast-follow on hardware.
-- **Env units/scale:** pin per-sensor scale factors from datasheets into the stream-10 golden vector.
+- **Env unit conversions:** pin each sensor's native-LSB → SI conversion (Pa / µT / °C) from its
+  datasheet into the stream-10 golden vector.
 - **SHUB write-once sequencing:** only one `SLV0` write-once channel — multi-sensor init must sequence
   (bring-up detail for the firmware plan).
