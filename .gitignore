@@ -65,3 +65,21 @@ Thumbs.db
 
 # shareable scan recordings are deliberately tracked despite *.bin above
 !recordings/*.bin
+
+# KiCad auto-generated / local artifacts (references/kicad stack model)
+*.lck
+~*.lck
+*-erc.rpt
+*-backups/
+_autosave-*
+fp-info-cache
+
+# KiCad project-local (per-user) settings
+*.kicad_prl
+
+# Bulky board fab data — re-downloadable from ST, kept local, not in git (see wrap-up decision B)
+references/datasheets/NUCLEO-H563ZI/schematic/mb1404-manufacturing/
+references/datasheets/NUCLEO-IKS4A1/schematic/x-nucleo-iks4a1-gerber/
+references/datasheets/NUCLEO-VL53L9CX/schematic/x-nucleo-53l9a1-gerber/
+# Duplicated datasheet PDFs under the KiCad model (originals live in references/datasheets/)
+references/kicad/roomscanner-stack/datasheets/

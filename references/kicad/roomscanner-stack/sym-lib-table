@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "roomscanner")(type "KiCad")(uri "${KIPRJMOD}/roomscanner.kicad_sym")(options "")(descr "Consolidated NUCLEO stack symbols"))
+)

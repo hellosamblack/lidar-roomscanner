@@ -1,0 +1,4663 @@
+(export
+	(version "E")
+	(design
+		(source "F:\\git\\personal\\lidar\\roomscanner\\references\\kicad\\roomscanner-stack\\roomscanner-stack.kicad_sch")
+		(date "2026-07-10T09:37:05")
+		(tool "Eeschema 10.0.3")
+		(sheet
+			(number "1")
+			(name "/")
+			(tstamps "/")
+			(title_block
+				(title)
+				(company)
+				(rev)
+				(date)
+				(source "roomscanner-stack.kicad_sch")
+				(comment
+					(number "1")
+					(value "")
+				)
+				(comment
+					(number "2")
+					(value "")
+				)
+				(comment
+					(number "3")
+					(value "")
+				)
+				(comment
+					(number "4")
+					(value "")
+				)
+				(comment
+					(number "5")
+					(value "")
+				)
+				(comment
+					(number "6")
+					(value "")
+				)
+				(comment
+					(number "7")
+					(value "")
+				)
+				(comment
+					(number "8")
+					(value "")
+				)
+				(comment
+					(number "9")
+					(value "")
+				)
+			)
+		)
+	)
+	(components
+		(comp
+			(ref "CN5")
+			(value "Conn_1x10")
+			(datasheet "datasheets/NUCLEO-H563ZI_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/NUCLEO-H563ZI_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_1x10")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "f0057429-da57-28f0-0c82-589e4ec91054")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "8")
+						)
+						(pin
+							(num "9")
+						)
+						(pin
+							(num "10")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "CN6")
+			(value "Conn_1x08")
+			(datasheet "datasheets/NUCLEO-H563ZI_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/NUCLEO-H563ZI_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_1x08")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "892d1dce-24eb-0b50-883c-21d50972990e")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "8")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "CN7")
+			(value "Conn_2x19")
+			(datasheet "datasheets/NUCLEO-H563ZI_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/NUCLEO-H563ZI_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_2x19")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "c79c16d6-cb3c-3dac-c6fb-a3ce4aa91b2b")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "9")
+						)
+						(pin
+							(num "11")
+						)
+						(pin
+							(num "13")
+						)
+						(pin
+							(num "15")
+						)
+						(pin
+							(num "17")
+						)
+						(pin
+							(num "19")
+						)
+						(pin
+							(num "21")
+						)
+						(pin
+							(num "23")
+						)
+						(pin
+							(num "25")
+						)
+						(pin
+							(num "27")
+						)
+						(pin
+							(num "29")
+						)
+						(pin
+							(num "31")
+						)
+						(pin
+							(num "33")
+						)
+						(pin
+							(num "35")
+						)
+						(pin
+							(num "37")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "8")
+						)
+						(pin
+							(num "10")
+						)
+						(pin
+							(num "12")
+						)
+						(pin
+							(num "14")
+						)
+						(pin
+							(num "16")
+						)
+						(pin
+							(num "18")
+						)
+						(pin
+							(num "20")
+						)
+						(pin
+							(num "22")
+						)
+						(pin
+							(num "24")
+						)
+						(pin
+							(num "26")
+						)
+						(pin
+							(num "28")
+						)
+						(pin
+							(num "30")
+						)
+						(pin
+							(num "32")
+						)
+						(pin
+							(num "34")
+						)
+						(pin
+							(num "36")
+						)
+						(pin
+							(num "38")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "CN8")
+			(value "Conn_1x06")
+			(datasheet "datasheets/NUCLEO-H563ZI_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/NUCLEO-H563ZI_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_1x06")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "0dc1de00-cc7c-a683-7ec4-27a449f80e33")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "CN9")
+			(value "Conn_1x08")
+			(datasheet "datasheets/NUCLEO-H563ZI_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/NUCLEO-H563ZI_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_1x08")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "0f3aeac5-d560-6326-81c7-28395fd374cd")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "8")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "CN10")
+			(value "Conn_2x19")
+			(datasheet "datasheets/NUCLEO-H563ZI_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/NUCLEO-H563ZI_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_2x19")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "5db75fe2-5f40-48d2-56f2-85c893cf383b")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "9")
+						)
+						(pin
+							(num "11")
+						)
+						(pin
+							(num "13")
+						)
+						(pin
+							(num "15")
+						)
+						(pin
+							(num "17")
+						)
+						(pin
+							(num "19")
+						)
+						(pin
+							(num "21")
+						)
+						(pin
+							(num "23")
+						)
+						(pin
+							(num "25")
+						)
+						(pin
+							(num "27")
+						)
+						(pin
+							(num "29")
+						)
+						(pin
+							(num "31")
+						)
+						(pin
+							(num "33")
+						)
+						(pin
+							(num "35")
+						)
+						(pin
+							(num "37")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "8")
+						)
+						(pin
+							(num "10")
+						)
+						(pin
+							(num "12")
+						)
+						(pin
+							(num "14")
+						)
+						(pin
+							(num "16")
+						)
+						(pin
+							(num "18")
+						)
+						(pin
+							(num "20")
+						)
+						(pin
+							(num "22")
+						)
+						(pin
+							(num "24")
+						)
+						(pin
+							(num "26")
+						)
+						(pin
+							(num "28")
+						)
+						(pin
+							(num "30")
+						)
+						(pin
+							(num "32")
+						)
+						(pin
+							(num "34")
+						)
+						(pin
+							(num "36")
+						)
+						(pin
+							(num "38")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "CN105")
+			(value "Conn_1x10")
+			(datasheet "datasheets/X-NUCLEO-IKS4A1_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/X-NUCLEO-IKS4A1_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_1x10")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "ad410421-d547-34ca-b1f3-90aa9c168fa6")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "8")
+						)
+						(pin
+							(num "9")
+						)
+						(pin
+							(num "10")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "CN106")
+			(value "Conn_1x08")
+			(datasheet "datasheets/X-NUCLEO-IKS4A1_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/X-NUCLEO-IKS4A1_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_1x08")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "0e858a8b-40ec-629b-e3d5-95605ffd5679")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "8")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "CN107")
+			(value "Conn_2x19")
+			(datasheet "datasheets/X-NUCLEO-IKS4A1_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/X-NUCLEO-IKS4A1_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_2x19")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "aaaef440-2ad1-4608-22a1-26afe4e6775d")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "9")
+						)
+						(pin
+							(num "11")
+						)
+						(pin
+							(num "13")
+						)
+						(pin
+							(num "15")
+						)
+						(pin
+							(num "17")
+						)
+						(pin
+							(num "19")
+						)
+						(pin
+							(num "21")
+						)
+						(pin
+							(num "23")
+						)
+						(pin
+							(num "25")
+						)
+						(pin
+							(num "27")
+						)
+						(pin
+							(num "29")
+						)
+						(pin
+							(num "31")
+						)
+						(pin
+							(num "33")
+						)
+						(pin
+							(num "35")
+						)
+						(pin
+							(num "37")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "8")
+						)
+						(pin
+							(num "10")
+						)
+						(pin
+							(num "12")
+						)
+						(pin
+							(num "14")
+						)
+						(pin
+							(num "16")
+						)
+						(pin
+							(num "18")
+						)
+						(pin
+							(num "20")
+						)
+						(pin
+							(num "22")
+						)
+						(pin
+							(num "24")
+						)
+						(pin
+							(num "26")
+						)
+						(pin
+							(num "28")
+						)
+						(pin
+							(num "30")
+						)
+						(pin
+							(num "32")
+						)
+						(pin
+							(num "34")
+						)
+						(pin
+							(num "36")
+						)
+						(pin
+							(num "38")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "CN108")
+			(value "Conn_1x06")
+			(datasheet "datasheets/X-NUCLEO-IKS4A1_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/X-NUCLEO-IKS4A1_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_1x06")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "047029d6-9c1e-fc4c-19aa-12014dd9519c")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "CN109")
+			(value "Conn_1x08")
+			(datasheet "datasheets/X-NUCLEO-IKS4A1_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/X-NUCLEO-IKS4A1_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_1x08")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "a89be0cd-37a6-086b-8f86-1326845179ea")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "8")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "CN110")
+			(value "Conn_2x19")
+			(datasheet "datasheets/X-NUCLEO-IKS4A1_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/X-NUCLEO-IKS4A1_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_2x19")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "cf94bad8-04c0-57fe-55d6-b1a2f160fa6e")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "9")
+						)
+						(pin
+							(num "11")
+						)
+						(pin
+							(num "13")
+						)
+						(pin
+							(num "15")
+						)
+						(pin
+							(num "17")
+						)
+						(pin
+							(num "19")
+						)
+						(pin
+							(num "21")
+						)
+						(pin
+							(num "23")
+						)
+						(pin
+							(num "25")
+						)
+						(pin
+							(num "27")
+						)
+						(pin
+							(num "29")
+						)
+						(pin
+							(num "31")
+						)
+						(pin
+							(num "33")
+						)
+						(pin
+							(num "35")
+						)
+						(pin
+							(num "37")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "8")
+						)
+						(pin
+							(num "10")
+						)
+						(pin
+							(num "12")
+						)
+						(pin
+							(num "14")
+						)
+						(pin
+							(num "16")
+						)
+						(pin
+							(num "18")
+						)
+						(pin
+							(num "20")
+						)
+						(pin
+							(num "22")
+						)
+						(pin
+							(num "24")
+						)
+						(pin
+							(num "26")
+						)
+						(pin
+							(num "28")
+						)
+						(pin
+							(num "30")
+						)
+						(pin
+							(num "32")
+						)
+						(pin
+							(num "34")
+						)
+						(pin
+							(num "36")
+						)
+						(pin
+							(num "38")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "CN205")
+			(value "Conn_1x10")
+			(datasheet "datasheets/X-NUCLEO-53L9A1_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/X-NUCLEO-53L9A1_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_1x10")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "deb705a3-4b98-9723-1628-c0b6a358b4d2")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "8")
+						)
+						(pin
+							(num "9")
+						)
+						(pin
+							(num "10")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "CN206")
+			(value "Conn_1x08")
+			(datasheet "datasheets/X-NUCLEO-53L9A1_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/X-NUCLEO-53L9A1_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_1x08")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "d9d6d44f-a390-cf18-5bd1-07d6e0147ce9")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "8")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "CN208")
+			(value "Conn_1x06")
+			(datasheet "datasheets/X-NUCLEO-53L9A1_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/X-NUCLEO-53L9A1_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_1x06")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "d6526e2f-bddc-cbdf-20c1-b68aa99e0eed")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "CN209")
+			(value "Conn_1x08")
+			(datasheet "datasheets/X-NUCLEO-53L9A1_board.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/X-NUCLEO-53L9A1_board.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "Conn_1x08")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "e48c4fed-499e-c079-6b67-3137eb9ca3ac")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "8")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "SW1")
+			(value "SW_SPDT")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "SW_SPDT")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "0d0aeb4a-28b3-c8c2-4bfd-209ece9b0d2d")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "2")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U101")
+			(value "LDK130")
+			(datasheet "https://www.st.com/resource/en/datasheet/ldk130.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "https://www.st.com/resource/en/datasheet/ldk130.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "LDK130")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "deb93751-4568-a169-d443-a6e88494fbf0")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "2")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U103")
+			(value "NXS0108")
+			(datasheet "https://www.nxp.com/docs/en/data-sheet/NXS0108.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "https://www.nxp.com/docs/en/data-sheet/NXS0108.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "NXS0108")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "7349900c-dda5-b028-7795-b3d59afe0a87")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "11")
+						)
+						(pin
+							(num "10")
+						)
+						(pin
+							(num "19")
+						)
+						(pin
+							(num "20")
+						)
+						(pin
+							(num "18")
+						)
+						(pin
+							(num "17")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U104")
+			(value "LSM6DSV16X")
+			(datasheet "datasheets/LSM6DSV16X_datasheet.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/LSM6DSV16X_datasheet.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "LSM6DSV16X")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "1e223267-b4cf-f4d0-eef3-9099d0aac1ee")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "13")
+						)
+						(pin
+							(num "14")
+						)
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "9")
+						)
+						(pin
+							(num "12")
+						)
+						(pin
+							(num "8")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U105")
+			(value "LIS2DUXS12")
+			(datasheet "https://www.st.com/resource/en/datasheet/lis2duxs12.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "https://www.st.com/resource/en/datasheet/lis2duxs12.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "LIS2DUXS12")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "5828d637-3c43-bc67-686f-8a9c71199bf8")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "12")
+						)
+						(pin
+							(num "11")
+						)
+						(pin
+							(num "9")
+						)
+						(pin
+							(num "10")
+						)
+						(pin
+							(num "6")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U106")
+			(value "LPS22DF")
+			(datasheet "https://www.st.com/resource/en/datasheet/lps22df.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "https://www.st.com/resource/en/datasheet/lps22df.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "LPS22DF")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "f7ca8d3b-e84e-e1ad-7947-6b165b9d9c97")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "10")
+						)
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "9")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U107")
+			(value "LIS2MDL")
+			(datasheet "https://www.st.com/resource/en/datasheet/lis2mdl.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "https://www.st.com/resource/en/datasheet/lis2mdl.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "LIS2MDL")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "87cd7dba-3a95-8aea-8e2a-afa266695e1f")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "9")
+						)
+						(pin
+							(num "10")
+						)
+						(pin
+							(num "6")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U108")
+			(value "STTS22H")
+			(datasheet "https://www.st.com/resource/en/datasheet/stts22h.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "https://www.st.com/resource/en/datasheet/stts22h.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "STTS22H")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "1358a36b-d42e-78f9-90ff-26817dea3693")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "6")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U109")
+			(value "LSM6DSO16IS")
+			(datasheet "https://www.st.com/resource/en/datasheet/lsm6dso16is.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "https://www.st.com/resource/en/datasheet/lsm6dso16is.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "LSM6DSO16IS")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "2eb5f2c2-9f23-01a2-3d0a-177d603492c3")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "13")
+						)
+						(pin
+							(num "14")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "9")
+						)
+						(pin
+							(num "8")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "6")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U110")
+			(value "SHT40")
+			(datasheet "https://sensirion.com/products/catalog/SHT40-AD1B")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "https://sensirion.com/products/catalog/SHT40-AD1B")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "SHT40")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "d083b141-2306-2923-a700-1c0e7b81df08")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U205")
+			(value "PI4ULS3V204")
+			(datasheet "https://www.diodes.com/assets/Datasheets/PI4ULS3V204.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "https://www.diodes.com/assets/Datasheets/PI4ULS3V204.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "PI4ULS3V204")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "e2800a80-3f69-898d-c32f-2aced7d55ad4")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "8")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "14")
+						)
+						(pin
+							(num "13")
+						)
+						(pin
+							(num "12")
+						)
+						(pin
+							(num "11")
+						)
+						(pin
+							(num "10")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U206")
+			(value "PI4ULS3V204")
+			(datasheet "https://www.diodes.com/assets/Datasheets/PI4ULS3V204.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "https://www.diodes.com/assets/Datasheets/PI4ULS3V204.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "PI4ULS3V204")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "300da905-dca7-cfee-df95-5fd78a157e74")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+						(pin
+							(num "5")
+						)
+						(pin
+							(num "8")
+						)
+						(pin
+							(num "7")
+						)
+						(pin
+							(num "14")
+						)
+						(pin
+							(num "13")
+						)
+						(pin
+							(num "12")
+						)
+						(pin
+							(num "11")
+						)
+						(pin
+							(num "10")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "U207")
+			(value "VL53L9CX")
+			(datasheet "datasheets/VL53L9CX_datasheet.pdf")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet") "datasheets/VL53L9CX_datasheet.pdf")
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "VL53L9CX")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "7d260101-44a2-99e9-ca85-efd408a29134")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "A11")
+						)
+						(pin
+							(num "A12")
+						)
+						(pin
+							(num "A10")
+						)
+						(pin
+							(num "B12")
+						)
+						(pin
+							(num "D12")
+						)
+						(pin
+							(num "E11")
+						)
+						(pin
+							(num "E8")
+						)
+						(pin
+							(num "E6")
+						)
+						(pin
+							(num "C12")
+						)
+						(pin
+							(num "B1")
+						)
+						(pin
+							(num "A1")
+						)
+					)
+				)
+			)
+		)
+		(comp
+			(ref "Y201")
+			(value "OSC_12MHz")
+			(fields
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(libsource
+				(lib "roomscanner")
+				(part "OSC_12MHz")
+				(description "")
+			)
+			(property
+				(name "Sheetname")
+				(value "")
+			)
+			(property
+				(name "Sheetfile")
+				(value "roomscanner-stack.kicad_sch")
+			)
+			(sheetpath
+				(names "/")
+				(tstamps "/")
+			)
+			(tstamps "f0fb74a8-899f-78da-02d3-cc26619d6478")
+			(units
+				(unit
+					(name "A")
+					(pins
+						(pin
+							(num "1")
+						)
+						(pin
+							(num "2")
+						)
+						(pin
+							(num "3")
+						)
+						(pin
+							(num "4")
+						)
+					)
+				)
+			)
+		)
+	)
+	(groups)
+	(variants)
+	(libparts
+		(libpart
+			(lib "roomscanner")
+			(part "Conn_1x06")
+			(fields
+				(field
+					(name "Reference") "J")
+				(field
+					(name "Value") "Conn_1x06")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "Pin_1")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "Pin_2")
+					(type "passive")
+				)
+				(pin
+					(num "3")
+					(name "Pin_3")
+					(type "passive")
+				)
+				(pin
+					(num "4")
+					(name "Pin_4")
+					(type "passive")
+				)
+				(pin
+					(num "5")
+					(name "Pin_5")
+					(type "passive")
+				)
+				(pin
+					(num "6")
+					(name "Pin_6")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "Conn_1x08")
+			(fields
+				(field
+					(name "Reference") "J")
+				(field
+					(name "Value") "Conn_1x08")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "Pin_1")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "Pin_2")
+					(type "passive")
+				)
+				(pin
+					(num "3")
+					(name "Pin_3")
+					(type "passive")
+				)
+				(pin
+					(num "4")
+					(name "Pin_4")
+					(type "passive")
+				)
+				(pin
+					(num "5")
+					(name "Pin_5")
+					(type "passive")
+				)
+				(pin
+					(num "6")
+					(name "Pin_6")
+					(type "passive")
+				)
+				(pin
+					(num "7")
+					(name "Pin_7")
+					(type "passive")
+				)
+				(pin
+					(num "8")
+					(name "Pin_8")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "Conn_1x10")
+			(fields
+				(field
+					(name "Reference") "J")
+				(field
+					(name "Value") "Conn_1x10")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "Pin_1")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "Pin_2")
+					(type "passive")
+				)
+				(pin
+					(num "3")
+					(name "Pin_3")
+					(type "passive")
+				)
+				(pin
+					(num "4")
+					(name "Pin_4")
+					(type "passive")
+				)
+				(pin
+					(num "5")
+					(name "Pin_5")
+					(type "passive")
+				)
+				(pin
+					(num "6")
+					(name "Pin_6")
+					(type "passive")
+				)
+				(pin
+					(num "7")
+					(name "Pin_7")
+					(type "passive")
+				)
+				(pin
+					(num "8")
+					(name "Pin_8")
+					(type "passive")
+				)
+				(pin
+					(num "9")
+					(name "Pin_9")
+					(type "passive")
+				)
+				(pin
+					(num "10")
+					(name "Pin_10")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "Conn_2x19")
+			(fields
+				(field
+					(name "Reference") "J")
+				(field
+					(name "Value") "Conn_2x19")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "Pin_1")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "Pin_2")
+					(type "passive")
+				)
+				(pin
+					(num "3")
+					(name "Pin_3")
+					(type "passive")
+				)
+				(pin
+					(num "4")
+					(name "Pin_4")
+					(type "passive")
+				)
+				(pin
+					(num "5")
+					(name "Pin_5")
+					(type "passive")
+				)
+				(pin
+					(num "6")
+					(name "Pin_6")
+					(type "passive")
+				)
+				(pin
+					(num "7")
+					(name "Pin_7")
+					(type "passive")
+				)
+				(pin
+					(num "8")
+					(name "Pin_8")
+					(type "passive")
+				)
+				(pin
+					(num "9")
+					(name "Pin_9")
+					(type "passive")
+				)
+				(pin
+					(num "10")
+					(name "Pin_10")
+					(type "passive")
+				)
+				(pin
+					(num "11")
+					(name "Pin_11")
+					(type "passive")
+				)
+				(pin
+					(num "12")
+					(name "Pin_12")
+					(type "passive")
+				)
+				(pin
+					(num "13")
+					(name "Pin_13")
+					(type "passive")
+				)
+				(pin
+					(num "14")
+					(name "Pin_14")
+					(type "passive")
+				)
+				(pin
+					(num "15")
+					(name "Pin_15")
+					(type "passive")
+				)
+				(pin
+					(num "16")
+					(name "Pin_16")
+					(type "passive")
+				)
+				(pin
+					(num "17")
+					(name "Pin_17")
+					(type "passive")
+				)
+				(pin
+					(num "18")
+					(name "Pin_18")
+					(type "passive")
+				)
+				(pin
+					(num "19")
+					(name "Pin_19")
+					(type "passive")
+				)
+				(pin
+					(num "20")
+					(name "Pin_20")
+					(type "passive")
+				)
+				(pin
+					(num "21")
+					(name "Pin_21")
+					(type "passive")
+				)
+				(pin
+					(num "22")
+					(name "Pin_22")
+					(type "passive")
+				)
+				(pin
+					(num "23")
+					(name "Pin_23")
+					(type "passive")
+				)
+				(pin
+					(num "24")
+					(name "Pin_24")
+					(type "passive")
+				)
+				(pin
+					(num "25")
+					(name "Pin_25")
+					(type "passive")
+				)
+				(pin
+					(num "26")
+					(name "Pin_26")
+					(type "passive")
+				)
+				(pin
+					(num "27")
+					(name "Pin_27")
+					(type "passive")
+				)
+				(pin
+					(num "28")
+					(name "Pin_28")
+					(type "passive")
+				)
+				(pin
+					(num "29")
+					(name "Pin_29")
+					(type "passive")
+				)
+				(pin
+					(num "30")
+					(name "Pin_30")
+					(type "passive")
+				)
+				(pin
+					(num "31")
+					(name "Pin_31")
+					(type "passive")
+				)
+				(pin
+					(num "32")
+					(name "Pin_32")
+					(type "passive")
+				)
+				(pin
+					(num "33")
+					(name "Pin_33")
+					(type "passive")
+				)
+				(pin
+					(num "34")
+					(name "Pin_34")
+					(type "passive")
+				)
+				(pin
+					(num "35")
+					(name "Pin_35")
+					(type "passive")
+				)
+				(pin
+					(num "36")
+					(name "Pin_36")
+					(type "passive")
+				)
+				(pin
+					(num "37")
+					(name "Pin_37")
+					(type "passive")
+				)
+				(pin
+					(num "38")
+					(name "Pin_38")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "LDK130")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "LDK130")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "VIN")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "passive")
+				)
+				(pin
+					(num "3")
+					(name "EN")
+					(type "passive")
+				)
+				(pin
+					(num "4")
+					(name "ADJ")
+					(type "passive")
+				)
+				(pin
+					(num "5")
+					(name "VOUT")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "LIS2DUXS12")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "LIS2DUXS12")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "SCL")
+					(type "passive")
+				)
+				(pin
+					(num "4")
+					(name "SDA")
+					(type "passive")
+				)
+				(pin
+					(num "6")
+					(name "GND")
+					(type "passive")
+				)
+				(pin
+					(num "9")
+					(name "VDD")
+					(type "passive")
+				)
+				(pin
+					(num "10")
+					(name "VDD_IO")
+					(type "passive")
+				)
+				(pin
+					(num "11")
+					(name "INT2")
+					(type "passive")
+				)
+				(pin
+					(num "12")
+					(name "INT1")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "LIS2MDL")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "LIS2MDL")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "SCL")
+					(type "passive")
+				)
+				(pin
+					(num "4")
+					(name "SDA")
+					(type "passive")
+				)
+				(pin
+					(num "6")
+					(name "GND")
+					(type "passive")
+				)
+				(pin
+					(num "7")
+					(name "INT/DRDY")
+					(type "passive")
+				)
+				(pin
+					(num "9")
+					(name "VDD")
+					(type "passive")
+				)
+				(pin
+					(num "10")
+					(name "VDD_IO")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "LPS22DF")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "LPS22DF")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "VDD_IO")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "SCL")
+					(type "passive")
+				)
+				(pin
+					(num "4")
+					(name "SDA")
+					(type "passive")
+				)
+				(pin
+					(num "7")
+					(name "INT_DRDY")
+					(type "passive")
+				)
+				(pin
+					(num "9")
+					(name "GND")
+					(type "passive")
+				)
+				(pin
+					(num "10")
+					(name "VDD")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "LSM6DSO16IS")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "LSM6DSO16IS")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "4")
+					(name "INT1")
+					(type "passive")
+				)
+				(pin
+					(num "5")
+					(name "VDDIO")
+					(type "passive")
+				)
+				(pin
+					(num "6")
+					(name "GND")
+					(type "passive")
+				)
+				(pin
+					(num "8")
+					(name "VDD")
+					(type "passive")
+				)
+				(pin
+					(num "9")
+					(name "INT2")
+					(type "passive")
+				)
+				(pin
+					(num "13")
+					(name "SCL")
+					(type "passive")
+				)
+				(pin
+					(num "14")
+					(name "SDA")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "LSM6DSV16X")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "LSM6DSV16X")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "SDO/SA0")
+					(type "passive")
+				)
+				(pin
+					(num "4")
+					(name "INT1")
+					(type "passive")
+				)
+				(pin
+					(num "5")
+					(name "VDD_IO")
+					(type "passive")
+				)
+				(pin
+					(num "6")
+					(name "GND")
+					(type "passive")
+				)
+				(pin
+					(num "8")
+					(name "VDD")
+					(type "passive")
+				)
+				(pin
+					(num "9")
+					(name "INT2")
+					(type "passive")
+				)
+				(pin
+					(num "12")
+					(name "CS")
+					(type "passive")
+				)
+				(pin
+					(num "13")
+					(name "SCL")
+					(type "passive")
+				)
+				(pin
+					(num "14")
+					(name "SDA")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "NXS0108")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "NXS0108")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "A1")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "VCCA")
+					(type "passive")
+				)
+				(pin
+					(num "3")
+					(name "A2")
+					(type "passive")
+				)
+				(pin
+					(num "4")
+					(name "A3")
+					(type "passive")
+				)
+				(pin
+					(num "10")
+					(name "OE")
+					(type "passive")
+				)
+				(pin
+					(num "11")
+					(name "GND")
+					(type "passive")
+				)
+				(pin
+					(num "17")
+					(name "B3")
+					(type "passive")
+				)
+				(pin
+					(num "18")
+					(name "B2")
+					(type "passive")
+				)
+				(pin
+					(num "19")
+					(name "VCCB")
+					(type "passive")
+				)
+				(pin
+					(num "20")
+					(name "B1")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "OSC_12MHz")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "OSC_12MHz")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "OE")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "GND")
+					(type "passive")
+				)
+				(pin
+					(num "3")
+					(name "OUT")
+					(type "passive")
+				)
+				(pin
+					(num "4")
+					(name "VDD")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "PI4ULS3V204")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "PI4ULS3V204")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "VCCA")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "A1")
+					(type "passive")
+				)
+				(pin
+					(num "3")
+					(name "A2")
+					(type "passive")
+				)
+				(pin
+					(num "4")
+					(name "A3")
+					(type "passive")
+				)
+				(pin
+					(num "5")
+					(name "A4")
+					(type "passive")
+				)
+				(pin
+					(num "7")
+					(name "GND")
+					(type "passive")
+				)
+				(pin
+					(num "8")
+					(name "EN")
+					(type "passive")
+				)
+				(pin
+					(num "10")
+					(name "B4")
+					(type "passive")
+				)
+				(pin
+					(num "11")
+					(name "B3")
+					(type "passive")
+				)
+				(pin
+					(num "12")
+					(name "B2")
+					(type "passive")
+				)
+				(pin
+					(num "13")
+					(name "B1")
+					(type "passive")
+				)
+				(pin
+					(num "14")
+					(name "VCCB")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "SHT40")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "SHT40")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "SDA")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "SCL")
+					(type "passive")
+				)
+				(pin
+					(num "3")
+					(name "VDD")
+					(type "passive")
+				)
+				(pin
+					(num "4")
+					(name "GND")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "STTS22H")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "STTS22H")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "SCL")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "AL/INT")
+					(type "passive")
+				)
+				(pin
+					(num "3")
+					(name "VDD")
+					(type "passive")
+				)
+				(pin
+					(num "4")
+					(name "ADDR")
+					(type "passive")
+				)
+				(pin
+					(num "5")
+					(name "GND")
+					(type "passive")
+				)
+				(pin
+					(num "6")
+					(name "SDA")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "SW_SPDT")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "SW_SPDT")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "1")
+					(name "INT")
+					(type "passive")
+				)
+				(pin
+					(num "2")
+					(name "COM")
+					(type "passive")
+				)
+				(pin
+					(num "3")
+					(name "EXT")
+					(type "passive")
+				)
+			)
+		)
+		(libpart
+			(lib "roomscanner")
+			(part "VL53L9CX")
+			(fields
+				(field
+					(name "Reference") "U")
+				(field
+					(name "Value") "VL53L9CX")
+				(field
+					(name "Footprint")
+				)
+				(field
+					(name "Datasheet")
+				)
+				(field
+					(name "Description")
+				)
+			)
+			(pins
+				(pin
+					(num "A1")
+					(name "GND")
+					(type "passive")
+				)
+				(pin
+					(num "A10")
+					(name "INTR")
+					(type "passive")
+				)
+				(pin
+					(num "A11")
+					(name "SCL")
+					(type "passive")
+				)
+				(pin
+					(num "A12")
+					(name "SDA")
+					(type "passive")
+				)
+				(pin
+					(num "B1")
+					(name "VBAT_LDD")
+					(type "passive")
+				)
+				(pin
+					(num "B12")
+					(name "XSHUT")
+					(type "passive")
+				)
+				(pin
+					(num "C12")
+					(name "DVDD")
+					(type "passive")
+				)
+				(pin
+					(num "D12")
+					(name "SYNC_IN")
+					(type "passive")
+				)
+				(pin
+					(num "E6")
+					(name "AVDD")
+					(type "passive")
+				)
+				(pin
+					(num "E8")
+					(name "IOVDD")
+					(type "passive")
+				)
+				(pin
+					(num "E11")
+					(name "AP_CLK")
+					(type "passive")
+				)
+			)
+		)
+	)
+	(libraries
+		(library
+			(logical "roomscanner")
+			(uri "${KIPRJMOD}/roomscanner.kicad_sym")
+		)
+	)
+	(nets
+		(net
+			(code "1")
+			(name "+1V8")
+			(class "Default")
+			(node
+				(ref "U101")
+				(pin "4")
+				(pinfunction "ADJ_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "U101")
+				(pin "5")
+				(pinfunction "VOUT_5")
+				(pintype "passive")
+			)
+			(node
+				(ref "U103")
+				(pin "19")
+				(pinfunction "VCCB_19")
+				(pintype "passive")
+			)
+			(node
+				(ref "U104")
+				(pin "1")
+				(pinfunction "SDO/SA0_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "U104")
+				(pin "12")
+				(pinfunction "CS_12")
+				(pintype "passive")
+			)
+			(node
+				(ref "U104")
+				(pin "5")
+				(pinfunction "VDD_IO_5")
+				(pintype "passive")
+			)
+			(node
+				(ref "U104")
+				(pin "8")
+				(pinfunction "VDD_8")
+				(pintype "passive")
+			)
+			(node
+				(ref "U105")
+				(pin "10")
+				(pinfunction "VDD_IO_10")
+				(pintype "passive")
+			)
+			(node
+				(ref "U105")
+				(pin "9")
+				(pinfunction "VDD_9")
+				(pintype "passive")
+			)
+			(node
+				(ref "U106")
+				(pin "1")
+				(pinfunction "VDD_IO_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "U106")
+				(pin "10")
+				(pinfunction "VDD_10")
+				(pintype "passive")
+			)
+			(node
+				(ref "U107")
+				(pin "10")
+				(pinfunction "VDD_IO_10")
+				(pintype "passive")
+			)
+			(node
+				(ref "U107")
+				(pin "9")
+				(pinfunction "VDD_9")
+				(pintype "passive")
+			)
+			(node
+				(ref "U108")
+				(pin "3")
+				(pinfunction "VDD_3")
+				(pintype "passive")
+			)
+			(node
+				(ref "U109")
+				(pin "5")
+				(pinfunction "VDDIO_5")
+				(pintype "passive")
+			)
+			(node
+				(ref "U109")
+				(pin "8")
+				(pinfunction "VDD_8")
+				(pintype "passive")
+			)
+			(node
+				(ref "U110")
+				(pin "3")
+				(pinfunction "VDD_3")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "2")
+			(name "+3V3")
+			(class "Default")
+			(node
+				(ref "CN106")
+				(pin "4")
+				(pinfunction "Pin_4_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN206")
+				(pin "4")
+				(pinfunction "Pin_4_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN6")
+				(pin "4")
+				(pinfunction "Pin_4_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "U101")
+				(pin "1")
+				(pinfunction "VIN_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "U101")
+				(pin "3")
+				(pinfunction "EN_3")
+				(pintype "passive")
+			)
+			(node
+				(ref "U103")
+				(pin "2")
+				(pinfunction "VCCA_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "U205")
+				(pin "1")
+				(pinfunction "VCCA_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "U205")
+				(pin "8")
+				(pinfunction "EN_8")
+				(pintype "passive")
+			)
+			(node
+				(ref "U206")
+				(pin "1")
+				(pinfunction "VCCA_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "U206")
+				(pin "8")
+				(pinfunction "EN_8")
+				(pintype "passive")
+			)
+			(node
+				(ref "U207")
+				(pin "B1")
+				(pinfunction "VBAT_LDD_B1")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "3")
+			(name "+5V")
+			(class "Default")
+			(node
+				(ref "CN106")
+				(pin "5")
+				(pinfunction "Pin_5_5")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN206")
+				(pin "5")
+				(pinfunction "Pin_5_5")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN6")
+				(pin "5")
+				(pinfunction "Pin_5_5")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "4")
+			(name "/IKS_SCL")
+			(class "Default")
+			(node
+				(ref "U103")
+				(pin "20")
+				(pinfunction "B1_20")
+				(pintype "passive")
+			)
+			(node
+				(ref "U104")
+				(pin "13")
+				(pinfunction "SCL_13")
+				(pintype "passive")
+			)
+			(node
+				(ref "U105")
+				(pin "1")
+				(pinfunction "SCL_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "U106")
+				(pin "2")
+				(pinfunction "SCL_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "U107")
+				(pin "1")
+				(pinfunction "SCL_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "U108")
+				(pin "1")
+				(pinfunction "SCL_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "U109")
+				(pin "13")
+				(pinfunction "SCL_13")
+				(pintype "passive")
+			)
+			(node
+				(ref "U110")
+				(pin "2")
+				(pinfunction "SCL_2")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "5")
+			(name "/IKS_SDA")
+			(class "Default")
+			(node
+				(ref "U103")
+				(pin "18")
+				(pinfunction "B2_18")
+				(pintype "passive")
+			)
+			(node
+				(ref "U104")
+				(pin "14")
+				(pinfunction "SDA_14")
+				(pintype "passive")
+			)
+			(node
+				(ref "U105")
+				(pin "4")
+				(pinfunction "SDA_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "U106")
+				(pin "4")
+				(pinfunction "SDA_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "U107")
+				(pin "4")
+				(pinfunction "SDA_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "U108")
+				(pin "6")
+				(pinfunction "SDA_6")
+				(pintype "passive")
+			)
+			(node
+				(ref "U109")
+				(pin "14")
+				(pinfunction "SDA_14")
+				(pintype "passive")
+			)
+			(node
+				(ref "U110")
+				(pin "1")
+				(pinfunction "SDA_1")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "6")
+			(name "/VL53_CLK_EXT")
+			(class "Default")
+			(node
+				(ref "SW1")
+				(pin "3")
+				(pinfunction "EXT_3")
+				(pintype "passive")
+			)
+			(node
+				(ref "U206")
+				(pin "12")
+				(pinfunction "B2_12")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "7")
+			(name "/VL53_CLK_INT")
+			(class "Default")
+			(node
+				(ref "SW1")
+				(pin "1")
+				(pinfunction "INT_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "Y201")
+				(pin "3")
+				(pinfunction "OUT_3")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "8")
+			(name "/VL53_IOVDD")
+			(class "Default")
+			(node
+				(ref "U205")
+				(pin "14")
+				(pinfunction "VCCB_14")
+				(pintype "passive")
+			)
+			(node
+				(ref "U206")
+				(pin "14")
+				(pinfunction "VCCB_14")
+				(pintype "passive")
+			)
+			(node
+				(ref "U207")
+				(pin "E8")
+				(pinfunction "IOVDD_E8")
+				(pintype "passive")
+			)
+			(node
+				(ref "Y201")
+				(pin "4")
+				(pinfunction "VDD_4")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "9")
+			(name "/VL53_S_CLK")
+			(class "Default")
+			(node
+				(ref "SW1")
+				(pin "2")
+				(pinfunction "COM_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "U207")
+				(pin "E11")
+				(pinfunction "AP_CLK_E11")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "10")
+			(name "/VL53_S_INTR")
+			(class "Default")
+			(node
+				(ref "U206")
+				(pin "10")
+				(pinfunction "B4_10")
+				(pintype "passive")
+			)
+			(node
+				(ref "U207")
+				(pin "A10")
+				(pinfunction "INTR_A10")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "11")
+			(name "/VL53_S_SCL")
+			(class "Default")
+			(node
+				(ref "U205")
+				(pin "12")
+				(pinfunction "B2_12")
+				(pintype "passive")
+			)
+			(node
+				(ref "U207")
+				(pin "A11")
+				(pinfunction "SCL_A11")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "12")
+			(name "/VL53_S_SDA")
+			(class "Default")
+			(node
+				(ref "U205")
+				(pin "13")
+				(pinfunction "B1_13")
+				(pintype "passive")
+			)
+			(node
+				(ref "U207")
+				(pin "A12")
+				(pinfunction "SDA_A12")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "13")
+			(name "/VL53_S_SYNC")
+			(class "Default")
+			(node
+				(ref "U206")
+				(pin "13")
+				(pinfunction "B1_13")
+				(pintype "passive")
+			)
+			(node
+				(ref "U207")
+				(pin "D12")
+				(pinfunction "SYNC_IN_D12")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "14")
+			(name "/VL53_S_XSHUT")
+			(class "Default")
+			(node
+				(ref "U206")
+				(pin "11")
+				(pinfunction "B3_11")
+				(pintype "passive")
+			)
+			(node
+				(ref "U207")
+				(pin "B12")
+				(pinfunction "XSHUT_B12")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "15")
+			(name "GND")
+			(class "Default")
+			(node
+				(ref "CN106")
+				(pin "6")
+				(pinfunction "Pin_6_6")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN106")
+				(pin "7")
+				(pinfunction "Pin_7_7")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN206")
+				(pin "6")
+				(pinfunction "Pin_6_6")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN206")
+				(pin "7")
+				(pinfunction "Pin_7_7")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN6")
+				(pin "6")
+				(pinfunction "Pin_6_6")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN6")
+				(pin "7")
+				(pinfunction "Pin_7_7")
+				(pintype "passive")
+			)
+			(node
+				(ref "U101")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "U103")
+				(pin "11")
+				(pinfunction "GND_11")
+				(pintype "passive")
+			)
+			(node
+				(ref "U104")
+				(pin "6")
+				(pinfunction "GND_6")
+				(pintype "passive")
+			)
+			(node
+				(ref "U105")
+				(pin "6")
+				(pinfunction "GND_6")
+				(pintype "passive")
+			)
+			(node
+				(ref "U106")
+				(pin "9")
+				(pinfunction "GND_9")
+				(pintype "passive")
+			)
+			(node
+				(ref "U107")
+				(pin "6")
+				(pinfunction "GND_6")
+				(pintype "passive")
+			)
+			(node
+				(ref "U108")
+				(pin "4")
+				(pinfunction "ADDR_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "U108")
+				(pin "5")
+				(pinfunction "GND_5")
+				(pintype "passive")
+			)
+			(node
+				(ref "U109")
+				(pin "6")
+				(pinfunction "GND_6")
+				(pintype "passive")
+			)
+			(node
+				(ref "U110")
+				(pin "4")
+				(pinfunction "GND_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "U205")
+				(pin "7")
+				(pinfunction "GND_7")
+				(pintype "passive")
+			)
+			(node
+				(ref "U206")
+				(pin "7")
+				(pinfunction "GND_7")
+				(pintype "passive")
+			)
+			(node
+				(ref "U207")
+				(pin "A1")
+				(pinfunction "GND_A1")
+				(pintype "passive")
+			)
+			(node
+				(ref "Y201")
+				(pin "1")
+				(pinfunction "OE_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "Y201")
+				(pin "2")
+				(pinfunction "GND_2")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "16")
+			(name "IOREF")
+			(class "Default")
+			(node
+				(ref "CN106")
+				(pin "2")
+				(pinfunction "Pin_2_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN206")
+				(pin "2")
+				(pinfunction "Pin_2_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN6")
+				(pin "2")
+				(pinfunction "Pin_2_2")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "17")
+			(name "NRST")
+			(class "Default")
+			(node
+				(ref "CN106")
+				(pin "3")
+				(pinfunction "Pin_3_3")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN206")
+				(pin "3")
+				(pinfunction "Pin_3_3")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN6")
+				(pin "3")
+				(pinfunction "Pin_3_3")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "18")
+			(name "PA5")
+			(class "Default")
+			(node
+				(ref "CN105")
+				(pin "6")
+				(pinfunction "Pin_6_6")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN205")
+				(pin "6")
+				(pinfunction "Pin_6_6")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN5")
+				(pin "6")
+				(pinfunction "Pin_6_6")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "19")
+			(name "PA6")
+			(class "Default")
+			(node
+				(ref "CN108")
+				(pin "1")
+				(pinfunction "Pin_1_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN208")
+				(pin "1")
+				(pinfunction "Pin_1_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN8")
+				(pin "1")
+				(pinfunction "Pin_1_1")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "20")
+			(name "PB1")
+			(class "Default")
+			(node
+				(ref "CN108")
+				(pin "4")
+				(pinfunction "Pin_4_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN208")
+				(pin "4")
+				(pinfunction "Pin_4_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN8")
+				(pin "4")
+				(pinfunction "Pin_4_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "U206")
+				(pin "2")
+				(pinfunction "A1_2")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "21")
+			(name "PB5")
+			(class "Default")
+			(node
+				(ref "CN105")
+				(pin "4")
+				(pinfunction "Pin_4_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN205")
+				(pin "4")
+				(pinfunction "Pin_4_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN5")
+				(pin "4")
+				(pinfunction "Pin_4_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "U206")
+				(pin "3")
+				(pinfunction "A2_3")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "22")
+			(name "PB6")
+			(class "Default")
+			(node
+				(ref "CN109")
+				(pin "2")
+				(pinfunction "Pin_2_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN209")
+				(pin "2")
+				(pinfunction "Pin_2_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN9")
+				(pin "2")
+				(pinfunction "Pin_2_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "U206")
+				(pin "4")
+				(pinfunction "A3_4")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "23")
+			(name "PB7")
+			(class "Default")
+			(node
+				(ref "CN109")
+				(pin "1")
+				(pinfunction "Pin_1_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN209")
+				(pin "1")
+				(pinfunction "Pin_1_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN9")
+				(pin "1")
+				(pinfunction "Pin_1_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "U206")
+				(pin "5")
+				(pinfunction "A4_5")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "24")
+			(name "PB8")
+			(class "Default")
+			(node
+				(ref "CN105")
+				(pin "10")
+				(pinfunction "Pin_10_10")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN205")
+				(pin "10")
+				(pinfunction "Pin_10_10")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN5")
+				(pin "10")
+				(pinfunction "Pin_10_10")
+				(pintype "passive")
+			)
+			(node
+				(ref "U103")
+				(pin "1")
+				(pinfunction "A1_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "U205")
+				(pin "3")
+				(pinfunction "A2_3")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "25")
+			(name "PB9")
+			(class "Default")
+			(node
+				(ref "CN105")
+				(pin "9")
+				(pinfunction "Pin_9_9")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN205")
+				(pin "9")
+				(pinfunction "Pin_9_9")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN5")
+				(pin "9")
+				(pinfunction "Pin_9_9")
+				(pintype "passive")
+			)
+			(node
+				(ref "U103")
+				(pin "3")
+				(pinfunction "A2_3")
+				(pintype "passive")
+			)
+			(node
+				(ref "U205")
+				(pin "2")
+				(pinfunction "A1_2")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "26")
+			(name "PC0")
+			(class "Default")
+			(node
+				(ref "CN108")
+				(pin "2")
+				(pinfunction "Pin_2_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN208")
+				(pin "2")
+				(pinfunction "Pin_2_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN8")
+				(pin "2")
+				(pinfunction "Pin_2_2")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "27")
+			(name "PC2")
+			(class "Default")
+			(node
+				(ref "CN108")
+				(pin "5")
+				(pinfunction "Pin_5_5")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN208")
+				(pin "5")
+				(pinfunction "Pin_5_5")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN8")
+				(pin "5")
+				(pinfunction "Pin_5_5")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "28")
+			(name "PC3")
+			(class "Default")
+			(node
+				(ref "CN108")
+				(pin "3")
+				(pinfunction "Pin_3_3")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN208")
+				(pin "3")
+				(pinfunction "Pin_3_3")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN8")
+				(pin "3")
+				(pinfunction "Pin_3_3")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "29")
+			(name "PD14")
+			(class "Default")
+			(node
+				(ref "CN105")
+				(pin "3")
+				(pinfunction "Pin_3_3")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN205")
+				(pin "3")
+				(pinfunction "Pin_3_3")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN5")
+				(pin "3")
+				(pinfunction "Pin_3_3")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "30")
+			(name "PD15")
+			(class "Default")
+			(node
+				(ref "CN105")
+				(pin "2")
+				(pinfunction "Pin_2_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN205")
+				(pin "2")
+				(pinfunction "Pin_2_2")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN5")
+				(pin "2")
+				(pinfunction "Pin_2_2")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "31")
+			(name "PE9")
+			(class "Default")
+			(node
+				(ref "CN109")
+				(pin "7")
+				(pinfunction "Pin_7_7")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN209")
+				(pin "7")
+				(pinfunction "Pin_7_7")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN9")
+				(pin "7")
+				(pinfunction "Pin_7_7")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "32")
+			(name "PE11")
+			(class "Default")
+			(node
+				(ref "CN109")
+				(pin "6")
+				(pinfunction "Pin_6_6")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN209")
+				(pin "6")
+				(pinfunction "Pin_6_6")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN9")
+				(pin "6")
+				(pinfunction "Pin_6_6")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "33")
+			(name "PE13")
+			(class "Default")
+			(node
+				(ref "CN109")
+				(pin "4")
+				(pinfunction "Pin_4_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN209")
+				(pin "4")
+				(pinfunction "Pin_4_4")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN9")
+				(pin "4")
+				(pinfunction "Pin_4_4")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "34")
+			(name "PE14")
+			(class "Default")
+			(node
+				(ref "CN109")
+				(pin "5")
+				(pinfunction "Pin_5_5")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN209")
+				(pin "5")
+				(pinfunction "Pin_5_5")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN9")
+				(pin "5")
+				(pinfunction "Pin_5_5")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "35")
+			(name "PF3")
+			(class "Default")
+			(node
+				(ref "CN105")
+				(pin "1")
+				(pinfunction "Pin_1_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN205")
+				(pin "1")
+				(pinfunction "Pin_1_1")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN5")
+				(pin "1")
+				(pinfunction "Pin_1_1")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "36")
+			(name "PF11")
+			(class "Default")
+			(node
+				(ref "CN108")
+				(pin "6")
+				(pinfunction "Pin_6_6")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN208")
+				(pin "6")
+				(pinfunction "Pin_6_6")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN8")
+				(pin "6")
+				(pinfunction "Pin_6_6")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "37")
+			(name "PG9")
+			(class "Default")
+			(node
+				(ref "CN105")
+				(pin "5")
+				(pinfunction "Pin_5_5")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN205")
+				(pin "5")
+				(pinfunction "Pin_5_5")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN5")
+				(pin "5")
+				(pinfunction "Pin_5_5")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "38")
+			(name "PG12")
+			(class "Default")
+			(node
+				(ref "CN109")
+				(pin "8")
+				(pinfunction "Pin_8_8")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN209")
+				(pin "8")
+				(pinfunction "Pin_8_8")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN9")
+				(pin "8")
+				(pinfunction "Pin_8_8")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "39")
+			(name "PG14")
+			(class "Default")
+			(node
+				(ref "CN109")
+				(pin "3")
+				(pinfunction "Pin_3_3")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN209")
+				(pin "3")
+				(pinfunction "Pin_3_3")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN9")
+				(pin "3")
+				(pinfunction "Pin_3_3")
+				(pintype "passive")
+			)
+		)
+		(net
+			(code "40")
+			(name "VIN")
+			(class "Default")
+			(node
+				(ref "CN106")
+				(pin "8")
+				(pinfunction "Pin_8_8")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN206")
+				(pin "8")
+				(pinfunction "Pin_8_8")
+				(pintype "passive")
+			)
+			(node
+				(ref "CN6")
+				(pin "8")
+				(pinfunction "Pin_8_8")
+				(pintype "passive")
+			)
+		)
+	)
+)
