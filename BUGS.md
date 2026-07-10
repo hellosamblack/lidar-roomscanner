@@ -13,7 +13,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | ID      | Status  | Area          | Title |
 |---------|---------|---------------|-------|
 | BUG-001 | fixed   | host/viewer   | Spatial surface mode floods console with Open3D "invalid tetra" warnings |
-| BUG-002 | open    | host/viewer   | Spatial surface mode pins many CPU cores; GPU sits idle |
+| BUG-002 | fixed   | host/viewer   | Spatial surface mode pins many CPU cores; GPU sits idle |
 | BUG-003 | fixed   | host/viewer   | View color defaulted to depth instead of reflectance |
 | BUG-004 | open    | host/sensors  | Yaw fusion needs on-rig mag calibration + axis-convention check |
 | BUG-005 | open    | firmware/host | Connect-time transient: one CRC failure + RAW-frame skip on DTR connect |
@@ -43,8 +43,8 @@ spams. The mesh that comes back is still completely usable as the degenerate tet
 
 ## BUG-002 — Spatial surface mode pins many CPU cores; GPU sits idle
 
-- **Status:** open · **Reported:** 2026-07-10 (owner) · **Area:** host/viewer
-- **Where:** `host/src/roomscan/surface.py` (`alpha_shape_mesh`), `panel.py` `_rebuild_spatial_mesh`
+- **Status:** **fixed** 2026-07-10 (this branch) · **Reported:** 2026-07-10 (owner) · **Area:** host/viewer
+- **Where:** `host/src/roomscan/surface.py` (`grid_triangles_3d`), `panel.py` `_render_surface`
 
 With spatial surface mode on, many CPU cores are pinned while the GPU stays nearly idle. Owner
 question: can this be offloaded to the GPU?
@@ -66,7 +66,7 @@ per-vertex KDTree back-matching loop in `alpha_shape_mesh` adds single-core cost
 4. True GPU surface reconstruction (TSDF/surfel raycast) — belongs to Phase 6 SLAM work, where a
    TSDF volume exists anyway; not worth building just for the panel preview.
 
-Recommendation: do (3) — it fixes BUG-001 and BUG-002 at once for this data shape.
+**Fix:** Implemented Option 3. Since the cloud is structured as an organized grid, "spatial" adjacency is computed using grid-adjacency triangulation with a 3D Euclidean distance threshold (`grid_triangles_3d` in `surface.py`). This runs in a fully-vectorized O(N) NumPy pass every frame with near-zero CPU footprint, completely resolving CPU pinning and avoiding Qhull failures.
 
 ## BUG-003 — View color defaulted to depth instead of reflectance
 
