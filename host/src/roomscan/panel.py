@@ -39,10 +39,19 @@ from .decoder import StreamDecoder
 from .deproject import Deprojector
 from .ir_image import ir_range, reflectance_to_rgb
 from .logbus import LogBus
+from .metrics import (
+    MetricsRegistry,
+    ResourceSampler,
+    fmt_bytes,
+    fmt_cpu_line,
+    fmt_gpu_line,
+    fmt_rate,
+    fmt_stream_line,
+)
 from .native import Transform
 from . import portguard
 from .pipeline import TransformStage
-from .protocol import CommandCode, FrameType, ProtocolError, parse_event
+from .protocol import HEADER_SIZE, CommandCode, FrameType, ProtocolError, parse_event
 from .sensors import SensorState, gizmo_pose, tilt_compensated_heading
 from .sensors_widgets import render_compass, render_sparkline
 from .shading import MODES as _NEAR_MODES
@@ -91,7 +100,12 @@ _HELP_LINES = [
     "",
     "Mouse:  left-drag orbit (yaw only)  |  ctrl / middle-drag pan  |  wheel zoom",
     "        (camera is tilt-locked: it spins level and pans but never tips)",
-    "Key:    H  this help",
+    "Key:    H  this help    M  toggle metrics overlay    G  orientation gizmo",
+    "",
+    "Metrics overlay (top-left of the 3D view): per-sensor sample rates as",
+    "  →hub (device cadence from frame timestamps) / →host (arrival rate) — a",
+    "  gap between them means frames dropped on the link; plus rendered FPS,",
+    "  link + NIC bandwidth, CPU per core, RAM, and GPU/VRAM.",
     "",
     "Status   fps, frame/seq-gap/drop/crc/raw counters, current usecase + color.",
     "Device   Ping / Request CALIB / Reinit; usecase; exposure (ms, sent on release).",
@@ -177,7 +191,7 @@ class _Pacer:
 
 
 def _run_reader(source, decoder, stage, stats, slot, fault, bus, client, recorder,
-                pacer, is_stopped, state=None):
+                pacer, is_stopped, state=None, metrics=None):
     """Reader-thread body (module-level so it's unit-testable without a window).
 
     Owns source+decoder+transform; routes device EVENT -> log bus, ACK ->
@@ -209,6 +223,13 @@ def _run_reader(source, decoder, stage, stats, slot, fault, bus, client, recorde
                 continue
             if ft != FrameType.DATA:
                 continue
+            if metrics is not None:
+                # Feed every DATA frame (RAW/DEPTH/CALIB/IMU/ENV) so per-sensor
+                # rates and link bandwidth see the full stream, not just the
+                # frames that survive stage.feed's RAW->depth filter. Wire size
+                # = header + payload + CRC32.
+                metrics.record(frame.header, HEADER_SIZE + frame.header.payload_len + 4,
+                               time.monotonic())
             if state is not None:
                 try:
                     state.feed(frame)   # streams 9/10 -> SensorState; ignores others
@@ -264,6 +285,11 @@ class ControlPanel:
         self.gizmo_scale = float(getattr(args, "gizmo_scale", 0.15) or 0.15)
         self._gizmo_added = False
         self.stats = Stats()
+        # metrics HUD: per-sensor rate meters + a background resource sampler.
+        # Fed from the reader thread; read on the UI tick. Overlay is toggleable.
+        self.resource_sampler = ResourceSampler()
+        self.metrics = MetricsRegistry(sampler=self.resource_sampler)
+        self.metrics_overlay = bool(getattr(args, "metrics_overlay", True))
         self.slot: queue.Queue = queue.Queue(maxsize=1)
         self.fault: dict = {}
         self._stop = False
@@ -331,6 +357,7 @@ class ControlPanel:
 
         self._build_scene()
         self._build_panel()
+        self._build_overlay()
         self.window.set_on_layout(self._on_layout)
         self.window.set_on_close(self._on_close)
         self.window.set_on_tick_event(self._on_tick)
@@ -349,6 +376,29 @@ class ControlPanel:
         # it fight our leveling and produce the jitter; CONSUMED stops it).
         self.scene_widget.set_on_mouse(self._on_mouse)
         self.window.add_child(self.scene_widget)
+
+    def _build_overlay(self):
+        """A floating metrics HUD drawn over the top-left of the 3D scene (a
+        Window child positioned in _on_layout, NOT inside the side panel).
+        Fixed pool of labels updated in place at the UI cadence; hidden/shown
+        by the Metrics-overlay checkbox / M key."""
+        gui = self._gui
+        em = self.window.theme.font_size
+        self.overlay = gui.Vert(0.02 * em, gui.Margins(0.4 * em, 0.3 * em, 0.4 * em, 0.3 * em))
+        self._ov_fps = gui.Label("")
+        self._ov_sensors = [gui.Label("") for _ in range(4)]   # ToF/IMU/Env (+spare)
+        self._ov_link = gui.Label("")
+        self._ov_cpu = gui.Label("")
+        self._ov_ram = gui.Label("")
+        self._ov_gpu = gui.Label("")
+        self._ov_nic = gui.Label("")
+        fg = gui.Color(0.75, 1.0, 0.78)          # bright green, legible on the dark scene
+        for lb in (self._ov_fps, *self._ov_sensors, self._ov_link,
+                   self._ov_cpu, self._ov_ram, self._ov_gpu, self._ov_nic):
+            lb.text_color = fg
+            self.overlay.add_child(lb)
+        self.overlay.visible = self.metrics_overlay
+        self.window.add_child(self.overlay)
 
     def _group(self, title, *, open=True):
         """A collapsable group added to the panel, with consistent margins."""
@@ -414,6 +464,10 @@ class ControlPanel:
         self.chk_bg.checked = True
         self.chk_bg.set_on_checked(self._on_bg)
         view.add_child(self.chk_bg)
+        self.chk_metrics = gui.Checkbox("Metrics overlay (M)")
+        self.chk_metrics.checked = self.metrics_overlay
+        self.chk_metrics.set_on_checked(self._on_metrics_overlay)
+        view.add_child(self.chk_metrics)
         vrow = gui.Horiz(0.25 * em)
         for text, cb in (("Rotate 90", self._on_rotate), ("Reset", self._on_reset_view),
                          ("Help", self._show_help)):
@@ -543,14 +597,20 @@ class ControlPanel:
         panel_w = min(panel_w, r.width - 100)
         self.scene_widget.frame = gui.Rect(r.x, r.y, r.width - panel_w, r.height)
         self.panel.frame = gui.Rect(r.x + r.width - panel_w, r.y, panel_w, r.height)
+        # metrics HUD: sized to its content, pinned to the scene's top-left
+        pref = self.overlay.calc_preferred_size(ctx, gui.Widget.Constraints())
+        pad = int(0.5 * self.window.theme.font_size)
+        self.overlay.frame = gui.Rect(r.x + pad, r.y + pad, pref.width, pref.height)
 
     # ---- lifecycle ----------------------------------------------------------
     def start(self):
+        self.resource_sampler.start()
         self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._reader_thread.start()
 
     def _on_close(self):
         self._stop = True
+        self.resource_sampler.stop()       # join the sampler thread before teardown
         self.pacer.paused.clear()          # unblock a paused reader so it can exit
         try:
             self.source.close()            # unblocks a blocking read; pump's finally re-closes harmlessly
@@ -579,7 +639,7 @@ class ControlPanel:
                 near_mode=self.near_mode, near_cutoff_m=self.near_cutoff_m,
                 near_emphasis=self.near_emphasis,
                 imu_gizmo=self.imu_gizmo, sensors_panel=self.sensors_panel,
-                gizmo_scale=self.gizmo_scale)
+                gizmo_scale=self.gizmo_scale, metrics_overlay=self.metrics_overlay)
             path = cfg.save()
             self.bus.publish(f"saved config to {path}")
         except Exception as exc:  # never let a config write block window close
@@ -589,7 +649,7 @@ class ControlPanel:
     def _reader_loop(self):
         _run_reader(self.source, self.decoder, self.stage, self.stats, self.slot,
                     self.fault, self.bus, self.client, self.recorder, self.pacer,
-                    lambda: self._stop, self.sensor_state)
+                    lambda: self._stop, self.sensor_state, self.metrics)
 
     # ---- tick (GUI main thread) --------------------------------------------
     def _on_tick(self):
@@ -618,6 +678,7 @@ class ControlPanel:
             self._update_status()
             self._update_ir()
             self._update_sensors()
+            self._update_metrics()
             self._drain_log()
             redraw = True
         return redraw
@@ -658,6 +719,7 @@ class ControlPanel:
             self.pcd.colors = o3d.utility.Vector3dVector(np.zeros((0, 3)))
             self._show_geometries(pts)
         self._shown += 1
+        self.metrics.tick_render(time.monotonic())   # rendered-FPS counter
 
     def _show_geometries(self, all_pts):
         """Push the dot cloud to the scene and (re)frame the camera from the
@@ -814,6 +876,31 @@ class ControlPanel:
             line2 += f"  raw-skip {self.stage.raw_skipped_awaiting_calib}"
         self.lbl_counts2.text = line2
 
+    def _update_metrics(self):
+        """Refresh the HUD overlay labels from a metrics snapshot (UI thread,
+        <=4 Hz). Relayouts the overlay so it tracks its (variable-width) content;
+        a no-op past setting visibility when the overlay is hidden."""
+        self.overlay.visible = self.metrics_overlay
+        if not self.metrics_overlay:
+            return
+        snap = self.metrics.snapshot(time.monotonic())
+        self._ov_fps.text = f"FPS {snap.render_fps:.1f}"
+        for i, lb in enumerate(self._ov_sensors):
+            lb.text = fmt_stream_line(snap.streams[i]) if i < len(snap.streams) else ""
+        self._ov_link.text = f"Link {fmt_rate(snap.link_bytes_per_s)}"
+        res = snap.resources
+        if res is None:                       # sampler hasn't produced its first pass yet
+            self._ov_cpu.text = "CPU  sampling…"
+            self._ov_ram.text = ""
+            self._ov_gpu.text = ""
+            self._ov_nic.text = ""
+        else:
+            self._ov_cpu.text = fmt_cpu_line(res)
+            self._ov_ram.text = f"RAM  {fmt_bytes(res.ram_used)}/{fmt_bytes(res.ram_total)}"
+            self._ov_gpu.text = fmt_gpu_line(res)
+            self._ov_nic.text = f"NIC  {fmt_rate(res.net_bytes_per_s)}"
+        self.window.set_needs_layout()        # text widths changed -> re-fit the frame
+
     def _np_to_o3d(self, rgb: np.ndarray):
         """(H,W,3) uint8 RGB -> o3d.geometry.Image, the shape gui.ImageWidget /
         update_image expect. Shared by the IR monitor and the Sensors widgets."""
@@ -907,6 +994,11 @@ class ControlPanel:
         self._dark_bg = checked
         self.scene_widget.scene.set_background(_BG_DARK if checked else _BG_LIGHT)
 
+    def _on_metrics_overlay(self, checked):
+        self.metrics_overlay = checked
+        self.overlay.visible = checked
+        self.bus.publish(f"metrics overlay -> {'on' if checked else 'off'}")
+
     def _on_reset_view(self):
         self._camera_set = False
         self._reset_camera()
@@ -977,6 +1069,12 @@ class ControlPanel:
         if event.type == gui.KeyEvent.DOWN and event.key == gui.KeyName.H:
             self._show_help()
             return True
+        if event.type == gui.KeyEvent.DOWN and event.key == gui.KeyName.M:
+            self.metrics_overlay = not self.metrics_overlay
+            self.overlay.visible = self.metrics_overlay
+            self.chk_metrics.checked = self.metrics_overlay
+            self.bus.publish(f"metrics overlay -> {'on' if self.metrics_overlay else 'off'}")
+            return True
         if event.type == gui.KeyEvent.DOWN and event.key == gui.KeyName.G:
             self.imu_gizmo = not self.imu_gizmo
             if not self.imu_gizmo and self._gizmo_added:
@@ -1029,7 +1127,7 @@ class ControlPanel:
 _PANEL_FIELDS = ("point_size", "ir_colormap", "ir_freeze_range", "panel_width",
                  "near_mode", "near_cutoff_m", "near_emphasis",
                  "surface_enabled", "surface_mode", "surface_threshold_pct",
-                 "imu_gizmo", "sensors_panel", "gizmo_scale")
+                 "imu_gizmo", "sensors_panel", "gizmo_scale", "metrics_overlay")
 
 
 def _fill_panel_fields(args) -> None:

@@ -55,6 +55,7 @@ class ViewerConfig:
     imu_gizmo: bool = True             # show the orientation gizmo in the scene
     sensors_panel: bool = True         # show the Sensors panel group
     gizmo_scale: float = 0.15          # gizmo axis length (metres)
+    metrics_overlay: bool = True       # show the on-scene metrics HUD (rates/fps/resources)
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "ViewerConfig":

@@ -281,6 +281,25 @@ def test_reader_surfaces_fault():
     assert isinstance(fault["error"], OSError)
 
 
+def test_reader_feeds_metrics_for_data_frames():
+    from roomscan.metrics import MetricsRegistry
+    reg = MetricsRegistry(window_s=10.0)
+    stats = Stats()
+    slot: queue.Queue = queue.Queue(maxsize=1)
+    bus = LogBus()
+    fault: dict = {}
+    frames = b"".join(_depth_frame(i) for i in range(1, 4))
+    _run_reader(_OneShotSource(frames), StreamDecoder(), TransformStage(), stats, slot,
+                fault, bus, None, Recorder(), _Pacer(0.0), lambda: False, None, reg)
+    snap = reg.snapshot(now=time.monotonic())
+    # The feed path created a ToF meter from the DEPTH_ZF32 frames (rate math
+    # itself is covered by the metrics unit tests with controlled timings; here
+    # the 3 frames are recorded in one monotonic instant so span~0 -> rate 0).
+    assert stats.frames == 3
+    assert [s.label for s in snap.streams] == ["ToF"]
+    assert snap.streams[0].stream_id == StreamId.DEPTH_ZF32
+
+
 def test_reader_paces_frames_with_interval():
     frames = b"".join(_depth_frame(i) for i in range(1, 4))
     t0 = time.monotonic()
