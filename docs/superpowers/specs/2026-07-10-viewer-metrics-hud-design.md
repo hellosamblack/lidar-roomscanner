@@ -123,6 +123,35 @@ presentation wiring in `panel.py`.
 - No historical graphs/plots of metrics — instantaneous readout only.
 - No per-env-sensor rate split (bundled in ENV; would need a protocol change).
 
+## Revision 2 (owner feedback, 2026-07-10) — bars + per-process only
+
+Three changes after the first live look:
+
+1. **Bars, not raw numbers.** The overlay is now an **image** (`metrics_hud.py`,
+   Pillow) rendered into a single `gui.ImageWidget`, not a stack of `gui.Label`s.
+   This was forced by a real bug — Open3D's gui font renders `→` (and block-bar
+   glyphs) as `?` — and it gives true capacity bars. Each row is
+   `label [====----] value`, color-coded green/amber/red. Sensor rows show
+   `host/hub` where the **bar = host_hz / device_hz** (delivery ratio: full =
+   keeping up), so no arbitrary per-sensor "max rate" constant is needed.
+
+2. **Per-process, not system-wide.** `ResourceSnapshot` now measures **this
+   process** via `psutil.Process()`: `proc_cpu_percent` (100% = one core),
+   `proc_rss`, and per-process GPU. **CPU** is drawn as one bar-segment per core
+   in use (e.g. 1.6 cores → a full segment + a 60% segment). **GPU** uses NVML's
+   per-process SM utilization (`nvmlDeviceGetProcessUtilization`), which needs
+   the `monitor` extra (`nvidia-ml-py`); without it GPU shows `n/a`. nvidia-smi
+   is dropped (it can't do per-process util). **Per-process VRAM** is only shown
+   where the platform exposes it — on **Windows/WDDM it's `None`**, so the VRAM
+   row is omitted there (verified empirically on the dev box).
+
+3. **Link renamed to USB; NIC dropped.** The scanner link is labeled **USB** and
+   its bar fills toward the CDC Full-Speed practical ceiling (~1.2 MB/s). System
+   **NIC is removed** — the transport is USB, so our project has no NIC traffic
+   yet; it returns with the Ethernet transport (Phase 5).
+
+`Pillow` moves from the `tools` extra to a hard dependency (the HUD needs it).
+
 ## Verification
 
 - Unit tests (`tests/test_metrics.py`): `RateMeter` device/host/bytes math incl.

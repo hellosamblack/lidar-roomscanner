@@ -39,15 +39,8 @@ from .decoder import StreamDecoder
 from .deproject import Deprojector
 from .ir_image import ir_range, reflectance_to_rgb
 from .logbus import LogBus
-from .metrics import (
-    MetricsRegistry,
-    ResourceSampler,
-    fmt_bytes,
-    fmt_cpu_line,
-    fmt_gpu_line,
-    fmt_rate,
-    fmt_stream_line,
-)
+from .metrics import MetricsRegistry, ResourceSampler
+from .metrics_hud import render_hud
 from .native import Transform
 from . import portguard
 from .pipeline import TransformStage
@@ -102,10 +95,10 @@ _HELP_LINES = [
     "        (camera is tilt-locked: it spins level and pans but never tips)",
     "Key:    H  this help    M  toggle metrics overlay    G  orientation gizmo",
     "",
-    "Metrics overlay (top-left of the 3D view): per-sensor sample rates as",
-    "  →hub (device cadence from frame timestamps) / →host (arrival rate) — a",
-    "  gap between them means frames dropped on the link; plus rendered FPS,",
-    "  link + NIC bandwidth, CPU per core, RAM, and GPU/VRAM.",
+    "Metrics overlay (top-left of the 3D view): capacity bars for our app.",
+    "  Sensor rows show host/hub rate — the bar is the fraction of what the",
+    "  sensor produced that reached the host (full = keeping up). Plus FPS,",
+    "  USB link use, and this process's CPU (cores), RAM, and GPU.",
     "",
     "Status   fps, frame/seq-gap/drop/crc/raw counters, current usecase + color.",
     "Device   Ping / Request CALIB / Reinit; usecase; exposure (ms, sent on release).",
@@ -378,25 +371,15 @@ class ControlPanel:
         self.window.add_child(self.scene_widget)
 
     def _build_overlay(self):
-        """A floating metrics HUD drawn over the top-left of the 3D scene (a
-        Window child positioned in _on_layout, NOT inside the side panel).
-        Fixed pool of labels updated in place at the UI cadence; hidden/shown
-        by the Metrics-overlay checkbox / M key."""
+        """A floating metrics HUD image drawn over the top-left of the 3D scene
+        (a Window child positioned in _on_layout, NOT inside the side panel).
+        Rendered by metrics_hud.render_hud into an ImageWidget so bars and text
+        look identical on every box (Open3D's gui font can't draw bars/arrows).
+        Hidden/shown by the Metrics-overlay checkbox / M key."""
         gui = self._gui
-        em = self.window.theme.font_size
-        self.overlay = gui.Vert(0.02 * em, gui.Margins(0.4 * em, 0.3 * em, 0.4 * em, 0.3 * em))
-        self._ov_fps = gui.Label("")
-        self._ov_sensors = [gui.Label("") for _ in range(4)]   # ToF/IMU/Env (+spare)
-        self._ov_link = gui.Label("")
-        self._ov_cpu = gui.Label("")
-        self._ov_ram = gui.Label("")
-        self._ov_gpu = gui.Label("")
-        self._ov_nic = gui.Label("")
-        fg = gui.Color(0.75, 1.0, 0.78)          # bright green, legible on the dark scene
-        for lb in (self._ov_fps, *self._ov_sensors, self._ov_link,
-                   self._ov_cpu, self._ov_ram, self._ov_gpu, self._ov_nic):
-            lb.text_color = fg
-            self.overlay.add_child(lb)
+        blank = np.zeros((10, 10, 3), dtype=np.uint8)
+        self.overlay = gui.ImageWidget(self._np_to_o3d(blank))
+        self._overlay_size = (10, 10)            # (w, h) tracked for _on_layout
         self.overlay.visible = self.metrics_overlay
         self.window.add_child(self.overlay)
 
@@ -597,10 +580,10 @@ class ControlPanel:
         panel_w = min(panel_w, r.width - 100)
         self.scene_widget.frame = gui.Rect(r.x, r.y, r.width - panel_w, r.height)
         self.panel.frame = gui.Rect(r.x + r.width - panel_w, r.y, panel_w, r.height)
-        # metrics HUD: sized to its content, pinned to the scene's top-left
-        pref = self.overlay.calc_preferred_size(ctx, gui.Widget.Constraints())
+        # metrics HUD image: pinned to the scene's top-left at its native size
+        w, h = self._overlay_size
         pad = int(0.5 * self.window.theme.font_size)
-        self.overlay.frame = gui.Rect(r.x + pad, r.y + pad, pref.width, pref.height)
+        self.overlay.frame = gui.Rect(r.x + pad, r.y + pad, w, h)
 
     # ---- lifecycle ----------------------------------------------------------
     def start(self):
@@ -877,29 +860,19 @@ class ControlPanel:
         self.lbl_counts2.text = line2
 
     def _update_metrics(self):
-        """Refresh the HUD overlay labels from a metrics snapshot (UI thread,
-        <=4 Hz). Relayouts the overlay so it tracks its (variable-width) content;
-        a no-op past setting visibility when the overlay is hidden."""
+        """Render the HUD image from a metrics snapshot and push it to the
+        overlay ImageWidget (UI thread, <=4 Hz). No-op past setting visibility
+        when the overlay is hidden."""
         self.overlay.visible = self.metrics_overlay
         if not self.metrics_overlay:
             return
         snap = self.metrics.snapshot(time.monotonic())
-        self._ov_fps.text = f"FPS {snap.render_fps:.1f}"
-        for i, lb in enumerate(self._ov_sensors):
-            lb.text = fmt_stream_line(snap.streams[i]) if i < len(snap.streams) else ""
-        self._ov_link.text = f"Link {fmt_rate(snap.link_bytes_per_s)}"
-        res = snap.resources
-        if res is None:                       # sampler hasn't produced its first pass yet
-            self._ov_cpu.text = "CPU  sampling…"
-            self._ov_ram.text = ""
-            self._ov_gpu.text = ""
-            self._ov_nic.text = ""
-        else:
-            self._ov_cpu.text = fmt_cpu_line(res)
-            self._ov_ram.text = f"RAM  {fmt_bytes(res.ram_used)}/{fmt_bytes(res.ram_total)}"
-            self._ov_gpu.text = fmt_gpu_line(res)
-            self._ov_nic.text = f"NIC  {fmt_rate(res.net_bytes_per_s)}"
-        self.window.set_needs_layout()        # text widths changed -> re-fit the frame
+        img = render_hud(snap)
+        h, w = img.shape[:2]
+        self.overlay.update_image(self._np_to_o3d(img))
+        if (w, h) != self._overlay_size:      # fixed-size render -> fires once
+            self._overlay_size = (w, h)
+            self.window.set_needs_layout()
 
     def _np_to_o3d(self, rgb: np.ndarray):
         """(H,W,3) uint8 RGB -> o3d.geometry.Image, the shape gui.ImageWidget /

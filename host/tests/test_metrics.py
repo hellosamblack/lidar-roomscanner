@@ -9,16 +9,11 @@ import time
 from roomscan.metrics import (
     MetricsRegistry,
     RateMeter,
-    ResourceSnapshot,
     ResourceSampler,
-    StreamRate,
     fmt_bytes,
-    fmt_cpu_line,
-    fmt_gpu_line,
     fmt_hz,
     fmt_rate,
-    fmt_stream_line,
-    probe_gpu,
+    probe_gpu_process,
 )
 from roomscan.protocol import FrameHeader, FrameType, StreamId
 
@@ -143,10 +138,6 @@ def test_registry_link_bytes_is_sum_across_streams():
 
 # --- formatters (pure) -------------------------------------------------------
 
-def test_fmt_hz_none_is_dash():
-    assert fmt_hz(None) == "—"
-
-
 def test_fmt_hz_precision_switches_at_10():
     assert fmt_hz(4.25) == "4.2"       # finer under 10 Hz
     assert fmt_hz(479.6) == "480"      # whole numbers above
@@ -163,67 +154,43 @@ def test_fmt_bytes_units_and_unknown():
     assert fmt_bytes(8 * 1024 * 1024 * 1024) == "8.0 GB"
 
 
-def test_fmt_stream_line_has_both_rates():
-    sr = StreamRate(7, "ToF", 28.1, 28.0, 431 * 1024.0)
-    line = fmt_stream_line(sr)
-    assert "ToF" in line and "→hub" in line and "→host" in line and "KB/s" in line
+def test_fmt_hz_dash_when_none():
+    assert fmt_hz(None) == "-"
 
 
-def test_fmt_stream_line_dash_device_when_none():
-    sr = StreamRate(9, "IMU", None, 476.0, 7000.0)
-    assert "→hub     —" in fmt_stream_line(sr)
-
-
-def _res(**over):
-    base = dict(cpu_percent=[10.0, 20.0], cpu_overall=15.0, ram_used=1, ram_total=2,
-                gpu_util=23.0, vram_used=1_000_000, vram_total=8_000_000,
-                gpu_source="pynvml", net_bytes_per_s=0.0)
-    base.update(over)
-    return ResourceSnapshot(**base)
-
-
-def test_fmt_gpu_line_present_and_na():
-    assert "GPU  23%" in fmt_gpu_line(_res())
-    assert fmt_gpu_line(_res(gpu_source="n/a", gpu_util=None)) == "GPU  n/a"
-
-
-def test_fmt_cpu_line_lists_cores():
-    line = fmt_cpu_line(_res(cpu_percent=[10.0, 90.0], cpu_overall=50.0))
-    assert "avg 50%" in line and "10" in line and "90" in line
-
-
-# --- probe_gpu (fallback chain) ----------------------------------------------
+# --- probe_gpu_process (per-process, NVML) -----------------------------------
 
 def _boom(exc=RuntimeError("gpu probe failed")):
-    def _p():
+    def _p(pid):
         raise exc
     return _p
 
 
-def test_probe_gpu_first_probe_wins():
-    def good():
-        return (42.0, 1_000_000, 8_000_000, "pynvml")
-    util, used, total, src = probe_gpu(probes=[good, _boom()])
-    assert (util, used, total, src) == (42.0, 1_000_000, 8_000_000, "pynvml")
+def test_probe_gpu_process_first_probe_wins():
+    def good(pid):
+        assert pid == 4321
+        return (42.0, None, 12_000_000_000, "RTX", "pynvml")
+    out = probe_gpu_process(4321, probes=[good, _boom()])
+    assert out == (42.0, None, 12_000_000_000, "RTX", "pynvml")
 
 
-def test_probe_gpu_falls_through_to_next_on_error():
-    def smi():
-        return (7.0, 2_000_000, 4_000_000, "nvidia-smi")
-    util, used, total, src = probe_gpu(probes=[_boom(ImportError("no pynvml")), smi])
-    assert src == "nvidia-smi" and util == 7.0
+def test_probe_gpu_process_falls_through_on_error():
+    def ok(pid):
+        return (7.0, 1_000, 2_000, "GPU", "pynvml")
+    out = probe_gpu_process(1, probes=[_boom(ImportError("no pynvml")), ok])
+    assert out[0] == 7.0 and out[4] == "pynvml"
 
 
-def test_probe_gpu_all_fail_returns_na():
-    util, used, total, src = probe_gpu(probes=[_boom(), _boom()])
-    assert (util, used, total, src) == (None, None, None, "n/a")
+def test_probe_gpu_process_all_fail_returns_na():
+    out = probe_gpu_process(1, probes=[_boom(), _boom()])
+    assert out == (None, None, None, None, "n/a")
 
 
-# --- ResourceSampler (real psutil, mocked GPU) -------------------------------
+# --- ResourceSampler (real psutil for THIS process, mocked GPU) --------------
 
-def test_resource_sampler_produces_snapshot():
+def test_resource_sampler_produces_process_snapshot():
     def fake_gpu():
-        return (55.0, 3_000_000, 8_000_000, "fake")
+        return (55.0, 3_000_000, 8_000_000, "Fake GPU", "fake")
     s = ResourceSampler(interval=0.05, gpu_probe=fake_gpu)
     s.start()
     try:
@@ -233,18 +200,18 @@ def test_resource_sampler_produces_snapshot():
             snap = s.latest()
             time.sleep(0.02)
         assert snap is not None, "sampler never produced a snapshot"
-        assert len(snap.cpu_percent) >= 1
-        assert snap.ram_total > 0 and 0 <= snap.ram_used <= snap.ram_total
+        assert snap.n_cores >= 1
+        assert snap.proc_cpu_percent >= 0.0
+        assert snap.ram_total > 0 and 0 < snap.proc_rss <= snap.ram_total
         assert snap.gpu_util == 55.0 and snap.gpu_source == "fake"
-        assert snap.vram_used == 3_000_000 and snap.vram_total == 8_000_000
-        assert snap.net_bytes_per_s >= 0.0
+        assert snap.proc_vram == 3_000_000 and snap.vram_total == 8_000_000
     finally:
         s.stop()
 
 
 def test_resource_sampler_gpu_na_when_probe_fails():
     def na_probe():
-        return probe_gpu(probes=[_boom()])
+        return probe_gpu_process(999999, probes=[_boom()])
 
     s = ResourceSampler(interval=0.05, gpu_probe=na_probe)
     s.start()
@@ -263,7 +230,7 @@ def test_resource_sampler_gpu_na_when_probe_fails():
 
 def test_resource_sampler_stop_is_idempotent_and_joins():
     def fake_gpu():
-        return (0.0, 0, 1, "fake")
+        return (0.0, None, 1, "g", "fake")
     s = ResourceSampler(interval=0.05, gpu_probe=fake_gpu)
     s.start()
     s.stop()

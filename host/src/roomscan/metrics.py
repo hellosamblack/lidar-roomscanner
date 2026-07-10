@@ -21,7 +21,6 @@ latest-snapshot via an atomic reference swap.
 """
 from __future__ import annotations
 
-import subprocess
 import threading
 import time
 from collections import deque
@@ -113,15 +112,20 @@ class StreamRate:
 
 @dataclass(frozen=True)
 class ResourceSnapshot:
-    cpu_percent: list[float]        # per logical core
-    cpu_overall: float
-    ram_used: int
-    ram_total: int
-    gpu_util: float | None
-    vram_used: int | None
+    """Resource usage of THIS process (not the whole system), so the HUD shows
+    what our app consumes. ``proc_cpu_percent`` is summed across cores
+    (100% == one full core); divide by 100 for core-equivalents. ``proc_vram``
+    is None where the platform can't attribute GPU memory per process (Windows
+    WDDM), in which case the HUD omits the VRAM bar."""
+    proc_cpu_percent: float
+    n_cores: int
+    proc_rss: int                   # our process resident set size (bytes)
+    ram_total: int                  # system RAM (the capacity the bar fills toward)
+    gpu_util: float | None          # our process SM utilization %, None if no NVML
+    proc_vram: int | None           # our process VRAM (bytes), None if unavailable
     vram_total: int | None
-    gpu_source: str                 # "pynvml" | "nvidia-smi" | "n/a" | test tag
-    net_bytes_per_s: float
+    gpu_name: str | None
+    gpu_source: str                 # "pynvml" | "n/a" | test tag
 
 
 @dataclass(frozen=True)
@@ -189,57 +193,13 @@ class MetricsRegistry:
         return MetricsSnapshot(self.render_fps(now), streams, link_bps, resources)
 
 
-# --- GPU probing (fallback chain: pynvml -> nvidia-smi -> n/a) ----------------
-
-def _probe_gpu_pynvml() -> tuple[float | None, int | None, int | None, str]:
-    import pynvml  # optional dep; ImportError falls through to the next probe
-    pynvml.nvmlInit()
-    try:
-        h = pynvml.nvmlDeviceGetHandleByIndex(0)
-        util = float(pynvml.nvmlDeviceGetUtilizationRates(h).gpu)
-        mem = pynvml.nvmlDeviceGetMemoryInfo(h)
-        return util, int(mem.used), int(mem.total), "pynvml"
-    finally:
-        try:
-            pynvml.nvmlShutdown()
-        except Exception:
-            pass
-
-
-def _probe_gpu_smi() -> tuple[float | None, int | None, int | None, str]:
-    out = subprocess.run(
-        ["nvidia-smi",
-         "--query-gpu=utilization.gpu,memory.used,memory.total",
-         "--format=csv,noheader,nounits"],
-        capture_output=True, text=True, timeout=2.0, check=True,
-    )
-    line = out.stdout.strip().splitlines()[0]
-    util_s, used_s, total_s = (p.strip() for p in line.split(","))
-    return (float(util_s), int(used_s) * 1_048_576, int(total_s) * 1_048_576, "nvidia-smi")
-
-
-_DEFAULT_GPU_PROBES = [_probe_gpu_pynvml, _probe_gpu_smi]
-
-
-def probe_gpu(probes=None) -> tuple[float | None, int | None, int | None, str]:
-    """Try each probe in order; first that returns without raising wins. All
-    failures (no NVIDIA GPU, no driver, no pynvml) degrade to ``(None, None,
-    None, "n/a")``. ``probes`` is injectable for tests."""
-    for fn in (probes if probes is not None else _DEFAULT_GPU_PROBES):
-        try:
-            return fn()
-        except Exception:
-            continue
-    return None, None, None, "n/a"
-
-
-# --- HUD text formatting (pure) ----------------------------------------------
+# --- text formatting (pure) --------------------------------------------------
 
 def fmt_hz(hz: float | None) -> str:
-    """Rate for the HUD: ``—`` when unknown (device rate with no usable t_us),
+    """Rate for the HUD: ``-`` when unknown (device rate with no usable t_us),
     else adaptive precision (finer under 10 Hz)."""
     if hz is None:
-        return "—"
+        return "-"
     return f"{hz:.1f}" if hz < 10 else f"{hz:.0f}"
 
 
@@ -265,35 +225,75 @@ def fmt_bytes(n: int | None) -> str:
     return f"{x:.1f} TB"
 
 
-def fmt_stream_line(sr: "StreamRate") -> str:
-    """One sensor row: ``ToF   ->hub 28.1  ->host 28.0   431.0 KB/s``."""
-    return (f"{sr.label:<4} →hub {fmt_hz(sr.device_hz):>5}  "
-            f"→host {fmt_hz(sr.host_hz):>5}   {fmt_rate(sr.bytes_per_s)}")
+# --- GPU probing (per-process, NVML only) ------------------------------------
+# nvidia-smi can't report per-process GPU utilization, so the per-project GPU
+# readout needs NVML (optional `monitor` extra). Without it, GPU shows n/a.
+
+def _nvml_recent_us() -> int:
+    """Timestamp (us) ~2 s ago: the lower bound for nvmlDeviceGetProcessUtilization
+    so it returns only recent SM-utilization samples."""
+    return int(time.time() * 1e6) - 2_000_000
 
 
-def fmt_gpu_line(res: "ResourceSnapshot") -> str:
-    if res.gpu_source == "n/a" or res.gpu_util is None:
-        return "GPU  n/a"
-    return (f"GPU  {res.gpu_util:.0f}%  VRAM {fmt_bytes(res.vram_used)}/"
-            f"{fmt_bytes(res.vram_total)} ({res.gpu_source})")
+def _probe_gpu_pynvml(pid: int):
+    import pynvml as N   # optional dep; ImportError -> caught by probe_gpu_process
+    N.nvmlInit()
+    try:
+        h = N.nvmlDeviceGetHandleByIndex(0)
+        name = N.nvmlDeviceGetName(h)
+        if isinstance(name, bytes):
+            name = name.decode("ascii", "replace")
+        vram_total = int(N.nvmlDeviceGetMemoryInfo(h).total)
+        proc_vram = None                      # WDDM (Windows) reports None per process
+        try:
+            running = (list(N.nvmlDeviceGetGraphicsRunningProcesses(h))
+                       + list(N.nvmlDeviceGetComputeRunningProcesses(h)))
+            for p in running:
+                if p.pid == pid and getattr(p, "usedGpuMemory", None):
+                    proc_vram = int(p.usedGpuMemory)
+        except N.NVMLError:
+            pass
+        util = 0.0                            # NVML up but our pid idle -> 0, not n/a
+        try:
+            for s in N.nvmlDeviceGetProcessUtilization(h, _nvml_recent_us()):
+                if s.pid == pid:
+                    util = float(s.smUtil)
+        except N.NVMLError:
+            util = 0.0                        # no recent samples == no GPU activity
+        return util, proc_vram, vram_total, name, "pynvml"
+    finally:
+        try:
+            N.nvmlShutdown()
+        except Exception:
+            pass
 
 
-def fmt_cpu_line(res: "ResourceSnapshot") -> str:
-    cores = " ".join(f"{c:2.0f}" for c in res.cpu_percent)
-    return f"CPU  avg {res.cpu_overall:2.0f}%  [{cores}]"
+def probe_gpu_process(pid: int, probes=None):
+    """Per-process GPU sample ``(util%, proc_vram, vram_total, name, source)``.
+    Tries each probe; first that returns wins; all failures -> the n/a tuple.
+    ``probes`` is injectable for tests (each called with ``pid``)."""
+    for fn in (probes if probes is not None else [_probe_gpu_pynvml]):
+        try:
+            return fn(pid)
+        except Exception:
+            continue
+    return None, None, None, None, "n/a"
 
 
 class ResourceSampler:
-    """Background daemon sampling CPU/RAM/NIC (psutil) + GPU/VRAM (probe chain)
-    at ``interval`` seconds, publishing the latest ResourceSnapshot for lockless
-    reads. A slow ``nvidia-smi`` therefore never touches the render loop.
+    """Background daemon sampling THIS process's CPU/RAM (psutil) + per-process
+    GPU (NVML) at ``interval`` seconds, publishing the latest ResourceSnapshot
+    for lockless reads. Off the render loop so a slow probe never stalls it.
 
-    ``gpu_probe`` is injectable (defaults to ``probe_gpu``) so tests need no GPU.
+    ``gpu_probe`` is injectable (defaults to the NVML per-process probe) so tests
+    need no GPU; ``pid`` defaults to the current process.
     """
 
-    def __init__(self, interval: float = 0.7, gpu_probe=None):
+    def __init__(self, interval: float = 0.7, gpu_probe=None, pid: int | None = None):
+        import os
         self.interval = interval
-        self._gpu_probe = gpu_probe if gpu_probe is not None else probe_gpu
+        self._pid = pid if pid is not None else os.getpid()
+        self._gpu_probe = gpu_probe if gpu_probe is not None else (lambda: probe_gpu_process(self._pid))
         self._latest: ResourceSnapshot | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -320,29 +320,25 @@ class ResourceSampler:
 
     def _run(self) -> None:
         import psutil
-        psutil.cpu_percent(percpu=True)     # prime (first call is a 0.0 baseline)
-        last_net = psutil.net_io_counters()
-        last_t = time.monotonic()
+        proc = psutil.Process(self._pid)
+        proc.cpu_percent(None)              # prime (first call is a 0.0 baseline)
+        n_cores = psutil.cpu_count() or 1
         while not self._stop.wait(self.interval):
-            now = time.monotonic()
-            cpu = psutil.cpu_percent(percpu=True)
-            vm = psutil.virtual_memory()
-            net = psutil.net_io_counters()
-            dt = now - last_t
-            if dt <= 0:
-                dt = self.interval or 1e-9
-            net_delta = (net.bytes_sent + net.bytes_recv) - (last_net.bytes_sent + last_net.bytes_recv)
-            net_bps = max(net_delta / dt, 0.0)
-            last_net, last_t = net, now
-            gpu_util, vram_used, vram_total, src = self._gpu_probe()
+            try:
+                cpu = proc.cpu_percent(None)
+                rss = int(proc.memory_info().rss)
+            except psutil.Error:
+                continue                    # process vanished mid-sample; try again
+            ram_total = int(psutil.virtual_memory().total)
+            gpu_util, proc_vram, vram_total, gpu_name, src = self._gpu_probe()
             self._latest = ResourceSnapshot(
-                cpu_percent=list(cpu),
-                cpu_overall=(sum(cpu) / len(cpu)) if cpu else 0.0,
-                ram_used=int(vm.used),
-                ram_total=int(vm.total),
+                proc_cpu_percent=float(cpu),
+                n_cores=int(n_cores),
+                proc_rss=rss,
+                ram_total=ram_total,
                 gpu_util=gpu_util,
-                vram_used=vram_used,
+                proc_vram=proc_vram,
                 vram_total=vram_total,
+                gpu_name=gpu_name,
                 gpu_source=src,
-                net_bytes_per_s=net_bps,
             )
