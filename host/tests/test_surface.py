@@ -78,3 +78,23 @@ def test_alpha_shape_covers_a_flat_patch_but_not_a_far_outlier():
     assert mesh.has_vertex_colors()
     assert covered[:36].all()
     assert not covered[36]
+
+
+def test_alpha_shape_degenerate_coplanar_input_returns_empty_uncovered():
+    # >=4 points but exactly coplanar (all z=0) -- Qhull cannot build a 3D
+    # tetrahedralization from a degenerate/flat point set and raises
+    # RuntimeError. alpha_shape_mesh must catch this and return the same
+    # "nothing covered" result as the n<4 case, not propagate the exception
+    # (this runs inside a live GUI render loop -- a crash would be user-visible).
+    pts = np.array([
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.5, 0.5, 0.0],
+        [0.2, 0.8, 0.0],
+    ])
+    pcd = _make_pcd(pts)
+    mesh, covered = alpha_shape_mesh(pcd, threshold_m=0.5)
+    assert len(mesh.triangles) == 0
+    assert covered.tolist() == [False] * 6
