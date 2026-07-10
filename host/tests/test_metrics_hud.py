@@ -37,13 +37,22 @@ def test_render_hud_shape_and_dtype():
     assert img.shape[0] > 0
 
 
-def test_render_hud_stable_canvas_size():
-    # fixed-row canvas: size must not depend on how many rows are populated,
-    # so the overlay frame never jumps as sensors come and go.
-    a = render_hud(_snap(streams=[], resources=None))
-    b = render_hud(_snap(streams=[StreamRate(7, "ToF", 28.0, 28.0, 4e5),
-                                  StreamRate(9, "IMU", 480.0, 476.0, 8000.0)]))
-    assert a.shape == b.shape
+def test_render_hud_width_fixed_height_grows_with_rows():
+    # width is fixed; height scales with the number of rows (more sensors / more
+    # CPU-core bars -> taller). The overlay frame tracks this each render.
+    few = render_hud(_snap(streams=[], resources=None), width=320)
+    many = render_hud(_snap(streams=[StreamRate(7, "ToF", 28.0, 28.0, 4e5),
+                                     StreamRate(9, "IMU", 480.0, 476.0, 8000.0)]),
+                      width=320)
+    assert few.shape[1] == many.shape[1] == 320
+    assert many.shape[0] > few.shape[0]
+
+
+def test_render_hud_one_bar_per_core_in_use():
+    # ~2.4 cores -> 3 CPU rows; ~0.5 core -> 1 CPU row. More cores == taller HUD.
+    one_core = render_hud(_snap(streams=[], resources=_res(proc_cpu_percent=50.0)))
+    three_core = render_hud(_snap(streams=[], resources=_res(proc_cpu_percent=240.0)))
+    assert three_core.shape[0] > one_core.shape[0]
 
 
 def test_render_hud_bar_fill_reflects_utilization():

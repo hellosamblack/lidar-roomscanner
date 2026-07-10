@@ -13,7 +13,7 @@ against a capacity:
 * sensor rows (ToF/IMU/Env): bar = host_hz / device_hz — the fraction of what
   the sensor produced that actually reached the host (full == keeping up).
 * USB: link throughput / USB Full-Speed practical ceiling.
-* CPU: our process, drawn as one segment per core in use (each 0..100%).
+* CPU: our process, drawn as one utilization bar per core in use (each 0..100%).
 * RAM: our process RSS / system RAM.
 * GPU: our process SM utilization (0..100%).
 * VRAM: our process VRAM / total — only when the platform exposes it.
@@ -44,9 +44,6 @@ _AMBER = (232, 182, 72)
 _RED = (226, 92, 80)
 _BLUE = (96, 162, 232)
 
-_MAX_ROWS = 10          # FPS + up to 4 sensors + USB + CPU + RAM + GPU + VRAM
-
-
 def _font(size: int):
     from PIL import ImageFont
     try:
@@ -68,15 +65,14 @@ def _bar_color(frac: float, good_high: bool) -> tuple[int, int, int]:
 
 
 class _Row:
-    __slots__ = ("label", "value", "frac", "good_high", "segments", "accent")
+    __slots__ = ("label", "value", "frac", "good_high", "accent")
 
-    def __init__(self, label, value, frac=None, good_high=False, segments=None, accent=None):
+    def __init__(self, label, value, frac=None, good_high=False, accent=None):
         self.label = label
         self.value = value
         self.frac = frac                # None -> empty track (unknown capacity)
         self.good_high = good_high
-        self.segments = segments        # list[float] for multi-segment (CPU cores)
-        self.accent = accent            # fixed color override
+        self.accent = accent            # fixed color override (else green/amber/red)
 
 
 def _rows(snap: MetricsSnapshot, usb_capacity_bps: float, fps_target: float) -> list[_Row]:
@@ -95,10 +91,15 @@ def _rows(snap: MetricsSnapshot, usb_capacity_bps: float, fps_target: float) -> 
                      frac=snap.link_bytes_per_s / usb_capacity_bps if usb_capacity_bps > 0 else None))
     res = snap.resources
     if res is not None:
+        # One utilization bar per core our app is using (not the whole system).
+        # We can't map a process to physical cores per-core, so distribute the
+        # process's total CPU into core-equivalents: N = ceil(cores used), each
+        # bar filled 0..100%. Labelled CPU on the first row, blank under it.
         cores_used = res.proc_cpu_percent / 100.0
-        n_seg = max(1, min(res.n_cores, math.ceil(cores_used) if cores_used > 0 else 1))
-        segs = [max(0.0, min(1.0, cores_used - i)) for i in range(n_seg)]
-        rows.append(_Row("CPU", f"{cores_used:.1f} cores", segments=segs, accent=_BLUE))
+        n_bars = max(1, min(res.n_cores, math.ceil(cores_used) if cores_used > 0 else 1))
+        for i in range(n_bars):
+            fill = max(0.0, min(1.0, cores_used - i))
+            rows.append(_Row("CPU" if i == 0 else "", f"{fill * 100:.0f}%", frac=fill))
         rows.append(_Row("RAM", fmt_bytes(res.proc_rss),
                          frac=res.proc_rss / res.ram_total if res.ram_total else None))
         if res.gpu_util is None:
@@ -119,7 +120,7 @@ def render_hud(snap: MetricsSnapshot, *, width: int = 320, row_h: int = 22,
 
     rows = _rows(snap, usb_capacity_bps, fps_target)
     top, bottom = 8, 6
-    height = top + _MAX_ROWS * row_h + bottom       # fixed canvas -> stable overlay frame
+    height = top + max(1, len(rows)) * row_h + bottom   # grows with the CPU-core rows
     img = Image.new("RGB", (width, height), _BG)
     d = ImageDraw.Draw(img)
     font = _font(13)
@@ -137,16 +138,7 @@ def render_hud(snap: MetricsSnapshot, *, width: int = 320, row_h: int = 22,
         d.text((label_x, cy - 7), row.label, font=font, fill=_TEXT)
         # bar track
         d.rectangle([bar_x, by, bar_x + bar_w, by + bar_h], fill=_TRACK)
-        if row.segments is not None:                # CPU: one filled segment per core
-            n = len(row.segments)
-            gap = 3
-            seg_w = (bar_w - gap * (n - 1)) / n
-            for j, frac in enumerate(row.segments):
-                sx = bar_x + j * (seg_w + gap)
-                fillw = seg_w * max(0.0, min(1.0, frac))
-                if fillw > 0:
-                    d.rectangle([sx, by, sx + fillw, by + bar_h], fill=row.accent or _BLUE)
-        elif row.frac is not None:
+        if row.frac is not None:
             fillw = bar_w * max(0.0, min(1.0, row.frac))
             if fillw > 0:
                 color = row.accent or _bar_color(row.frac, row.good_high)
@@ -154,6 +146,6 @@ def render_hud(snap: MetricsSnapshot, *, width: int = 320, row_h: int = 22,
         # value text, right-aligned in the value column
         vw = d.textlength(row.value, font=font)
         d.text((width - 8 - vw, cy - 7), row.value, font=font,
-               fill=_TEXT if row.frac is not None or row.segments is not None else _MUTED)
+               fill=_TEXT if row.frac is not None else _MUTED)
 
     return np.asarray(img, dtype=np.uint8)
