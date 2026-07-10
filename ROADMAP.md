@@ -92,9 +92,9 @@ Found during review of `<APP>/Src/vl53l9_app.c`; fix these in our fork, leave th
    must be measured for TX-time vs frame-time and must drop frames rather than stall acquisition.
 6. **Resource frees commented out** (`vl53l9_app.c:263-269`): acceptable in a never-exiting loop, but our
    app gains stop/reconfigure paths in Phase 3 — the teardown sequence must actually work by then.
-   **✅ Addressed in our fork, Phase 3** — the raw-only build has no on-MCU transform to free, and the
-   sensor stop → re-profile → restart cycle (`rs_sensor_reinit()`) is exercised live by `SET_USECASE`/
-   `REINIT` and the recovery path.
+   **✅ Addressed in our fork, Phase 3** — the raw-only build has no on-MCU transform to free. The
+   sensor stop → re-profile → restart cycle is exercised inline by SET_USECASE, while rs_sensor_reinit()
+   is exercised live by REINIT and the recovery path.
 
 ## Cross-cutting risks (watch continuously)
 
