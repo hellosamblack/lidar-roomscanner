@@ -62,6 +62,92 @@ changing *which* IKS4A1 sensor is actually on the shared bus:
 
 Full writeup: `docs/superpowers/plans/2026-07-09-iks4a1-hub1-multidevice-i3c.md`.
 
+## Sensor hub (Mode 2) — RESOLVED & WORKING (2026-07-10)
+
+**Fix, for the impatient:** set **J4/J5 to pos `5-6` ONLY** (env sensors isolated on the LSM aux master —
+no GND short on `11-12`, no primary-bus short on `1-2`) **and address the barometer at `0x5D`** (SA0=1 on
+this board; `0x5C` NACKs). With that, all three env sensors read live over the hub (verified LSM-only:
+`P≈982 hPa`, `T≈26.6 °C`, mag; `STATUS_MASTER=0x01` SENS_HUB_ENDOP, `nack=0`). Every firmware register was
+correct the whole time — the "no NACK ever / `STATUS_MASTER=0x00`" signature always meant a dead aux bus, and
+the two shorts above were it. The `1-2` short is subtle: it ties `SENS` to the STM primary bus, looping the
+LSM's aux-master output back onto its own primary interface, so the master never sees a free bus. The
+diagnostic history that pinned "electrical, not config" is preserved below.
+
+## Sensor hub (Mode 2) — diagnostic history (how "electrical, not config" was proven)
+
+With HUB1-only routing, the env sensors (LPS22DF/LIS2MDL/STTS22H) are reachable **only** through the
+LSM6DSV16X's own I²C sensor hub (Mode 2): the LSM acts as an I²C *master* on its `SDx/SCx` pins, which in
+IKS4A1 **Mode 3** (jumpers `J4:5-6`, `J5:5-6` → `HUB1_SDx/SCx = SENS_I2C`, per the getting-started guide)
+carry the env-sensor sub-bus. Our `rs_lsm.c` `rs_lsm_shub_init()` configures this, gated behind
+`RS_LSM_ENABLE_SHUB`. It does **not** work yet — and the cause is now pinned down.
+
+**Symptom.** `MASTER_ON=1` and fully configured, yet the master *never issues a START*: `STATUS_MASTER`
+stays `0x00`, **no slave NACK ever**, no FIFO sensor-hub tags. "No NACK ever" is the tell — a NACK requires
+the master to have *addressed* a slave; it never gets that far. So the aux bus (`SENS_I2C`) never reaches
+idle-high (SDA/SCL held low) and the master's bus-free check never lets it start. That is electrical.
+
+**Firmware diagnosis is complete — every MCU-controllable cause was ruled out on-target** (built with
+`CONF_LSM_PROBE=1` + `RS_LSM_ENABLE_SHUB=1`, flashed, read back over ST-Link VCOM):
+
+| Check | Register readback | Meaning |
+|-------|-------------------|---------|
+| Enable + slave count latched | `MASTER_CONFIG=0x46` | MASTER_ON=1, AUX_SENS_ON=3-slaves, WR_ONCE=1, START_CFG=0 ✓ |
+| Slave address latched | `SLV0_ADD=0xB9` | `0x5C<<1 \| read` — exactly right ✓ |
+| Aux-bus pull-up | `IF_CFG=0x40` | **SHUB_PU_EN (bit6) = 1** — internal pull-up IS on ✓ |
+| Pins not stolen | `CTRL7=0x00` | AH_QVAR_EN (bit7) = 0 — analog-hub/Qvar not holding `SDx/SCx` ✓ |
+| Trigger source alive | SFLP quat @ ~477 Hz | XL/GY data-ready (the internal trigger) is running ✓ |
+| Master not wedged | `RST_MASTER_REGS` pulse | no change — not a stale-state lockup ✓ |
+
+Note the earlier note that *"SHUB_PU_EN reads 0"* was a **misdiagnosis**: it read `MASTER_CONFIG` bit3
+(which is `not_used0`). SHUB_PU_EN lives in `IF_CFG (0x03) bit6`, and on-target it reads **1**. Likewise
+*"trigger never fires"* was wrong — SFLP runs off the same XL/GY data-ready and streams fine.
+
+**Remaining causes are all physical on the IKS4A1** (need a jumper check / scope — the one thing firmware
+can't set), ranked:
+
+1. **Leftover Mode-1 GND shunts.** `J4/J5` position `11-12` tie `HUB_SDx/SCx` to GND (Mode 1's default;
+   *"HUB1 must be connected to GND if not used"*). If those shunts are still fitted alongside the Mode-3
+   `5-6` shunts, the aux bus is clamped to ground and no pull-up can raise it. **Most likely.** Check that
+   **only `5-6`** is populated on **both** `J4` and `J5`.
+2. **J4/J5 not actually in Mode-3 (`5-6`)** → the env sensors were never on the LSM's aux bus.
+3. **Open/cold joint on `SENS_SDA`/`SENS_SCL`**, or one env sensor stuck holding SDA low.
+
+Pass-through mode (AN5763 §7.3) can't isolate this from firmware — it needs an I²C primary interface, and
+ours is I3C. Once the jumper is confirmed, re-enable `RS_LSM_ENABLE_SHUB` and reflash; the probe prints
+`SLAVEx_NACK`/`SENS_HUB_ENDOP` and env values directly. The `rs_lsm_shub_init()` path already carries the
+defensive `RST_MASTER_REGS` pulse + `AH_QVAR_EN` clear (tested harmless) so the next attempt starts clean.
+
+## LSM6DSV16X tuning (applied 2026-07-10, verified on-target)
+
+This rig is **not power-constrained**, so the orientation path favours rate + range (the SFLP quaternion is
+the SLAM rotation prior). Knobs live at the top of `rs_lsm.c`:
+
+- **SFLP + XL/GY ODR 120 → 480 Hz** (`RS_LSM_SFLP_ODR`, `RS_LSM_XL_GY_ODR`). 480 Hz is the SFLP ceiling;
+  quarters orientation latency and de-blurs fast handheld motion. **Verified live**: probe showed the quat
+  tag counting at ~477 Hz (was ~120).
+- **Accel full scale ±2g → ±4g, gyro ±250 → ±500 dps** (`RS_LSM_XL_FS`, `RS_LSM_GY_FS`). POR ranges clip on
+  handheld shake / wrist flicks; clipping corrupts the fusion far more than the small LSB-resolution loss.
+- **High-performance mode** (anti-alias filter on) — already set, kept.
+- **Staged (`RS_LSM_SFLP_BATCH_AUX`, default off):** batching the SFLP gravity + gyro-bias vectors to FIFO,
+  for host observability once the stream layer demuxes them. The game-rotation vector is internally
+  bias-corrected regardless.
+- **Follow-up once the hub is alive:** the game-rotation vector has **no magnetometer input → yaw drifts**.
+  With the LIS2MDL readable via the hub, run a tilt-compensated e-compass (datasheets dt0058/dt0060) to pin
+  absolute heading — the biggest orientation-accuracy win available, and the strongest reason to fix the hub.
+
+## RESOLVED (2026-07-10) — stacked I3C now streams the full sensor suite at 27.85 fps
+
+The "shared I3C fails at operating speed when stacked" conflict below is **fixed in firmware**. Root cause
+(confirmed against `references/i2c-i3c-bus-debug-reference.md` §6 + the KiCad netlist + scope): the IKS4A1's
+**NXS0108 auto-direction level translator** on the shared PB8/PB9 bus can't pass 12.5 MHz I3C **push-pull**,
+so it mis-latches during **ENTDAA** and the ToF (behind the 53L9A1 PI4ULS3V204, the double-shifted path) drops
+out while the directly-wired LSM still enumerates. **Fix in `rs_assign_dynamic_addresses()`: slow the push-pull
+clock for ENTDAA only** (`SCLPPLowDuration`/`SCLI3CHighDuration = 0xff`; OD kept `0x7c`) → ToF enumerates
+100% (105/105). **Ranging stays at full `0x0a`/`0x09`** (steady reads tolerate 12.5 MHz PP; only ENTDAA's
+arbitration/handoff stresses the translator). Verified: full stack streams RAW + orientation (stream 9) + env
+(stream 10), 333/333/333 paired, **27.85 fps, 0 CRC, 0 gaps**. It was NOT pull-ups, NOT the J4/J5 jumper, NOT
+contact — those were all wrong turns. The investigation notes below are kept for history.
+
 ## Known conflict — shared I3C1 fails at operating speed when stacked (superseded — see "Resolved" above)
 
 A bench session stacked both boards and drove the shared bus through the full ToF init sequence.

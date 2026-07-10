@@ -15,7 +15,7 @@ F:\git\personal\lidar\
 ├─ roomscanner\            ← YOU ARE HERE (active dev)
 │  ├─ CLAUDE.md            ← this file
 │  ├─ ROADMAP.md           ← phased plan (source of truth for sequencing; per-phase risks + reference-firmware bug list)
-│  ├─ .claude\skills\      ← project skills: firmware-loop (build/flash/monitor), protocol-change (wire-change checklist)
+│  ├─ .claude\skills\      ← project skills: firmware-loop (build/flash/monitor), protocol-change (wire-change checklist), stack-electrical (jumpers/SBs/bus routing across the board stack)
 │  ├─ docs\
 │  │  ├─ engineering-practices.md            ← binding conventions (repo rules, protocol rules, firmware/host standards)
 │  │  ├─ protocol.md                         ← wire protocol spec (created by Phase 1 Task 1)
@@ -39,6 +39,15 @@ work vendors TinyUSB (see the Phase 1 plan).
 run the `milestone-retro` skill BEFORE starting the next phase — convert the push's friction into
 skills (with references/scripts), shared tools under `host/tools/`, and doc fixes. A milestone isn't
 done until the next one got easier.
+
+**Agentic firmware loop (owner, 2026-07-10):** this is an agentic project — **Claude reads/writes firmware
+and drives the full build → flash → observe → diagnose loop itself**, it does not write up "bench steps"
+for a human to run. The toolchain, `STM32_Programmer_CLI`, `capture.py` (native CDC), ST-Link VCOM, and
+on-target SWD register reads (`-r32 <addr>`, addresses from the `.map`) are all Claude's to use — see the
+`firmware-loop` skill and `docs/engineering-practices.md` → Firmware. The human is asked **only** for
+physical actions Claude cannot perform: moving IKS4A1/53L9A1 jumpers & solder bridges, scope probing, and
+power-cycling (USB replug) to clear a warm-wedged I3C bus. Diagnose in firmware first; escalate to the
+human only for a genuinely physical cause, and name the exact physical action.
 
 Throughout this doc, **`<APP>`** = `../53L9A1/Projects/NUCLEO-H563ZI/Applications/53L9A1/53L9A1_PostprocessSingle/` (the reference firmware app dir). File references like `Src/vl53l9_app.c` are relative to `<APP>`.
 

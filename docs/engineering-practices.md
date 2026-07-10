@@ -29,6 +29,18 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
 - Build: `cmake --preset Debug && cmake --build build/Debug` from the app dir; flash + monitor via the
   `firmware-loop` skill. Validation is on-target — there is no simulator; every firmware change ends with
   a flash-and-observe step.
+- **Claude drives the on-target loop directly — this is an agentic project, not a hand-off.** Build, flash
+  (`STM32_Programmer_CLI` over SWD), and monitor (native CDC via `capture.py` on VID/PID `CAFE:4001`;
+  ST-Link VCOM for `printf`/probe output) are all Claude's to run. Toolchain + programmer paths and the
+  probe/register-readback pattern are in the `firmware-loop` skill. Read registers on-target over SWD
+  (`STM32_Programmer_CLI -c port=SWD mode=hotplug -r32 <addr> <n>`, addresses from `build/Debug/*.map`) to
+  diagnose without guessing — e.g. `uwTick` for core-liveness, `g_lsm_ok`/`g_last_seq` for boot stage.
+  Do **not** write "next bench steps (owner)" for anything firmware can do; take it to the hardware yourself.
+- **The human does physical-only actions**, and only these: moving IKS4A1/53L9A1 jumpers & solder bridges,
+  scope probing, and power-cycling (USB unplug/replug) to clear a warm-wedged I3C bus that survives MCU
+  reset. Rapid flash/reset cycles during probing can wedge the independently-powered ToF/LSM on the shared
+  I3C bus; if `capture.py` and `-hardRst` both fail to bring the CDC back but `uwTick` still advances, it's
+  that warm-wedge — ask for a replug, don't keep resetting.
 - Keep `USER CODE BEGIN/END` guards intact in CubeMX-generated files even in our fork.
 - Error policy: no silent failures. Every `vl53l9_*`/`transform_*` call's return value is checked at the
   call site (watch reference bug #1 — a dropped assignment defeats the check). Streaming errors become

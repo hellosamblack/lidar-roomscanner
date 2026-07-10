@@ -11,24 +11,39 @@
 #include "lsm6dsv16x_reg.h"
 #include "stm32h5xx_hal.h"
 
-/* Sensor-hub baro/mag/temp slaves. Gated OFF -- diagnosed but not yet working.
- * Findings (bench, 2026-07-09/10):
- *   - MASTER_CONFIG reads back 0x46 after sh_master_set: MASTER_ON=1 (bit2), AUX_SENS_ON=2
- *     (bits1:0 -> 3 slaves), WRITE_ONCE pending (bit6). So the enable + slave config DO
- *     latch over I3C -- SHUB-bank writes work.
- *   - BUT the master never runs a single cycle: STATUS_MASTER.sens_hub_endop stays 0, no
- *     slave NACK ever, no FIFO SHUB-slave tags. The state machine never STARTS a transaction
- *     -> the XL/GY-DRDY trigger isn't reaching the sensor hub.
- *   - Ruled out: NOT an SFLP conflict (SHUB stays dead with SFLP explicitly disabled);
- *     NOT the write-once init (dead with the init writes removed); NOT enable-not-latching.
- *   - SHUB_PU_EN (MASTER_CONFIG bit3) reads 0 despite sh_master_interface_pull_up_set(1).
- * Next bench steps (owner): scope SENS_SDA/SENS_SCL for any master activity + check board
- * pull-ups; try START_CONFIG/INT2 trigger instead of XL_GY_DRDY; investigate why SHUB_PU_EN
- * won't set; confirm the accel DRDY actually pulses the sensor-hub trigger over I3C.
- * NB: LSM config persists across an MCU -rst (independently powered) -- set states
- * explicitly (see RS_LSM_SFLP_ON), don't rely on POR defaults, when bench-testing. */
-#define RS_LSM_ENABLE_SHUB (0)
-#define RS_LSM_SFLP_ON (1)  /* SFLP game-rotation-vector; set 0 only to bench SHUB in isolation */
+/* Sensor-hub baro/mag/temp slaves. WORKING as of 2026-07-10 -- verified on-target via
+ * CONF_LSM_PROBE (all three slaves reading: P=982 hPa, T=26.6C, mag; shstat=0x01 ENDOP, nack=0).
+ * The long "master never cycles" hunt turned out to be TWO things, both outside firmware:
+ *   1. The IKS4A1 aux bus was electrically dead. Every register was correct all along
+ *      (MASTER_CONFIG=0x46 master-on; IF_CFG=0x40 SHUB_PU_EN=1; SLV0_ADD latched; CTRL7=0x00;
+ *      SFLP trigger alive) -- the "no NACK EVER, STATUS_MASTER=0x00" signature meant the master
+ *      could never get a free bus. Root cause was the J4/J5 jumpers: the aux bus (SENS_I2C =
+ *      HUB1_SDx/SCx) was first shorted to GND (pos 11-12), then shorted to the STM primary bus
+ *      (pos 1-2, which loops the LSM's aux-master output back onto its own primary interface).
+ *      FIX: J4/J5 = pos 5-6 ONLY (env sensors isolated on the LSM aux master). See
+ *      docs/iks4a1-stacking.md "Sensor hub (Mode 2)".
+ *   2. The barometer answers at 0x5D (SA0=1) on this board, not 0x5C -- 0x5C NACKed (slave0_nack).
+ * NB the old diagnostic that "SHUB_PU_EN reads 0" was a red herring: it read MASTER_CONFIG bit3
+ * (=not_used0); SHUB_PU_EN is IF_CFG bit6 and reads 1. The CTRL7-clear + RST_MASTER_REGS pulse
+ * below are kept as cheap defensive hygiene (this device is never software-reset, so it can carry
+ * stale state); they were not the fix.
+ * NB: LSM config persists across an MCU -rst (independently powered) -- set states explicitly
+ * (see RS_LSM_SFLP_ON), don't rely on POR defaults. */
+#define RS_LSM_ENABLE_SHUB (1)  /* full stack: ToF + SFLP orientation + env hub (J4/J5=5-6, baro@0x5D) */
+#define RS_LSM_SFLP_ON (1)  /* SFLP game-rotation-vector; set 0 only to isolate SHUB */
+
+/* Orientation-path tuning. The accel+gyro feed SFLP, whose quaternion is the SLAM rotation
+ * prior; this rig is NOT power-constrained, so favour rate + range over current draw.
+ * Rationale in docs/iks4a1-stacking.md "LSM6DSV16X tuning". All safe for the shipping quat
+ * output (unitless), independent of the SHUB bring-up above. */
+#define RS_LSM_XL_GY_ODR    LSM6DSV16X_ODR_AT_480Hz  /* was 120Hz; also the SFLP trigger rate */
+#define RS_LSM_SFLP_ODR     LSM6DSV16X_SFLP_480Hz     /* was 120Hz; orientation-prior rate (max) */
+#define RS_LSM_XL_FS        LSM6DSV16X_4g             /* was ±2g POR; headroom vs handheld-shake clip */
+#define RS_LSM_GY_FS        LSM6DSV16X_500dps         /* was ±250dps POR; wrist-flick headroom */
+/* Batch SFLP gravity + gyro-bias vectors to FIFO for host observability. Staged OFF: enabling
+ * adds GRAVITY(0x17)/GBIAS(0x16) FIFO tags that the host stream layer must demux first. The
+ * game-rotation vector is already internally bias-corrected regardless of this flag. */
+#define RS_LSM_SFLP_BATCH_AUX (0)
 
 #define LSM_ADDR 0x50u           /* LSM6DSV16X dynamic I3C address (rs_assign_dynamic_addresses) */
 
@@ -89,7 +104,10 @@ static void lsm_mdelay(uint32_t ms) {
     HAL_Delay(ms);
 }
 
-uint8_t g_lsm_master_config = 0xFF;   /* diagnostic: MASTER_CONFIG readback after sh_master_set */
+uint8_t g_lsm_master_config = 0xFF;   /* diagnostic: MASTER_CONFIG (SHUB bank) readback after sh_master_set */
+uint8_t g_lsm_if_cfg = 0xFF;          /* diagnostic: IF_CFG (0x03) readback -- SHUB_PU_EN=bit6, SDA_PU_EN=bit7 */
+uint8_t g_lsm_slv0_add = 0xFF;        /* diagnostic: SLV0_ADD readback -- confirms slave-cfg latched */
+uint8_t g_lsm_ctrl7_pre = 0xFF;       /* diagnostic: CTRL7 as found -- AH_QVAR_EN=bit7 steals SDx/SCx pins */
 
 static lsm6dsv16x_ctx_t g_ctx = {
     .write_reg = lsm_i3c_write,
@@ -142,17 +160,38 @@ static void sflp_word_to_quat(const uint8_t data[6], float quat_wxyz[4]) {
 
 #if RS_LSM_ENABLE_SHUB
 /* Sensor-hub slave map (7-bit addresses; the driver adds the R/W bit):
- *   slot 0 = LPS22DF baro  (0x5C): PRESS_OUT_XL 0x28, 3 bytes, hPa=raw/4096
+ *   slot 0 = LPS22DF baro  (0x5D): PRESS_OUT_XL 0x28, 3 bytes, hPa=raw/4096 (SA0=1 on this IKS4A1; 0x5C NACKs)
  *   slot 1 = LIS2MDL mag   (0x1E): OUTX_L_REG   0x68, 6 bytes, gauss=raw*1.5e-3
  *   slot 2 = STTS22H temp  (0x38): TEMP_L_OUT   0x06, 2 bytes, C=raw*0.01 */
 static int rs_lsm_shub_init(void) {
     /* One-time slave power-up writes via the write-once channel. Each needs its own
      * enable-cycle-disable so the single DATAWRITE channel fires per slave. */
     static const struct { uint8_t addr, reg, val; } inits[3] = {
-        { 0x5C, 0x10, 0x20 },  /* LPS22DF CTRL_REG1: ODR 25 Hz continuous */
+        { 0x5D, 0x10, 0x20 },  /* LPS22DF CTRL_REG1: ODR 25 Hz continuous */
         { 0x1E, 0x60, 0x8C },  /* LIS2MDL CFG_REG_A: temp-comp, 100 Hz, continuous */
         { 0x38, 0x04, 0x3C },  /* STTS22H CTRL: free-run + auto-inc + BDU */
     };
+    /* We never software-reset the LSM (would drop the I3C dynamic address), so the sensor-hub
+     * master block can hold stale/wedged state from a prior config. RST_MASTER_REGS resets ONLY
+     * the I2C-master interface + its config/output regs -- not the chip, not the I3C address.
+     * Pulse it before (re)configuring. Must be manually asserted then de-asserted (AN5763 7.2.1). */
+    lsm6dsv16x_sh_reset_set(&g_ctx, 1);
+    lsm_mdelay(1);
+    lsm6dsv16x_sh_reset_set(&g_ctx, 0);
+    lsm_mdelay(1);
+
+    /* The aux-master pins are muxed SDx/AH1/QVAR1 and SCx/AH2/QVAR2: if the analog-hub / Qvar
+     * front-end owns them (CTRL7.AH_QVAR_EN, bit7) the I2C master can never drive them, and the
+     * master state machine never issues a START -- exactly our symptom (MASTER_ON=1, config +
+     * pull-up all latched, yet zero cycles / zero NACK). AH_QVAR_EN can persist from a prior
+     * config because we deliberately skip the software reset (keeps the I3C dynamic address).
+     * Capture it as-found, then force it off before bringing the hub up. */
+    lsm6dsv16x_read_reg(&g_ctx, LSM6DSV16X_CTRL7, &g_lsm_ctrl7_pre, 1);
+    {
+        uint8_t ctrl7 = (uint8_t)(g_lsm_ctrl7_pre & ~0x80u);  /* clear AH_QVAR_EN */
+        lsm6dsv16x_write_reg(&g_ctx, LSM6DSV16X_CTRL7, &ctrl7, 1);
+    }
+
     /* Enable the sensor-hub master's internal pull-ups on the aux SENS_I2C bus --
      * without these the master can't drive SDx/SCx and never completes a cycle. */
     lsm6dsv16x_sh_master_interface_pull_up_set(&g_ctx, 1);
@@ -171,7 +210,7 @@ static int rs_lsm_shub_init(void) {
     }
 
     /* Configure the three read slaves. */
-    lsm6dsv16x_sh_cfg_read_t r0 = { 0x5C, 0x28, 3 };
+    lsm6dsv16x_sh_cfg_read_t r0 = { 0x5D, 0x28, 3 };
     lsm6dsv16x_sh_cfg_read_t r1 = { 0x1E, 0x68, 6 };
     lsm6dsv16x_sh_cfg_read_t r2 = { 0x38, 0x06, 2 };
     if (lsm6dsv16x_sh_slv_cfg_read(&g_ctx, 0, &r0) != 0 ||
@@ -186,10 +225,18 @@ static int rs_lsm_shub_init(void) {
     lsm6dsv16x_fifo_sh_batch_slave_set(&g_ctx, 2, 1);
     lsm6dsv16x_sh_master_set(&g_ctx, 1);
 
-    /* DIAG: read MASTER_CONFIG back to see whether MASTER_ON (bit2) / AUX_SENS_ON (bits1:0)
-     * / SHUB_PU_EN (bit3) actually latched over I3C. 0x00 => SHUB-bank write not landing. */
+    /* DIAG: IF_CFG (main bank) holds the aux-bus pull-up enable. SHUB_PU_EN is bit6 -- if it
+     * reads 0 here despite sh_master_interface_pull_up_set(1), the pull-up write isn't landing
+     * and the Mode-3 aux bus floats (root cause A). The OLD diag checked MASTER_CONFIG bit3,
+     * which is not_used0 -- it never told us anything about the pull-up. */
+    lsm6dsv16x_read_reg(&g_ctx, LSM6DSV16X_IF_CFG, &g_lsm_if_cfg, 1);
+
+    /* DIAG: MASTER_CONFIG + SLV0_ADD (SHUB bank) -- confirm enable + slave-cfg latched.
+     * MASTER_CONFIG: MASTER_ON=bit2, AUX_SENS_ON=bits1:0, WRITE_ONCE=bit6, START_CONFIG=bit5.
+     * SLV0_ADD: 7-bit addr in bits7:1, rw_0 in bit0 (expect 0x5C<<1 | 1 = 0xB9 for LPS22DF read). */
     lsm6dsv16x_mem_bank_set(&g_ctx, LSM6DSV16X_SENSOR_HUB_MEM_BANK);
     lsm6dsv16x_read_reg(&g_ctx, LSM6DSV16X_MASTER_CONFIG, &g_lsm_master_config, 1);
+    lsm6dsv16x_read_reg(&g_ctx, LSM6DSV16X_SLV0_ADD, &g_lsm_slv0_add, 1);
     lsm6dsv16x_mem_bank_set(&g_ctx, LSM6DSV16X_MAIN_MEM_BANK);
     return 0;
 }
@@ -234,19 +281,26 @@ int rs_lsm_init(void) {
      * from the power-on-reset register defaults instead. */
     lsm6dsv16x_block_data_update_set(&g_ctx, 1);
 
-    /* Accel + gyro must run for SFLP to fuse. */
+    /* Accel + gyro must run for SFLP to fuse. High-performance mode (anti-alias filter on),
+     * high ODR, and generous full scale -- see RS_LSM_* tuning knobs at the top of this file. */
     lsm6dsv16x_xl_mode_set(&g_ctx, LSM6DSV16X_XL_HIGH_PERFORMANCE_MD);
     lsm6dsv16x_gy_mode_set(&g_ctx, LSM6DSV16X_GY_HIGH_PERFORMANCE_MD);
-    if (lsm6dsv16x_xl_data_rate_set(&g_ctx, LSM6DSV16X_ODR_AT_120Hz) != 0 ||
-        lsm6dsv16x_gy_data_rate_set(&g_ctx, LSM6DSV16X_ODR_AT_120Hz) != 0) {
+    lsm6dsv16x_xl_full_scale_set(&g_ctx, RS_LSM_XL_FS);
+    lsm6dsv16x_gy_full_scale_set(&g_ctx, RS_LSM_GY_FS);
+    if (lsm6dsv16x_xl_data_rate_set(&g_ctx, RS_LSM_XL_GY_ODR) != 0 ||
+        lsm6dsv16x_gy_data_rate_set(&g_ctx, RS_LSM_XL_GY_ODR) != 0) {
         return -3;
     }
 
     /* SFLP game rotation vector -> FIFO. (LSM config persists across MCU -rst, so
      * explicitly set game_rotation to the desired state rather than skipping the call.) */
-    lsm6dsv16x_sflp_data_rate_set(&g_ctx, LSM6DSV16X_SFLP_120Hz);
+    lsm6dsv16x_sflp_data_rate_set(&g_ctx, RS_LSM_SFLP_ODR);
     lsm6dsv16x_sflp_game_rotation_set(&g_ctx, RS_LSM_SFLP_ON);
-    lsm6dsv16x_fifo_sflp_raw_t sflp_batch = { .game_rotation = RS_LSM_SFLP_ON, .gravity = 0, .gbias = 0 };
+    lsm6dsv16x_fifo_sflp_raw_t sflp_batch = {
+        .game_rotation = RS_LSM_SFLP_ON,
+        .gravity = RS_LSM_SFLP_BATCH_AUX,
+        .gbias = RS_LSM_SFLP_BATCH_AUX,
+    };
     lsm6dsv16x_fifo_sflp_batch_set(&g_ctx, sflp_batch);
 
 #if RS_LSM_ENABLE_SHUB

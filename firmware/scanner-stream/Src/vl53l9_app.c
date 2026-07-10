@@ -201,8 +201,11 @@ static void iks4a1_i3c_probe(void) {
      * inspect the actual ENTDAA payload -- the wrapper never validates whether a real device
      * answered before unconditionally registering address 0x52, so its "return 0" doesn't by
      * itself prove real discovery happened. A nonzero payload with recognizable PID bytes does. */
-    hi3c1.Init.CtrlBusCharacteristic.SCLPPLowDuration = 0x7c;
-    hi3c1.Init.CtrlBusCharacteristic.SCLI3CHighDuration = 0x7c;
+    /* debug ref 7.4 -- reduce push-pull reliance: slow the PP clock to the floor (0xff) while
+     * keeping OD at the reference ~1 MHz (0x7c). Tests whether the NXS0108 auto-direction
+     * translator tolerates I3C push-pull when it's slow enough, vs. can't do PP at any speed. */
+    hi3c1.Init.CtrlBusCharacteristic.SCLPPLowDuration = 0xff;
+    hi3c1.Init.CtrlBusCharacteristic.SCLI3CHighDuration = 0xff;
     hi3c1.Init.CtrlBusCharacteristic.SCLODLowDuration = 0x7c;
     HAL_I3C_Init(&hi3c1);
 
@@ -241,9 +244,8 @@ static void iks4a1_i3c_probe(void) {
 
     printf("[IKS4A1 I3C PROBE] ENTDAA complete: %d responder(s), final status=%d\n", n, (int)daa_status);
 
-    hi3c1.Init.CtrlBusCharacteristic.SCLPPLowDuration = 0x0a;
-    hi3c1.Init.CtrlBusCharacteristic.SCLI3CHighDuration = 0x09;
-    hi3c1.Init.CtrlBusCharacteristic.SCLODLowDuration = 0x59;
+    /* keep the slow-PP timing (do NOT restore 12.5 MHz) so the continuous ENTDAA loop below
+     * runs at the same slow-PP settings we're diagnosing. */
     HAL_I3C_Init(&hi3c1);
 
     if (n == 0) {
@@ -269,38 +271,34 @@ static void iks4a1_i3c_probe(void) {
         }
     }
 
+    /* Continuous ENTDAA at the slow-PP timing -- steady scope-observable traffic + a running
+     * ToF-appearance tally. RSTDAA_THEN_ENTDAA resets every dynamic address each pass, so each
+     * iteration is a fresh full enumeration. Scope SCL/SDA at 53L9A1 TP5/TP4 (ToF side of the
+     * PI4ULS3V204) and compare to host PB8/PB9 to see whether the translator passes the PP bits. */
+    uint32_t pass = 0, tof_hits = 0, lsm_hits = 0;
     for (;;) {
-        for (int i = 0; i < n; i++) {
-            /* Positive ToF ID: 16-bit MODEL_ID @0x0000 (4 bytes) -- exactly what the working
-             * ULD driver reads. Only the VL53L9CX answers a 16-bit-addressed read sensibly. */
-            uint8_t reg16[2] = { 0x00, 0x00 };
-            uint8_t model[4] = { 0 };
-            int r16 = i3c_priv_read(resp_addr[i], reg16, 2, model, 4);
-            /* Positive LSM ID: 8-bit WHO_AM_I @0x0F -- only the LSM6DSV16X returns 0x70. */
-            uint8_t reg8 = 0x0F;
-            uint8_t wai = 0xFF;
-            int r8 = i3c_priv_read(resp_addr[i], &reg8, 1, &wai, 1);
-
-            const char *verdict =
-                (r8 == 0 && wai == 0x70) ? "LSM6DSV16X"
-                : (r16 == 0 && (model[0] || model[1] || model[2] || model[3])) ? "ToF (VL53L9CX)"
-                : "UNIDENTIFIED";
-            printf("[IKS4A1 I3C PROBE] PartID=0x%04X @0x%02X | MODEL_ID(16b)=", resp_part_id[i], resp_addr[i]);
-            if (r16 == 0) {
-                printf("0x%02X%02X%02X%02X", model[0], model[1], model[2], model[3]);
-            } else {
-                printf("FAIL(%d)", r16);
+        uint64_t p = 0;
+        HAL_StatusTypeDef st;
+        int m = 0, tof = 0, lsm = 0;
+        do {
+            p = 0;
+            st = HAL_I3C_Ctrl_DynAddrAssign(&hi3c1, &p, I3C_RSTDAA_THEN_ENTDAA, 5000);
+            if (st == HAL_BUSY) {
+                I3C_ENTDAAPayloadTypeDef pi = { 0 };
+                HAL_I3C_Get_ENTDAA_Payload_Info(&hi3c1, p, &pi);
+                if (pi.PID.PartID == 0x0102) tof = 1;       /* TOF_PART_ID (defined later in file) */
+                else if (pi.PID.PartID == 0x0070) lsm = 1;   /* IKS4A1_LSM6DSV16X_PART_ID */
+                HAL_I3C_Ctrl_SetDynAddr(&hi3c1, (uint8_t)(0x50 + 2 * m) & 0x7F);
+                m++;
             }
-            printf(" | WHO_AM_I(8b)=");
-            if (r8 == 0) {
-                printf("0x%02X", wai);
-            } else {
-                printf("FAIL(%d)", r8);
-            }
-            printf(" => %s\n", verdict);
-        }
-        printf("[IKS4A1 I3C PROBE] --- identify pass complete, repeating in 2s ---\n");
-        HAL_Delay(2000);
+        } while (st == HAL_BUSY);
+        pass++;
+        if (tof) tof_hits++;
+        if (lsm) lsm_hits++;
+        printf("[I3C PP-DIAG] pass %lu: %d resp ToF=%d LSM=%d | ToF seen %lu/%lu, LSM %lu/%lu\n",
+               (unsigned long)pass, m, tof, lsm,
+               (unsigned long)tof_hits, (unsigned long)pass, (unsigned long)lsm_hits, (unsigned long)pass);
+        HAL_Delay(100);
     }
 }
 #endif /* CONF_IKS4A1_I3C_PROBE */
@@ -589,48 +587,74 @@ static int rs_assign_dynamic_addresses(void) {
     I3C_DeviceConfTypeDef dev_conf[2];
     uint8_t nb_configured = 0;
 
-    hi3c1.Init.CtrlBusCharacteristic.SCLPPLowDuration = 0x7c;
-    hi3c1.Init.CtrlBusCharacteristic.SCLI3CHighDuration = 0x7c;
+    /* Slow-PP for ENTDAA: the IKS4A1 NXS0108 auto-direction translator can't pass 12.5 MHz I3C
+     * push-pull, so the ToF (behind the 53L9A1 shifter) drops from ENTDAA when stacked. At slow
+     * PP it enumerates 100% (diagnosed: 105/105 passes). OD kept at the reference ~1 MHz. */
+    hi3c1.Init.CtrlBusCharacteristic.SCLPPLowDuration = 0xff;
+    hi3c1.Init.CtrlBusCharacteristic.SCLI3CHighDuration = 0xff;
     hi3c1.Init.CtrlBusCharacteristic.SCLODLowDuration = 0x7c;
     if (HAL_I3C_Init(&hi3c1) != HAL_OK) {
         return -1;
     }
 
-    do {
-        payload = 0;
-        status = HAL_I3C_Ctrl_DynAddrAssign(&hi3c1, &payload, I3C_RSTDAA_THEN_ENTDAA, 5000);
-        if (status == HAL_BUSY) {
-            I3C_ENTDAAPayloadTypeDef pinfo = { 0 };
-            HAL_I3C_Get_ENTDAA_Payload_Info(&hi3c1, payload, &pinfo);
-            uint32_t bcr = __HAL_I3C_GET_BCR(payload);
+    /* Multi-device ENTDAA is a race: with the IKS4A1 stacked, the always-on LSM6DSV16X can win
+     * arbitration and the HAL reports enumeration "complete" (HAL_OK) after the LSM alone --
+     * before the ToF (just released from its XSHUT reset) joins -- leaving the ToF unaddressed
+     * and boot dead (observed: "1 responder(s)", LSM only). It worked at session start only
+     * because the ToF happened to win the race. RSTDAA_THEN_ENTDAA resets EVERY dynamic address
+     * each pass, so we can safely re-run the whole enumeration until the ToF appears. The ToF is
+     * mandatory; the IKS4A1 is optional, so we gate on the ToF, not on a device count. */
+    uint8_t tof_seen = 0;
+    for (int attempt = 0; attempt < 6 && !tof_seen; attempt++) {
+        nb_configured = 0;
+        do {
+            payload = 0;
+            status = HAL_I3C_Ctrl_DynAddrAssign(&hi3c1, &payload, I3C_RSTDAA_THEN_ENTDAA, 5000);
+            if (status == HAL_BUSY) {
+                I3C_ENTDAAPayloadTypeDef pinfo = { 0 };
+                HAL_I3C_Get_ENTDAA_Payload_Info(&hi3c1, payload, &pinfo);
+                uint32_t bcr = __HAL_I3C_GET_BCR(payload);
 
-            uint8_t address;
-            if (pinfo.PID.PartID == TOF_PART_ID) {
-                address = VL53L9_DEFAULT_ADDRESS;
-            } else if (pinfo.PID.PartID == IKS4A1_LSM6DSV16X_PART_ID) {
-                address = IKS4A1_LSM6DSV16X_I3C_ADDR;
-            } else {
-                return -2; /* unrecognized device answered ENTDAA -- bail rather than guess */
+                uint8_t address;
+                if (pinfo.PID.PartID == TOF_PART_ID) {
+                    address = VL53L9_DEFAULT_ADDRESS;
+                    tof_seen = 1;
+                } else if (pinfo.PID.PartID == IKS4A1_LSM6DSV16X_PART_ID) {
+                    address = IKS4A1_LSM6DSV16X_I3C_ADDR;
+                } else {
+                    return -2; /* unrecognized device answered ENTDAA -- bail rather than guess */
+                }
+
+                HAL_I3C_Ctrl_SetDynAddr(&hi3c1, address & 0x7F);
+
+                if (nb_configured < 2) {
+                    dev_conf[nb_configured].DeviceIndex = (uint8_t)(nb_configured + 1);
+                    dev_conf[nb_configured].TargetDynamicAddr = address & 0x7F;
+                    dev_conf[nb_configured].IBIAck = __HAL_I3C_GET_IBI_CAPABLE(bcr);
+                    dev_conf[nb_configured].IBIPayload = __HAL_I3C_GET_IBI_PAYLOAD(bcr);
+                    dev_conf[nb_configured].CtrlRoleReqAck = __HAL_I3C_GET_CR_CAPABLE(bcr);
+                    dev_conf[nb_configured].CtrlStopTransfer = DISABLE;
+                    nb_configured++;
+                }
             }
+        } while (status == HAL_BUSY);
 
-            HAL_I3C_Ctrl_SetDynAddr(&hi3c1, address & 0x7F);
-
-            if (nb_configured < 2) {
-                dev_conf[nb_configured].DeviceIndex = (uint8_t)(nb_configured + 1);
-                dev_conf[nb_configured].TargetDynamicAddr = address & 0x7F;
-                dev_conf[nb_configured].IBIAck = __HAL_I3C_GET_IBI_CAPABLE(bcr);
-                dev_conf[nb_configured].IBIPayload = __HAL_I3C_GET_IBI_PAYLOAD(bcr);
-                dev_conf[nb_configured].CtrlRoleReqAck = __HAL_I3C_GET_CR_CAPABLE(bcr);
-                dev_conf[nb_configured].CtrlStopTransfer = DISABLE;
-                nb_configured++;
-            }
+        if (status != HAL_OK) {
+            return -3;
         }
-    } while (status == HAL_BUSY);
-
-    if (status != HAL_OK) {
-        return -3;
+        if (!tof_seen) {
+            HAL_Delay(20); /* give the ToF a beat to (re)join, then RSTDAA + re-enumerate */
+        }
     }
 
+    /* If the ToF never answered (genuinely absent, e.g. board removed for LSM-only bring-up), we
+     * still proceed: whatever DID enumerate is addressed below, and the shipping boot path fails
+     * loudly downstream at vl53l9_init() if the ToF is required. This keeps LSM-only diagnostics
+     * (CONF_LSM_PROBE) working while the retry above still maximises the ToF's chances when stacked. */
+
+    /* Steady-state (ranging) timing. Ranging reads are also I3C push-pull, so they must also run
+     * slow enough for the NXS0108 -- start at the ENTDAA-proven floor (0xff) to confirm streaming,
+     * then tune PP up toward max sustainable fps. OD (0x59) for any legacy-I2C traffic. */
     hi3c1.Init.CtrlBusCharacteristic.SCLPPLowDuration = 0x0a;
     hi3c1.Init.CtrlBusCharacteristic.SCLI3CHighDuration = 0x09;
     hi3c1.Init.CtrlBusCharacteristic.SCLODLowDuration = 0x59;
@@ -1215,9 +1239,16 @@ void vl53l9_app() {
         printf("\n[LSM PROBE] daa=%d init=%d (0=ok)\n", daa, ir);
         extern uint16_t g_lsm_tag_hist[32];
         extern uint8_t g_lsm_master_config;
+        extern uint8_t g_lsm_if_cfg;
+        extern uint8_t g_lsm_slv0_add;
+        extern uint8_t g_lsm_ctrl7_pre;
         extern uint8_t rs_lsm_shub_status_raw(void);
-        printf("[LSM PROBE] MASTER_CONFIG=0x%02X (MASTER_ON=bit2 0x04, AUX_SENS_ON=bits1:0, PU=bit3 0x08)\n",
+        printf("[LSM PROBE] CTRL7 as-found=0x%02X (AH_QVAR_EN=bit7 0x80 -> steals SDx/SCx from I2C master)\n",
+               g_lsm_ctrl7_pre);
+        printf("[LSM PROBE] MASTER_CONFIG=0x%02X (MASTER_ON=bit2 0x04, AUX_SENS_ON=bits1:0, START_CFG=bit5 0x20, WR_ONCE=bit6 0x40)\n",
                g_lsm_master_config);
+        printf("[LSM PROBE] IF_CFG=0x%02X (SHUB_PU_EN=bit6 0x40 -> aux-bus pull-up; 0 => Mode-3 aux bus floats) | SLV0_ADD=0x%02X (expect 0xB9)\n",
+               g_lsm_if_cfg, g_lsm_slv0_add);
         for (;;) {
             rs_lsm_sample_t s;
             (void)rs_lsm_read_latest(&s);
