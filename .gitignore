@@ -83,3 +83,6 @@ references/datasheets/NUCLEO-IKS4A1/schematic/x-nucleo-iks4a1-gerber/
 references/datasheets/NUCLEO-VL53L9CX/schematic/x-nucleo-53l9a1-gerber/
 # Duplicated datasheet PDFs under the KiCad model (originals live in references/datasheets/)
 references/kicad/roomscanner-stack/datasheets/
+
+# Editor local-history cache
+.history/
