@@ -1213,17 +1213,17 @@ void vl53l9_app() {
         HAL_Delay(50);
         int ir = rs_lsm_init();
         printf("\n[LSM PROBE] daa=%d init=%d (0=ok)\n", daa, ir);
+        extern uint16_t g_lsm_tag_hist[32];
+        extern uint8_t rs_lsm_shub_status_raw(void);
         for (;;) {
             rs_lsm_sample_t s;
-            int rr = rs_lsm_read_latest(&s);
-            if (rr == 0 && s.have_quat) {
-                printf("[LSM PROBE] quat(x1000) w=%d x=%d y=%d z=%d\n",
-                       (int)(s.quat[0] * 1000.0f), (int)(s.quat[1] * 1000.0f),
-                       (int)(s.quat[2] * 1000.0f), (int)(s.quat[3] * 1000.0f));
-            } else {
-                printf("[LSM PROBE] no quat (rr=%d)\n", rr);
-            }
-            HAL_Delay(200);
+            (void)rs_lsm_read_latest(&s);
+            printf("[LSM PROBE] tags quat=%u sh0=%u sh1=%u sh2=%u nack=%u | shstat=0x%02X | P=%d(Pa) mag=%d,%d,%d(uTx10) T=%d(Cx100) env=%u\n",
+                   g_lsm_tag_hist[0x13], g_lsm_tag_hist[0x0E], g_lsm_tag_hist[0x0F],
+                   g_lsm_tag_hist[0x10], g_lsm_tag_hist[0x19], rs_lsm_shub_status_raw(),
+                   (int)s.pressure_pa, (int)(s.mag_ut[0] * 10.0f), (int)(s.mag_ut[1] * 10.0f),
+                   (int)(s.mag_ut[2] * 10.0f), (int)(s.temp_c * 100.0f), s.have_env);
+            HAL_Delay(300);
         }
     }
 #endif
