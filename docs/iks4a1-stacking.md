@@ -4,10 +4,11 @@ Bring-up recipe and bench-validation checklist for stacking the **X-NUCLEO-IKS4A
 (IMU / mag / baro / temp-humidity) on top of the existing **X-NUCLEO-53L9A1** (VL53L9CX ToF)
 + **NUCLEO-H563ZI** stack.
 
-**Status:** bench-tested, and the shared-I3C1 approach below **fails at operating speed when the
-boards are physically stacked**. See "Known conflict" below before wiring anything up. The IKS4A1
-*driver* still lands on a separate branch (Phase 4); this branch remains untouched on the firmware
-side — the ToF-only build is unaffected whether or not the IKS4A1 is physically stacked.
+**Status:** RESOLVED — see "Resolved — HUB1 native-I3C" below. The originally-planned shared-I3C1
+approach (IKS4A1's legacy-I2C sensors riding the same bus as the ToF) **fails at operating speed when
+the boards are physically stacked** — see "Known conflict" for that investigation. The IKS4A1 *driver*
+work for the environmental sensors (via the LSM6DSV16X's own sensor-hub) still lands on a separate
+branch (Phase 4).
 
 Source of truth for pins is the `scanner-stream` firmware `.ioc` and the two board schematics under
 `references/datasheets/`. Verify against those if anything here looks stale.
@@ -23,7 +24,45 @@ below are still necessary but are no longer sufficient on their own:
 2. **Keep the IKS4A1 interrupt line(s) off the ToF's control pins** (PB1/PB5/PB6/PB7) — or just poll.
 3. **ToF shield on top** (needs a clear field of view and glass-holder clearance).
 
-## Known conflict — shared I3C1 fails at operating speed when stacked
+## Resolved — HUB1 native-I3C (ToF + LSM6DSV16X share the bus)
+
+The conflict documented below is resolved — not by picking one of the "Candidate workarounds," but by
+changing *which* IKS4A1 sensor is actually on the shared bus:
+
+- **Jumper change:** the IKS4A1 is jumpered to **HUB1 only** (J4/J5 → `HUB1_SDx`/`HUB1_SCx`, the
+  getting-started guide's "Mode 3"). In this configuration only the **LSM6DSV16X (HUB1)** rides the
+  shared I3C1 bus — the environmental sensors (LIS2MDL mag, LPS22DF baro, STTS22H temp, SHT40 humidity)
+  are no longer reachable from it (see the trade-off below).
+- **The LSM6DSV16X is a genuine MIPI I3C v1.1 target** (datasheet DS13510 §5.2, `WHO_AM_I` reg `0x0F` =
+  `0x70`). It answers the same ENTDAA the ToF uses and runs at the full 12.5 MHz push-pull speed — no
+  legacy-I2C loading, no bus-speed downshift. That's what makes the fix possible: the failure below was
+  specific to the IKS4A1's legacy-I2C targets loading the bus at PP speed, not to I3C sharing itself.
+- **The fix:** a fork-owned `rs_assign_dynamic_addresses()` in `firmware/scanner-stream/Src/vl53l9_app.c`
+  (commits: probe `43f42b9`, function `8c08ff7`, wiring `c84f79b`) replaces the read-only reference's
+  single-device `platform_assign_dynamic_address()`. It enumerates both ENTDAA responders and assigns
+  each a distinct dynamic address, keyed on **PID.PartID** (not MIPIID — see below), then registers both
+  in the I3C controller's device table:
+  - ToF (VL53L9CX): PartID `0x0102` (MODEL_ID `0x394C3353`) → kept at `0x52` (`VL53L9_DEFAULT_ADDRESS`).
+  - LSM6DSV16X: PartID `0x0070` (`WHO_AM_I` `0x70`) → assigned `0x50` (clear of `0x52` and every IKS4A1
+    static address: `0x1E`/`0x38`/`0x5C`/`0x5D`/`0x6A`/`0x6B`).
+- **Why PartID, not the plan's MIPIID:** device identity was measured on hardware (an extended
+  `iks4a1_i3c_probe()` diagnostic). PID.MIPIID is degenerate here — both devices report identical
+  `BCR=0x07` and near-identical MIPIID; PartID is the reliable 16-bit discriminator. Identity was proven
+  both ways: a 16-bit MODEL_ID read (only the ToF answers, `0x394C3353` = ASCII "9L3S") and an 8-bit
+  `WHO_AM_I` read (only the LSM answers `0x70`).
+- **Hardware verification, both stacked:** the native CDC port reappears (it did **not** before this
+  fix — the boot hung), and a 15 s capture decoded 422 RAW + 7 CALIB frames, **0 CRC failures, 0 seq
+  gaps**, **28.24 fps interval / 28.13 fps wall-clock** (at/above the ~27.76 fps Phase 2.5 baseline),
+  CALIB cadence exactly 64, 0 EVENT frames. The known connect-time transient (see Phase 2 in
+  `ROADMAP.md`) was present — 0 CRC, characterized-cosmetic.
+- **Trade-off, stated explicitly:** HUB1-only routing **disconnects the environmental sensors**
+  (LPS22DF baro, LIS2MDL mag, STTS22H temp, SHT40 humidity) from the shared bus. Reading them now
+  requires the LSM6DSV16X's own I2C sensor-hub (mode 2) feature — a separate, not-yet-implemented
+  driver task, out of this doc's scope.
+
+Full writeup: `docs/superpowers/plans/2026-07-09-iks4a1-hub1-multidevice-i3c.md`.
+
+## Known conflict — shared I3C1 fails at operating speed when stacked (superseded — see "Resolved" above)
 
 A bench session stacked both boards and drove the shared bus through the full ToF init sequence.
 Findings:
@@ -46,7 +85,7 @@ Findings:
 **Conclusion:** the "no firmware change, just stack it" plan in the rest of this doc does **not**
 hold as written. Read "Candidate workarounds" before the next bench pass.
 
-## Candidate workarounds
+## Candidate workarounds (superseded — see "Resolved" above)
 
 Ranked least-invasive → most-invasive. Try each in order; each is cheap enough to rule out before
 moving to the next.

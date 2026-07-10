@@ -487,16 +487,22 @@ hardware timestamps. New streams = new `stream_id`s + a version bump per the pro
 numbers; content is unchanged.)* The USB CDC link carries the added IMU/env traffic easily (~KB/s on
 top of 445 KB/s raw), so nothing here waits on Ethernet.
 
-- **Bus topology — bench-tested, shared-I3C1 approach blocked** (`docs/iks4a1-stacking.md`): stacking
-  the IKS4A1 on the ToF's **I3C1** bus (`I3C1.BusUsage=MixedUsage`, shared PB8/PB9) works through ENTDAA
-  (~1.85 MHz open-drain) but fails once the bus switches to I3C push-pull SDR at the configured
-  12.5 MHz — the ToF init errors out with the IKS4A1 stacked, and works with it removed. Suspected root
-  cause: the 53L9A1's onboard NXS0108 level shifter can't meet PP timing under the extra stub/pull-up
-  load the stacked IKS4A1 adds; not yet confirmed with a scope. No static-address collision either way
-  (ToF `0x29` vs IKS4A1 `0x1E`/`0x38`/`0x5C-5D`/`0x6A-6B`). See `docs/iks4a1-stacking.md` → "Known
-  conflict" + "Candidate workarounds" for the ranked list of fixes to try (lift IKS4A1 pull-ups, verify
-  Vio under load, flying-lead unstacking, fall back to a second I2C peripheral) before driver work
-  starts.
+- **Bus topology — resolved: HUB1-only native-I3C** (`docs/iks4a1-stacking.md` → "Resolved — HUB1
+  native-I3C"; plan `docs/superpowers/plans/2026-07-09-iks4a1-hub1-multidevice-i3c.md`). The naive
+  shared-I3C1 approach (IKS4A1's legacy-I2C sensors alongside the ToF) failed at the configured
+  12.5 MHz push-pull speed once stacked (ENTDAA at ~1.85 MHz was fine; PP wasn't). The fix: jumper the
+  IKS4A1 to **HUB1 only** (J4/J5 → `HUB1_SDx`/`HUB1_SCx`), so only the **LSM6DSV16X** — a genuine MIPI
+  I3C v1.1 target (DS13510 §5.2) — shares I3C1 with the ToF, both running native I3C at the full
+  12.5 MHz PP speed. A fork-owned `rs_assign_dynamic_addresses()` in
+  `firmware/scanner-stream/Src/vl53l9_app.c` enumerates both ENTDAA responders and assigns each a
+  distinct address keyed on **PID.PartID** (MIPIID is degenerate between the two devices): ToF
+  (PartID `0x0102`) → `0x52`, LSM6DSV16X (PartID `0x0070`, WHO_AM_I `0x70`) → `0x50`, clear of every
+  IKS4A1 static address. Verified on hardware with both boards stacked: native CDC port reappears
+  (previously the boot hung), **0 CRC failures, 0 seq gaps, 28.24 fps interval / 28.13 fps wall-clock**
+  over a 15 s capture (422 RAW + 7 CALIB frames). **Trade-off:** HUB1-only routing disconnects the
+  environmental sensors (LPS22DF baro, LIS2MDL mag, STTS22H temp, SHT40 humidity) from the shared bus —
+  reading them needs the LSM6DSV16X's own I2C sensor-hub (mode 2), a separate follow-up driver task not
+  yet implemented.
 - SFLP quaternion wire format: **IEEE binary16 (fp16), not fixed-point int16** — the research doc mislabels
   this; document the encoding in `docs/protocol.md` and test the fp16 decode path with a golden vector.
 - IMU sample rate (~100+ Hz) ≠ ToF frame rate: IMU frames are independent small frames with their own
