@@ -304,7 +304,7 @@ class ControlPanel:
         # real transitions (init/active/gated:*) still log once each.
         self._last_fusion_status = "off"
         self._gizmo_added = False
-        self._baseline_yaw = None
+        self._baseline_quat = None
         self.persistence = False  # only show currently perceived image, no persistence (for now)
         self.stats = Stats()
         # metrics HUD: per-sensor rate meters + a background resource sampler.
@@ -722,9 +722,11 @@ class ControlPanel:
         # Retrieve fused orientation
         quat = self.sensor_state.fused_quat()
         quat_display = quat
-        if quat is not None and self._baseline_yaw is not None:
-            from .sensors import graft_yaw
-            quat_display = graft_yaw(quat, -self._baseline_yaw)
+        if quat is not None and self._baseline_quat is not None:
+            from .sensors import quat_mul
+            qb = self._baseline_quat
+            qb_inv = (qb[0], -qb[1], -qb[2], -qb[3])
+            quat_display = quat_mul(quat, qb_inv)
 
         if quat_display is not None:
             from .sensors import quat_to_matrix
@@ -1022,20 +1024,17 @@ class ControlPanel:
         vmin, vmax, self._ir_frozen = _ir_freeze_range(self.ir_freeze, self._ir_frozen, auto)
         rgb = reflectance_to_rgb(refl, colormap=self.ir_colormap,
                                  vmin=vmin, vmax=vmax, upscale=_IR_UPSCALE)
-        # Combine the manual 90° rotation with the gravity-derived in-plane roll so
-        # the IR image "down" matches the physical down shown in the 3D view.
-        quat_display = self.sensor_state.fused_quat()
-        if quat_display is not None and self._baseline_yaw is not None:
-            from .sensors import graft_yaw
-            quat_display = graft_yaw(quat_display, -self._baseline_yaw)
-        if quat_display is not None:
+        # Use the raw fused quaternion (no yaw baseline — gravity is absolute) to
+        # determine the in-plane sensor roll so IR "down" matches the 3D view.
+        quat_raw = self.sensor_state.fused_quat()
+        if quat_raw is not None:
             from .sensors import ir_gravity_rot
-            gravity_steps = ir_gravity_rot(quat_display)
+            gravity_steps = ir_gravity_rot(quat_raw)
         else:
             gravity_steps = 0
         total_rot = (self._rot + gravity_steps) % 4
         if total_rot:
-            rgb = np.rot90(rgb, total_rot)     # keep the IR pane aligned with the rotated cloud
+            rgb = np.rot90(rgb, total_rot)     # keep the IR pane aligned with gravity + manual rot
         self.ir_widget.update_image(self._np_to_o3d(rgb))
 
     def _ir_placeholder(self):
@@ -1075,9 +1074,11 @@ class ControlPanel:
         Graceful no-data: quietly does nothing until IMU_QUAT/ENV frames arrive."""
         quat = self.sensor_state.fused_quat()
         quat_display = quat
-        if quat is not None and self._baseline_yaw is not None:
-            from .sensors import graft_yaw
-            quat_display = graft_yaw(quat, -self._baseline_yaw)
+        if quat is not None and self._baseline_quat is not None:
+            from .sensors import quat_mul
+            qb = self._baseline_quat
+            qb_inv = (qb[0], -qb[1], -qb[2], -qb[3])
+            quat_display = quat_mul(quat, qb_inv)
         if self.imu_gizmo and quat_display is not None:
             self._update_camera_gizmo(quat_display)
         status = self.sensor_state.fusion_status()
@@ -1148,9 +1149,8 @@ class ControlPanel:
     def _on_reset_orientation(self):
         quat = self.sensor_state.fused_quat()
         if quat is not None:
-            from .sensors import quat_yaw_deg
-            self._baseline_yaw = quat_yaw_deg(quat)
-            self.bus.publish(f"yaw-fusion -> baseline reset (yaw = {self._baseline_yaw:.1f} deg)")
+            self._baseline_quat = quat
+            self.bus.publish("yaw-fusion -> baseline reset")
             self._on_clear_scan()
 
     def _on_clear_scan(self):

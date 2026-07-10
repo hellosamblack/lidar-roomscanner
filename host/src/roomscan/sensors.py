@@ -204,8 +204,9 @@ def ir_gravity_rot(quat: tuple[float, float, float, float]) -> int:
     gx, gz = float(g_body[0]), float(g_body[2])   # in-plane (XZ) components
     # atan2(gx, -gz): 0° when gravity is along body -Z (image down at identity)
     angle_deg = math.degrees(math.atan2(gx, -gz))
-    # Snap to nearest 90° and convert to rot90 count (CCW turns)
-    step = int(round(angle_deg / 90.0)) % 4
+    # Negate: gravity pulling right means we need a CW correction (k=3 = -1 mod 4),
+    # not a CCW correction.  step = -round(angle/90) mod 4.
+    step = (-int(round(angle_deg / 90.0))) % 4
     return step
 
 
