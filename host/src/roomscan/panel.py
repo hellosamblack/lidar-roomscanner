@@ -46,6 +46,7 @@ from .protocol import CommandCode, FrameType, ProtocolError, parse_event
 from .shading import MODES as _NEAR_MODES
 from .shading import cloud_colors
 from .sources import FileSource, Recorder, SerialSource, pump
+from .surface import alpha_shape_mesh, grid_triangles
 from .viewer import Stats, _build_arg_parser
 
 # Usecase id -> label (only binning-2 profiles are usable at full res; see ROADMAP
@@ -53,8 +54,10 @@ from .viewer import Stats, _build_arg_parser
 _USECASES = [(0, "AR_RANGE (~32 fps)"), (1, "AR_PRECISION (~28 fps)")]
 _COLOR_MODES = ("depth", "reflectance", "confidence")
 _IR_COLORMAPS = ("gray", "turbo")
+_SURFACE_MODES = ("grid", "spatial")
 _IR_UPSCALE = 6                 # 54x42 zones -> 324x252 px, nearest-neighbor
 _GEOM = "cloud"
+_MESH_GEOM = "surface"
 _UI_PERIOD = 0.25               # <=4 Hz label / IR / log refresh
 _EXPOSURE_DEBOUNCE = 0.4        # s to settle before sending a dragged exposure value
 _BG_DARK = [0.05, 0.05, 0.08, 1.0]
@@ -252,6 +255,8 @@ class ControlPanel:
         # render state
         self.deproj: Deprojector | None = None
         self.pcd = o3d.geometry.PointCloud()
+        self.mesh = o3d.geometry.TriangleMesh()
+        self._last_all_pts: np.ndarray | None = None      # full valid-point set, for camera framing
         self._camera_set = False
         self._cam_target = None             # turntable camera state (world-up locked, no tilt)
         self._cam_az = 0.0
@@ -280,6 +285,15 @@ class ControlPanel:
         self._ir_frozen: tuple[float, float] | None = None
         self._ir_unavailable_shown = False
 
+        # surface-interpolation state (opt-in: adjacent points close enough
+        # get covered by a mesh instead of drawn as dots -- see docs/
+        # superpowers/plans/2026-07-09-surface-interpolation-design.md)
+        self.surface_enabled = bool(getattr(args, "surface_enabled", False))
+        self.surface_mode = args.surface_mode if getattr(args, "surface_mode", None) in _SURFACE_MODES else "grid"
+        self.surface_threshold_pct = float(getattr(args, "surface_threshold_pct", 4.0) or 4.0)
+        self._last_surface_rebuild = 0.0       # spatial-mode throttle timer
+        self._surface_covered: np.ndarray | None = None
+
         # command state
         self._pending_exposure: tuple[int, float] | None = None
         self._last_sent_exposure: int | None = None
@@ -294,6 +308,8 @@ class ControlPanel:
         self.material = rendering.MaterialRecord()
         self.material.shader = "defaultUnlit"
         self.material.point_size = float(getattr(args, "point_size", 5.0))
+        self.mesh_material = rendering.MaterialRecord()
+        self.mesh_material.shader = "defaultUnlit"
         self._dark_bg = True
 
         self._build_scene()
@@ -574,24 +590,54 @@ class ControlPanel:
                 vals = pts[:, 2]
             colors = cloud_colors(vals, pts[:, 2], mode=self.near_mode,   # z-based, so pre-rotation
                                   cutoff_m=self.near_cutoff_m, emphasis=self.near_emphasis)
-            self.pcd.points = o3d.utility.Vector3dVector(_rot_xy(pts, self._rot))
-            self.pcd.colors = o3d.utility.Vector3dVector(colors)
+            rot_pts = _rot_xy(pts, self._rot)
+            if self.surface_enabled:
+                self._render_surface(depth, rot_pts, colors)
+            else:
+                self._remove_mesh_geometry()
+                self.pcd.points = o3d.utility.Vector3dVector(rot_pts)
+                self.pcd.colors = o3d.utility.Vector3dVector(colors)
+            self._show_geometries(rot_pts)
         else:
+            self._remove_mesh_geometry()
             self.pcd.points = o3d.utility.Vector3dVector(pts)
             self.pcd.colors = o3d.utility.Vector3dVector(np.zeros((0, 3)))
-        self._show_cloud()
+            self._show_geometries(pts)
         self._shown += 1
 
-    def _show_cloud(self):
+    def _show_geometries(self, all_pts):
+        """Push the dot cloud to the scene and (re)frame the camera from the
+        FULL valid point set for this frame -- `all_pts` is every valid point
+        before the covered/lone split, so framing doesn't shrink once most
+        points move into the mesh. The mesh geometry itself is managed
+        separately by _show_mesh_geometry/_remove_mesh_geometry, called from
+        _render_surface, since only surface mode touches it."""
+        self._last_all_pts = all_pts
         sc = self.scene_widget.scene
         if sc.has_geometry(_GEOM):
             sc.remove_geometry(_GEOM)
         sc.add_geometry(_GEOM, self.pcd, self.material)
-        if not self._camera_set and len(self.pcd.points):
+        if not self._camera_set and len(all_pts):
             self._reset_camera()
 
+    def _show_mesh_geometry(self):
+        sc = self.scene_widget.scene
+        if sc.has_geometry(_MESH_GEOM):
+            sc.remove_geometry(_MESH_GEOM)
+        if len(self.mesh.triangles) > 0:
+            sc.add_geometry(_MESH_GEOM, self.mesh, self.mesh_material)
+
+    def _remove_mesh_geometry(self):
+        sc = self.scene_widget.scene
+        if sc.has_geometry(_MESH_GEOM):
+            sc.remove_geometry(_MESH_GEOM)
+
     def _reset_camera(self):
-        bounds = self.pcd.get_axis_aligned_bounding_box()
+        all_pts = self._last_all_pts
+        if all_pts is None or len(all_pts) == 0:
+            return
+        bounds = self._o3d.geometry.AxisAlignedBoundingBox.create_from_points(
+            self._o3d.utility.Vector3dVector(all_pts))
         ext = float(bounds.get_extent().max())
         if ext <= 0:
             return
@@ -601,6 +647,55 @@ class ControlPanel:
         self._cam_az = 0.0
         self._apply_camera()
         self._camera_set = True
+
+    def _render_surface(self, depth, rot_pts, colors):
+        """Split this frame's points into covered (hidden, drawn by the mesh)
+        and lone (still dots), per the selected adjacency mode. Always leaves
+        self.pcd holding only the lone points -- caller still calls
+        _show_geometries(rot_pts) afterward with the FULL point set so camera
+        framing isn't affected by the split."""
+        h, w = depth.shape
+        if self.surface_mode == "spatial":
+            now = time.monotonic()
+            if now - self._last_surface_rebuild >= _UI_PERIOD:
+                self._rebuild_spatial_mesh(rot_pts, colors)
+                self._last_surface_rebuild = now
+            covered = self._surface_covered
+            if covered is None or len(covered) != len(rot_pts):
+                covered = np.zeros(len(rot_pts), dtype=bool)
+        else:
+            pts_grid, valid_grid = self.deproj.grid(depth)
+            triangles, covered_grid = grid_triangles(pts_grid, valid_grid, self.surface_threshold_pct)
+            covered = covered_grid[valid_grid.ravel()]
+            mesh_verts = _rot_xy(pts_grid.reshape(-1, 3), self._rot)
+            colors_grid = np.zeros((h * w, 3), dtype=np.float64)
+            colors_grid[valid_grid.ravel()] = colors
+            self.mesh.vertices = self._o3d.utility.Vector3dVector(mesh_verts)
+            self.mesh.vertex_colors = self._o3d.utility.Vector3dVector(colors_grid)
+            self.mesh.triangles = self._o3d.utility.Vector3iVector(triangles.astype(np.int32))
+            self._show_mesh_geometry()
+        self.pcd.points = self._o3d.utility.Vector3dVector(rot_pts[~covered])
+        self.pcd.colors = self._o3d.utility.Vector3dVector(colors[~covered])
+
+    def _rebuild_spatial_mesh(self, rot_pts, colors):
+        """Throttled to ~_UI_PERIOD by the caller -- alpha shape's 3D
+        triangulation is real per-call cost, unlike grid mode's vectorized
+        numpy pass."""
+        o3d = self._o3d
+        if len(rot_pts) < 4:
+            self._surface_covered = np.zeros(len(rot_pts), dtype=bool)
+            self._remove_mesh_geometry()
+            return
+        pcd_src = o3d.geometry.PointCloud()
+        pcd_src.points = o3d.utility.Vector3dVector(rot_pts)
+        pcd_src.colors = o3d.utility.Vector3dVector(colors)
+        threshold_m = max((self.surface_threshold_pct / 100.0) * float(np.mean(rot_pts[:, 2])), 1e-6)
+        mesh, covered = alpha_shape_mesh(pcd_src, threshold_m)
+        self.mesh.vertices = mesh.vertices
+        self.mesh.vertex_colors = mesh.vertex_colors
+        self.mesh.triangles = mesh.triangles
+        self._surface_covered = covered
+        self._show_mesh_geometry()
 
     def _apply_camera(self):
         if self._cam_target is None:
