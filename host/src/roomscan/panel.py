@@ -210,7 +210,10 @@ def _run_reader(source, decoder, stage, stats, slot, fault, bus, client, recorde
             if ft != FrameType.DATA:
                 continue
             if state is not None:
-                state.feed(frame)   # streams 9/10 -> SensorState; ignores others
+                try:
+                    state.feed(frame)   # streams 9/10 -> SensorState; ignores others
+                except Exception:
+                    pass  # a malformed IMU/ENV payload must never kill the reader (ToF continues)
             result = stage.feed(frame)
             if result is None:
                 continue

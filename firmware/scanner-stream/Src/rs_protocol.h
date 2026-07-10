@@ -15,7 +15,7 @@
 #define RS_STREAM_DEPTH_ZF32 (0u)
 #define RS_FLAG_DROPPED      (0x01u)
 
-/* Stream registry — see roomscanner/docs/protocol.md. 1-6 reserved (Phase 2+); 7-8 live. */
+/* Stream registry — see roomscanner/docs/protocol.md. 1-6 reserved (Phase 2+); 7-8 + 9-10 live. */
 #define RS_STREAM_DEPTH_ZAPC  (1u)
 #define RS_STREAM_AMBIENT     (2u)
 #define RS_STREAM_AMPLITUDE   (3u)
