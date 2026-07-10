@@ -15,6 +15,7 @@ F:\git\personal\lidar\
 ├─ roomscanner\            ← YOU ARE HERE (active dev)
 │  ├─ CLAUDE.md            ← this file
 │  ├─ ROADMAP.md           ← phased plan (source of truth for sequencing; per-phase risks + reference-firmware bug list)
+│  ├─ BUGS.md              ← bug tracker for OUR code (host + scanner-stream firmware); file new bugs here
 │  ├─ .claude\skills\      ← project skills: firmware-loop (build/flash/monitor), protocol-change (wire-change checklist), stack-electrical (jumpers/SBs/bus routing across the board stack)
 │  ├─ docs\
 │  │  ├─ engineering-practices.md            ← binding conventions (repo rules, protocol rules, firmware/host standards)

@@ -150,7 +150,7 @@ def test_reader_ack_with_no_client_is_silently_dropped():
 def test_resolve_args_defaults_from_builtin_when_no_config_file(tmp_path):
     cfg_path = tmp_path / "roomscan.toml"
     args = resolve_args(["--replay", "dummy.bin"], config_path=cfg_path)
-    assert args.color == "depth"
+    assert args.color == "reflectance"
     assert args.fov_h == 55.0
     assert args.fov_v == 42.0
     assert args.replay_fps == 0.0

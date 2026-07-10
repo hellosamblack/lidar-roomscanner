@@ -128,7 +128,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--replay-fps", type=float, default=None,
                     help="pace file replay at N fps (0 = as fast as it decodes)")
     ap.add_argument("--color", choices=("depth", "reflectance", "confidence"), default=None,
-                    help="colorize the cloud by z-depth (default) or by an aux transform plane")
+                    help="colorize the cloud by reflectance (default; falls back to depth when "
+                         "the plane is absent), z-depth, or confidence")
     ap.add_argument("--save-config", action="store_true",
                     help="persist the effective color/fov/replay-fps/port settings to roomscan.toml")
     ap.add_argument("--panel", action="store_true",

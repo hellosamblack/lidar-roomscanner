@@ -47,7 +47,7 @@ def test_config_dir_falls_back_to_home_without_appdata(monkeypatch, tmp_path):
 def test_load_missing_file_returns_builtin_defaults(tmp_path):
     cfg = ViewerConfig.load(tmp_path / "does-not-exist.toml")
     assert cfg == ViewerConfig()
-    assert cfg.color == "depth"
+    assert cfg.color == "reflectance"
     assert cfg.fov_h == 55.0
     assert cfg.fov_v == 42.0
     assert cfg.replay_fps == 0.0
@@ -187,7 +187,7 @@ def test_load_malformed_viewer_shape_with_panel_key_falls_back_to_all_defaults(t
     cfg = ViewerConfig.load(path)
     assert cfg == ViewerConfig()
     assert cfg.panel_width == 340
-    assert cfg.color == "depth"
+    assert cfg.color == "reflectance"
 
 
 def test_load_wrong_type_panel_field_value_is_tolerated_not_validated(tmp_path):
@@ -223,7 +223,7 @@ def test_apply_config_defaults_all_unset_pulls_entirely_from_config():
 def test_apply_config_defaults_builtin_default_when_config_is_default_too():
     args = Args()
     apply_config_defaults(args, ViewerConfig())
-    assert args.color == "depth"
+    assert args.color == "reflectance"
     assert args.fov_h == 55.0
     assert args.fov_v == 42.0
     assert args.replay_fps == 0.0
