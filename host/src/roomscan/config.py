@@ -49,6 +49,9 @@ class ViewerConfig:
     near_mode: str = "window"          # near-contrast: off|window|emphasis|equalize
     near_cutoff_m: float = 1.5         # window-mode near/far boundary (metres)
     near_emphasis: float = 0.5         # emphasis-mode strength 0..1
+    surface_enabled: bool = False
+    surface_mode: str = "grid"          # "grid" | "spatial"
+    surface_threshold_pct: float = 4.0
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "ViewerConfig":

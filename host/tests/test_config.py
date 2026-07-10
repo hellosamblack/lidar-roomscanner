@@ -45,6 +45,9 @@ def test_panel_fields_have_expected_defaults_on_fresh_config():
     assert cfg.ir_colormap == "gray"
     assert cfg.ir_freeze_range is False
     assert cfg.panel_width == 340
+    assert cfg.surface_enabled is False
+    assert cfg.surface_mode == "grid"
+    assert cfg.surface_threshold_pct == 4.0
 
 
 def test_save_then_load_roundtrip(tmp_path):
@@ -71,7 +74,9 @@ def test_save_then_load_roundtrip_panel_fields(tmp_path):
     path = tmp_path / "roomscan.toml"
     original = ViewerConfig(ir_colormap="turbo", ir_freeze_range=True,
                              point_size=8.0, panel_width=400,
-                             near_mode="emphasis", near_cutoff_m=2.25, near_emphasis=0.8)
+                             near_mode="emphasis", near_cutoff_m=2.25, near_emphasis=0.8,
+                             surface_enabled=True, surface_mode="spatial",
+                             surface_threshold_pct=7.5)
     saved_path = original.save(path)
     assert saved_path == path
 
@@ -84,6 +89,9 @@ def test_save_then_load_roundtrip_panel_fields(tmp_path):
     assert loaded.near_mode == "emphasis"
     assert loaded.near_cutoff_m == 2.25
     assert loaded.near_emphasis == 0.8
+    assert loaded.surface_enabled is True
+    assert loaded.surface_mode == "spatial"
+    assert loaded.surface_threshold_pct == 7.5
 
 
 def test_load_old_config_file_missing_panel_keys_falls_back_to_defaults(tmp_path):
@@ -106,6 +114,9 @@ def test_load_old_config_file_missing_panel_keys_falls_back_to_defaults(tmp_path
     assert cfg.ir_colormap == "gray"
     assert cfg.ir_freeze_range is False
     assert cfg.panel_width == 340
+    assert cfg.surface_enabled is False
+    assert cfg.surface_mode == "grid"
+    assert cfg.surface_threshold_pct == 4.0
 
 
 def test_load_corrupt_file_tolerated(tmp_path):

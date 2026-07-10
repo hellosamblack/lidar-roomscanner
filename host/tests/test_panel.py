@@ -40,7 +40,8 @@ from roomscan.viewer import Stats
 def _bare_args(**over):
     ns = argparse.Namespace(point_size=None, ir_colormap=None, ir_freeze_range=None,
                             panel_width=None, near_mode=None, near_cutoff_m=None,
-                            near_emphasis=None)
+                            near_emphasis=None, surface_enabled=None, surface_mode=None,
+                            surface_threshold_pct=None)
     for k, v in over.items():
         setattr(ns, k, v)
     return ns
@@ -57,18 +58,25 @@ def test_fill_panel_fields_uses_builtin_defaults_when_no_config(tmp_path, monkey
     assert args.near_mode == "window"
     assert args.near_cutoff_m == 1.5
     assert args.near_emphasis == 0.5
+    assert args.surface_enabled is False
+    assert args.surface_mode == "grid"
+    assert args.surface_threshold_pct == 4.0
 
 
 def test_fill_panel_fields_pulls_from_config_file(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path))
     ViewerConfig(ir_colormap="turbo", ir_freeze_range=True,
-                 point_size=5.0, panel_width=400).save()
+                 point_size=5.0, panel_width=400,
+                 surface_enabled=True, surface_mode="spatial", surface_threshold_pct=7.5).save()
     args = _bare_args()
     _fill_panel_fields(args)
     assert args.ir_colormap == "turbo"
     assert args.ir_freeze_range is True
     assert args.point_size == 5.0
     assert args.panel_width == 400
+    assert args.surface_enabled is True
+    assert args.surface_mode == "spatial"
+    assert args.surface_threshold_pct == 7.5
 
 
 def test_fill_panel_fields_leaves_already_set_values(tmp_path, monkeypatch):

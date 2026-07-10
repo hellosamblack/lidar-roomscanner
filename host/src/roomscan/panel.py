@@ -827,7 +827,8 @@ class ControlPanel:
 
 # ---- entry points -----------------------------------------------------------
 _PANEL_FIELDS = ("point_size", "ir_colormap", "ir_freeze_range", "panel_width",
-                 "near_mode", "near_cutoff_m", "near_emphasis")
+                 "near_mode", "near_cutoff_m", "near_emphasis",
+                 "surface_enabled", "surface_mode", "surface_threshold_pct")
 
 
 def _fill_panel_fields(args) -> None:
