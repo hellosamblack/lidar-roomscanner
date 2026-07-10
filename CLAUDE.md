@@ -15,7 +15,7 @@ F:\git\personal\lidar\
 ├─ roomscanner\            ← YOU ARE HERE (active dev)
 │  ├─ CLAUDE.md            ← this file
 │  ├─ ROADMAP.md           ← phased plan (source of truth for sequencing; per-phase risks + reference-firmware bug list)
-│  ├─ .claude\skills\      ← project skills: firmware-loop (build/flash/monitor), protocol-change (wire-change checklist), stack-electrical (jumpers/SBs/bus routing across the board stack)
+│  ├─ .claude\skills\      ← project skills: firmware-loop (build/flash/monitor), protocol-change (wire-change checklist), status-sync (MANDATORY at ship time — docs move with the code), stack-electrical (jumpers/SBs/bus routing across the board stack)
 │  ├─ docs\
 │  │  ├─ engineering-practices.md            ← binding conventions (repo rules, protocol rules, firmware/host standards)
 │  │  ├─ protocol.md                         ← wire protocol spec (created by Phase 1 Task 1)
@@ -81,20 +81,20 @@ Presets in `<APP>/CMakePresets.json`. Post-build emits `53L9A1_PostprocessSingle
 ## Target architecture (where this is going)
 
 Two decisions that override the older parts of `references/roadmapResearch.md`:
-- **Transport: Ethernet, not USB.** The board has a 10/100 MAC (RMII pins already `AF11_ETH` in `<APP>/Src/main.c`; MAC + lwIP not yet enabled). Target link is lwIP/UDP with hardware PTP timestamping. USB CDC (native `USB_DRD_FS`) is a bring-up/fallback only. This removes the USB-bandwidth and timestamp-drift bottlenecks the doc spends most of its length on.
-- **Sensors: X-NUCLEO-IKS4A1** adds an IMU (LSM6DSV16X, hardware SFLP orientation), magnetometer, barometer (Z-drift constraint), and temp/humidity. Not yet in code. Bus-sharing is **resolved**: the IKS4A1 rides the ToF's I3C1 bus as legacy-I2C targets (shared PB8/PB9) — no separate peripheral. Stacking/config recipe + bench checklist in `docs/iks4a1-stacking.md`.
+- **Transport: native USB CDC FS is the production link for now; Ethernet is shelved (owner, 2026-07-10).** Measurement inverted the earlier "Ethernet, not USB" call: the CDC send is fully hidden inside the sensor's ranging window (Phase 2.5 trigger-early overlap) and the bandwidth wall is the **I3C sensor readout** (~60-80 Hz raw ceiling), not USB. Ethernet (lwIP/UDP + PTP, Phase 5) stays specced with explicit revival triggers in `ROADMAP.md`'s transport decision; the 10/100 MAC and RMII muxing remain available.
+- **Sensors: X-NUCLEO-IKS4A1** — **integrated (Phase 4, 2026-07-10)**: the LSM6DSV16X shares I3C1 with the ToF as a native I3C target (HUB1-only jumpering, PartID-keyed multi-device ENTDAA, slow-PP workaround for the NXS0108 translator); SFLP orientation quaternion = stream 9, sensor-hub env (baro/mag/temp) = stream 10, both one sample per ToF frame; host panel shows gizmo/compass/sparklines and runs 9-axis mag yaw fusion (`docs/yaw-fusion.md`). Full stack streams at 27.85 fps, 0 CRC. Stacking recipe + bus-conflict resolution history in `docs/iks4a1-stacking.md`. Still open: on-rig mag calibration + `AXIS_CONVENTION` check; SHT40 humidity unstreamed.
 
 ### Roadmap
 
 Full detail in `ROADMAP.md`. Summary:
 
 - **Phase 0 — ✅ done.** On-device transform + ASCII depth map over ST-Link VCOM (`CONF_PRINT_FRAME = 1` in `<APP>/Src/vl53l9_app.c:31`).
-- **Phase 1 — real-time 3D visualizer.** Replace ASCII with a **versioned binary frame protocol** (magic + seq + timestamp + payload + CRC32) over a link fast enough for real-time (VCOM @115200 ≈ 1 fps for a 9 KB frame — inadequate; use **native USB CDC FS** now, Ethernet later). PC app deprojects depth → point cloud and renders live (Python + Open3D, or a custom viewer). First capture what the transform library exposes: the app prints available **streams and controls** at startup via `streams_inspect`/`controls_inspect` — that list (depth/reflectance/confidence/possibly XYZ) decides what can be streamed and whether deprojection happens on-MCU or PC-side.
-- **Phase 2 — IR + additional sensor streams.** Extend protocol + PC UI for IR reflectance, confidence, ambient; colorize the cloud by IR. Multi-stream from the start.
-- **Phase 3 — UI & runtime configuration.** Host→device control channel to set usecase/binning/streams at runtime (transform lib exposes `controls`); recording/playback; config persistence.
-- **Phase 4 — integrate X-NUCLEO-IKS4A1** (swapped ahead of Ethernet 2026-07-09): IMU/mag/baro drivers, fuse into the payload with hardware timestamps. Edge-AI (in-sensor MLC/ISPU) belongs here, not on the M33 — see the edge-ai-tooling memory.
-- **Phase 5 — transport upgrade to Ethernet** (lwIP/UDP + PTP + zero-config direct link). Older docs may use the pre-swap numbering (Ethernet=4, IKS4A1=5).
-- **Phase 6 — real-time SLAM** on PC: SFLP rotation prior, 3-DoF G-ICP, scalable TSDF, IR-as-intensity, baro Z-constraint.
+- **Phase 1 — ✅ done. Real-time 3D visualizer**: versioned binary frame protocol (magic + seq + timestamp + payload + CRC32) over native USB CDC FS (TinyUSB, VID:PID `CAFE:4001`); PC package `roomscan` decodes, deprojects, and renders live (Open3D).
+- **Phase 2 (+2.5) — ✅ done. Raw streaming + PC-side transform**: the MCU streams raw `3DMD` + CALIB; the `vl53l9-transform-c` pipeline runs on the PC (equivalence-gated), giving depth/IR/confidence/ambient host-side; trigger-early overlap → ~27.8 fps.
+- **Phase 3 (+3.5) — ✅ done. UI & runtime configuration**: COMMAND/ACK control channel (usecase/exposure/reinit), EVENT frames + bounded recovery, recording/playback, config persistence, and the `roomscan-panel` GUI (IR monitor, device controls, capture, events).
+- **Phase 4 — ✅ done. X-NUCLEO-IKS4A1 integrated** (2026-07-10): streams 9 (SFLP quat) + 10 (env via LSM sensor hub), panel sensors group, host yaw fusion — see the architecture bullet above for what's still open. Edge-AI (in-sensor MLC/ISPU) belongs at this tier, not on the M33 — see the edge-ai-tooling memory.
+- **Phase 5 — ⏸ shelved (2026-07-10): transport upgrade to Ethernet** (lwIP/UDP + PTP + zero-config direct link) — I3C readout, not USB, is the bandwidth wall; revival triggers in `ROADMAP.md`. Older docs may use the pre-swap numbering (Ethernet=4, IKS4A1=5).
+- **Phase 6 — ← next. Real-time SLAM** on PC: SFLP rotation prior, 3-DoF G-ICP, scalable TSDF, IR-as-intensity, baro Z-constraint.
 - **Phase 7 — offline**: COLMAP pose priors + depth-regularized 3D Gaussian Splatting.
 
-Guiding order (per project owner): mature the visualizer and UI/config on the ToF sensor alone **before** adding the IKS4A1 board.
+Guiding order (per project owner): mature the visualizer and UI/config on the ToF sensor alone **before** adding the IKS4A1 board. *(Satisfied — both are done; Phase 6 SLAM should likewise be validated against recorded captures before hardware-in-the-loop.)*

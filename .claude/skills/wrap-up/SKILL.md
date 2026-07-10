@@ -12,15 +12,16 @@ consolidated report at the end.
 
 ## Phase 1: Ship It
 
-**Commit & merge:**
+**Commit & land (PR flow — never merge locally):**
 1. Run `git status` and `git branch` to see current state
-2. If uncommitted changes exist, stage and commit all changed files with a
+2. Run the `status-sync` skill checklist — the commit must include the doc
+   deltas the work implies (ROADMAP.md status, superseded annotations, memory)
+3. If uncommitted changes exist, stage and commit all changed files with a
    descriptive message
-3. If currently on a feature/chore branch (not `main`), merge it into `main`:
-   - `git checkout main`
-   - `git merge --no-ff <branch> -m "Merge <branch> into main"`
-   - Delete the branch after a successful merge
-4. Push `main` to remote
+4. If on a feature/worktree branch: push it and open a **draft PR**
+   (`gh pr create --draft`). Do NOT merge into local `main`, do NOT
+   `gh pr merge`, do NOT delete the branch — merging is the owner's call.
+   If somehow on `main` with local commits: STOP and report; never push main.
 
 **File placement check:**
 5. If any files were created or saved during this session:
