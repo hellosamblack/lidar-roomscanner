@@ -507,7 +507,7 @@ are all reused unchanged (no wire change; `docs/protocol.md` untouched).
 > - **Bus** (per the HUB1 design below, plus one fix the plan missed): PartID-keyed multi-device ENTDAA
 >   (ToF `0x0102`→`0x52`, LSM6DSV16X `0x0070`→`0x50`). Stacked, the IKS4A1's NXS0108 auto-direction
 >   translator can't pass 12.5 MHz I3C push-pull, so `rs_assign_dynamic_addresses()` slows the PP clock
->   **for ENTDAA only** (ranging stays full-speed) — ToF enumeration went intermittent → 105/105.
+>   **for ENTDAA only** (ranging stays full-speed) — ToF enumeration went from intermittent to 100% stable (105/105 passes).
 >   Second independent fix: sensor-hub env sensors needed J4/J5 = 5-6 **only** and the LPS22DF barometer
 >   at `0x5D` (SA0=1 on this board). Full history: `docs/iks4a1-stacking.md` → "RESOLVED (2026-07-10)".
 > - **Streams** (protocol v1 rev 2026-07-09, additive): **IMU_QUAT (9)** — SFLP game-rotation quaternion,
