@@ -304,7 +304,8 @@ class ControlPanel:
         # real transitions (init/active/gated:*) still log once each.
         self._last_fusion_status = "off"
         self._gizmo_added = False
-        self._baseline_quat = None
+        self._baseline_yaw = None
+        self.persistence = False  # only show currently perceived image, no persistence (for now)
         self.stats = Stats()
         # metrics HUD: per-sensor rate meters + a background resource sampler.
         # Fed from the reader thread; read on the UI tick. Overlay is toggleable.
@@ -721,11 +722,9 @@ class ControlPanel:
         # Retrieve fused orientation
         quat = self.sensor_state.fused_quat()
         quat_display = quat
-        if quat is not None and self._baseline_quat is not None:
-            from .sensors import quat_mul
-            qb = self._baseline_quat
-            qb_inv = (qb[0], -qb[1], -qb[2], -qb[3])
-            quat_display = quat_mul(quat, qb_inv)
+        if quat is not None and self._baseline_yaw is not None:
+            from .sensors import graft_yaw
+            quat_display = graft_yaw(quat, -self._baseline_yaw)
 
         if quat_display is not None:
             from .sensors import quat_to_matrix
@@ -771,31 +770,38 @@ class ControlPanel:
                 self._render_surface(depth, world_pts, colors, r_mapped)
             else:
                 self._remove_mesh_geometry()
-                self._accumulated_points.append(world_pts)
-                self._accumulated_colors.append(colors)
+                if self.persistence:
+                    self._accumulated_points.append(world_pts)
+                    self._accumulated_colors.append(colors)
+                else:
+                    self.pcd.points = o3d.utility.Vector3dVector(world_pts)
+                    self.pcd.colors = o3d.utility.Vector3dVector(colors)
 
-            # Concatenate accumulated points
-            if len(self._accumulated_points) > 0:
-                flat_pts = np.concatenate(self._accumulated_points, axis=0)
-                flat_cols = np.concatenate(self._accumulated_colors, axis=0)
+            # Concatenate accumulated points if persistence is enabled
+            if self.persistence:
+                if len(self._accumulated_points) > 0:
+                    flat_pts = np.concatenate(self._accumulated_points, axis=0)
+                    flat_cols = np.concatenate(self._accumulated_colors, axis=0)
 
-                # Voxel downsample if too large to preserve interactive performance
-                if len(flat_pts) > 20000:
-                    pcd_temp = self._o3d.geometry.PointCloud()
-                    pcd_temp.points = self._o3d.utility.Vector3dVector(flat_pts)
-                    pcd_temp.colors = self._o3d.utility.Vector3dVector(flat_cols)
-                    pcd_temp = pcd_temp.voxel_down_sample(voxel_size=0.02)
-                    self._accumulated_points = [np.asarray(pcd_temp.points)]
-                    self._accumulated_colors = [np.asarray(pcd_temp.colors)]
-                    flat_pts = self._accumulated_points[0]
-                    flat_cols = self._accumulated_colors[0]
+                    # Voxel downsample if too large to preserve interactive performance
+                    if len(flat_pts) > 20000:
+                        pcd_temp = self._o3d.geometry.PointCloud()
+                        pcd_temp.points = self._o3d.utility.Vector3dVector(flat_pts)
+                        pcd_temp.colors = self._o3d.utility.Vector3dVector(flat_cols)
+                        pcd_temp = pcd_temp.voxel_down_sample(voxel_size=0.02)
+                        self._accumulated_points = [np.asarray(pcd_temp.points)]
+                        self._accumulated_colors = [np.asarray(pcd_temp.colors)]
+                        flat_pts = self._accumulated_points[0]
+                        flat_cols = self._accumulated_colors[0]
+                else:
+                    flat_pts = np.zeros((0, 3))
+                    flat_cols = np.zeros((0, 3))
+
+                self.pcd.points = o3d.utility.Vector3dVector(flat_pts)
+                self.pcd.colors = o3d.utility.Vector3dVector(flat_cols)
+                self._show_geometries(flat_pts)
             else:
-                flat_pts = np.zeros((0, 3))
-                flat_cols = np.zeros((0, 3))
-
-            self.pcd.points = o3d.utility.Vector3dVector(flat_pts)
-            self.pcd.colors = o3d.utility.Vector3dVector(flat_cols)
-            self._show_geometries(flat_pts)
+                self._show_geometries(world_pts)
         else:
             self._remove_mesh_geometry()
             if not self._camera_set:
@@ -827,8 +833,9 @@ class ControlPanel:
         sc = self.scene_widget.scene
         if sc.has_geometry(_MESH_GEOM):
             sc.remove_geometry(_MESH_GEOM)
-        if self._accumulated_mesh is not None and len(self._accumulated_mesh.triangles) > 0:
-            sc.add_geometry(_MESH_GEOM, self._accumulated_mesh, self.mesh_material)
+        mesh_to_show = self._accumulated_mesh if self.persistence else self.mesh
+        if mesh_to_show is not None and len(mesh_to_show.triangles) > 0:
+            sc.add_geometry(_MESH_GEOM, mesh_to_show, self.mesh_material)
 
     def _remove_mesh_geometry(self):
         sc = self.scene_widget.scene
@@ -880,28 +887,37 @@ class ControlPanel:
         colors_grid = np.zeros((h * w, 3), dtype=np.float64)
         colors_grid[valid_grid.ravel()] = colors
         
-        current_mesh = self._o3d.geometry.TriangleMesh()
-        current_mesh.vertices = self._o3d.utility.Vector3dVector(mesh_verts)
-        current_mesh.vertex_colors = self._o3d.utility.Vector3dVector(colors_grid)
-        current_mesh.triangles = self._o3d.utility.Vector3iVector(triangles.astype(np.int32))
-        
-        if self._accumulated_mesh is None or len(self._accumulated_mesh.triangles) == 0:
-            self._accumulated_mesh = current_mesh
-        else:
-            self._accumulated_mesh += current_mesh
+        if self.persistence:
+            current_mesh = self._o3d.geometry.TriangleMesh()
+            current_mesh.vertices = self._o3d.utility.Vector3dVector(mesh_verts)
+            current_mesh.vertex_colors = self._o3d.utility.Vector3dVector(colors_grid)
+            current_mesh.triangles = self._o3d.utility.Vector3iVector(triangles.astype(np.int32))
             
-        if len(self._accumulated_mesh.triangles) > 50000:
-            self._accumulated_mesh = self._accumulated_mesh.simplify_vertex_clustering(0.02)
-            self._accumulated_mesh.remove_duplicated_vertices()
-            self._accumulated_mesh.remove_duplicated_triangles()
-            self._accumulated_mesh.remove_degenerate_triangles()
-            
-        self._show_mesh_geometry()
+            if self._accumulated_mesh is None or len(self._accumulated_mesh.triangles) == 0:
+                self._accumulated_mesh = current_mesh
+            else:
+                self._accumulated_mesh += current_mesh
+                
+            if len(self._accumulated_mesh.triangles) > 50000:
+                self._accumulated_mesh = self._accumulated_mesh.simplify_vertex_clustering(0.02)
+                self._accumulated_mesh.remove_duplicated_vertices()
+                self._accumulated_mesh.remove_duplicated_triangles()
+                self._accumulated_mesh.remove_degenerate_triangles()
+                
+            self._show_mesh_geometry()
 
-        lone_pts = rot_pts[~covered]
-        lone_colors = colors[~covered]
-        self._accumulated_points.append(lone_pts)
-        self._accumulated_colors.append(lone_colors)
+            lone_pts = rot_pts[~covered]
+            lone_colors = colors[~covered]
+            self._accumulated_points.append(lone_pts)
+            self._accumulated_colors.append(lone_colors)
+        else:
+            self.mesh.vertices = self._o3d.utility.Vector3dVector(mesh_verts)
+            self.mesh.vertex_colors = self._o3d.utility.Vector3dVector(colors_grid)
+            self.mesh.triangles = self._o3d.utility.Vector3iVector(triangles.astype(np.int32))
+            self._show_mesh_geometry()
+            
+            self.pcd.points = self._o3d.utility.Vector3dVector(rot_pts[~covered])
+            self.pcd.colors = self._o3d.utility.Vector3dVector(colors[~covered])
 
 
     def _apply_camera(self):
@@ -1047,11 +1063,9 @@ class ControlPanel:
         Graceful no-data: quietly does nothing until IMU_QUAT/ENV frames arrive."""
         quat = self.sensor_state.fused_quat()
         quat_display = quat
-        if quat is not None and self._baseline_quat is not None:
-            from .sensors import quat_mul
-            qb = self._baseline_quat
-            qb_inv = (qb[0], -qb[1], -qb[2], -qb[3])
-            quat_display = quat_mul(quat, qb_inv)
+        if quat is not None and self._baseline_yaw is not None:
+            from .sensors import graft_yaw
+            quat_display = graft_yaw(quat, -self._baseline_yaw)
         if self.imu_gizmo and quat_display is not None:
             self._update_camera_gizmo(quat_display)
         status = self.sensor_state.fusion_status()
@@ -1122,8 +1136,9 @@ class ControlPanel:
     def _on_reset_orientation(self):
         quat = self.sensor_state.fused_quat()
         if quat is not None:
-            self._baseline_quat = quat
-            self.bus.publish("yaw-fusion -> baseline reset")
+            from .sensors import quat_yaw_deg
+            self._baseline_yaw = quat_yaw_deg(quat)
+            self.bus.publish(f"yaw-fusion -> baseline reset (yaw = {self._baseline_yaw:.1f} deg)")
             self._on_clear_scan()
 
     def _on_clear_scan(self):

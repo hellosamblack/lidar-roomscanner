@@ -520,7 +520,7 @@ are all reused unchanged (no wire change; `docs/protocol.md` untouched).
 >   ellipsoid-fit mag-calibration CLI. Suite: **240 passed**.
 >
 > **Open follow-ups (not blockers):**
-> - **[RESOLVED 2026-07-10] Visualizer camera model + world-space accumulation**: replaced the 3D axes gizmo with a 3D camera model entity, transformed point cloud and mesh data into the fixed world frame using the IMU orientation, accumulated and downsampled the scan to "paint" the space, and added Clear UI/key controls.
+> - **[RESOLVED 2026-07-10] Visualizer camera model + world-space accumulation**: replaced the 3D axes gizmo with a 3D camera model entity, transformed point cloud and mesh data into the fixed world frame using the IMU orientation. Absolute gravity tilt (down direction of gravity from accelerometer) is preserved by only zeroing yaw during baseline resets, and persistent accumulation is controllable via a `self.persistence` configuration flag (defaulting to False). Added Clear UI/key controls.
 > - **[RESOLVED 2026-07-10] On-rig mag calibration + `AXIS_CONVENTION` verification**:
 >   calibration generated `mag_cal.json` (residual std/mean < 0.02, field_ut ~49.87 uT), `AXIS_CONVENTION` verified and set to `np.diag([1.0, -1.0, -1.0])` (representing `[x, -y, -z]`), and visual yaw-as-roll mapping resolved in `gizmo_pose`.
 > - **SHT40 humidity (and the remaining IKS4A1 sensors) are not streamed** — ENV carries
