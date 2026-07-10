@@ -112,3 +112,27 @@ def test_graft_yaw_zero_is_noop():
 def test_quat_mul_identity():
     q = (0.5, 0.5, 0.5, 0.5)
     assert quat_mul((1.0, 0.0, 0.0, 0.0), q) == pytest.approx(q)
+
+
+def test_fused_quat_falls_back_to_raw_without_fusion():
+    st = SensorState()
+    st.feed(_frame(StreamId.IMU_QUAT, struct.pack("<4f", 1.0, 0.0, 0.0, 0.0)))
+    assert st.fused_quat() == pytest.approx((1.0, 0.0, 0.0, 0.0))
+    assert st.fusion_status() == "off"
+
+
+def test_fused_quat_applies_yaw_correction():
+    import math
+    from roomscan.magcal import MagCalibration
+    from roomscan.sensors import YawFusion
+    cal = MagCalibration(offset=(0.0, 0.0, 0.0),
+                         matrix=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+                         field_ut=50.0)
+    st = SensorState(fusion=YawFusion(tau_s=0.5, calibration=cal))
+    mag = (50.0 * math.cos(math.radians(60.0)), 50.0 * math.sin(math.radians(60.0)), 0.0)
+    for i in range(300):
+        st.feed(_frame(StreamId.ENV, struct.pack("<5f", 101325.0, *mag, 20.0)))
+        h = FrameHeader(FrameType.DATA, StreamId.IMU_QUAT, 0, 1, (i + 1) * 10_000, 0, 0, 16)
+        st.feed(Frame(h, struct.pack("<4f", 1.0, 0.0, 0.0, 0.0)))
+    assert st.fusion_status() == "active"
+    assert wrap180(quat_yaw_deg(st.fused_quat()) - 60.0) == pytest.approx(0.0, abs=1.5)

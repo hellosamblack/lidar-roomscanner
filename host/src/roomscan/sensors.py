@@ -22,12 +22,14 @@ class EnvSample:
 
 
 class SensorState:
-    def __init__(self, history: int = 256):
+    def __init__(self, history: int = 256, fusion: "YawFusion | None" = None):
         self._lock = threading.Lock()
         self._quat: tuple[float, float, float, float] | None = None
         self._env: EnvSample | None = None
         self._pressure = deque(maxlen=history)
         self._temp = deque(maxlen=history)
+        self._fusion = fusion
+        self._raw_mag: tuple[float, float, float] | None = None
 
     def feed(self, frame: Frame) -> None:
         if frame.header.frame_type != FrameType.DATA:
@@ -37,17 +39,34 @@ class SensorState:
             q = decode_imu_quat(frame.payload)
             with self._lock:
                 self._quat = q
+                if self._fusion is not None and self._raw_mag is not None:
+                    self._fusion.update(q, self._raw_mag, frame.header.t_us)
         elif sid == StreamId.ENV:
             pressure, mag, temp = decode_env(frame.payload)
             sample = EnvSample(pressure, mag, temp, frame.header.t_us)
             with self._lock:
                 self._env = sample
+                self._raw_mag = mag
                 self._pressure.append(pressure)
                 self._temp.append(temp)
 
     def latest_quat(self) -> tuple[float, float, float, float] | None:
         with self._lock:
             return self._quat
+
+    def fused_quat(self) -> tuple[float, float, float, float] | None:
+        """Yaw-drift-corrected orientation if a fusion filter is attached and has
+        produced a result; otherwise the raw SFLP quaternion (today's behavior)."""
+        with self._lock:
+            if self._fusion is not None:
+                fused = self._fusion.fused_quat()
+                if fused is not None:
+                    return fused
+            return self._quat
+
+    def fusion_status(self) -> str:
+        with self._lock:
+            return self._fusion.status if self._fusion is not None else "off"
 
     def latest_env(self) -> EnvSample | None:
         with self._lock:
