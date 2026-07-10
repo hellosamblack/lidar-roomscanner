@@ -1214,15 +1214,17 @@ void vl53l9_app() {
         int ir = rs_lsm_init();
         printf("\n[LSM PROBE] daa=%d init=%d (0=ok)\n", daa, ir);
         extern uint16_t g_lsm_tag_hist[32];
+        extern uint8_t g_lsm_master_config;
         extern uint8_t rs_lsm_shub_status_raw(void);
+        printf("[LSM PROBE] MASTER_CONFIG=0x%02X (MASTER_ON=bit2 0x04, AUX_SENS_ON=bits1:0, PU=bit3 0x08)\n",
+               g_lsm_master_config);
         for (;;) {
             rs_lsm_sample_t s;
             (void)rs_lsm_read_latest(&s);
-            printf("[LSM PROBE] tags quat=%u sh0=%u sh1=%u sh2=%u nack=%u | shstat=0x%02X | P=%d(Pa) mag=%d,%d,%d(uTx10) T=%d(Cx100) env=%u\n",
+            printf("[LSM PROBE] tags quat=%u sh0=%u sh1=%u sh2=%u nack=%u | shstat=0x%02X mcfg=0x%02X | P=%d(Pa) T=%d(Cx100) env=%u\n",
                    g_lsm_tag_hist[0x13], g_lsm_tag_hist[0x0E], g_lsm_tag_hist[0x0F],
                    g_lsm_tag_hist[0x10], g_lsm_tag_hist[0x19], rs_lsm_shub_status_raw(),
-                   (int)s.pressure_pa, (int)(s.mag_ut[0] * 10.0f), (int)(s.mag_ut[1] * 10.0f),
-                   (int)(s.mag_ut[2] * 10.0f), (int)(s.temp_c * 100.0f), s.have_env);
+                   g_lsm_master_config, (int)s.pressure_pa, (int)(s.temp_c * 100.0f), s.have_env);
             HAL_Delay(300);
         }
     }

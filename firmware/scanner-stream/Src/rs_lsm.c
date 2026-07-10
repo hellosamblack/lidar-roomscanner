@@ -11,15 +11,24 @@
 #include "lsm6dsv16x_reg.h"
 #include "stm32h5xx_hal.h"
 
-/* Sensor-hub baro/mag/temp slaves. Gated OFF: the first-cut config below is complete
- * and compiles, but on the bench the sensor-hub MASTER never runs a cycle
- * (STATUS_MASTER.sens_hub_endop stays 0, no slave NACK, wr_once_done stays 0) --
- * independent of the write-once init writes. That points at a master-enable / bank-access
- * issue (e.g. MASTER_CONFIG.MASTER_ON not latching over I3C, an embedded-function
- * prerequisite, or the SENS_I2C aux bus needing external pull-ups on the board), which is
- * interactive bench work. Next steps: read back MASTER_CONFIG to confirm MASTER_ON, scope
- * SENS_SDA/SENS_SCL, and verify SHUB-bank access over I3C. SFLP orientation is unaffected. */
+/* Sensor-hub baro/mag/temp slaves. Gated OFF -- diagnosed but not yet working.
+ * Findings (bench, 2026-07-09/10):
+ *   - MASTER_CONFIG reads back 0x46 after sh_master_set: MASTER_ON=1 (bit2), AUX_SENS_ON=2
+ *     (bits1:0 -> 3 slaves), WRITE_ONCE pending (bit6). So the enable + slave config DO
+ *     latch over I3C -- SHUB-bank writes work.
+ *   - BUT the master never runs a single cycle: STATUS_MASTER.sens_hub_endop stays 0, no
+ *     slave NACK ever, no FIFO SHUB-slave tags. The state machine never STARTS a transaction
+ *     -> the XL/GY-DRDY trigger isn't reaching the sensor hub.
+ *   - Ruled out: NOT an SFLP conflict (SHUB stays dead with SFLP explicitly disabled);
+ *     NOT the write-once init (dead with the init writes removed); NOT enable-not-latching.
+ *   - SHUB_PU_EN (MASTER_CONFIG bit3) reads 0 despite sh_master_interface_pull_up_set(1).
+ * Next bench steps (owner): scope SENS_SDA/SENS_SCL for any master activity + check board
+ * pull-ups; try START_CONFIG/INT2 trigger instead of XL_GY_DRDY; investigate why SHUB_PU_EN
+ * won't set; confirm the accel DRDY actually pulses the sensor-hub trigger over I3C.
+ * NB: LSM config persists across an MCU -rst (independently powered) -- set states
+ * explicitly (see RS_LSM_SFLP_ON), don't rely on POR defaults, when bench-testing. */
 #define RS_LSM_ENABLE_SHUB (0)
+#define RS_LSM_SFLP_ON (1)  /* SFLP game-rotation-vector; set 0 only to bench SHUB in isolation */
 
 #define LSM_ADDR 0x50u           /* LSM6DSV16X dynamic I3C address (rs_assign_dynamic_addresses) */
 
@@ -79,6 +88,8 @@ static int32_t lsm_i3c_write(void *handle, uint8_t reg, const uint8_t *data, uin
 static void lsm_mdelay(uint32_t ms) {
     HAL_Delay(ms);
 }
+
+uint8_t g_lsm_master_config = 0xFF;   /* diagnostic: MASTER_CONFIG readback after sh_master_set */
 
 static lsm6dsv16x_ctx_t g_ctx = {
     .write_reg = lsm_i3c_write,
@@ -174,6 +185,12 @@ static int rs_lsm_shub_init(void) {
     lsm6dsv16x_fifo_sh_batch_slave_set(&g_ctx, 1, 1);
     lsm6dsv16x_fifo_sh_batch_slave_set(&g_ctx, 2, 1);
     lsm6dsv16x_sh_master_set(&g_ctx, 1);
+
+    /* DIAG: read MASTER_CONFIG back to see whether MASTER_ON (bit2) / AUX_SENS_ON (bits1:0)
+     * / SHUB_PU_EN (bit3) actually latched over I3C. 0x00 => SHUB-bank write not landing. */
+    lsm6dsv16x_mem_bank_set(&g_ctx, LSM6DSV16X_SENSOR_HUB_MEM_BANK);
+    lsm6dsv16x_read_reg(&g_ctx, LSM6DSV16X_MASTER_CONFIG, &g_lsm_master_config, 1);
+    lsm6dsv16x_mem_bank_set(&g_ctx, LSM6DSV16X_MAIN_MEM_BANK);
     return 0;
 }
 
@@ -225,15 +242,12 @@ int rs_lsm_init(void) {
         return -3;
     }
 
-    /* SFLP game rotation vector -> FIFO. */
-    if (lsm6dsv16x_sflp_data_rate_set(&g_ctx, LSM6DSV16X_SFLP_120Hz) != 0 ||
-        lsm6dsv16x_sflp_game_rotation_set(&g_ctx, 1) != 0) {
-        return -4;
-    }
-    lsm6dsv16x_fifo_sflp_raw_t sflp_batch = { .game_rotation = 1, .gravity = 0, .gbias = 0 };
-    if (lsm6dsv16x_fifo_sflp_batch_set(&g_ctx, sflp_batch) != 0) {
-        return -5;
-    }
+    /* SFLP game rotation vector -> FIFO. (LSM config persists across MCU -rst, so
+     * explicitly set game_rotation to the desired state rather than skipping the call.) */
+    lsm6dsv16x_sflp_data_rate_set(&g_ctx, LSM6DSV16X_SFLP_120Hz);
+    lsm6dsv16x_sflp_game_rotation_set(&g_ctx, RS_LSM_SFLP_ON);
+    lsm6dsv16x_fifo_sflp_raw_t sflp_batch = { .game_rotation = RS_LSM_SFLP_ON, .gravity = 0, .gbias = 0 };
+    lsm6dsv16x_fifo_sflp_batch_set(&g_ctx, sflp_batch);
 
 #if RS_LSM_ENABLE_SHUB
     /* Sensor-hub environmental slaves are configured in a later bring-up step. */
