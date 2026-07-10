@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .magcal import MagCalibration
 from .protocol import Frame, FrameType, StreamId, decode_env, decode_imu_quat
 
 
@@ -137,3 +138,76 @@ def gizmo_pose(quat: tuple[float, float, float, float], scale: float,
     m[:3, :3] = quat_to_matrix(*quat) * scale
     m[:3, 3] = np.array(anchor, dtype=np.float64)
     return m
+
+
+AXIS_CONVENTION = np.eye(3)   # mag-mounting-vs-IMU sign/permutation; resolved on-target
+
+
+class YawFusion:
+    """Stateful yaw-only complementary filter: grafts a gated, low-passed
+    tilt-compensated magnetometer heading onto the SFLP quaternion. Tilt is
+    taken from SFLP unchanged; only heading is corrected."""
+
+    def __init__(self, tau_s: float = 20.0, calibration: MagCalibration | None = None,
+                 anomaly_frac: float = 0.3, motion_rate_dps: float = 40.0,
+                 gimbal_margin_deg: float = 15.0):
+        self.tau_s = float(tau_s)
+        self.cal = calibration
+        self.anomaly_frac = float(anomaly_frac)
+        self.motion_rate_dps = float(motion_rate_dps)
+        self.gimbal_margin_deg = float(gimbal_margin_deg)
+        self._delta = 0.0
+        self._have_delta = False
+        self._last_quat: tuple[float, float, float, float] | None = None
+        self._last_t: int | None = None
+        self.status = "init"
+
+    def update(self, quat, raw_mag, t_us: int) -> None:
+        quat = tuple(float(v) for v in quat)
+        prev_quat, prev_t = self._last_quat, self._last_t
+        self._last_quat = quat
+        if self.cal is None:
+            self.status = "gated:no-cal"
+            self._last_t = t_us
+            return
+        if prev_quat is None or prev_t is None:
+            self.status = "init"
+            self._last_t = t_us
+            return
+        dt = (t_us - prev_t) / 1e6
+        if dt <= 0:
+            dt = 1e-3
+        # gate: gimbal lock
+        if abs(quat_pitch_deg(quat)) > 90.0 - self.gimbal_margin_deg:
+            self.status = "gated:gimbal"
+            self._last_t = t_us
+            return
+        # gate: fast motion (SFLP quat angular rate as accel-free motion proxy)
+        dot = sum(a * b for a, b in zip(prev_quat, quat))
+        ang = 2.0 * math.acos(max(0.0, min(1.0, abs(dot))))   # rad between orientations
+        if math.degrees(ang) / dt > self.motion_rate_dps:
+            self.status = "gated:motion"
+            self._last_t = t_us
+            return
+        # calibrate + axis-convention the mag, then anomaly gate on magnitude
+        cal_mag = AXIS_CONVENTION @ self.cal.apply(raw_mag)
+        mag_norm = float(np.linalg.norm(cal_mag))
+        if abs(mag_norm - self.cal.field_ut) > self.anomaly_frac * self.cal.field_ut:
+            self.status = "gated:anomaly"
+            self._last_t = t_us
+            return
+        heading = tilt_compensated_heading(quat, tuple(cal_mag))
+        yaw = quat_yaw_deg(quat)
+        if not self._have_delta:
+            self._delta = wrap180(heading - yaw)   # snap on first valid sample
+            self._have_delta = True
+        else:
+            gain = dt / (self.tau_s + dt)
+            self._delta += gain * wrap180(heading - (yaw + self._delta))
+        self.status = "active"
+        self._last_t = t_us
+
+    def fused_quat(self):
+        if self._last_quat is None:
+            return None
+        return graft_yaw(self._last_quat, self._delta)
