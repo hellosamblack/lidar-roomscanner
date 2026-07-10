@@ -60,7 +60,11 @@ def fit_ellipsoid(samples: np.ndarray) -> MagCalibration:
     x, y, z = X[:, 0], X[:, 1], X[:, 2]
     D = np.column_stack([x * x, y * y, z * z, 2 * y * z, 2 * x * z, 2 * x * y,
                          2 * x, 2 * y, 2 * z])
-    v, *_ = np.linalg.lstsq(D, np.ones(X.shape[0]), rcond=None)
+    v, _res, rank, _sv = np.linalg.lstsq(D, np.ones(X.shape[0]), rcond=None)
+    if rank < 9:
+        # Rank-deficient design matrix: the samples don't span 3-D (e.g. confined
+        # to a plane or line), so the ellipsoid is underdetermined.
+        raise ValueError("degenerate ellipsoid fit (rank-deficient sample cloud)")
     a, b, c, f, g, h, p, q, r = v
     Q = np.array([[a, h, g], [h, b, f], [g, f, c]])
     u = np.array([p, q, r])

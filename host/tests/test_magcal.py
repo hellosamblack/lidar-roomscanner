@@ -60,3 +60,16 @@ def test_fit_recovers_center_and_spherizes():
 def test_fit_too_few_points_raises():
     with pytest.raises(ValueError):
         fit_ellipsoid(np.zeros((5, 3)))
+
+
+def test_fit_degenerate_planar_raises():
+    # Points confined to the z=0 plane make the shape matrix rank-deficient
+    # (singular Q / non-positive-definite), exercising the degenerate-math
+    # guards rather than the <20-point shape guard.
+    rng = np.random.default_rng(3)
+    theta = np.linspace(0.0, 2.0 * np.pi, 200, endpoint=False)
+    planar = np.column_stack([45.0 * np.cos(theta) + 5.0,
+                              45.0 * np.sin(theta) - 3.0,
+                              np.zeros_like(theta)])
+    with pytest.raises(ValueError):
+        fit_ellipsoid(planar)
