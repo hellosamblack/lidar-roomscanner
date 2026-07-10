@@ -143,3 +143,12 @@ reporting one bare "fps" number (this exact ambiguity caused real confusion in t
   root-caused, self-healing artifact (docs/connect-transient-forensics.md) — don't mistake it for a
   regression; `capture.py`'s report labels it explicitly as "connect transient: present/absent" and
   excludes it from the mid-stream anomaly count.
+- **With the IKS4A1 stacked** (the normal config since Phase 4), a healthy capture shows streams
+  **9 (IMU_QUAT) and 10 (ENV)** at ~1:1 with RAW. Streams 9/10 absent while RAW flows = LSM bring-up
+  failed (look for its EVENT). A boot that hangs with both boards stacked was the
+  NXS0108-vs-12.5 MHz-push-pull ENTDAA problem, **already fixed in firmware** (slow-PP ENTDAA in
+  `rs_assign_dynamic_addresses()`) — if it recurs, read `docs/iks4a1-stacking.md` before theorizing
+  about hardware. ENV dead but quat alive → jumpers J4/J5 must be **5-6 only**, and the LPS22DF
+  barometer is at `0x5D` on this board.
+- For a GUI surface with device buttons, IR monitor, and the sensors group (gizmo/compass/sparklines),
+  prefer `roomscan-panel` (`roomscan-view --panel`) over the classic keyboard-only viewer.
