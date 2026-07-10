@@ -15,8 +15,9 @@ Threading model (hard rules, mirrors the classic viewer's hard-won contract):
     EVENT/ACK to the log bus / CommandClient, and drops each rendered frame into
     a latest-wins slot (`queue.Queue(maxsize=1)`).
   * ALL scene/UI mutation happens on the GUI main thread, driven by
-    `Window.set_on_tick_event` -- the tick polls the slot (cloud every frame it
-    changes) and refreshes labels / IR pane / event log at <=4 Hz.
+    `Window.set_on_tick_event` -- the tick polls the slot and renders the cloud
+    AND the IR pane every frame it changes; labels / sensors / metrics / event
+    log refresh at <=4 Hz.
   * Serial writes (commands) run on `CommandDispatcher`'s short-lived worker
     threads, never on the reader or UI thread; their results come back as log-bus
     messages, drained on the UI thread. This keeps `SerialSource.write`'s "never
@@ -64,7 +65,9 @@ _GEOM = "cloud"
 _MESH_GEOM = "surface"
 _GIZMO_GEOM = "__imu_gizmo__"
 _GIZMO_ANCHOR = np.array([0.0, 0.0, 0.0], dtype=np.float64)  # fixed scene anchor; calibrate later
-_UI_PERIOD = 0.25               # <=4 Hz label / IR / log refresh
+_UI_PERIOD = 0.25               # <=4 Hz label / sensors / metrics / log refresh
+                                # (the IR pane is NOT throttled here -- it renders
+                                #  per frame, in lockstep with the point cloud)
 _EXPOSURE_DEBOUNCE = 0.4        # s to settle before sending a dragged exposure value
 _BG_DARK = [0.05, 0.05, 0.08, 1.0]
 _BG_LIGHT = [0.90, 0.90, 0.92, 1.0]
@@ -646,7 +649,8 @@ class ControlPanel:
             self._fault_reported = True
         if item is not None:
             self._render_frame(item)
-            redraw = True
+            self._update_ir()      # IR pane in lockstep with the cloud (per frame),
+            redraw = True          #   not batched into the <=4 Hz UI refresh below
         now = time.monotonic()
         # debounced exposure send
         if self._pending_exposure is not None:
@@ -659,7 +663,6 @@ class ControlPanel:
         if now - self._last_ui >= _UI_PERIOD:
             self._last_ui = now
             self._update_status()
-            self._update_ir()
             self._update_sensors()
             self._update_metrics()
             self._drain_log()
@@ -905,8 +908,8 @@ class ControlPanel:
         return self._np_to_o3d(img)
 
     def _update_sensors(self):
-        """Called from the same <=4 Hz tick as `_update_ir`: refresh the scene
-        gizmo's transform from the latest orientation quaternion, and (if the
+        """Called on the <=4 Hz UI tick: refresh the scene gizmo's transform
+        from the latest orientation quaternion, and (if the
         Sensors panel group is enabled) the compass + pressure/temp sparklines.
         Graceful no-data: quietly does nothing until IMU_QUAT/ENV frames arrive."""
         quat = self.sensor_state.latest_quat()
