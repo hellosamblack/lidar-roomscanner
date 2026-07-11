@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ..colors import normalize as _percentile_normalize
 from ..deproject import Deprojector
 from .cloud import source_cloud
 from .frames import baro_height_m, predict_pose, world_up
@@ -16,6 +17,7 @@ from .odometry import register
 from .tsdf import TsdfMap
 
 _MIN_VALID_POINTS = 100
+_DEFAULT_MIN_CONFIDENCE = 20.0  # tuned against captures/phase6_motion_ref.bin, see task-quality-report.md
 
 
 @dataclass
@@ -32,13 +34,16 @@ class Mapper:
                  icp_mode: str = "translation", voxel_size: float = 0.01,
                  baro_weight: float = 0.05, max_dist: float = 0.05,
                  min_fitness: float = 0.3, max_rmse: float = 0.05,
+                 min_confidence: float | None = _DEFAULT_MIN_CONFIDENCE,
+                 weight_threshold: float = 3.0,
                  clock=time.perf_counter):
         self.width, self.height = width, height
         self.icp_mode = icp_mode
         self.baro_weight = baro_weight
+        self.min_confidence = min_confidence
         self._deproj = Deprojector(width, height, fov_h, fov_v)
         self._intr = pinhole(width, height, fov_h, fov_v)
-        self._tsdf = TsdfMap(voxel_size=voxel_size)
+        self._tsdf = TsdfMap(voxel_size=voxel_size, weight_threshold=weight_threshold)
         self._gate = dict(max_dist=max_dist, min_fitness=min_fitness, max_rmse=max_rmse)
         self._clock = clock
         self._t_prev = np.zeros(3)
@@ -63,8 +68,34 @@ class Mapper:
         out[:3, 3] = blended
         return out
 
-    def step(self, depth_mm: np.ndarray, quat, pressure_pa=None) -> FrameStep:
+    def _gate_confidence(self, depth_mm: np.ndarray, confidence: np.ndarray | None) -> np.ndarray:
+        """Invalidate (zero) depth pixels whose confidence is below
+        `min_confidence` -- higher confidence = better (verified on the real
+        capture: values range ~0-460, median ~75; see task-quality-report.md
+        for the chosen threshold). A no-op when no confidence was supplied or
+        gating is disabled (`min_confidence=None`), so existing callers that
+        never pass `confidence` see byte-identical depth. NaN confidence
+        fails the `>=` comparison (False), so unknown-confidence pixels are
+        also invalidated rather than trusted."""
+        if confidence is None or self.min_confidence is None:
+            return depth_mm
+        mask = np.asarray(confidence) >= self.min_confidence
+        return np.where(mask, depth_mm, 0.0).astype(np.float32)
+
+    @staticmethod
+    def _reflectance_color(reflectance: np.ndarray) -> np.ndarray:
+        """Reflectance -> an (h, w, 3) float32 [0,1] grayscale image, via the
+        same percentile-clip normalization the IR monitor uses (`colors.
+        normalize`), so the mesh's reflectance look matches the live IR
+        panel."""
+        norm = _percentile_normalize(reflectance).astype(np.float32)
+        return np.repeat(norm[..., None], 3, axis=-1)
+
+    def step(self, depth_mm: np.ndarray, quat, pressure_pa=None,
+             reflectance=None, confidence=None) -> FrameStep:
         t0 = self._clock()
+        depth_mm = self._gate_confidence(depth_mm, confidence)
+        color = self._reflectance_color(reflectance) if reflectance is not None else None
         pts, valid = self._deproj.grid(depth_mm)
         n_valid = int(valid.sum())
         T_pred = predict_pose(quat, self._t_prev)
@@ -114,7 +145,7 @@ class Mapper:
                     pose = T_pred
 
         if not lost:
-            self._tsdf.integrate(depth_mm, self._intr, np.linalg.inv(pose))
+            self._tsdf.integrate(depth_mm, self._intr, np.linalg.inv(pose), color=color)
             self._t_prev = pose[:3, 3].copy()
             self._bootstrapped = True
         else:

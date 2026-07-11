@@ -32,8 +32,11 @@ def _wall_sequence(n, z0=1.30, step=-0.02):
     """A gently moving synthetic scan: n frames, each `step` metres further
     (negative = pushing in) than the last -- well within the 5cm single-step
     shift test_slam_mapper.py's test_pose_translation_tracks_a_synthetic_shift
-    already validates ICP recovers. Every frame should track successfully."""
-    return [(_textured_wall(z0 + i * step), _Q, 101325.0, i * 0.1) for i in range(n)]
+    already validates ICP recovers. Every frame should track successfully.
+    Frame tuple is (depth, reflectance, confidence, quat, pressure, t_s) --
+    reflectance/confidence are None here (most tests don't care about color/
+    gating); see test_reflectance_color_* below for tests that do."""
+    return [(_textured_wall(z0 + i * step), None, None, _Q, 101325.0, i * 0.1) for i in range(n)]
 
 
 def _drain(worker, timeout=15.0):
@@ -206,7 +209,7 @@ def test_empty_capture_publishes_terminal_done_zero_verts_no_crash():
 
 
 def test_all_lost_capture_publishes_terminal_done_zero_verts_no_crash():
-    frames = [(_degenerate(), _Q, 101325.0, i * 0.1) for i in range(5)]
+    frames = [(_degenerate(), None, None, _Q, 101325.0, i * 0.1) for i in range(5)]
     w = PostProcessWorker(frames, W, H, voxel_size=0.02)
     w.run()
     latest = w.latest()

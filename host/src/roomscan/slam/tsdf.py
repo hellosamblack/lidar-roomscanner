@@ -19,9 +19,27 @@ Open3D 0.19 API notes (verified against the installed build -- see
     expects.
   - `extract_point_cloud()` / `extract_triangle_mesh()` raise a C++
     `SetPointColors` shape-mismatch error if `attr_names` omits `color` --
-    unconditionally, even with 0 points requested. We declare an unused
-    `color` attribute solely to keep those two methods usable; we never
-    populate it (integrate() always uses the depth-only overload).
+    unconditionally, even with 0 points requested. We declare a `color`
+    attribute so those two methods are always usable; `integrate()` now has
+    an optional `color` overload (Task 13) that populates it with a
+    reflectance-derived image, but still defaults to the depth-only overload
+    when no color is given.
+  - `integrate()`'s color overload (`VoxelBlockGrid.integrate(block_coords,
+    depth, color, intrinsic, extrinsic, depth_scale, depth_max,
+    trunc_voxel_multiplier)`, verified against the installed 0.19 build's
+    `help()`) requires `depth`/`color` to be the SAME dtype pairing: either
+    both float32, or depth uint16 + color uint8 -- (float32, uint8) raises
+    "Unsupported input data type combination" from the C++ kernel. Since our
+    depth image is already float32 (millimetres), the color image must also
+    be float32, with values in [0, 1] (verified empirically: a float32 [0,1]
+    gradient image round-trips through `extract_triangle_mesh()` unchanged,
+    e.g. an input of 0.81 comes back as vertex color 0.81).
+  - `extract_triangle_mesh()`/`extract_point_cloud()` both accept a
+    `weight_threshold: float = 3.0` first argument (verified via `help()`) --
+    voxels integrated fewer than this many times are dropped from the
+    extraction. 3.0 was already Open3D's own default (we previously called
+    both with no arguments), so exposing it as a `TsdfMap` constructor knob
+    with the same 3.0 default changes nothing unless a caller raises it.
 
 Task 9.5 perf note: `raycast()`'s cost is dominated by how many voxel blocks
 it visits. Passing `hashmap().active_buf_indices()` (ALL blocks ever
@@ -45,11 +63,13 @@ _CPU = o3d.core.Device("CPU:0")
 class TsdfMap:
     def __init__(self, voxel_size: float = 0.01, trunc_multiplier: float = 8.0,
                  block_resolution: int = 8, block_count: int = 40000,
-                 depth_scale: float = 1000.0, depth_max: float = 5.0):
+                 depth_scale: float = 1000.0, depth_max: float = 5.0,
+                 weight_threshold: float = 3.0):
         self.voxel_size = voxel_size
         self.trunc_multiplier = trunc_multiplier
         self.depth_scale = depth_scale
         self.depth_max = depth_max
+        self.weight_threshold = weight_threshold
         self._empty = True
         self._vbg = o3d.t.geometry.VoxelBlockGrid(
             attr_names=("tsdf", "weight", "color"),
@@ -65,15 +85,32 @@ class TsdfMap:
         d = np.ascontiguousarray(depth_mm, dtype=np.float32)
         return o3d.t.geometry.Image(o3d.core.Tensor(d, device=_CPU))
 
+    def _color_image(self, color: np.ndarray) -> o3d.t.geometry.Image:
+        # Must be float32 in [0,1] to pair with our float32 depth image --
+        # see the module docstring's "color overload" note.
+        c = np.ascontiguousarray(color, dtype=np.float32)
+        return o3d.t.geometry.Image(o3d.core.Tensor(c, device=_CPU))
+
     def integrate(self, depth_mm: np.ndarray, intrinsic: o3d.core.Tensor,
-                  extrinsic: np.ndarray) -> None:
+                  extrinsic: np.ndarray, color: np.ndarray | None = None) -> None:
+        """`color`, if given, is an (h, w, 3) float32 array in [0, 1] (e.g. a
+        reflectance-derived grayscale image) integrated via the VBG's
+        color-integrate overload, populating the `color` voxel attribute so
+        `mesh()`/`point_cloud()` return non-black vertex colors. Omitting it
+        (the default) keeps the original depth-only overload -- unchanged
+        behavior for callers that don't have a color image handy."""
         depth = self._depth_image(depth_mm)
         ext = o3d.core.Tensor(np.asarray(extrinsic, dtype=np.float64), device=_CPU)
         intr = intrinsic.to(_CPU)
         coords = self._vbg.compute_unique_block_coordinates(
             depth, intr, ext, self.depth_scale, self.depth_max, self.trunc_multiplier)
-        self._vbg.integrate(coords, depth, intr, ext,
-                            self.depth_scale, self.depth_max, self.trunc_multiplier)
+        if color is not None:
+            color_img = self._color_image(color)
+            self._vbg.integrate(coords, depth, color_img, intr, ext,
+                                self.depth_scale, self.depth_max, self.trunc_multiplier)
+        else:
+            self._vbg.integrate(coords, depth, intr, ext,
+                                self.depth_scale, self.depth_max, self.trunc_multiplier)
         self._empty = False
 
     def frustum_block_coords(self, depth_mm: np.ndarray, intrinsic: o3d.core.Tensor,
@@ -145,7 +182,7 @@ class TsdfMap:
             m.vertex.colors = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=_CPU)
             m.triangle.indices = o3d.core.Tensor(np.zeros((0, 3), dtype=np.int32), device=_CPU)
             return m
-        return self._vbg.extract_triangle_mesh()
+        return self._vbg.extract_triangle_mesh(self.weight_threshold)
 
     def point_cloud(self) -> o3d.t.geometry.PointCloud:
         if self._empty:
@@ -153,4 +190,4 @@ class TsdfMap:
             pc.point.positions = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=_CPU)
             pc.point.colors = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=_CPU)
             return pc
-        return self._vbg.extract_point_cloud()
+        return self._vbg.extract_point_cloud(self.weight_threshold)

@@ -106,6 +106,40 @@ def test_mesh_throttle_counts_successful_frames_not_processed_frames():
     assert w._frames_integrated == 1                    # lost frame must not bump the counter
 
 
+def test_submit_forwards_reflectance_and_confidence_to_mapper_step(monkeypatch):
+    # Task 13: submit()'s optional reflectance/confidence must reach
+    # Mapper.step, not be silently dropped by the worker's in-slot plumbing.
+    from roomscan.slam.mapper import Mapper
+
+    seen = {}
+    orig_step = Mapper.step
+
+    def spy_step(self, depth, quat, pressure_pa=None, reflectance=None, confidence=None):
+        seen["reflectance"] = reflectance
+        seen["confidence"] = confidence
+        return orig_step(self, depth, quat, pressure_pa, reflectance=reflectance, confidence=confidence)
+
+    monkeypatch.setattr(Mapper, "step", spy_step)
+    w = SlamWorker(W, H, voxel_size=0.02)
+    reflectance = np.full((H, W), 42.0, dtype=np.float32)
+    confidence = np.full((H, W), 200.0, dtype=np.float32)
+    w.submit(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0, reflectance=reflectance, confidence=confidence)
+    w.run_once()
+    assert seen["reflectance"] is reflectance
+    assert seen["confidence"] is confidence
+
+
+def test_submit_defaults_reflectance_and_confidence_to_none():
+    # Existing 3-positional-arg call sites (panel.py) must keep working
+    # unchanged -- reflectance/confidence default to None.
+    w = SlamWorker(W, H, voxel_size=0.02)
+    w.submit(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    w.run_once()
+    latest = w.latest()
+    assert latest is not None
+    assert not latest[2].tracking_lost
+
+
 def test_start_stop_processes_in_background_and_does_not_hang():
     w = SlamWorker(W, H, voxel_size=0.02)
     w.start()

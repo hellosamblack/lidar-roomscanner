@@ -85,3 +85,68 @@ def test_raycast_empty_map_with_depth_hint_returns_none():
     m = TsdfMap(voxel_size=0.02)
     K = pinhole(W, H)
     assert m.raycast(K, np.eye(4), W, H, depth_hint=_wall_depth(1.0)) is None
+
+
+def _gradient_color():
+    # (H, W, 3) float32 [0,1] gradient across columns -- varied, non-black.
+    grad = (np.arange(W, dtype=np.float32) / (W - 1))
+    c = np.repeat(grad[None, :, None], H, axis=0)
+    return np.repeat(c, 3, axis=2).astype(np.float32)
+
+
+def test_integrate_with_color_populates_non_black_varied_mesh_colors():
+    # Task 13: the color-integrate overload populates the VBG's `color`
+    # attribute so extract_triangle_mesh() returns real (non-black) vertex
+    # colors instead of all-zero.
+    m = TsdfMap(voxel_size=0.02, depth_max=5.0)
+    K = pinhole(W, H)
+    depth = _wall_depth(1.0)
+    color = _gradient_color()
+    for _ in range(4):   # a few integrations so weight_threshold=3 default keeps voxels
+        m.integrate(depth, K, np.eye(4), color=color)
+    mesh = m.mesh()
+    colors = mesh.vertex.colors.numpy()
+    assert len(colors) > 100
+    assert colors.max() > 0.0                    # non-black
+    assert (colors.max(axis=0) - colors.min(axis=0)).max() > 0.05   # varied, not flat
+
+
+def test_integrate_without_color_keeps_black_mesh_colors():
+    # Unchanged default behavior: omitting `color` uses the depth-only
+    # overload, so vertex colors stay at their zero-initialized default.
+    m = TsdfMap(voxel_size=0.02, depth_max=5.0)
+    K = pinhole(W, H)
+    depth = _wall_depth(1.0)
+    for _ in range(4):
+        m.integrate(depth, K, np.eye(4))
+    mesh = m.mesh()
+    colors = mesh.vertex.colors.numpy()
+    assert len(colors) > 100
+    assert np.allclose(colors, 0.0)
+
+
+def test_weight_threshold_reduces_extracted_vertex_count():
+    # A voxel seen only once (default single integration) is dropped by a
+    # weight_threshold > 1 -- the mechanism Task 13 uses to drop
+    # transient/noise voxels from the final extraction.
+    K = pinhole(W, H)
+    depth = _wall_depth(1.0)
+
+    m_low = TsdfMap(voxel_size=0.02, depth_max=5.0, weight_threshold=0.0)
+    m_low.integrate(depth, K, np.eye(4))
+    n_low = len(m_low.mesh().vertex.positions)
+
+    m_high = TsdfMap(voxel_size=0.02, depth_max=5.0, weight_threshold=3.0)
+    m_high.integrate(depth, K, np.eye(4))   # only integrated once: weight==1 < 3
+    n_high = len(m_high.mesh().vertex.positions)
+
+    assert n_low > 0
+    assert n_high < n_low
+
+
+def test_weight_threshold_defaults_to_three_matching_prior_behavior():
+    # Before Task 13, mesh()/point_cloud() called extract_*() with no
+    # arguments, which defaults to Open3D's own weight_threshold=3.0 --
+    # verify the new explicit constructor knob preserves that default.
+    m = TsdfMap(voxel_size=0.02, depth_max=5.0)
+    assert m.weight_threshold == 3.0

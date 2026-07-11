@@ -17,10 +17,13 @@ from . import metrics
 
 def _load_frames(path, max_frames=None):
     """Return (frames, width, height) where frames is a list of
-    (depth_mm(h,w), quat(4), pressure_pa|None, t_s). Depth comes from
-    TransformStage; quat/pressure are carried forward from the latest 9/10."""
+    (depth_mm(h,w), reflectance(h,w)|None, confidence(h,w)|None, quat(4),
+    pressure_pa|None, t_s). Depth/reflectance/confidence come from
+    TransformStage; quat/pressure are carried forward from the latest 9/10.
+    reflectance/confidence are None for sources that don't provide them (the
+    on-device DEPTH_ZF32 passthrough path only ever returns "depth")."""
     dec = StreamDecoder()
-    stage = TransformStage(outputs=("depth",))
+    stage = TransformStage(outputs=("depth", "reflectance", "confidence"))
     with open(path, "rb") as f:
         data = f.read()
     frames = []
@@ -44,8 +47,15 @@ def _load_frames(path, max_frames=None):
         depth = arrays.get("depth")
         if depth is None:
             continue
+        reflectance = arrays.get("reflectance")
+        confidence = arrays.get("confidence")
         width, height = header.width, header.height
-        frames.append((depth.astype(np.float32), last_quat, last_pa, header.t_us / 1e6))
+        frames.append((
+            depth.astype(np.float32),
+            reflectance.astype(np.float32) if reflectance is not None else None,
+            confidence.astype(np.float32) if confidence is not None else None,
+            last_quat, last_pa, header.t_us / 1e6,
+        ))
         if max_frames and len(frames) >= max_frames:
             break
     return frames, width, height
@@ -54,10 +64,11 @@ def _load_frames(path, max_frames=None):
 def _run(frames, width, height, cfg, mode):
     mapper = Mapper(width, height, cfg.fov_h, cfg.fov_v, icp_mode=mode,
                     voxel_size=cfg.voxel_size, baro_weight=cfg.baro_weight,
-                    max_dist=cfg.max_dist, min_fitness=cfg.min_fitness, max_rmse=cfg.max_rmse)
+                    max_dist=cfg.max_dist, min_fitness=cfg.min_fitness, max_rmse=cfg.max_rmse,
+                    min_confidence=cfg.min_confidence, weight_threshold=cfg.weight_threshold)
     timings, ts = [], []
-    for depth, quat, pa, t_s in frames:
-        step = mapper.step(depth, quat, pa)
+    for depth, reflectance, confidence, quat, pa, t_s in frames:
+        step = mapper.step(depth, quat, pa, reflectance=reflectance, confidence=confidence)
         timings.append(step.slam_ms)
         ts.append(t_s)
     return mapper, timings, ts
@@ -103,7 +114,7 @@ def main(argv=None) -> int:
     print(f"\n[slam] wrote {args.out_mesh} and {args.out_traj} (mode={chosen})")
 
     if args.benchmark:
-        depths = [d for d, _, _, _ in frames]
+        depths = [d for d, _, _, _, _, _ in frames]
         kiss = metrics.compare_kiss(depths, mapper._intr, cfg.fov_h, cfg.fov_v)
         if kiss:
             print(f"[slam] KISS-ICP: path={kiss['path_length_m']:.3f} m "

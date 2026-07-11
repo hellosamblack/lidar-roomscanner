@@ -17,6 +17,8 @@ def test_defaults():
     assert c.max_rmse == 0.05
     assert c.fov_h == 55.0
     assert c.fov_v == 42.0
+    assert c.min_confidence == 20.0
+    assert c.weight_threshold == 3.0
 
 
 def test_load_missing_returns_defaults(tmp_path):

@@ -190,11 +190,11 @@ class PostProcessWorker:
             self._publish(mapper, 0, 0, done=True)
             return
         published_final = False
-        for i, (depth, quat, pressure, _t_s) in enumerate(self._frames, start=1):
+        for i, (depth, reflectance, confidence, quat, pressure, _t_s) in enumerate(self._frames, start=1):
             if self._stop_evt.is_set():
                 return   # stopping mid-run: publish nothing further
             try:
-                mapper.step(depth, quat, pressure)
+                mapper.step(depth, quat, pressure, reflectance=reflectance, confidence=confidence)
             except Exception:
                 # Belt-and-braces (Mapper.step already degrades tracking-lost
                 # gracefully on its own): one bad frame must not kill this

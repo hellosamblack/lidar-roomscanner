@@ -30,8 +30,12 @@ _IDLE_SLEEP_S = 0.005     # poll interval when the submit slot is empty
 class SlamWorker:
     """Owns a `Mapper` and runs it off the GUI/reader threads.
 
-    `submit(depth, quat, pressure)` stores the latest input (dropping any
-    older, unprocessed one). `run_once()` pops it, steps the mapper, and
+    `submit(depth, quat, pressure, reflectance=None, confidence=None)` stores
+    the latest input (dropping any older, unprocessed one) -- reflectance/
+    confidence are optional (Task 13) and simply forwarded to `Mapper.step`;
+    the live panel does not yet supply them (a follow-up task wires that), so
+    today they default to None and the live preview stays uncolored/
+    ungated, unchanged from before this task. `run_once()` pops it, steps the mapper, and
     publishes `(mesh, trajectory, FrameStep)` -- mesh extraction is throttled
     to every `mesh_every` *successful* (non-tracking-lost) frames, since only
     those integrate into the TSDF (always on the first success, so a caller
@@ -50,7 +54,7 @@ class SlamWorker:
         self._last_mesh = None
 
         self._in_lock = threading.Lock()
-        self._in_slot = None    # (depth, quat, pressure) | None
+        self._in_slot = None    # (depth, quat, pressure, reflectance, confidence) | None
 
         self._out_lock = threading.Lock()
         self._out_slot = None   # (mesh, trajectory, FrameStep) | None
@@ -59,9 +63,9 @@ class SlamWorker:
         self._stop_evt = threading.Event()
 
     # ---- producer side (GUI/reader thread) ----------------------------------
-    def submit(self, depth, quat, pressure) -> None:
+    def submit(self, depth, quat, pressure, reflectance=None, confidence=None) -> None:
         with self._in_lock:
-            self._in_slot = (depth, quat, pressure)
+            self._in_slot = (depth, quat, pressure, reflectance, confidence)
 
     # ---- worker side ---------------------------------------------------------
     def run_once(self) -> bool:
@@ -72,8 +76,8 @@ class SlamWorker:
             item, self._in_slot = self._in_slot, None
         if item is None:
             return False
-        depth, quat, pressure = item
-        step = self._mapper.step(depth, quat, pressure)
+        depth, quat, pressure, reflectance, confidence = item
+        step = self._mapper.step(depth, quat, pressure, reflectance=reflectance, confidence=confidence)
         self._frames_processed += 1
         if not step.tracking_lost:
             # Only a successful (integrated) frame can have changed the TSDF,

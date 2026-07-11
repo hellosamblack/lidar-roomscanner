@@ -67,6 +67,64 @@ def test_recovers_after_first_frame_tracking_lost():
     assert model is not None
     assert model.point.positions.numpy().shape[0] > 100
 
+def test_reflectance_produces_non_black_varied_mesh_colors():
+    # Task 13: passing reflectance through step() colors the mesh via the
+    # TsdfMap color-integrate path (mirrors test_slam_tsdf.py's direct test,
+    # exercised here through the full Mapper.step plumbing). weight_threshold=0
+    # so a single integrated frame (weight=1) still extracts vertices.
+    m = Mapper(W, H, voxel_size=0.02, weight_threshold=0.0)
+    grad = (np.arange(W, dtype=np.float32) / (W - 1))
+    reflectance = np.repeat(grad[None, :], H, axis=0) * 100.0   # arbitrary reflectance units
+    m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0, reflectance=reflectance)
+    colors = m.mesh().vertex.colors.numpy()
+    assert len(colors) > 0
+    assert colors.max() > 0.0
+    assert (colors.max(axis=0) - colors.min(axis=0)).max() > 0.05
+
+
+def test_no_reflectance_keeps_mesh_colors_black():
+    m = Mapper(W, H, voxel_size=0.02, weight_threshold=0.0)
+    m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    colors = m.mesh().vertex.colors.numpy()
+    assert len(colors) > 0
+    assert np.allclose(colors, 0.0)
+
+
+def test_low_confidence_gates_depth_and_causes_tracking_loss():
+    # All-low-confidence => every pixel invalidated => same as an all-zero
+    # depth frame => tracking lost on the (bootstrap) first frame. Confidence
+    # semantics: higher = better (verified on the real capture).
+    m = Mapper(W, H, voxel_size=0.02, min_confidence=50.0)
+    low_confidence = np.full((H, W), 10.0, dtype=np.float32)   # below the 50.0 threshold
+    step = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0, confidence=low_confidence)
+    assert step.tracking_lost
+
+
+def test_high_confidence_does_not_gate_and_tracks_normally():
+    m = Mapper(W, H, voxel_size=0.02, min_confidence=50.0)
+    high_confidence = np.full((H, W), 200.0, dtype=np.float32)   # above the threshold
+    step = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0, confidence=high_confidence)
+    assert not step.tracking_lost
+
+
+def test_partial_confidence_gating_reduces_valid_points_without_losing_track():
+    # Gate out half the frame (below threshold) and confirm the map still
+    # only reflects the ungated half -- i.e. gating genuinely invalidates
+    # those depth pixels rather than being a no-op. weight_threshold=0 so a
+    # single integrated frame still extracts vertices.
+    m_full = Mapper(W, H, voxel_size=0.02, min_confidence=None, weight_threshold=0.0)
+    m_full.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    full_mesh_verts = len(m_full.mesh().vertex.positions)
+
+    m_gated = Mapper(W, H, voxel_size=0.02, min_confidence=50.0, weight_threshold=0.0)
+    half_confidence = np.full((H, W), 200.0, dtype=np.float32)
+    half_confidence[:, : W // 2] = 10.0   # left half below threshold
+    m_gated.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0, confidence=half_confidence)
+    gated_mesh_verts = len(m_gated.mesh().vertex.positions)
+
+    assert gated_mesh_verts < full_mesh_verts
+
+
 def test_pose_translation_tracks_a_synthetic_shift():
     # wall moves closer by 5 cm between frames => camera moved +5cm along +z.
     # Quat = 90deg about Y, NOT identity: per docs/coordinate-frames.md's composed

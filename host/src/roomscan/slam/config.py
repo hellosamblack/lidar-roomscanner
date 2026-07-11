@@ -31,6 +31,10 @@ class SlamConfig:
     max_rmse: float = 0.05
     fov_h: float = 55.0
     fov_v: float = 42.0
+    # Task 13 (data-quality): reflectance color + noise reduction, tuned against
+    # captures/phase6_motion_ref.bin -- see task-quality-report.md.
+    min_confidence: float = 20.0
+    weight_threshold: float = 3.0
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "SlamConfig":
