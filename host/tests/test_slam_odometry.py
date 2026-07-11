@@ -115,3 +115,30 @@ def test_low_overlap_trips_gate():
     far.point.positions = o3d.core.Tensor((target.point.positions.numpy() + 5.0).astype(np.float32))
     res = register(far, target, np.eye(4), mode="translation", max_dist=0.05)
     assert not res.ok
+
+
+def _flat_plane_cloud(n=40, z=1.0):
+    """Perfectly flat, coplanar grid (no curvature, unlike _plane_cloud) --
+    all normals identical. Point-to-plane ICP's 6x6 normal-equations solve is
+    singular on this geometry (e.g. a ToF sensor square to a blank wall)."""
+    xs, ys = np.meshgrid(np.linspace(-0.5, 0.5, n), np.linspace(-0.4, 0.4, n))
+    pts = np.stack([xs.ravel(), ys.ravel(), np.full(xs.size, z)], axis=1).astype(np.float32)
+    pc = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
+    pc.point.positions = o3d.core.Tensor(pts)
+    pc.estimate_normals()
+    return pc
+
+
+def test_singular_geometry_returns_not_ok():
+    # Open3D's point-to-plane ICP raises RuntimeError("... Singular 6x6 linear
+    # system detected, tracking failed.") on a perfectly flat, texture-poor
+    # target. register() must degrade to a not-ok result instead of letting
+    # the exception propagate and crash the mapper.
+    target = _flat_plane_cloud()
+    source = _flat_plane_cloud()
+    res = register(source, target, np.eye(4), mode="translation")
+    assert isinstance(res, RegistrationResult)
+    assert not res.ok
+    assert res.fitness == 0.0
+    assert res.rmse == float("inf")
+    assert np.allclose(res.pose, np.eye(4))

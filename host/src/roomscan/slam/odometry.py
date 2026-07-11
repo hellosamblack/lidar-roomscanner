@@ -31,8 +31,16 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
     init = o3d.core.Tensor(np.asarray(init_pose, dtype=np.float64),
                            device=o3d.core.Device("CPU:0"))
     criteria = _reg.ICPConvergenceCriteria(max_iteration=max_iter)
-    result = _reg.icp(source, target, max_dist, init,
-                      _reg.TransformationEstimationPointToPlane(), criteria)
+    try:
+        result = _reg.icp(source, target, max_dist, init,
+                          _reg.TransformationEstimationPointToPlane(), criteria)
+    except RuntimeError:
+        # Point-to-plane's 6x6 normal-equations solve is singular on large,
+        # near-planar, texture-poor surfaces (e.g. a blank wall filling the
+        # FOV) -- Open3D raises rather than returning a degenerate result.
+        # Degrade to tracking-lost instead of crashing the mapper.
+        return RegistrationResult(pose=np.asarray(init_pose, dtype=np.float64).copy(),
+                                  fitness=0.0, rmse=float("inf"), ok=False)
     T = result.transformation.numpy().copy()
     if mode == "translation":
         # hold rotation at the prior; keep ICP's translation component only.
