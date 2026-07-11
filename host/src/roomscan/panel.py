@@ -71,6 +71,8 @@ _SURFACE_MODES = ("grid", "spatial")
 _IR_UPSCALE = 6                 # 54x42 zones -> 324x252 px, nearest-neighbor
 _GEOM = "cloud"
 _MESH_GEOM = "surface"
+_MESH_WALLS_GEOM = "__slam_walls__"   # see-through-walls split, SLAM/Showcase only
+_WALL_MODES = ("solid", "translucent", "wireframe")
 _SLAM_TRAJ_GEOM = "__slam_trajectory__"
 _GIZMO_GEOM = "__imu_gizmo__"
 _GIZMO_ANCHOR = np.array([0.0, 0.0, 0.0], dtype=np.float64)  # fixed scene anchor; calibrate later
@@ -189,6 +191,31 @@ def _ir_freeze_range(freeze, frozen, auto):
         frozen = auto if frozen is None else frozen
         return frozen[0], frozen[1], frozen
     return auto[0], auto[1], frozen
+
+
+def _wall_submesh(verts, colors, tris):
+    """Build a new legacy `TriangleMesh` from a subset of `tris` (rows into
+    the parent mesh's triangle array), remapping vertex indices to a dense
+    0..N-1 range and carrying over `verts`/`colors` for the referenced
+    vertices only. Module-level (not a method) both because it's pure --
+    doesn't touch `self` -- and so it's directly callable from the
+    `_upload_slam_mesh` unit tests (test_panel_walls.py), which run that
+    method unbound on a lightweight stand-in object (see
+    test_panel_showcase.py's established pattern) rather than a real
+    `ControlPanel`.
+
+    `TriangleMesh.select_by_index` selects *vertices*, not triangles
+    (verified empirically -- it drops any triangle that isn't fully inside
+    the selected vertex set), so it can't be used to pull out an arbitrary
+    triangle subset; this does it by hand instead."""
+    import open3d as o3d
+    uniq, remap = np.unique(tris.reshape(-1), return_inverse=True)
+    new_tris = remap.reshape(tris.shape).astype(np.int32)
+    m = o3d.geometry.TriangleMesh()
+    m.vertices = o3d.utility.Vector3dVector(verts[uniq])
+    m.triangles = o3d.utility.Vector3iVector(new_tris)
+    m.vertex_colors = o3d.utility.Vector3dVector(colors[uniq])
+    return m
 
 
 class _Pacer:
@@ -377,6 +404,15 @@ class ControlPanel:
         self.slam_worker = None
         self._slam_last_mesh_obj = None   # identity check: skip re-upload of an unchanged mesh
 
+        # "See-through walls" (owner request, Phase 6): classify each SLAM/TSDF
+        # mesh triangle as wall (vertical surface) vs floor/ceiling (see
+        # slam/shading.wall_triangle_mask) and render walls translucent or as
+        # wireframe so a near wall doesn't occlude the room's interior. Shared
+        # by the classic SLAM view (_render_slam_frame) and Showcase mode
+        # (_show_showcase_mesh) via _upload_slam_mesh. Default "translucent"
+        # per the owner: they want to see the contents, not the shell.
+        self.wall_mode = "translucent"
+
         # Showcase mode (Task 12): record -> live preview -> post-process -> final
         # reveal. Off by default; layered on top of / mutually exclusive with the
         # SLAM view above (see _on_showcase_toggle / _on_slam_toggle). The heavy
@@ -418,6 +454,17 @@ class ControlPanel:
         self.slam_line_material = rendering.MaterialRecord()
         self.slam_line_material.shader = "unlitLine"
         self.slam_line_material.line_width = 3.0
+        # See-through walls (Phase 6): translucent-mesh + wall-wireframe materials.
+        # "defaultUnlitTransparency" is Open3D 0.19's unlit alpha-blend shader
+        # (confirmed present: <open3d install>/resources/defaultUnlitTransparency.filamat);
+        # alpha lives in base_color's 4th channel, RGB left at [1,1,1] (no tint)
+        # so the mesh's own baked shade_colors() vertex colors show through.
+        self.wall_translucent_material = rendering.MaterialRecord()
+        self.wall_translucent_material.shader = "defaultUnlitTransparency"
+        self.wall_translucent_material.base_color = [1.0, 1.0, 1.0, 0.3]
+        self.wall_wire_material = rendering.MaterialRecord()
+        self.wall_wire_material.shader = "unlitLine"
+        self.wall_wire_material.line_width = 2.0
         self._dark_bg = True
 
         self._build_scene()
@@ -591,6 +638,17 @@ class ControlPanel:
         self.lbl_slam_ms = gui.Label("slam_ms: --")
         slam.add_child(self.lbl_slam_ms)
         slam.add_child(gui.Label("(View -> Clear also resets the SLAM map)"))
+        # See-through walls (owner request): governs both this view and
+        # Showcase mode's mesh render (they share _upload_slam_mesh).
+        wg = self._labeled_grid()
+        wg.add_child(gui.Label("Walls"))
+        self.cb_wall_mode = gui.Combobox()
+        for m in _WALL_MODES:
+            self.cb_wall_mode.add_item(m)
+        self.cb_wall_mode.selected_index = _WALL_MODES.index(self.wall_mode)
+        self.cb_wall_mode.set_on_selection_changed(self._on_wall_mode)
+        wg.add_child(self.cb_wall_mode)
+        slam.add_child(wg)
 
         # --- Showcase (Task 12): record -> live preview -> post-process -> reveal.
         # Mutually exclusive with the SLAM view above (see _on_showcase_toggle /
@@ -950,18 +1008,7 @@ class ControlPanel:
         # *same* mesh object to the renderer every GUI tick in between.
         if (mesh is not None and mesh is not self._slam_last_mesh_obj
                 and len(mesh.vertex.positions) > 0):
-            from .slam.shading import shade_colors
-            legacy_mesh = mesh.to_legacy()
-            legacy_mesh.compute_vertex_normals()
-            # The TSDF mesh's vertex colors are always [0,0,0] (integrate() is
-            # depth-only, see tsdf.py) and this material is defaultUnlit with
-            # no scene lights -- bake a fixed-light shade in so it's not
-            # invisible black (see slam/shading.py's module docstring).
-            legacy_mesh.vertex_colors = self._o3d.utility.Vector3dVector(
-                shade_colors(np.asarray(legacy_mesh.vertex_normals)))
-            if sc.has_geometry(_MESH_GEOM):
-                sc.remove_geometry(_MESH_GEOM)
-            sc.add_geometry(_MESH_GEOM, legacy_mesh, self.mesh_material)
+            self._upload_slam_mesh(mesh)
             self._slam_last_mesh_obj = mesh
 
         # BUG-009 (fixed): a LineSet with < 2 points has 0 line segments and
@@ -1017,6 +1064,89 @@ class ControlPanel:
             sc.remove_geometry(_SLAM_TRAJ_GEOM)
         if sc.has_geometry(_MESH_GEOM):
             sc.remove_geometry(_MESH_GEOM)
+        if sc.has_geometry(_MESH_WALLS_GEOM):
+            sc.remove_geometry(_MESH_WALLS_GEOM)
+
+    def _on_wall_mode(self, text, index):
+        """Combobox handler for the "see-through walls" control (owner
+        request): governs both the classic SLAM view and Showcase mode,
+        since both funnel through `_upload_slam_mesh`. Clearing the identity
+        caches forces the next tick to re-run the upload (and, for
+        translucent/wireframe, the wall/non-wall split) even though the
+        worker's latest mesh object hasn't changed."""
+        self.wall_mode = text
+        self._slam_last_mesh_obj = None
+        self._showcase_last_mesh_obj = None
+        self.bus.publish(f"wall mode -> {text}")
+
+    def _upload_slam_mesh(self, mesh):
+        """Shade + upload a SLAM/TSDF tensor `mesh` (non-None, non-empty --
+        callers gate on that already). Shared by the classic SLAM view
+        (`_render_slam_frame`) and Showcase mode (`_show_showcase_mesh`) so
+        the "see-through walls" split (owner request) lives in one place.
+
+        `self.wall_mode`:
+          * "solid" -- unchanged pre-existing behavior: the whole mesh
+            uploaded as one opaque `_MESH_GEOM`.
+          * "translucent"/"wireframe" -- triangles are classified wall vs.
+            floor/ceiling by face-normal orientation (`wall_triangle_mask`,
+            not camera-facing, so it holds from any orbit angle). Non-wall
+            triangles upload as the normal opaque `_MESH_GEOM`; wall
+            triangles upload as a second geometry, `_MESH_WALLS_GEOM` --
+            alpha-blended for translucent, a `LineSet` of mesh edges for
+            wireframe -- so a near wall doesn't occlude the room's interior.
+
+        Always removes any stale `_MESH_GEOM`/`_MESH_WALLS_GEOM` first so a
+        mode switch (or a wall-only mesh) never leaves a leftover geometry
+        from the previous upload.
+        """
+        from .slam.shading import shade_colors, wall_triangle_mask
+        sc = self.scene_widget.scene
+        legacy_mesh = mesh.to_legacy()
+        legacy_mesh.compute_vertex_normals()
+        # The TSDF mesh's vertex colors are always [0,0,0] (integrate() is
+        # depth-only, see tsdf.py) and this material is defaultUnlit with no
+        # scene lights -- bake a fixed-light shade in so it's not invisible
+        # black (see slam/shading.py's module docstring).
+        legacy_mesh.vertex_colors = self._o3d.utility.Vector3dVector(
+            shade_colors(np.asarray(legacy_mesh.vertex_normals)))
+
+        if sc.has_geometry(_MESH_GEOM):
+            sc.remove_geometry(_MESH_GEOM)
+        if sc.has_geometry(_MESH_WALLS_GEOM):
+            sc.remove_geometry(_MESH_WALLS_GEOM)
+
+        if self.wall_mode == "solid" or len(legacy_mesh.triangles) == 0:
+            sc.add_geometry(_MESH_GEOM, legacy_mesh, self.mesh_material)
+            return
+
+        legacy_mesh.compute_triangle_normals()
+        wall_mask = wall_triangle_mask(np.asarray(legacy_mesh.triangle_normals))
+        tris = np.asarray(legacy_mesh.triangles)
+        verts = np.asarray(legacy_mesh.vertices)
+        colors = np.asarray(legacy_mesh.vertex_colors)
+
+        non_wall_tris = tris[~wall_mask]
+        if non_wall_tris.shape[0] > 0:
+            sc.add_geometry(_MESH_GEOM, _wall_submesh(verts, colors, non_wall_tris),
+                             self.mesh_material)
+
+        wall_tris = tris[wall_mask]
+        if wall_tris.shape[0] == 0:
+            return
+        wall_submesh = _wall_submesh(verts, colors, wall_tris)
+        if self.wall_mode == "translucent":
+            sc.add_geometry(_MESH_WALLS_GEOM, wall_submesh, self.wall_translucent_material)
+        else:   # "wireframe"
+            wire = self._o3d.geometry.LineSet.create_from_triangle_mesh(wall_submesh)
+            # BUG-009 (see _render_slam_frame's trajectory upload): a LineSet
+            # with < 2 points / 0 segments hard-crashes Filament -- guard it
+            # here too, even though a non-empty triangle selection should
+            # always produce >= 3 points/edges.
+            if len(wire.points) >= 2:
+                wire.colors = self._o3d.utility.Vector3dVector(
+                    np.tile([[0.45, 0.60, 0.75]], (len(wire.lines), 1)))  # muted blue-gray
+                sc.add_geometry(_MESH_WALLS_GEOM, wire, self.wall_wire_material)
 
     def _on_slam_toggle(self, checked):
         if checked and self.showcase_enabled:
@@ -1114,22 +1244,12 @@ class ControlPanel:
     def _show_showcase_mesh(self, mesh):
         """Upload `mesh` if it's new (identity check -- mesh extraction is
         already throttled inside the worker) and non-empty. Shares the
-        classic SLAM view's geometry name/material since the two modes are
-        mutually exclusive and never rendered in the same frame."""
+        classic SLAM view's geometry name/material (via `_upload_slam_mesh`)
+        since the two modes are mutually exclusive and never rendered in the
+        same frame."""
         if mesh is None or mesh is self._showcase_last_mesh_obj or len(mesh.vertex.positions) == 0:
             return
-        from .slam.shading import shade_colors
-        sc = self.scene_widget.scene
-        legacy_mesh = mesh.to_legacy()
-        legacy_mesh.compute_vertex_normals()
-        # Same black-mesh fix as the classic SLAM view's _render_slam_frame:
-        # bake a fixed-light shade into the vertex colors since integrate()
-        # never populates real ones and this material/scene has no lighting.
-        legacy_mesh.vertex_colors = self._o3d.utility.Vector3dVector(
-            shade_colors(np.asarray(legacy_mesh.vertex_normals)))
-        if sc.has_geometry(_MESH_GEOM):
-            sc.remove_geometry(_MESH_GEOM)
-        sc.add_geometry(_MESH_GEOM, legacy_mesh, self.mesh_material)
+        self._upload_slam_mesh(mesh)
         self._showcase_last_mesh_obj = mesh
 
     def _show_showcase_trajectory(self, trajectory):

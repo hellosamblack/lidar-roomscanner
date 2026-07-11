@@ -41,3 +41,29 @@ def shade_colors(normals: np.ndarray) -> np.ndarray:
     lam = np.abs(normals @ _LIGHT_DIR)
     shade = _AMBIENT + _DIFFUSE * np.clip(lam, 0.0, 1.0)
     return np.clip(shade[:, None] * _BASE_COLOR, 0.0, 1.0)
+
+
+def wall_triangle_mask(tri_normals: np.ndarray, up: np.ndarray | None = None,
+                        thresh: float = 0.5) -> np.ndarray:
+    """True where a triangle is a 'wall' (vertical surface): its face normal is
+    roughly perpendicular to world-up, i.e. |normal . up| < thresh. Floor/ceiling
+    (|normal.up| ~ 1) are False. `up` defaults to Open3D CV world-up
+    (`roomscan.slam.frames.world_up()`, `[0,-1,0]`).
+
+    Orientation-based, not camera-facing-based: a wall is a wall from any
+    orbit angle, so the "see-through walls" render modes (panel.py) never
+    have to reclassify per frame.
+    """
+    tri_normals = np.asarray(tri_normals, dtype=np.float64)
+    if tri_normals.shape[0] == 0:
+        return np.zeros((0,), dtype=bool)
+    if up is None:
+        from .frames import world_up
+        up = world_up()
+    up = np.asarray(up, dtype=np.float64)
+    up = up / np.linalg.norm(up)
+    norms = np.linalg.norm(tri_normals, axis=1, keepdims=True)
+    norms[norms == 0.0] = 1.0
+    unit = tri_normals / norms
+    dot = np.abs(unit @ up)
+    return dot < thresh

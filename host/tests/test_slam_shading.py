@@ -14,9 +14,10 @@ the result is non-black and varies across vertices.
 import numpy as np
 import open3d as o3d
 
-from roomscan.slam.shading import shade_colors
+from roomscan.slam.shading import shade_colors, wall_triangle_mask
 from roomscan.slam.tsdf import TsdfMap
 from roomscan.slam.intrinsics import pinhole
+from roomscan.slam.frames import world_up
 
 W, H = 54, 42
 
@@ -115,3 +116,68 @@ def test_slam_mesh_colors_are_nonblack_and_vary_after_shading():
     assert shaded.shape[0] == len(mesh.vertex.positions)
     assert shaded.max() > 0.1          # non-black
     assert shaded.std(axis=0).max() > 0.001   # varies across vertices (not one flat color)
+
+
+# ---- wall_triangle_mask ("see-through walls", Phase 6) ----------------------
+#
+# World-up is Open3D CV world's [0,-1,0] (Y-down, see frames.world_up()). A
+# "wall" is a vertical surface -- its face normal points roughly *sideways*,
+# i.e. roughly perpendicular to up, so |normal . up| is small. Floor/ceiling
+# normals point roughly *along* up (or -up), so |normal . up| is close to 1.
+
+def test_horizontal_normal_is_a_wall():
+    # normal points sideways (+X) -- perpendicular to world-up -> wall.
+    normals = np.array([[1.0, 0.0, 0.0]])
+    mask = wall_triangle_mask(normals)
+    assert mask.tolist() == [True]
+
+
+def test_vertical_normal_is_not_a_wall():
+    # normal points along +Y -- this is close to -world_up ([0,-1,0]), i.e.
+    # a floor/ceiling face -> not a wall.
+    normals = np.array([[0.0, 1.0, 0.0]])
+    mask = wall_triangle_mask(normals)
+    assert mask.tolist() == [False]
+
+
+def test_threshold_boundary_is_strict_less_than():
+    # Construct a normal whose |dot(normal, up)| lands exactly on `thresh`
+    # (0.5 by default): tilted 60 degrees off horizontal, dot = -0.5.
+    up = world_up()
+    assert up.tolist() == [0.0, -1.0, 0.0]
+    normal = np.array([[np.sqrt(3) / 2, 0.5, 0.0]])
+    dot = float(np.abs(normal[0] @ up))
+    assert abs(dot - 0.5) < 1e-9
+    mask = wall_triangle_mask(normal, thresh=0.5)
+    assert mask.tolist() == [False]   # strict "<", not "<=" -> boundary is NOT a wall
+    # Nudge just inside the threshold and it flips to a wall.
+    normal_in = np.array([[np.sqrt(1 - 0.49 ** 2), 0.49, 0.0]])
+    assert wall_triangle_mask(normal_in, thresh=0.5).tolist() == [True]
+
+
+def test_mix_returns_correct_shape_and_values():
+    normals = np.array([
+        [1.0, 0.0, 0.0],    # wall
+        [0.0, 1.0, 0.0],    # floor/ceiling
+        [0.0, -1.0, 0.0],   # floor/ceiling (ceiling side)
+        [0.0, 0.0, 1.0],    # wall
+    ])
+    mask = wall_triangle_mask(normals)
+    assert mask.shape == (4,)
+    assert mask.dtype == np.bool_
+    assert mask.tolist() == [True, False, False, True]
+
+
+def test_empty_triangles():
+    mask = wall_triangle_mask(np.zeros((0, 3)))
+    assert mask.shape == (0,)
+
+
+def test_custom_up_vector():
+    # With world-up swapped to [0, 1, 0] (opposite convention), the same
+    # normal's wall/floor classification flips accordingly is NOT expected --
+    # |dot| is sign-agnostic, so [0,1,0] as `up` behaves identically for
+    # this vertical-normal case (still "not a wall").
+    normals = np.array([[0.0, 1.0, 0.0]])
+    mask = wall_triangle_mask(normals, up=np.array([0.0, 1.0, 0.0]))
+    assert mask.tolist() == [False]
