@@ -34,13 +34,16 @@ protocol, `TransformStage`, `Deprojector`, `sources`, `decoder`, or `config` bey
 | `intrinsics.py` | Pinhole intrinsic from Deprojector FoV | `pinhole(w, h, fov_h, fov_v) -> o3c.Tensor(3x3)` | — |
 | `frames.py` | Poses/priors/constraints per `coordinate-frames.md` | `prior_pose(quat, t_prev) -> 4x4`; `baro_to_world_z(pa, ref_pa) -> float`; `world_axis_up() -> vec3` | `sensors.py` |
 | `tsdf.py` | `VoxelBlockGrid` wrapper | `integrate(depth, intr, pose)`; `raycast(intr, pose) -> (points, normals)`; `extract_mesh()`; `extract_pcd()` | Open3D tensor |
-| `odometry.py` | Point-to-plane ICP, frame-to-model, prior-initialized, fitness/RMSE gated, **rotation held at prior (3-DoF translation-only)** | `register(src_pcd, model_pcd, init_pose) -> Result{pose, fitness, rmse, ok}` | Open3D tensor |
+| `odometry.py` | Point-to-plane ICP, frame-to-model, prior-initialized, fitness/RMSE gated; **switchable `mode`: `translation` (3-DoF, rotation held at prior) or `6dof` (full, prior as init)** | `register(src_pcd, model_pcd, init_pose, mode) -> Result{pose, fitness, rmse, ok}` | Open3D tensor |
 | `mapper.py` | Per-frame orchestration + SLAM state + trajectory; tracking-lost fallback; baro-Z soft correction | `Mapper.step(depth, quat, pressure) -> FrameResult`; `.trajectory`, `.map_mesh()` | all above |
 | `metrics.py` | Trajectory export (TUM/npy), per-frame timing, drift stats, KISS-ICP comparison | `summarize(traj, timings) -> report`; `compare_kiss(...)` | (optional) `kiss-icp` |
 
 **CLI:** `roomscan-slam` (new console-script) — runs `Mapper` over a capture via the existing
-`FileSource`/`pump`/`TransformStage` path, writes trajectory + fused mesh (`.ply`) + a timing/drift report;
-`--benchmark` adds the KISS-ICP comparison.
+`FileSource`/`pump`/`TransformStage` path, writes trajectory + fused mesh (`.ply`) + a timing/drift report.
+Flags: `--icp-mode {translation,6dof}` (default `translation`), `--benchmark` (adds the KISS-ICP
+comparison), `--compare-modes` (runs both ICP modes and reports side by side — the empirical selection).
+Config: a new `[slam]` table (`icp_mode`, voxel size, trunc distance, fitness/rmse gates) in
+`roomscan.toml`, same CLI > file > default priority as the existing `[viewer]` table.
 
 ## 3. Per-frame data flow
 
@@ -53,13 +56,19 @@ Reuses the existing decode→transform→deproject front end unchanged:
 4. **Predict:** `T_pred = [R_prior | t_prev]` (rotation from SFLP each frame; translation carried from the
    previous estimate — no velocity model in v1).
 5. **Raycast** model cloud (+normals) from the `VoxelBlockGrid` at `T_pred` (frame-to-**model**).
-6. **Point-to-plane ICP (3-DoF, translation-only):** source = current frame cloud, target = model
-   raycast, init = `T_pred`. Per the roadmap's "3-DoF constrained" decision, rotation is **held** at the
-   SFLP prior and ICP estimates only the 3-DoF translation. Implementation: run point-to-plane ICP from
-   `T_pred` and re-impose `R_prior` on the rotation block after convergence (equivalently, a
-   translation-only point-to-plane solve); a test asserts the rotation block stays equal to `R_prior`.
-   Rationale: SFLP orientation is hardware-fused and trustworthy; letting ICP move rotation on thin
-   2,268-pt frames is where drift/divergence enters.
+6. **Point-to-plane ICP (mode-switchable):** source = current frame cloud, target = model raycast,
+   init = `T_pred`. Two selectable modes, chosen empirically during validation (default
+   `translation`):
+   - **`translation`** (3-DoF): rotation **held** at the SFLP prior; ICP estimates only translation.
+     Implementation: run point-to-plane ICP from `T_pred` then re-impose `R_prior` on the rotation block
+     after convergence (equivalently, a translation-only point-to-plane solve); a test asserts the
+     rotation block stays equal to `R_prior`.
+   - **`6dof`** (full): standard point-to-plane, `T_pred` as initial guess; ICP refines all 6-DoF.
+   Rationale for offering both: SFLP orientation is hardware-fused and usually trustworthy, so
+   `translation` avoids the rotational wander ICP suffers on thin 2,268-pt plane-dominated frames — but
+   if SFLP carries a small systematic bias, `6dof` can catch it. The offline validation runs **both** on
+   `phase6_motion_ref.bin` and reports drift/rotational-cleanliness side by side; the winner becomes the
+   documented default. Selected via `--icp-mode` (CLI) / `[slam].icp_mode` (config).
 7. **Baro soft-Z:** nudge `T_est` translation toward the barometric height along **world-up**
    (`world_axis_up()` — Open3D CV world −Y) with a low weight; never override ICP (indoor pressure drifts
    several Pa — `12 Pa/m`, HVAC/doors are noise).
@@ -98,8 +107,9 @@ fields for tracking state + per-frame SLAM ms. Presentation-layer only; no wire 
   known corner divergence (linear vs pinhole).
 - `tsdf`: integrate a known planar/box depth image, raycast it back → geometry matches within voxel size;
   mesh/pcd extraction non-empty.
-- `odometry`: apply a **known** SE(3) transform to a synthetic cloud → ICP recovers it within tolerance;
-  low-overlap input trips the fitness gate (`ok=False`).
+- `odometry`: apply a **known** SE(3) transform to a synthetic cloud → both modes recover it within
+  tolerance; `translation` mode leaves the rotation block exactly equal to `R_prior`; `6dof` mode is
+  free to move it; low-overlap input trips the fitness gate (`ok=False`) in both.
 - `mapper`: two-frame synthetic sequence with a known between-pose → trajectory recovers it; a lost-track
   frame holds pose and doesn't integrate.
 - Small synthetic fixtures live in `host/tests/fixtures/` (tracked, per `.gitignore` exception).
@@ -132,7 +142,8 @@ per-frame ms in budget, tracking-lost recovers — one supervised soak.
 ## 8. Success criteria
 
 1. `roomscan-slam captures/phase6_motion_ref.bin` produces a trajectory + fused room mesh, median SLAM
-   time < 35 ms/frame on CPU, drift reported, KISS-ICP benchmark in the same ballpark.
+   time < 35 ms/frame on CPU, drift reported, KISS-ICP benchmark in the same ballpark. `--compare-modes`
+   reports `translation` vs `6dof` drift side by side and a default is chosen and documented.
 2. Full synthetic test suite green; no regression in the existing host suite.
 3. `roomscan-panel` SLAM mode maps live on hardware within budget (supervised soak).
 4. No wire-protocol change; `docs/protocol.md` untouched.
