@@ -20,7 +20,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-006 | anomaly | firmware      | One 100 s post-flash boot-recovery hang (seen once, never reproduced) |
 | BUG-007 | fixed   | transform lib | ZAPC confidence plane is structurally ~1.0 everywhere |
 | BUG-008 | fixed   | host/viewer   | Minimizing the roomscanner panel triggers Filament Camera preconditions warning |
-| BUG-009 | open    | host/panel    | SLAM/Showcase trajectory LineSet with a single point hard-crashes Filament (segfault) |
+| BUG-009 | fixed   | host/panel    | SLAM/Showcase trajectory LineSet with a single point hard-crashes Filament (segfault) |
 | BUG-010 | by-design | host/panel  | A Recorder capture started well into a session lacks CALIB and can't be post-processed |
 
 ---
@@ -134,7 +134,8 @@ When the roomscanner panel is minimized, the console shows:
 
 ## BUG-009 — SLAM/Showcase trajectory LineSet with a single point hard-crashes Filament (segfault)
 
-- **Status:** **open** · **Reported:** 2026-07-11 (Task 12, Showcase mode) · **Area:** host/panel
+- **Status:** **fixed** 2026-07-11 (this branch) · **Reported:** 2026-07-11 (Task 12, Showcase mode)
+  · **Area:** host/panel
 - **Where:** `host/src/roomscan/panel.py` `_render_slam_frame`'s trajectory upload block (Task 10,
   the classic SLAM view -- `_show_showcase_trajectory` in this same file, added by Task 12, sidesteps
   it, see that method's docstring)
@@ -161,11 +162,9 @@ trajectory publish before the *next* mesh/trajectory render call replaced it wit
 0-vertex-index (or otherwise degenerate) buffer being the very first `unlitLine`-shaded geometry
 added to the scene under certain engine states, rather than raising a catchable Python exception.
 
-**Fix (not yet applied here — this bug lives in the pre-existing Task 10 code, out of scope for a
-regression-safe Task 12 diff):** guard `_render_slam_frame`'s trajectory block the same way
-`_show_showcase_trajectory` now does: skip the upload while `len(trajectory) < 2` instead of
-uploading a point-only `LineSet`. Task 12's new Showcase code does NOT inherit this bug (its own
-`_show_showcase_trajectory` has the guard), but the classic SLAM view (`chk_slam`) still can hit it.
+**Fix (applied 2026-07-11, this branch):** guarded `_render_slam_frame`'s trajectory block the same
+way `_show_showcase_trajectory` already did: skip the upload while `len(trajectory) < 2` instead of
+uploading a point-only `LineSet`. The classic SLAM view (`chk_slam`) no longer hits this.
 
 ## BUG-010 — A Recorder capture started well into a session lacks CALIB and can't be post-processed
 

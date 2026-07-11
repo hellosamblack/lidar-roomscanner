@@ -387,6 +387,12 @@ class ControlPanel:
         self._showcase_preview_worker = None   # SlamWorker, live during RECORDING
         self._showcase_post_worker = None      # PostProcessWorker, live during PROCESSING/FINAL
         self._showcase_loader_thread = None    # loads the .bin + builds the PostProcessWorker
+        # Bumped by _join_showcase_workers (teardown) and _start_showcase_post_process
+        # (each new load) so a slow-loading loader thread that's still in flight
+        # when the panel moves on (new recording, Clear, mode switch, window
+        # close) can tell it's been superseded and must not publish its
+        # (running) PostProcessWorker into self._showcase_post_worker.
+        self._showcase_generation = 0
         self._showcase_last_mesh_obj = None
         self._showcase_rec_frames = 0
         self._showcase_orbit_enabled = False
@@ -944,22 +950,33 @@ class ControlPanel:
         # *same* mesh object to the renderer every GUI tick in between.
         if (mesh is not None and mesh is not self._slam_last_mesh_obj
                 and len(mesh.vertex.positions) > 0):
+            from .slam.shading import shade_colors
             legacy_mesh = mesh.to_legacy()
             legacy_mesh.compute_vertex_normals()
+            # The TSDF mesh's vertex colors are always [0,0,0] (integrate() is
+            # depth-only, see tsdf.py) and this material is defaultUnlit with
+            # no scene lights -- bake a fixed-light shade in so it's not
+            # invisible black (see slam/shading.py's module docstring).
+            legacy_mesh.vertex_colors = self._o3d.utility.Vector3dVector(
+                shade_colors(np.asarray(legacy_mesh.vertex_normals)))
             if sc.has_geometry(_MESH_GEOM):
                 sc.remove_geometry(_MESH_GEOM)
             sc.add_geometry(_MESH_GEOM, legacy_mesh, self.mesh_material)
             self._slam_last_mesh_obj = mesh
 
-        if trajectory:
+        # BUG-009 (fixed): a LineSet with < 2 points has 0 line segments and
+        # hard-crashes Filament ("vertexCount cannot be 0", then a native
+        # segfault) on add_geometry -- skip the upload entirely until there's
+        # a real segment to draw. Same guard `_show_showcase_trajectory`
+        # (Showcase mode) already uses.
+        if trajectory and len(trajectory) >= 2:
             pts = np.array([T[:3, 3] for T in trajectory], dtype=np.float64)
             lines = self._o3d.geometry.LineSet()
             lines.points = self._o3d.utility.Vector3dVector(pts)
-            if len(pts) >= 2:
-                idx = np.stack([np.arange(len(pts) - 1), np.arange(1, len(pts))], axis=1)
-                lines.lines = self._o3d.utility.Vector2iVector(idx)
-                lines.colors = self._o3d.utility.Vector3dVector(
-                    np.tile([[0.1, 0.9, 0.3]], (len(idx), 1)))
+            idx = np.stack([np.arange(len(pts) - 1), np.arange(1, len(pts))], axis=1)
+            lines.lines = self._o3d.utility.Vector2iVector(idx)
+            lines.colors = self._o3d.utility.Vector3dVector(
+                np.tile([[0.1, 0.9, 0.3]], (len(idx), 1)))
             if sc.has_geometry(_SLAM_TRAJ_GEOM):
                 sc.remove_geometry(_SLAM_TRAJ_GEOM)
             sc.add_geometry(_SLAM_TRAJ_GEOM, lines, self.slam_line_material)
@@ -1101,9 +1118,15 @@ class ControlPanel:
         mutually exclusive and never rendered in the same frame."""
         if mesh is None or mesh is self._showcase_last_mesh_obj or len(mesh.vertex.positions) == 0:
             return
+        from .slam.shading import shade_colors
         sc = self.scene_widget.scene
         legacy_mesh = mesh.to_legacy()
         legacy_mesh.compute_vertex_normals()
+        # Same black-mesh fix as the classic SLAM view's _render_slam_frame:
+        # bake a fixed-light shade into the vertex colors since integrate()
+        # never populates real ones and this material/scene has no lighting.
+        legacy_mesh.vertex_colors = self._o3d.utility.Vector3dVector(
+            shade_colors(np.asarray(legacy_mesh.vertex_normals)))
         if sc.has_geometry(_MESH_GEOM):
             sc.remove_geometry(_MESH_GEOM)
         sc.add_geometry(_MESH_GEOM, legacy_mesh, self.mesh_material)
@@ -1270,8 +1293,24 @@ class ControlPanel:
         the finished worker to `self._showcase_post_worker` (a simple
         reference assignment, safe to read from the GUI thread without a lock,
         same as `self.slam_worker`'s lazy construction elsewhere in this
-        file)."""
+        file).
+
+        Race guard: this bumps `self._showcase_generation` and the loader
+        closure captures that value. `_load_frames` (inside `from_capture`)
+        can take a while on a large capture; if the panel moves on in the
+        meantime -- a new recording, Clear, leaving Showcase mode, or window
+        close, all of which call `_join_showcase_workers` (which also bumps
+        the generation) -- the generation the loader captured no longer
+        matches `self._showcase_generation` by the time it checks, so a
+        superseded load quietly drops its (possibly still-running) worker
+        instead of assigning it into the live `self._showcase_post_worker`
+        slot out from under whatever the panel is doing now."""
+        self._showcase_generation += 1
+        gen = self._showcase_generation
+
         def _loader():
+            if gen != self._showcase_generation:
+                return   # superseded before loading even started
             from .slam.showcase import PostProcessWorker
             try:
                 worker = PostProcessWorker.from_capture(
@@ -1280,7 +1319,14 @@ class ControlPanel:
             except Exception as exc:
                 self.bus.publish(f"showcase: failed to load capture {path!r}: {exc!r}")
                 return
+            if gen != self._showcase_generation:
+                return   # superseded while `_load_frames`/Mapper setup ran
             worker.start()
+            if gen != self._showcase_generation:
+                # superseded in the gap between start() and this check --
+                # don't leave the worker's thread running unsupervised
+                worker.stop()
+                return
             self._showcase_post_worker = worker
         self._showcase_loader_thread = threading.Thread(target=_loader, daemon=True)
         self._showcase_loader_thread.start()
@@ -1290,7 +1336,13 @@ class ControlPanel:
         PostProcessWorker, and the capture-loader thread) -- called on window
         close, on leaving Showcase mode, and on Clear, so no Showcase thread
         ever outlives the panel or a mode switch. Safe to call repeatedly /
-        when nothing is running."""
+        when nothing is running.
+
+        Bumps `_showcase_generation` first so any loader thread still in
+        flight from a superseded `_start_showcase_post_process` call (see
+        that method's docstring) can tell it's stale and must not publish
+        into `self._showcase_post_worker`."""
+        self._showcase_generation += 1
         if self._showcase_preview_worker is not None:
             self._showcase_preview_worker.stop()
             self._showcase_preview_worker = None
@@ -1466,6 +1518,14 @@ class ControlPanel:
             return res.CONSUMED
         if et == gui.MouseEvent.Type.BUTTON_DOWN:
             self._drag = (e.x, e.y)
+            # Showcase FINAL's camera ease (_advance_showcase_orbit) computes
+            # its progress from an un-paused wall clock -- it only *pauses*
+            # while `_drag` is set, so an ease that's still in flight when a
+            # drag starts would otherwise resume (and can jump straight to
+            # 100%) the moment the drag ends, teleporting the camera and
+            # discarding the user's manual positioning. Cancel outright on
+            # drag start instead: a manual drag always wins.
+            self._showcase_ease = None
             return res.CONSUMED
         if et == gui.MouseEvent.Type.BUTTON_UP:
             self._drag = None
