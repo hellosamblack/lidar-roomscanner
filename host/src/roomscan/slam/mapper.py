@@ -45,6 +45,7 @@ class Mapper:
         self._ref_pa: float | None = None
         self.trajectory: list[np.ndarray] = []
         self.tracking_lost_count = 0
+        self._bootstrapped = False
 
     def _apply_baro_z(self, pose: np.ndarray, pressure_pa: float | None) -> np.ndarray:
         if pressure_pa is None or self.baro_weight <= 0.0:
@@ -68,14 +69,13 @@ class Mapper:
         n_valid = int(valid.sum())
         T_pred = predict_pose(quat, self._t_prev)
 
-        empty = not self.trajectory
         lost = False
         fitness = rmse = 0.0
 
         if n_valid < _MIN_VALID_POINTS:
             lost = True
             pose = T_pred
-        elif empty:
+        elif not self._bootstrapped:
             pose = T_pred                                   # bootstrap: accept prior
         else:
             src = source_cloud(pts, valid)
@@ -116,6 +116,7 @@ class Mapper:
         if not lost:
             self._tsdf.integrate(depth_mm, self._intr, np.linalg.inv(pose))
             self._t_prev = pose[:3, 3].copy()
+            self._bootstrapped = True
         else:
             self.tracking_lost_count += 1
 

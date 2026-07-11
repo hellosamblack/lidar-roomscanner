@@ -53,6 +53,20 @@ def _textured_wall(z_m):
     curve = 0.1 * (rows ** 2 + cols ** 2)   # metres
     return ((z_m + curve) * 1000.0).astype(np.float32)
 
+def test_recovers_after_first_frame_tracking_lost():
+    m = Mapper(W, H, voxel_size=0.02)
+    lost = m.step(np.zeros((H, W), dtype=np.float32), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert lost.tracking_lost
+    assert len(m.trajectory) == 1
+    K = pinhole(W, H)
+    model_after_lost = m._tsdf.raycast(K, np.linalg.inv(m.trajectory[0]), W, H)
+    assert model_after_lost is None
+    step = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert not step.tracking_lost
+    model = m._tsdf.raycast(K, np.linalg.inv(step.pose), W, H)
+    assert model is not None
+    assert model.point.positions.numpy().shape[0] > 100
+
 def test_pose_translation_tracks_a_synthetic_shift():
     # wall moves closer by 5 cm between frames => camera moved +5cm along +z.
     # Quat = 90deg about Y, NOT identity: per docs/coordinate-frames.md's composed
