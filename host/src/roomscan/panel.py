@@ -101,6 +101,13 @@ _ORBIT_K = 0.008          # rad per pixel drag (~0.46 deg/px)
 _PAN_K = 0.0015           # pan fraction of radius per pixel
 _ZOOM_STEP = 0.9          # radius *= 0.9**wheel_dy
 
+# Showcase mode (Task 12): FINAL-phase auto-orbit rate and camera ease-in
+# duration. See "Fade" note on _advance_showcase_orbit -- Filament has no
+# practical per-geometry alpha fade, so the PROCESSING->FINAL transition is a
+# clean geometry swap plus this eased camera move, not a literal cross-fade.
+_SHOWCASE_ORBIT_STEP = 0.003    # rad per rendered frame -- a gentle few-deg/sec orbit
+_SHOWCASE_EASE_S = 1.5          # seconds to ease the camera into the final framing
+
 _HELP_LINES = [
     "",
     "Mouse:  left-drag orbit (yaw only)  |  ctrl / middle-drag pan  |  wheel zoom",
@@ -370,6 +377,22 @@ class ControlPanel:
         self.slam_worker = None
         self._slam_last_mesh_obj = None   # identity check: skip re-upload of an unchanged mesh
 
+        # Showcase mode (Task 12): record -> live preview -> post-process -> final
+        # reveal. Off by default; layered on top of / mutually exclusive with the
+        # SLAM view above (see _on_showcase_toggle / _on_slam_toggle). The heavy
+        # `slam.showcase` import (pulls in open3d's tensor geometry stack) is
+        # deferred to first actual use, same as slam.worker.SlamWorker above.
+        self.showcase_enabled = False
+        self.showcase_phase = None   # set to ShowcasePhase.IDLE on first toggle-on
+        self._showcase_preview_worker = None   # SlamWorker, live during RECORDING
+        self._showcase_post_worker = None      # PostProcessWorker, live during PROCESSING/FINAL
+        self._showcase_loader_thread = None    # loads the .bin + builds the PostProcessWorker
+        self._showcase_last_mesh_obj = None
+        self._showcase_rec_frames = 0
+        self._showcase_orbit_enabled = False
+        self._showcase_ease = None             # camera ease-in state (see _advance_showcase_orbit)
+        self._showcase_process_start_ts = None
+
         # command state
         self._pending_exposure: tuple[int, float] | None = None
         self._last_sent_exposure: int | None = None
@@ -425,6 +448,13 @@ class ControlPanel:
         self._overlay_size = (10, 10)            # (w, h) tracked for _on_layout
         self.overlay.visible = self.metrics_overlay
         self.window.add_child(self.overlay)
+
+        # Showcase mode's phase banner (Task 12) -- a plain floating Label,
+        # stacked just below the metrics HUD image (see _on_layout), hidden
+        # unless Showcase mode is on.
+        self.showcase_banner = gui.Label("")
+        self.showcase_banner.visible = False
+        self.window.add_child(self.showcase_banner)
 
     def _group(self, title, *, open=True):
         """A collapsable group added to the panel, with consistent margins."""
@@ -556,6 +586,17 @@ class ControlPanel:
         slam.add_child(self.lbl_slam_ms)
         slam.add_child(gui.Label("(View -> Clear also resets the SLAM map)"))
 
+        # --- Showcase (Task 12): record -> live preview -> post-process -> reveal.
+        # Mutually exclusive with the SLAM view above (see _on_showcase_toggle /
+        # _on_slam_toggle); the phase banner + stats render inside the 3D view
+        # itself (a floating gui.Label -- see _build_overlay/_on_layout), not here.
+        show = self._group("Showcase", open=False)
+        self.chk_showcase = gui.Checkbox("Showcase mode (record -> live preview -> reveal)")
+        self.chk_showcase.checked = False
+        self.chk_showcase.set_on_checked(self._on_showcase_toggle)
+        show.add_child(self.chk_showcase)
+        show.add_child(gui.Label("Record to scan, Stop to process. Clear resets to idle."))
+
         # --- Sensors (LSM6DSV16X: tilt-compensated heading + pressure/temp) ---
         if self.sensors_panel:
             sg = self._group("Sensors")
@@ -650,6 +691,15 @@ class ControlPanel:
         w, h = self._overlay_size
         pad = int(0.5 * self.window.theme.font_size)
         self.overlay.frame = gui.Rect(r.x + pad, r.y + pad, w, h)
+        # Showcase banner: stacked just below the metrics HUD image (if visible),
+        # spanning most of the scene's width. Computed unconditionally (cheap;
+        # mirrors the overlay's own always-computed frame above) -- visibility
+        # alone gates whether it's actually drawn.
+        em = self.window.theme.font_size
+        banner_h = int(1.6 * em)
+        banner_y = r.y + pad + (h + pad if self.overlay.visible else 0)
+        self.showcase_banner.frame = gui.Rect(r.x + pad, banner_y,
+                                              min(scene_w - 2 * pad, int(32 * em)), banner_h)
 
     # ---- lifecycle ----------------------------------------------------------
     def start(self):
@@ -661,6 +711,7 @@ class ControlPanel:
         self._stop = True
         if self.slam_worker is not None:
             self.slam_worker.stop()        # join the SLAM worker thread before teardown
+        self._join_showcase_workers()      # join Showcase's preview/post-process/loader threads
         self.resource_sampler.stop()       # join the sampler thread before teardown
         self.pacer.paused.clear()          # unblock a paused reader so it can exit
         try:
@@ -743,6 +794,16 @@ class ControlPanel:
         h, w = depth.shape
         if self.deproj is None:
             self.deproj = Deprojector(w, h, self.args.fov_h, self.args.fov_v)
+
+        if self.showcase_enabled:
+            # Showcase mode (Task 12): the 4-phase record/preview/process/reveal
+            # experience replaces both the raw cloud AND the classic SLAM view
+            # below (mutually exclusive -- see _on_showcase_toggle). Additive and
+            # unreachable unless the Showcase checkbox is on.
+            self._render_showcase_frame(depth)
+            self._shown += 1
+            self.metrics.tick_render(time.monotonic())
+            return
 
         if self.slam_enabled:
             # SLAM view (Task 10): mesh + trajectory replace the raw cloud.
@@ -941,6 +1002,12 @@ class ControlPanel:
             sc.remove_geometry(_MESH_GEOM)
 
     def _on_slam_toggle(self, checked):
+        if checked and self.showcase_enabled:
+            # Mutually exclusive with Showcase mode (see _on_showcase_toggle's
+            # symmetric guard) -- this one added line is the only change to this
+            # method's pre-existing body below.
+            self.chk_showcase.checked = False
+            self._on_showcase_toggle(False)
         self.slam_enabled = checked
         if not checked:
             if self.slam_worker is not None:
@@ -954,6 +1021,317 @@ class ControlPanel:
         else:
             self._camera_set = False          # reframe onto SLAM content once it appears
         self.bus.publish(f"SLAM view -> {'on' if checked else 'off'}")
+
+    # ---- Showcase mode (Task 12): record -> live preview -> post-process -> reveal ----
+    def _render_showcase_frame(self, depth):
+        """Showcase mode's per-frame render -- dispatches on the current
+        `ShowcasePhase` (slam/showcase.py). Called from `_render_frame` only
+        when `self.showcase_enabled`; mirrors `_render_slam_frame`'s shape but
+        drives the 4-phase state machine instead of a single live view."""
+        from .slam.showcase import ShowcasePhase
+        phase = self.showcase_phase
+        if phase is ShowcasePhase.RECORDING:
+            self._render_showcase_recording(depth)
+        elif phase is ShowcasePhase.PROCESSING:
+            self._render_showcase_processing()
+        elif phase is ShowcasePhase.FINAL:
+            self._advance_showcase_orbit()
+        else:
+            self._set_showcase_banner("Press Record to scan the room.")
+
+    def _render_showcase_recording(self, depth):
+        """RECORDING phase: feed the live preview `SlamWorker` (same engine
+        Task 10's classic SLAM view uses, preview quality/translation-only ICP)
+        from this frame's depth + fused quat/pressure, and show its latest
+        rough mesh + trajectory. The panel's `Recorder` (started by the Record
+        button, see _on_record) is simultaneously writing the raw .bin
+        alongside this -- entirely independent of this preview."""
+        from .slam.worker import SlamWorker
+        if self._showcase_preview_worker is None:
+            h, w = depth.shape
+            self._showcase_preview_worker = SlamWorker(w, h, fov_h=self.args.fov_h,
+                                                        fov_v=self.args.fov_v)
+            self._showcase_preview_worker.start()
+
+        quat = self.sensor_state.fused_quat()
+        tracking_txt = "waiting for IMU..."
+        if quat is not None:
+            env = self.sensor_state.latest_env()
+            pressure = env.pressure_pa if env is not None else None
+            self._showcase_preview_worker.submit(depth, quat, pressure)
+            self._showcase_rec_frames += 1
+
+        latest = self._showcase_preview_worker.latest()
+        if latest is not None:
+            mesh, trajectory, step = latest
+            tracking_txt = "lost" if step.tracking_lost else "ok"
+            self._show_showcase_mesh(mesh)
+            self._show_showcase_trajectory(trajectory)
+            self._slam_camera_frame(mesh, trajectory)
+        self._set_showcase_banner(
+            f"● Recording — scanning… ({self._showcase_rec_frames} frames "
+            f"· tracking: {tracking_txt})")
+
+    def _render_showcase_processing(self):
+        """PROCESSING phase: render whatever the background `PostProcessWorker`
+        has published so far -- the scene stays interactive (orbitable) the
+        whole time; each newer, more-complete mesh simply swaps in over the
+        last one (see _show_showcase_mesh's identity check). On its terminal
+        (done=True) publish, hands off to _enter_showcase_final."""
+        worker = self._showcase_post_worker
+        if worker is None:
+            self._set_showcase_banner("Processing… loading capture…")
+            return
+        latest = worker.latest()
+        if latest is None:
+            self._set_showcase_banner("Processing… 0%")
+            return
+        self._show_showcase_mesh(latest.mesh)
+        self._show_showcase_trajectory(latest.trajectory)
+        self._slam_camera_frame(latest.mesh, latest.trajectory)
+        if latest.done:
+            self._enter_showcase_final(latest)
+        else:
+            self._set_showcase_banner(f"Processing… {latest.fraction * 100:.0f}%")
+
+    def _show_showcase_mesh(self, mesh):
+        """Upload `mesh` if it's new (identity check -- mesh extraction is
+        already throttled inside the worker) and non-empty. Shares the
+        classic SLAM view's geometry name/material since the two modes are
+        mutually exclusive and never rendered in the same frame."""
+        if mesh is None or mesh is self._showcase_last_mesh_obj or len(mesh.vertex.positions) == 0:
+            return
+        sc = self.scene_widget.scene
+        legacy_mesh = mesh.to_legacy()
+        legacy_mesh.compute_vertex_normals()
+        if sc.has_geometry(_MESH_GEOM):
+            sc.remove_geometry(_MESH_GEOM)
+        sc.add_geometry(_MESH_GEOM, legacy_mesh, self.mesh_material)
+        self._showcase_last_mesh_obj = mesh
+
+    def _show_showcase_trajectory(self, trajectory):
+        # NOTE: intentionally stricter than _render_slam_frame's equivalent
+        # block (classic SLAM view, which uploads a LineSet even for a
+        # single-point trajectory). Reproduced live (replaying
+        # captures/phase6_motion_ref.bin, ticking the panel through the
+        # classic SLAM view too): uploading a LineSet with 1 point / 0 line
+        # segments as the first "unlitLine"-shaded geometry ever added to a
+        # fresh scene hard-crashes Filament ("VertexBuffer ... vertexCount
+        # cannot be 0", then a native segfault) -- a pre-existing bug in
+        # Task 10's code (filed in BUGS.md), not something to inherit into
+        # this new method just because the shape matches. Skipping until
+        # there are >= 2 points sidesteps it entirely for Showcase mode.
+        if len(trajectory) < 2:
+            return
+        sc = self.scene_widget.scene
+        pts = np.array([T[:3, 3] for T in trajectory], dtype=np.float64)
+        lines = self._o3d.geometry.LineSet()
+        lines.points = self._o3d.utility.Vector3dVector(pts)
+        idx = np.stack([np.arange(len(pts) - 1), np.arange(1, len(pts))], axis=1)
+        lines.lines = self._o3d.utility.Vector2iVector(idx)
+        lines.colors = self._o3d.utility.Vector3dVector(
+            np.tile([[0.1, 0.9, 0.3]], (len(idx), 1)))
+        if sc.has_geometry(_SLAM_TRAJ_GEOM):
+            sc.remove_geometry(_SLAM_TRAJ_GEOM)
+        sc.add_geometry(_SLAM_TRAJ_GEOM, lines, self.slam_line_material)
+
+    def _showcase_target_camera(self, mesh, trajectory):
+        """(center, radius) to frame `mesh` + `trajectory`'s bounds -- the same
+        approach as `_slam_camera_frame`, duplicated (not shared) so that
+        pre-existing method, used by the classic SLAM view, stays untouched.
+        Returns None on a still-degenerate (zero-extent) scan."""
+        pts_list = [np.zeros((1, 3))]
+        if mesh is not None and len(mesh.vertex.positions) > 0:
+            pts_list.append(mesh.vertex.positions.numpy())
+        if trajectory:
+            pts_list.append(np.array([T[:3, 3] for T in trajectory]))
+        all_pts = np.vstack(pts_list)
+        bounds = self._o3d.geometry.AxisAlignedBoundingBox.create_from_points(
+            self._o3d.utility.Vector3dVector(all_pts))
+        ext = float(bounds.get_extent().max())
+        if ext <= 0:
+            return None
+        return np.asarray(bounds.get_center(), dtype=np.float64), ext * 1.8
+
+    def _enter_showcase_final(self, progress):
+        """PROCESSING -> FINAL: the mesh/trajectory are already the final ones
+        (just uploaded by the caller); auto-frame + start the slow orbit, and
+        show the stats banner. Fade note: Filament (Open3D's rendering
+        backend) has no practical per-geometry alpha fade, so rather than fight
+        it for a literal cross-fade, the "transition" is a clean geometry swap
+        (already done) plus this eased camera move toward the final framing
+        (smoothstepped over _SHOWCASE_EASE_S, in _advance_showcase_orbit) --
+        the fallback the brief explicitly sanctions."""
+        from .slam.showcase import next_phase
+        self.showcase_phase = next_phase(self.showcase_phase, processing_done=True)
+        target = self._showcase_target_camera(progress.mesh, progress.trajectory)
+        now = time.monotonic()
+        if target is not None:
+            to_target, to_radius = target
+            if self._cam_target is not None:
+                self._showcase_ease = {
+                    "t0": now, "duration": _SHOWCASE_EASE_S,
+                    "from_target": self._cam_target.copy(), "from_radius": self._cam_radius,
+                    "to_target": to_target, "to_radius": to_radius,
+                }
+            else:   # nothing framed yet (e.g. RECORDING never got a valid mesh) -- snap once
+                self._cam_target, self._cam_radius, self._cam_az = to_target, to_radius, 0.0
+                self._camera_set = True
+                self._apply_camera()
+                self._showcase_ease = None
+        self._showcase_orbit_enabled = True
+        elapsed = now - (self._showcase_process_start_ts or now)
+        stats = progress.stats or {}
+        self._set_showcase_banner(
+            f"Scan complete — {stats.get('frames', 0)} frames · "
+            f"drift {stats.get('gap_m', 0.0):.2f} m · {stats.get('verts', 0)} verts · "
+            f"{elapsed:.1f}s")
+        self.bus.publish("showcase: scan complete")
+
+    def _advance_showcase_orbit(self):
+        """FINAL phase, called every rendered frame: advance the camera-ease
+        (if one is in flight) and the slow auto-orbit -- both stop dead the
+        moment the user takes the mouse (checking `self._drag`, the same drag
+        state `_on_mouse` already tracks), so this never fights manual
+        orbit/pan."""
+        if self._drag is not None:
+            return
+        if self._showcase_ease is not None:
+            e = self._showcase_ease
+            frac = min(1.0, (time.monotonic() - e["t0"]) / e["duration"])
+            s = frac * frac * (3 - 2 * frac)   # smoothstep
+            self._cam_target = e["from_target"] + (e["to_target"] - e["from_target"]) * s
+            self._cam_radius = e["from_radius"] + (e["to_radius"] - e["from_radius"]) * s
+            if frac >= 1.0:
+                self._showcase_ease = None
+        if self._showcase_orbit_enabled:
+            self._cam_az += _SHOWCASE_ORBIT_STEP
+        self._apply_camera()
+
+    def _enter_showcase_recording(self):
+        """Record button pressed while in Showcase mode: fresh preview worker
+        (lazily built on the first depth frame, once its shape is known),
+        fresh camera framing, fresh geometry. `next_phase`'s record_pressed
+        rule fires from ANY phase (not just IDLE) -- pressing Record again
+        while looking at a FINAL reveal, or mid-PROCESSING, restarts rather
+        than being ignored, so this must tear down (not just orphan) whatever
+        the interrupted phase was using: `_join_showcase_workers()` stops and
+        joins a still-running PostProcessWorker/loader thread exactly like
+        leaving Showcase mode does.
+
+        Also re-requests CALIB (same command the Device group's "CALIB"
+        button sends): the device only streams CALIB once, near stream
+        start, so a Recorder capture that starts well into an already-running
+        session (the normal case -- Showcase can be turned on and Record
+        pressed at any point) would otherwise be missing it entirely. Without
+        it, `_load_frames`/`TransformStage` can't transform a single raw
+        frame in the just-recorded .bin, so the PostProcessWorker's Mapper
+        never even gets real width/height (see showcase.py's
+        `_publish_construction_failure`, which keeps that case from hanging
+        PROCESSING forever -- but the fix here is what makes the recording
+        actually processable). `dispatch()` itself already reports "not
+        available in replay" harmlessly when there's no live device, so this
+        is unconditional."""
+        from .slam.showcase import next_phase
+        self.showcase_phase = next_phase(self.showcase_phase, record_pressed=True)
+        self._join_showcase_workers()
+        self.dispatcher.dispatch(CommandCode.SEND_CALIB, 0, "calib (showcase)")
+        self._showcase_rec_frames = 0
+        self._showcase_last_mesh_obj = None
+        self._showcase_orbit_enabled = False
+        self._showcase_ease = None
+        self._camera_set = False
+        self._remove_slam_geometries()
+        self._set_showcase_banner("● Recording — scanning…")
+
+    def _enter_showcase_processing(self, path):
+        """Stop button pressed while RECORDING: tear down the live preview
+        worker (its job is done) and kick off the full-quality re-process on a
+        background thread -- both the capture load (`_load_frames`, tens of
+        MB) and the `Mapper` run happen off the GUI thread, so Stop returns
+        immediately and the banner flips to "Processing..." right away."""
+        from .slam.showcase import next_phase
+        self.showcase_phase = next_phase(self.showcase_phase, stop_pressed=True)
+        if self._showcase_preview_worker is not None:
+            self._showcase_preview_worker.stop()
+            self._showcase_preview_worker = None
+        self._showcase_post_worker = None
+        self._showcase_process_start_ts = time.monotonic()
+        self._set_showcase_banner("Processing… loading capture…")
+        if not path:
+            self.bus.publish("showcase: no capture path to process")
+            return
+        self._start_showcase_post_process(path)
+
+    def _start_showcase_post_process(self, path):
+        """Load `path` + build/start the `PostProcessWorker` on a dedicated
+        background thread (file IO + the full Mapper run; NOT the serial
+        reader -- no second serial reader, per the module contract). Publishes
+        the finished worker to `self._showcase_post_worker` (a simple
+        reference assignment, safe to read from the GUI thread without a lock,
+        same as `self.slam_worker`'s lazy construction elsewhere in this
+        file)."""
+        def _loader():
+            from .slam.showcase import PostProcessWorker
+            try:
+                worker = PostProcessWorker.from_capture(
+                    path, mesh_every=25, icp_mode="translation",
+                    fov_h=self.args.fov_h, fov_v=self.args.fov_v)
+            except Exception as exc:
+                self.bus.publish(f"showcase: failed to load capture {path!r}: {exc!r}")
+                return
+            worker.start()
+            self._showcase_post_worker = worker
+        self._showcase_loader_thread = threading.Thread(target=_loader, daemon=True)
+        self._showcase_loader_thread.start()
+
+    def _join_showcase_workers(self):
+        """Stop + join every Showcase-mode thread (preview SlamWorker, the
+        PostProcessWorker, and the capture-loader thread) -- called on window
+        close, on leaving Showcase mode, and on Clear, so no Showcase thread
+        ever outlives the panel or a mode switch. Safe to call repeatedly /
+        when nothing is running."""
+        if self._showcase_preview_worker is not None:
+            self._showcase_preview_worker.stop()
+            self._showcase_preview_worker = None
+        if self._showcase_post_worker is not None:
+            self._showcase_post_worker.stop()
+            self._showcase_post_worker = None
+        if self._showcase_loader_thread is not None:
+            self._showcase_loader_thread.join(timeout=5.0)
+            self._showcase_loader_thread = None
+
+    def _set_showcase_banner(self, text):
+        self.showcase_banner.text = text
+
+    def _on_showcase_toggle(self, checked):
+        from .slam.showcase import next_phase
+        if checked and self.slam_enabled:
+            # Mutually exclusive with the classic SLAM view (symmetric guard
+            # to the one added in _on_slam_toggle).
+            self.chk_slam.checked = False
+            self._on_slam_toggle(False)
+        self.showcase_enabled = checked
+        if checked:
+            self.showcase_phase = next_phase(self.showcase_phase, cleared=True)   # -> IDLE
+            self._showcase_orbit_enabled = False
+            self._showcase_ease = None
+            self._camera_set = False
+            self._showcase_last_mesh_obj = None
+            self.showcase_banner.visible = True
+            self._set_showcase_banner("Press Record to scan the room.")
+        else:
+            self._join_showcase_workers()
+            self.showcase_phase = next_phase(self.showcase_phase, cleared=True)   # -> IDLE
+            self._showcase_orbit_enabled = False
+            self._showcase_ease = None
+            self._remove_slam_geometries()
+            self._showcase_last_mesh_obj = None
+            self.showcase_banner.visible = False
+            self._camera_set = False
+            if self._last_item is not None:   # re-render the last frame as a normal cloud
+                self._render_frame(self._last_item)
+        self.bus.publish(f"Showcase mode -> {'on' if checked else 'off'}")
 
     def _show_geometries(self, all_pts):
         """Push the dot cloud to the scene and (re)frame the camera from the
@@ -1317,6 +1695,22 @@ class ControlPanel:
             self.lbl_slam_tracking.text = "tracking: --"
             self.lbl_slam_ms.text = "slam_ms: --"
             self.bus.publish("SLAM map cleared")
+        if self.showcase_enabled:
+            from .slam.showcase import ShowcasePhase, next_phase
+            if self.showcase_phase is ShowcasePhase.RECORDING and self.btn_record.is_on:
+                # Clear during an in-progress recording also stops it -- don't
+                # leave a dangling capture the panel no longer tracks.
+                self.recorder.stop()
+                self.btn_record.is_on = False
+                self.btn_record.text = "Record"
+            self._join_showcase_workers()
+            self.showcase_phase = next_phase(self.showcase_phase, cleared=True)
+            self._showcase_orbit_enabled = False
+            self._showcase_ease = None
+            self._remove_slam_geometries()
+            self._showcase_last_mesh_obj = None
+            self._set_showcase_banner("Press Record to scan the room.")
+            self.bus.publish("showcase cleared -> idle")
         self.bus.publish("scan cleared")
 
     def _sync_near_slider(self):
@@ -1424,10 +1818,16 @@ class ControlPanel:
             self.recorder.start(path)
             self.btn_record.text = "Recording..."
             self.bus.publish(f"recording -> {path}")
+            if self.showcase_enabled:
+                self._enter_showcase_recording()
         else:
+            path = self.recorder.path   # captured before stop() clears it
             self.recorder.stop()
             self.btn_record.text = "Record"
             self.bus.publish("recording stopped")
+            from .slam.showcase import ShowcasePhase
+            if self.showcase_enabled and self.showcase_phase is ShowcasePhase.RECORDING:
+                self._enter_showcase_processing(path)
 
     def _on_pause(self, *_):
         if self.btn_pause.is_on:

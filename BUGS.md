@@ -20,6 +20,8 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-006 | anomaly | firmware      | One 100 s post-flash boot-recovery hang (seen once, never reproduced) |
 | BUG-007 | fixed   | transform lib | ZAPC confidence plane is structurally ~1.0 everywhere |
 | BUG-008 | fixed   | host/viewer   | Minimizing the roomscanner panel triggers Filament Camera preconditions warning |
+| BUG-009 | open    | host/panel    | SLAM/Showcase trajectory LineSet with a single point hard-crashes Filament (segfault) |
+| BUG-010 | by-design | host/panel  | A Recorder capture started well into a session lacks CALIB and can't be post-processed |
 
 ---
 
@@ -129,5 +131,66 @@ When the roomscanner panel is minimized, the console shows:
 `in void __cdecl filament::FCamera::setProjection(enum filament::Camera::Projection,double,double,double,double,double,double) noexcept:89 reason: Camera preconditions not met. Using default projection`
 
 **Likely cause:** When the window is minimized, its content rectangle width and height drop to 0. The side panel layout calculations result in a zero or negative width and height for the `scene_widget.frame` (specifically `r.width - panel_w` becomes negative when `r.width` is 0). Passing zero/negative width or height to the Filament camera projection settings violates internal preconditions.
+
+## BUG-009 — SLAM/Showcase trajectory LineSet with a single point hard-crashes Filament (segfault)
+
+- **Status:** **open** · **Reported:** 2026-07-11 (Task 12, Showcase mode) · **Area:** host/panel
+- **Where:** `host/src/roomscan/panel.py` `_render_slam_frame`'s trajectory upload block (Task 10,
+  the classic SLAM view -- `_show_showcase_trajectory` in this same file, added by Task 12, sidesteps
+  it, see that method's docstring)
+
+Reproduced live, deterministically, replaying `captures/phase6_motion_ref.bin` through a real
+`ControlPanel` (`gui.Application.instance.run_one_tick()`), on the very first successful
+`SlamWorker`/`Mapper.step()` result: the trajectory at that point has exactly 1 pose. The existing
+code builds an Open3D `LineSet` with 1 point and (since `len(pts) >= 2` gates setting `.lines`) 0
+line segments, then uploads it via `scene.add_geometry(...)`. This crashes with:
+```
+in class filament::VertexBuffer *__cdecl filament::VertexBuffer::Builder::build(class filament::Engine &):111
+reason: vertexCount cannot be 0
+[Open3D WARNING] Resource [VertexBuffer, 0, hash: ...] not found.
+[Open3D WARNING] Resource [IndexBuffer, 0, hash: ...] not found.
+```
+...followed by a hard process segfault a few ticks later (not always the very next tick -- timing-
+dependent). Confirmed via a minimal repro script that toggles the classic SLAM checkbox alone (no
+Showcase code involved) and ticks the panel: same crash, same tick offset. Not exercised previously
+because nothing had driven the panel through `run_one_tick()` fast enough, immediately after
+enabling the SLAM view with no "warm-up" frames rendered first, to reach the first 1-point
+trajectory publish before the *next* mesh/trajectory render call replaced it with a ≥2-point one.
+
+**Likely cause:** Filament's `VertexBuffer`/`IndexBuffer` builders reject (well, crash on) a
+0-vertex-index (or otherwise degenerate) buffer being the very first `unlitLine`-shaded geometry
+added to the scene under certain engine states, rather than raising a catchable Python exception.
+
+**Fix (not yet applied here — this bug lives in the pre-existing Task 10 code, out of scope for a
+regression-safe Task 12 diff):** guard `_render_slam_frame`'s trajectory block the same way
+`_show_showcase_trajectory` now does: skip the upload while `len(trajectory) < 2` instead of
+uploading a point-only `LineSet`. Task 12's new Showcase code does NOT inherit this bug (its own
+`_show_showcase_trajectory` has the guard), but the classic SLAM view (`chk_slam`) still can hit it.
+
+## BUG-010 — A Recorder capture started well into a session lacks CALIB and can't be post-processed
+
+- **Status:** **by-design**, mitigated for live mode 2026-07-11 (Task 12) · **Reported:** 2026-07-11
+  (Task 12, Showcase mode) · **Area:** host/panel
+
+The scanner device streams its `CALIB` control frame once, near the very start of a session.
+`roomscan.slam.cli._load_frames` (and therefore `PostProcessWorker.from_capture`) needs that CALIB
+frame in the capture to run `TransformStage` and produce any depth frames at all -- without it,
+`_load_frames` returns `frames=[], width=None, height=None`. The panel's `Recorder` (Record/Stop
+button) just dumps raw bytes from whenever `Record` was pressed onward; if the user enables
+Showcase mode and presses Record well after the device/replay session already started (the normal
+case), the CALIB frame has already gone by and never lands in the new `.bin`.
+
+**Mitigation (Task 12):** `panel.py`'s `_enter_showcase_recording` now dispatches
+`CommandCode.SEND_CALIB` (the same command the Device group's "CALIB" button sends) every time
+Showcase's Record is pressed, so a live device re-streams CALIB into the just-opened recording.
+`CommandDispatcher.dispatch()` already no-ops harmlessly ("not available in replay") when there's
+no live device, so **replay-mode Showcase recordings starting after tick 0 of the replay file are
+still unprocessable** -- confirmed live: `PostProcessWorker` degrades gracefully (see
+`showcase.py`'s `_publish_construction_failure`: a terminal `done=True`, 0-frames/0-verts publish,
+not a hang or crash) rather than blocking PROCESSING forever, but the resulting "scan" is empty.
+Recording from the very start of a replay file works fine. Marked `by-design` rather than `open`
+because live mode (the feature's primary use case) is fixed; a full replay-mode fix would need
+`_load_frames` to tolerate a missing CALIB (e.g. reuse the panel's already-warm `TransformStage`
+instead of a fresh one) -- out of scope here.
 
 **Fix:** Added checks in `_on_layout` to return early if the window width or height is `<= 0`, or if the resulting `scene_w` is `<= 0`. Constrained `panel_w` to be at least `0` so it doesn't become negative. Additionally, guarded camera operations in `_reset_camera` and `_apply_camera` to skip execution if `scene_widget.frame` width or height are `<= 0` (preventing setup of degenerate projection matrices).
