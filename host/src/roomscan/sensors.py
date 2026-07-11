@@ -161,21 +161,58 @@ def absolute_heading(quat, mag_ut) -> float:
     return tilt_compensated_heading(tilt_only, mag_ut)
 
 
+# True physical mapping derived from board orientation:
+# ToF (CV) frame: X=Right, Y=Down, Z=Forward
+# SFLP body frame: X=Up, Y=Right, Z=Forward (when board held vertically, USB down)
+# Thus: X_body = -Y_cv; Y_body = X_cv; Z_body = Z_cv
+T_CV_TO_BODY = np.array([
+    [ 0.0, -1.0,  0.0],
+    [ 1.0,  0.0,  0.0],
+    [ 0.0,  0.0,  1.0]
+])
+
+# SFLP World frame: X=North, Y=West, Z=Up
+# Open3D CV World: X=Right(East), Y=Down(-Up), Z=Forward(North)
+# Thus: X_cv = -Y_world; Y_cv = -Z_world; Z_cv = X_world
+T_WORLD_TO_CV = np.array([
+    [ 0.0, -1.0,  0.0],
+    [ 0.0,  0.0, -1.0],
+    [ 1.0,  0.0,  0.0]
+])
+
 def gizmo_pose(quat: tuple[float, float, float, float], scale: float,
                anchor: tuple[float, float, float]) -> np.ndarray:
     """4x4 pose for the orientation gizmo: rotation from quaternion, uniform scale, placed
     at anchor. Suitable for Open3D geometry.transform()."""
-    R_align = np.array([
-        [1.0,  0.0,  0.0],
-        [0.0,  0.0, -1.0],
-        [0.0, -1.0,  0.0]
-    ])
     r = quat_to_matrix(*quat)
-    r_mapped = R_align @ r @ R_align.T
+    r_mapped = T_WORLD_TO_CV @ r @ T_CV_TO_BODY
     m = np.eye(4)
     m[:3, :3] = r_mapped * scale
     m[:3, 3] = np.array(anchor, dtype=np.float64)
     return m
+
+
+def ir_gravity_rot(quat: tuple[float, float, float, float]) -> int:
+    """Return the number of CCW 90° turns (0–3) to apply to the raw IR image so
+    that its "down" matches the physical gravity direction detected by the SFLP
+    accelerometer/gyroscope fusion.
+
+    Method:
+      1. Rotate the world-gravity vector [0, 0, -1] (SFLP Z-up world frame)
+         into the sensor body frame: g_body = R.T @ [0, 0, -1].
+      2. The image plane is the CV XY plane. CV Right = SFLP Y. CV Down = SFLP -X.
+      3. The in-plane gravity components are gx = g_body[1] and gy = -g_body[0].
+      4. The in-plane roll angle is atan2(gx, gy) — 0° when gravity is along
+         +image-down, increasing CCW. Snap to nearest 90° and return rot90 count.
+    """
+    r = quat_to_matrix(*quat)   # body → world
+    gravity_world = np.array([0.0, 0.0, -1.0])
+    g_body = r.T @ gravity_world   # sensor body frame gravity vector
+    gx, gy = float(g_body[1]), float(-g_body[0])   # in-plane components
+    angle_deg = math.degrees(math.atan2(gx, gy))
+    # Snap to nearest 90° and convert to rot90 count (CCW turns)
+    step = int(round(angle_deg / 90.0)) % 4
+    return step
 
 
 AXIS_CONVENTION = np.diag([1.0, -1.0, -1.0])   # mag-mounting-vs-IMU sign/permutation; resolved on-target

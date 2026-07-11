@@ -1,3 +1,4 @@
+import math
 import struct
 
 import numpy as np
@@ -12,6 +13,7 @@ from roomscan.protocol import (
 from roomscan.sensors import (
     SensorState,
     graft_yaw,
+    ir_gravity_rot,
     quat_mul,
     quat_pitch_deg,
     quat_to_matrix,
@@ -75,11 +77,14 @@ def test_tilt_compensated_heading_level_north():
 def test_gizmo_pose_identity():
     from roomscan.sensors import gizmo_pose
     m = gizmo_pose((1.0, 0.0, 0.0, 0.0), scale=0.2, anchor=(1.0, 2.0, 3.0))
-    # scale on the diagonal of the rotation block
-    assert m[0, 0] == pytest.approx(0.2)
-    # translation column
-    assert np.allclose(m[:3, 3], [1.0, 2.0, 3.0])
-    assert m[3, 3] == pytest.approx(1.0)
+    # True identity matrix mapping T_WORLD_TO_CV @ T_CV_TO_BODY
+    expected_m = np.array([
+        [-0.2, 0.0, 0.0, 1.0],
+        [0.0, 0.0, -0.2, 2.0],
+        [0.0, -0.2, 0.0, 3.0],
+        [0.0, 0.0, 0.0, 1.0]
+    ])
+    assert np.allclose(m, expected_m)
 
 
 def test_gizmo_pose_yaw_maps_to_y_axis_rotation():
@@ -89,15 +94,12 @@ def test_gizmo_pose_yaw_maps_to_y_axis_rotation():
     theta = math.radians(30.0) / 2
     quat = (math.cos(theta), 0.0, 0.0, math.sin(theta))
     m = gizmo_pose(quat, scale=1.0, anchor=(0.0, 0.0, 0.0))
-    
-    # Should correspond to a rotation around the visualizer Y axis:
-    # [[ cos(30), 0, sin(30) ],
-    #  [ 0,       1, 0       ],
-    #  [ -sin(30),0, cos(30) ]]
+
+    # Rotation around IMU Z axis mapped correctly through physically accurate matrices
     expected = np.array([
-        [math.cos(math.radians(30.0)), 0.0, math.sin(math.radians(30.0))],
-        [0.0, 1.0, 0.0],
-        [-math.sin(math.radians(30.0)), 0.0, math.cos(math.radians(30.0))]
+        [-math.cos(math.radians(30.0)), math.sin(math.radians(30.0)), 0.0],
+        [0.0, 0.0, -1.0],
+        [-math.sin(math.radians(30.0)), -math.cos(math.radians(30.0)), 0.0]
     ])
     assert np.allclose(m[:3, :3], expected, atol=1e-4)
 
@@ -169,3 +171,38 @@ def test_fused_quat_applies_yaw_correction():
         st.feed(Frame(h, struct.pack("<4f", 1.0, 0.0, 0.0, 0.0)))
     assert st.fusion_status() == "active"
     assert wrap180(quat_yaw_deg(st.fused_quat()) - 60.0) == pytest.approx(0.0, abs=1.5)
+
+
+# ---------------------------------------------------------------------------
+# ir_gravity_rot: in-plane roll snap tests
+# ---------------------------------------------------------------------------
+
+def _roll_quat(roll_deg: float) -> tuple[float, float, float, float]:
+    """Quaternion representing a pure sensor roll about the depth axis.
+    The sensor depth axis = SFLP body Y axis, so we rotate about Y."""
+    a = math.radians(roll_deg) / 2.0
+    return (math.cos(a), 0.0, math.sin(a), 0.0)  # w, x, y, z  (rot about Y)
+
+
+def test_ir_gravity_rot_level():
+    """Level sensor -> 0 turns."""
+    from roomscan.sensors import ir_gravity_rot
+    # Vertical holding = -90 roll around Y. This is the physically level (upright) orientation.
+    import math
+    theta = math.radians(-90.0) / 2
+    q = (math.cos(theta), 0.0, math.sin(theta), 0.0)
+    assert ir_gravity_rot(q) == 0
+
+
+def test_ir_gravity_rot_roll_90_cw():
+    """Gravity projects to image-right -> 1 CCW quarter-turn."""
+    theta = math.radians(-90.0) / 2
+    q = (math.cos(theta), math.sin(theta), 0.0, 0.0)
+    assert ir_gravity_rot(q) == 1
+
+
+def test_ir_gravity_rot_roll_90_ccw():
+    """Gravity projects to image-left -> 3 CCW quarter-turns."""
+    theta = math.radians(90.0) / 2
+    q = (math.cos(theta), math.sin(theta), 0.0, 0.0)
+    assert ir_gravity_rot(q) == 3

@@ -104,7 +104,7 @@ _HELP_LINES = [
     "",
     "Mouse:  left-drag orbit (yaw only)  |  ctrl / middle-drag pan  |  wheel zoom",
     "        (camera is tilt-locked: it spins level and pans but never tips)",
-    "Key:    H  this help    M  toggle metrics overlay    G  orientation gizmo",
+    "Key:    H  this help    M  toggle metrics overlay    G  camera model    C  clear scan",
     "",
     "Metrics overlay (top-left of the 3D view): capacity bars for our app.",
     "  Sensor rows show host/hub rate — the bar is the fraction of what the",
@@ -118,7 +118,7 @@ _HELP_LINES = [
     "         point size (raise it to close the gaps between zones);",
     "         Near contrast (see below); dark background;",
     "         Rotate 90 (turns the cloud AND the IR pane, e.g. sideways mount);",
-    "         Reset view.",
+    "         Reset view; Clear scan.",
     "",
     "Near contrast -- spend more of the colormap on close targets (e.g. a face",
     "in front of a wall) so facial relief stands out:",
@@ -304,7 +304,8 @@ class ControlPanel:
         # real transitions (init/active/gated:*) still log once each.
         self._last_fusion_status = "off"
         self._gizmo_added = False
-        self._baseline_quat = None
+        self._baseline_yaw = None
+        self.persistence = False  # only show currently perceived image, no persistence (for now)
         self.stats = Stats()
         # metrics HUD: per-sensor rate meters + a background resource sampler.
         # Fed from the reader thread; read on the UI tick. Overlay is toggleable.
@@ -320,6 +321,9 @@ class ControlPanel:
         self.deproj: Deprojector | None = None
         self.pcd = o3d.geometry.PointCloud()
         self.mesh = o3d.geometry.TriangleMesh()
+        self._accumulated_points = []
+        self._accumulated_colors = []
+        self._accumulated_mesh = self._o3d.geometry.TriangleMesh()
         self._last_all_pts: np.ndarray | None = None      # full valid-point set, for camera framing
         self._camera_set = False
         self._cam_target = None             # turntable camera state (world-up locked, no tilt)
@@ -480,7 +484,7 @@ class ControlPanel:
         view.add_child(self.chk_metrics)
         vrow = gui.Horiz(0.25 * em)
         for text, cb in (("Rotate 90", self._on_rotate), ("Reset", self._on_reset_view),
-                         ("Help", self._show_help)):
+                         ("Clear", self._on_clear_scan), ("Help", self._show_help)):
             b = gui.Button(text)
             b.horizontal_padding_em = 0.4
             b.set_on_clicked(cb)
@@ -714,6 +718,26 @@ class ControlPanel:
         if self.deproj is None:
             self.deproj = Deprojector(w, h, self.args.fov_h, self.args.fov_v)
         pts = self.deproj(depth)
+
+        # Retrieve fused orientation
+        quat = self.sensor_state.fused_quat()
+        quat_display = quat
+        if quat is not None and self._baseline_yaw is not None:
+            from .sensors import graft_yaw
+            quat_display = graft_yaw(quat, -self._baseline_yaw)
+
+        if quat_display is not None:
+            from .sensors import quat_to_matrix, T_WORLD_TO_CV, T_CV_TO_BODY
+            # Apply quaternion rotation using the true physical coordinate mappings
+            r = quat_to_matrix(*quat_display)
+            # Transform rotation back to CV frame for Open3D rendering
+            r_mapped = T_WORLD_TO_CV @ r @ T_CV_TO_BODY
+        else:
+            r_mapped = np.eye(3)
+
+        # Update the visual camera entity's transform at frame rate
+        self._update_camera_gizmo(quat_display)
+
         if len(pts):
             plane = None if self.color_mode == "depth" else outputs.get(self.color_mode)
             if plane is not None:
@@ -726,19 +750,64 @@ class ControlPanel:
                 vals = pts[:, 2]
             colors = cloud_colors(vals, pts[:, 2], mode=self.near_mode,   # z-based, so pre-rotation
                                   cutoff_m=self.near_cutoff_m, emphasis=self.near_emphasis)
+            
+            # Align points to sensor physical mounting orientation
             rot_pts = _rot_xy(pts, self._rot)
+            
+            # Map points into the fixed world using camera orientation
+            world_pts = (r_mapped @ rot_pts.T).T
+
+            # Reset accumulation if camera set flag was cleared
+            if not self._camera_set:
+                self._accumulated_points = []
+                self._accumulated_colors = []
+                self._accumulated_mesh = self._o3d.geometry.TriangleMesh()
+
             if self.surface_enabled:
-                self._render_surface(depth, rot_pts, colors)
+                self._render_surface(depth, world_pts, colors, r_mapped)
             else:
                 self._remove_mesh_geometry()
-                self.pcd.points = o3d.utility.Vector3dVector(rot_pts)
-                self.pcd.colors = o3d.utility.Vector3dVector(colors)
-            self._show_geometries(rot_pts)
+                if self.persistence:
+                    self._accumulated_points.append(world_pts)
+                    self._accumulated_colors.append(colors)
+                else:
+                    self.pcd.points = o3d.utility.Vector3dVector(world_pts)
+                    self.pcd.colors = o3d.utility.Vector3dVector(colors)
+
+            # Concatenate accumulated points if persistence is enabled
+            if self.persistence:
+                if len(self._accumulated_points) > 0:
+                    flat_pts = np.concatenate(self._accumulated_points, axis=0)
+                    flat_cols = np.concatenate(self._accumulated_colors, axis=0)
+
+                    # Voxel downsample if too large to preserve interactive performance
+                    if len(flat_pts) > 20000:
+                        pcd_temp = self._o3d.geometry.PointCloud()
+                        pcd_temp.points = self._o3d.utility.Vector3dVector(flat_pts)
+                        pcd_temp.colors = self._o3d.utility.Vector3dVector(flat_cols)
+                        pcd_temp = pcd_temp.voxel_down_sample(voxel_size=0.02)
+                        self._accumulated_points = [np.asarray(pcd_temp.points)]
+                        self._accumulated_colors = [np.asarray(pcd_temp.colors)]
+                        flat_pts = self._accumulated_points[0]
+                        flat_cols = self._accumulated_colors[0]
+                else:
+                    flat_pts = np.zeros((0, 3))
+                    flat_cols = np.zeros((0, 3))
+
+                self.pcd.points = o3d.utility.Vector3dVector(flat_pts)
+                self.pcd.colors = o3d.utility.Vector3dVector(flat_cols)
+                self._show_geometries(flat_pts)
+            else:
+                self._show_geometries(world_pts)
         else:
             self._remove_mesh_geometry()
-            self.pcd.points = o3d.utility.Vector3dVector(pts)
+            if not self._camera_set:
+                self._accumulated_points = []
+                self._accumulated_colors = []
+                self._accumulated_mesh = self._o3d.geometry.TriangleMesh()
+            self.pcd.points = o3d.utility.Vector3dVector(np.zeros((0, 3)))
             self.pcd.colors = o3d.utility.Vector3dVector(np.zeros((0, 3)))
-            self._show_geometries(pts)
+            self._show_geometries(np.zeros((0, 3)))
         self._shown += 1
         self.metrics.tick_render(time.monotonic())   # rendered-FPS counter
 
@@ -761,8 +830,9 @@ class ControlPanel:
         sc = self.scene_widget.scene
         if sc.has_geometry(_MESH_GEOM):
             sc.remove_geometry(_MESH_GEOM)
-        if len(self.mesh.triangles) > 0:
-            sc.add_geometry(_MESH_GEOM, self.mesh, self.mesh_material)
+        mesh_to_show = self._accumulated_mesh if self.persistence else self.mesh
+        if mesh_to_show is not None and len(mesh_to_show.triangles) > 0:
+            sc.add_geometry(_MESH_GEOM, mesh_to_show, self.mesh_material)
 
     def _remove_mesh_geometry(self):
         sc = self.scene_widget.scene
@@ -776,8 +846,14 @@ class ControlPanel:
         all_pts = self._last_all_pts
         if all_pts is None or len(all_pts) == 0:
             return
+        # Frame both the camera center [0.0, 0.0, 0.0] and the painted points
+        pts_for_bounds = np.vstack([all_pts, [0.0, 0.0, 0.0]])
+        if self.persistence and self._accumulated_mesh is not None and len(self._accumulated_mesh.vertices) > 0:
+            mesh_verts = np.asarray(self._accumulated_mesh.vertices)
+            if len(mesh_verts):
+                pts_for_bounds = np.vstack([pts_for_bounds, mesh_verts])
         bounds = self._o3d.geometry.AxisAlignedBoundingBox.create_from_points(
-            self._o3d.utility.Vector3dVector(all_pts))
+            self._o3d.utility.Vector3dVector(pts_for_bounds))
         ext = float(bounds.get_extent().max())
         if ext <= 0:
             return
@@ -788,12 +864,10 @@ class ControlPanel:
         self._apply_camera()
         self._camera_set = True
 
-    def _render_surface(self, depth, rot_pts, colors):
+    def _render_surface(self, depth, rot_pts, colors, r_mapped=None):
         """Split this frame's points into covered (hidden, drawn by the mesh)
-        and lone (still dots), per the selected adjacency mode. Always leaves
-        self.pcd holding only the lone points -- caller still calls
-        _show_geometries(rot_pts) afterward with the FULL point set so camera
-        framing isn't affected by the split."""
+        and lone (still dots), per the selected adjacency mode. Accumulates
+        the current mesh and the lone points into the global scan."""
         h, w = depth.shape
         pts_grid, valid_grid = self.deproj.grid(depth)
 
@@ -808,15 +882,43 @@ class ControlPanel:
 
         covered = covered_grid[valid_grid.ravel()]
         mesh_verts = _rot_xy(pts_grid.reshape(-1, 3), self._rot)
+        if r_mapped is not None:
+            mesh_verts = mesh_verts @ r_mapped.T
+            
         colors_grid = np.zeros((h * w, 3), dtype=np.float64)
         colors_grid[valid_grid.ravel()] = colors
-        self.mesh.vertices = self._o3d.utility.Vector3dVector(mesh_verts)
-        self.mesh.vertex_colors = self._o3d.utility.Vector3dVector(colors_grid)
-        self.mesh.triangles = self._o3d.utility.Vector3iVector(triangles.astype(np.int32))
-        self._show_mesh_geometry()
+        
+        if self.persistence:
+            current_mesh = self._o3d.geometry.TriangleMesh()
+            current_mesh.vertices = self._o3d.utility.Vector3dVector(mesh_verts)
+            current_mesh.vertex_colors = self._o3d.utility.Vector3dVector(colors_grid)
+            current_mesh.triangles = self._o3d.utility.Vector3iVector(triangles.astype(np.int32))
+            
+            if self._accumulated_mesh is None or len(self._accumulated_mesh.triangles) == 0:
+                self._accumulated_mesh = current_mesh
+            else:
+                self._accumulated_mesh += current_mesh
+                
+            if len(self._accumulated_mesh.triangles) > 50000:
+                self._accumulated_mesh = self._accumulated_mesh.simplify_vertex_clustering(0.02)
+                self._accumulated_mesh.remove_duplicated_vertices()
+                self._accumulated_mesh.remove_duplicated_triangles()
+                self._accumulated_mesh.remove_degenerate_triangles()
+                
+            self._show_mesh_geometry()
 
-        self.pcd.points = self._o3d.utility.Vector3dVector(rot_pts[~covered])
-        self.pcd.colors = self._o3d.utility.Vector3dVector(colors[~covered])
+            lone_pts = rot_pts[~covered]
+            lone_colors = colors[~covered]
+            self._accumulated_points.append(lone_pts)
+            self._accumulated_colors.append(lone_colors)
+        else:
+            self.mesh.vertices = self._o3d.utility.Vector3dVector(mesh_verts)
+            self.mesh.vertex_colors = self._o3d.utility.Vector3dVector(colors_grid)
+            self.mesh.triangles = self._o3d.utility.Vector3iVector(triangles.astype(np.int32))
+            self._show_mesh_geometry()
+            
+            self.pcd.points = self._o3d.utility.Vector3dVector(rot_pts[~covered])
+            self.pcd.colors = self._o3d.utility.Vector3dVector(colors[~covered])
 
 
     def _apply_camera(self):
@@ -921,14 +1023,48 @@ class ControlPanel:
         vmin, vmax, self._ir_frozen = _ir_freeze_range(self.ir_freeze, self._ir_frozen, auto)
         rgb = reflectance_to_rgb(refl, colormap=self.ir_colormap,
                                  vmin=vmin, vmax=vmax, upscale=_IR_UPSCALE)
-        if self._rot:
-            rgb = np.rot90(rgb, self._rot)     # keep the IR pane aligned with the rotated cloud
+        # Use the raw fused quaternion (no yaw baseline — gravity is absolute) to
+        # determine the in-plane sensor roll so IR "down" matches the 3D view.
+        quat_raw = self.sensor_state.fused_quat()
+        if quat_raw is not None:
+            from .sensors import ir_gravity_rot
+            gravity_steps = ir_gravity_rot(quat_raw)
+        else:
+            gravity_steps = 0
+        total_rot = (self._rot + gravity_steps) % 4
+        if total_rot:
+            rgb = np.rot90(rgb, total_rot)     # keep the IR pane aligned with gravity + manual rot
         self.ir_widget.update_image(self._np_to_o3d(rgb))
 
     def _ir_placeholder(self):
         img = np.zeros((42 * _IR_UPSCALE, 54 * _IR_UPSCALE, 3), dtype=np.uint8)
         img[:, :, 0] = 40  # dim maroon = "no IR"
         return self._np_to_o3d(img)
+
+    def _update_camera_gizmo(self, quat_display):
+        if self.imu_gizmo and quat_display is not None:
+            sc = self.scene_widget.scene
+            if not self._gizmo_added:
+                # Construct 3D camera geometry (unlit body + lens + red shutter button)
+                body = self._o3d.geometry.TriangleMesh.create_box(1.0, 0.6, 0.4)
+                body.translate([-0.5, -0.3, -0.4])
+                body.paint_uniform_color([0.2, 0.2, 0.22])
+                
+                lens = self._o3d.geometry.TriangleMesh.create_cylinder(radius=0.25, height=0.3)
+                lens.rotate(lens.get_rotation_matrix_from_xyz([np.pi/2, 0, 0]), center=[0, 0, 0])
+                lens.translate([0, 0, 0.15])
+                lens.paint_uniform_color([0.1, 0.3, 0.6])
+                
+                button = self._o3d.geometry.TriangleMesh.create_cylinder(radius=0.08, height=0.1)
+                button.translate([0.3, -0.35, -0.2])
+                button.paint_uniform_color([0.7, 0.2, 0.2])
+                
+                self._gizmo = body + lens + button
+                self._gizmo.compute_vertex_normals()
+                sc.add_geometry(_GIZMO_GEOM, self._gizmo, self.mesh_material)
+                self._gizmo_added = True
+            pose = gizmo_pose(quat_display, self.gizmo_scale, _GIZMO_ANCHOR)
+            sc.set_geometry_transform(_GIZMO_GEOM, pose)
 
     def _update_sensors(self):
         """Called on the <=4 Hz UI tick: refresh the scene gizmo's transform
@@ -937,19 +1073,11 @@ class ControlPanel:
         Graceful no-data: quietly does nothing until IMU_QUAT/ENV frames arrive."""
         quat = self.sensor_state.fused_quat()
         quat_display = quat
-        if quat is not None and self._baseline_quat is not None:
-            from .sensors import quat_mul
-            qb = self._baseline_quat
-            qb_inv = (qb[0], -qb[1], -qb[2], -qb[3])
-            quat_display = quat_mul(quat, qb_inv)
+        if quat is not None and self._baseline_yaw is not None:
+            from .sensors import graft_yaw
+            quat_display = graft_yaw(quat, -self._baseline_yaw)
         if self.imu_gizmo and quat_display is not None:
-            sc = self.scene_widget.scene
-            if not self._gizmo_added:
-                self._gizmo = self._o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)
-                sc.add_geometry(_GIZMO_GEOM, self._gizmo, self.mesh_material)
-                self._gizmo_added = True
-            pose = gizmo_pose(quat_display, self.gizmo_scale, _GIZMO_ANCHOR)
-            sc.set_geometry_transform(_GIZMO_GEOM, pose)
+            self._update_camera_gizmo(quat_display)
         status = self.sensor_state.fusion_status()
         if status != self._last_fusion_status:
             self._last_fusion_status = status
@@ -1018,8 +1146,24 @@ class ControlPanel:
     def _on_reset_orientation(self):
         quat = self.sensor_state.fused_quat()
         if quat is not None:
-            self._baseline_quat = quat
-            self.bus.publish("yaw-fusion -> baseline reset")
+            from .sensors import quat_yaw_deg
+            self._baseline_yaw = quat_yaw_deg(quat)
+            self.bus.publish(f"yaw-fusion -> baseline reset (yaw = {self._baseline_yaw:.1f} deg)")
+            self._on_clear_scan()
+
+    def _on_clear_scan(self):
+        self._accumulated_points = []
+        self._accumulated_colors = []
+        self._accumulated_mesh = self._o3d.geometry.TriangleMesh()
+        self.pcd.points = self._o3d.utility.Vector3dVector(np.zeros((0, 3)))
+        self.pcd.colors = self._o3d.utility.Vector3dVector(np.zeros((0, 3)))
+        sc = self.scene_widget.scene
+        if sc.has_geometry(_GEOM):
+            sc.remove_geometry(_GEOM)
+        sc.add_geometry(_GEOM, self.pcd, self.material)
+        self._remove_mesh_geometry()
+        self._camera_set = False
+        self.bus.publish("scan cleared")
 
     def _sync_near_slider(self):
         """Point the shared near-contrast slider at the control the current mode
@@ -1052,12 +1196,14 @@ class ControlPanel:
     def _on_surface_enabled(self, checked):
         self.surface_enabled = checked
         self.bus.publish(f"surface interpolation -> {'on' if checked else 'off'}")
+        self._camera_set = False
         if not checked:
             self._remove_mesh_geometry()
 
     def _on_surface_mode(self, text, index):
         self.surface_mode = text
         self.bus.publish(f"surface adjacency -> {text}")
+        self._camera_set = False
 
 
     def _on_surface_threshold(self, value):
@@ -1081,7 +1227,7 @@ class ControlPanel:
         self.window.show_dialog(dlg)
 
     def _on_key(self, event):
-        # H toggles the help dialog, G the orientation gizmo; everything else
+        # H toggles the help dialog, G the orientation gizmo, C clears the scan; everything else
         # falls through to the scene.
         gui = self._gui
         if event.type == gui.KeyEvent.DOWN and event.key == gui.KeyName.H:
@@ -1099,6 +1245,9 @@ class ControlPanel:
                 self.scene_widget.scene.remove_geometry(_GIZMO_GEOM)
                 self._gizmo_added = False
             self.bus.publish(f"IMU gizmo -> {'on' if self.imu_gizmo else 'off'}")
+            return True
+        if event.type == gui.KeyEvent.DOWN and event.key == gui.KeyName.C:
+            self._on_clear_scan()
             return True
         return False
 
