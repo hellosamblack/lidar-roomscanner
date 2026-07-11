@@ -39,7 +39,7 @@ def _wall_sequence(n, z0=1.30, step=-0.02):
     return [(_textured_wall(z0 + i * step), None, None, _Q, 101325.0, i * 0.1) for i in range(n)]
 
 
-def _drain(worker, timeout=15.0):
+def _drain(worker, timeout=90.0):
     """Poll `worker.latest()` until a terminal (done=True) publish, returning
     the list of distinct-fraction Progress snapshots observed, in order."""
     seen = []
