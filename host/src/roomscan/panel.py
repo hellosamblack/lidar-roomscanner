@@ -71,6 +71,7 @@ _SURFACE_MODES = ("grid", "spatial")
 _IR_UPSCALE = 6                 # 54x42 zones -> 324x252 px, nearest-neighbor
 _GEOM = "cloud"
 _MESH_GEOM = "surface"
+_SLAM_TRAJ_GEOM = "__slam_trajectory__"
 _GIZMO_GEOM = "__imu_gizmo__"
 _GIZMO_ANCHOR = np.array([0.0, 0.0, 0.0], dtype=np.float64)  # fixed scene anchor; calibrate later
 _UI_PERIOD = 0.25               # <=4 Hz label / sensors / metrics / log refresh
@@ -130,6 +131,8 @@ _HELP_LINES = [
     "  off      : plain linear depth coloring.",
     "",
     "IR Monitor  live 2D reflectance image; gray/turbo; Freeze holds the range.",
+    "SLAM        live pose + map view (Phase 6): mesh + trajectory replace the",
+    "            raw cloud, off the GUI/reader threads; Clear resets the map too.",
     "Capture     Record to captures/*.bin; replay adds Pause + fps.",
     "Events      device EVENTs, command results, connect/disconnect.",
     "",
@@ -360,6 +363,12 @@ class ControlPanel:
         self.surface_mode = args.surface_mode if getattr(args, "surface_mode", None) in _SURFACE_MODES else "grid"
         self.surface_threshold_pct = float(getattr(args, "surface_threshold_pct", 4.0) or 4.0)
 
+        # SLAM view state (Task 10) -- off by default; the worker is created
+        # lazily (first SLAM-mode frame) so no depth shape is needed up front.
+        # See slam/worker.py for the threading contract.
+        self.slam_enabled = False
+        self.slam_worker = None
+        self._slam_last_mesh_obj = None   # identity check: skip re-upload of an unchanged mesh
 
         # command state
         self._pending_exposure: tuple[int, float] | None = None
@@ -377,6 +386,9 @@ class ControlPanel:
         self.material.point_size = float(getattr(args, "point_size", 5.0))
         self.mesh_material = rendering.MaterialRecord()
         self.mesh_material.shader = "defaultUnlit"
+        self.slam_line_material = rendering.MaterialRecord()
+        self.slam_line_material.shader = "unlitLine"
+        self.slam_line_material.line_width = 3.0
         self._dark_bg = True
 
         self._build_scene()
@@ -532,6 +544,18 @@ class ControlPanel:
         self.chk_freeze.set_on_checked(self._on_ir_freeze)
         ir.add_child(self.chk_freeze)
 
+        # --- SLAM (Phase 6, Task 10): live pose + map view -------------------
+        slam = self._group("SLAM", open=False)
+        self.chk_slam = gui.Checkbox("SLAM view (mesh + trajectory)")
+        self.chk_slam.checked = False
+        self.chk_slam.set_on_checked(self._on_slam_toggle)
+        slam.add_child(self.chk_slam)
+        self.lbl_slam_tracking = gui.Label("tracking: --")
+        slam.add_child(self.lbl_slam_tracking)
+        self.lbl_slam_ms = gui.Label("slam_ms: --")
+        slam.add_child(self.lbl_slam_ms)
+        slam.add_child(gui.Label("(View -> Clear also resets the SLAM map)"))
+
         # --- Sensors (LSM6DSV16X: tilt-compensated heading + pressure/temp) ---
         if self.sensors_panel:
             sg = self._group("Sensors")
@@ -635,6 +659,8 @@ class ControlPanel:
 
     def _on_close(self):
         self._stop = True
+        if self.slam_worker is not None:
+            self.slam_worker.stop()        # join the SLAM worker thread before teardown
         self.resource_sampler.stop()       # join the sampler thread before teardown
         self.pacer.paused.clear()          # unblock a paused reader so it can exit
         try:
@@ -717,6 +743,16 @@ class ControlPanel:
         h, w = depth.shape
         if self.deproj is None:
             self.deproj = Deprojector(w, h, self.args.fov_h, self.args.fov_v)
+
+        if self.slam_enabled:
+            # SLAM view (Task 10): mesh + trajectory replace the raw cloud.
+            # Everything below this block (the normal-mode cloud/surface path)
+            # is untouched and unreachable while this flag is set.
+            self._render_slam_frame(depth)
+            self._shown += 1
+            self.metrics.tick_render(time.monotonic())
+            return
+
         pts = self.deproj(depth)
 
         # Retrieve fused orientation
@@ -810,6 +846,114 @@ class ControlPanel:
             self._show_geometries(np.zeros((0, 3)))
         self._shown += 1
         self.metrics.tick_render(time.monotonic())   # rendered-FPS counter
+
+    # ---- SLAM view (Task 10) --------------------------------------------------
+    def _render_slam_frame(self, depth):
+        """SLAM view: feed the background `SlamWorker` and render its latest
+        mesh + trajectory instead of the raw cloud. Only ever called from
+        `_render_frame` when `self.slam_enabled`, on the GUI thread; the
+        worker's own thread does the actual `Mapper.step` work, so this stays
+        cheap (a lock-guarded submit + a lock-guarded read). No serial writes
+        happen here or on the worker thread, per the module's threading
+        contract (see panel.py's module docstring and slam/worker.py)."""
+        if self.slam_worker is None:
+            from .slam.worker import SlamWorker
+            h, w = depth.shape
+            self.slam_worker = SlamWorker(w, h, fov_h=self.args.fov_h, fov_v=self.args.fov_v)
+            self.slam_worker.start()
+
+        quat = self.sensor_state.fused_quat()
+        if quat is not None:
+            env = self.sensor_state.latest_env()
+            pressure = env.pressure_pa if env is not None else None
+            self.slam_worker.submit(depth, quat, pressure)
+
+        latest = self.slam_worker.latest()
+        if latest is None:
+            self.lbl_slam_tracking.text = "tracking: waiting for IMU..."
+            self.lbl_slam_ms.text = "slam_ms: --"
+            return
+        mesh, trajectory, step = latest
+        self.lbl_slam_tracking.text = f"tracking: {'LOST' if step.tracking_lost else 'ok'}"
+        self.lbl_slam_ms.text = f"slam_ms: {step.slam_ms:.1f}"
+
+        sc = self.scene_widget.scene
+        # mesh extraction is already throttled inside the worker (every K
+        # processed frames); the identity check here avoids re-uploading the
+        # *same* mesh object to the renderer every GUI tick in between.
+        if (mesh is not None and mesh is not self._slam_last_mesh_obj
+                and len(mesh.vertex.positions) > 0):
+            legacy_mesh = mesh.to_legacy()
+            legacy_mesh.compute_vertex_normals()
+            if sc.has_geometry(_MESH_GEOM):
+                sc.remove_geometry(_MESH_GEOM)
+            sc.add_geometry(_MESH_GEOM, legacy_mesh, self.mesh_material)
+            self._slam_last_mesh_obj = mesh
+
+        if trajectory:
+            pts = np.array([T[:3, 3] for T in trajectory], dtype=np.float64)
+            lines = self._o3d.geometry.LineSet()
+            lines.points = self._o3d.utility.Vector3dVector(pts)
+            if len(pts) >= 2:
+                idx = np.stack([np.arange(len(pts) - 1), np.arange(1, len(pts))], axis=1)
+                lines.lines = self._o3d.utility.Vector2iVector(idx)
+                lines.colors = self._o3d.utility.Vector3dVector(
+                    np.tile([[0.1, 0.9, 0.3]], (len(idx), 1)))
+            if sc.has_geometry(_SLAM_TRAJ_GEOM):
+                sc.remove_geometry(_SLAM_TRAJ_GEOM)
+            sc.add_geometry(_SLAM_TRAJ_GEOM, lines, self.slam_line_material)
+
+        self._slam_camera_frame(mesh, trajectory)
+
+    def _slam_camera_frame(self, mesh, trajectory):
+        """First-time camera framing for the SLAM view -- mirrors
+        `_reset_camera`'s bounds-from-points approach, sourced from the mesh
+        vertices + trajectory instead of the raw cloud. No-op once
+        `_camera_set` (cleared by the SLAM checkbox / Clear map, like the
+        normal view's camera-set flag)."""
+        if self._camera_set:
+            return
+        if self.scene_widget.frame.width <= 0 or self.scene_widget.frame.height <= 0:
+            return
+        pts_list = [np.zeros((1, 3))]
+        if mesh is not None and len(mesh.vertex.positions) > 0:
+            pts_list.append(mesh.vertex.positions.numpy())
+        if trajectory:
+            pts_list.append(np.array([T[:3, 3] for T in trajectory]))
+        all_pts = np.vstack(pts_list)
+        bounds = self._o3d.geometry.AxisAlignedBoundingBox.create_from_points(
+            self._o3d.utility.Vector3dVector(all_pts))
+        ext = float(bounds.get_extent().max())
+        if ext <= 0:
+            return
+        self.scene_widget.setup_camera(60.0, bounds, bounds.get_center())
+        self._cam_target = np.asarray(bounds.get_center(), dtype=np.float64)
+        self._cam_radius = ext * 1.8
+        self._cam_az = 0.0
+        self._apply_camera()
+        self._camera_set = True
+
+    def _remove_slam_geometries(self):
+        sc = self.scene_widget.scene
+        if sc.has_geometry(_SLAM_TRAJ_GEOM):
+            sc.remove_geometry(_SLAM_TRAJ_GEOM)
+        if sc.has_geometry(_MESH_GEOM):
+            sc.remove_geometry(_MESH_GEOM)
+
+    def _on_slam_toggle(self, checked):
+        self.slam_enabled = checked
+        if not checked:
+            if self.slam_worker is not None:
+                self.slam_worker.stop()
+                self.slam_worker = None
+            self._remove_slam_geometries()
+            self._slam_last_mesh_obj = None
+            self._camera_set = False
+            if self._last_item is not None:   # re-render the last frame as a normal cloud
+                self._render_frame(self._last_item)
+        else:
+            self._camera_set = False          # reframe onto SLAM content once it appears
+        self.bus.publish(f"SLAM view -> {'on' if checked else 'off'}")
 
     def _show_geometries(self, all_pts):
         """Push the dot cloud to the scene and (re)frame the camera from the
@@ -1163,6 +1307,16 @@ class ControlPanel:
         sc.add_geometry(_GEOM, self.pcd, self.material)
         self._remove_mesh_geometry()
         self._camera_set = False
+        if self.slam_enabled and self.slam_worker is not None:
+            # "Clear" doubles as "Clear map" in SLAM view: drop the worker (and
+            # its Mapper/TSDF) so the next SLAM frame lazily builds a fresh one.
+            self.slam_worker.stop()
+            self.slam_worker = None
+            self._remove_slam_geometries()
+            self._slam_last_mesh_obj = None
+            self.lbl_slam_tracking.text = "tracking: --"
+            self.lbl_slam_ms.text = "slam_ms: --"
+            self.bus.publish("SLAM map cleared")
         self.bus.publish("scan cleared")
 
     def _sync_near_slider(self):
