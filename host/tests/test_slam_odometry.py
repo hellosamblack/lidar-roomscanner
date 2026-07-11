@@ -142,3 +142,36 @@ def test_singular_geometry_returns_not_ok():
     assert res.fitness == 0.0
     assert res.rmse == float("inf")
     assert np.allclose(res.pose, np.eye(4))
+
+
+def test_translation_gate_reflects_genuine_translation_fit_not_stale_6dof():
+    # Task 9.5 Lever 2 regression guard: translation mode must gate on the
+    # ACTUAL translation-only alignment quality, not a full 6-DoF ICP result
+    # whose rotation is discarded afterward. A large (40 deg) rotation about
+    # the corner's body diagonal is a case where 6-DoF ICP still converges
+    # perfectly (rotation absorbs all the error, fitness=1.0) but a genuine
+    # translation-only fit cannot correct a rotation and should fail the
+    # default gate (min_fitness=0.3). The old "run 6dof, keep its fitness,
+    # override rotation after" implementation would have reported this
+    # ok=True (reusing the 6dof fit's fitness=1.0) even though the returned
+    # translation-only pose does not actually align the clouds well -- a
+    # silently corrupt integration. Confirmed empirically before writing this
+    # test (see profiling notes): 6dof fitness=1.0 vs translation fitness
+    # ~0.28 at this angle.
+    target = _corner_cloud()
+    tgt_pts = target.point.positions.numpy()
+    centroid = tgt_pts.mean(axis=0)
+    axis = np.array([1.0, 1.0, 1.0])
+    angle = np.deg2rad(40.0)
+    R_true = _rotation_matrix(axis, angle)
+    src_pts = (R_true @ (tgt_pts - centroid).T).T + centroid
+    source = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
+    source.point.positions = o3d.core.Tensor(src_pts.astype(np.float32))
+
+    res_6dof = register(source, target, np.eye(4), mode="6dof", max_dist=0.2)
+    assert res_6dof.ok
+    assert res_6dof.fitness > 0.9   # 6dof genuinely converges on this case
+
+    res_translation = register(source, target, np.eye(4), mode="translation")
+    assert not res_translation.ok  # genuine translation-only fit correctly rejects it
+    assert np.allclose(res_translation.pose[:3, :3], np.eye(3), atol=1e-9)
