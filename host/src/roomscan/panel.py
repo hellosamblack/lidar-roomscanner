@@ -120,11 +120,16 @@ _SHOWCASE_EASE_S = 1.5          # seconds to ease the camera into the final fram
 # -forward for a touch of context (0 would put the eye exactly at the sensor);
 # `_FOLLOW_LOOK_AHEAD_M` is how far ahead of the sensor the look-at center
 # sits. `_FOLLOW_SMOOTH` is the per-tick lerp fraction toward the target
-# eye/center so per-frame pose noise (SLAM jitter) doesn't jitter the view --
-# light smoothing, not a lag-behind follow.
+# eye/center so per-frame pose noise (SLAM jitter) doesn't jitter the view.
+# Lowered 0.25 -> 0.12 (owner report: view was visibly shaky even with the
+# sensor stationary on a tripod). An EMA at alpha attenuates the steady-state
+# noise std by sqrt(alpha/(2-alpha)): 0.25 -> 0.38x, 0.12 -> 0.25x. It cannot
+# fully remove the jitter (the root is per-frame ICP translation noise on the
+# 54x42 depth), but 0.12 takes it from "shaky" to "gently floating" while the
+# added lag (~8 ticks / ~0.3 s at 28 fps) stays acceptable for a live preview.
 _FOLLOW_BACK_OFF_M = 0.3
 _FOLLOW_LOOK_AHEAD_M = 1.0
-_FOLLOW_SMOOTH = 0.25
+_FOLLOW_SMOOTH = 0.12
 
 _HELP_LINES = [
     "",
@@ -1210,6 +1215,14 @@ class ControlPanel:
         self._update_fov_geometry(step.pose)
         if self.follow_camera_enabled:
             self._apply_follow_camera(step.pose)
+            # First-person (owner request): hide the stray IMU gizmo ("camera
+            # icon", frozen in the scene since entering SLAM) and the green
+            # trajectory "trail" -- both clutter/occlude the first-person view.
+            # Removing the gizmo resets `_gizmo_added` so the classic view
+            # re-adds it cleanly on exit; the trail is simply not re-added
+            # below while following, and reappears the next frame once follow
+            # is turned off.
+            self._hide_first_person_clutter()
 
         sc = self.scene_widget.scene
         # mesh extraction is already throttled inside the worker (every K
@@ -1225,7 +1238,7 @@ class ControlPanel:
         # segfault) on add_geometry -- skip the upload entirely until there's
         # a real segment to draw. Same guard `_show_showcase_trajectory`
         # (Showcase mode) already uses.
-        if trajectory and len(trajectory) >= 2:
+        if trajectory and len(trajectory) >= 2 and not self.follow_camera_enabled:
             pts = np.array([T[:3, 3] for T in trajectory], dtype=np.float64)
             lines = self._o3d.geometry.LineSet()
             lines.points = self._o3d.utility.Vector3dVector(pts)
@@ -1377,6 +1390,19 @@ class ControlPanel:
         self.scene_widget.look_at(self._follow_center.astype(np.float32),
                                   self._follow_eye.astype(np.float32),
                                   up.astype(np.float32))
+
+    def _hide_first_person_clutter(self):
+        """Remove the IMU gizmo ("camera icon") and the trajectory trail while
+        camera-follow is active (owner request). The gizmo is removed here
+        (and `_gizmo_added` cleared so the classic view re-adds it on exit);
+        the trail is gated off at its add site in `_render_slam_frame`, so we
+        only need to remove any copy already in the scene."""
+        sc = self.scene_widget.scene
+        if sc.has_geometry(_GIZMO_GEOM):
+            sc.remove_geometry(_GIZMO_GEOM)
+            self._gizmo_added = False
+        if sc.has_geometry(_SLAM_TRAJ_GEOM):
+            sc.remove_geometry(_SLAM_TRAJ_GEOM)
 
     def _on_follow_camera_toggle(self, checked):
         self.follow_camera_enabled = checked
@@ -1574,11 +1600,13 @@ class ControlPanel:
             mesh, trajectory, step = latest
             tracking_txt = "lost" if step.tracking_lost else "ok"
             self._show_showcase_mesh(mesh)
-            self._show_showcase_trajectory(trajectory)
+            if not self.follow_camera_enabled:
+                self._show_showcase_trajectory(trajectory)
             self._slam_camera_frame(mesh, trajectory)
             self._update_fov_geometry(step.pose)
             if self.follow_camera_enabled:
                 self._apply_follow_camera(step.pose)
+                self._hide_first_person_clutter()   # hide gizmo + trail (owner request)
         self._set_showcase_banner(
             f"REC Recording - scanning... ({self._showcase_rec_frames} frames "
             f"| tracking: {tracking_txt})")
