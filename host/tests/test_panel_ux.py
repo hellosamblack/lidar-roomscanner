@@ -15,6 +15,8 @@ from roomscan.panel import (
     _format_eta,
     _fov_frustum_lines,
     _showcase_result_paths,
+    capture_square_corners,
+    follow_camera_target,
 )
 from roomscan.slam.shading import (
     mesh_colors_are_meaningful,
@@ -102,6 +104,123 @@ def test_fov_frustum_wider_hfov_spreads_corners():
     wide, _ = _fov_frustum_lines(np.eye(4), 90.0, 42.0, range_m=1.0)
     # wider horizontal FoV -> larger |x| spread at the far corners
     assert np.abs(wide[1:, 0]).max() > np.abs(narrow[1:, 0]).max()
+
+
+# ---- Camera-follow ("first-person") mode: capture-area square --------------
+
+def _plane_normal(corners):
+    """Normal of the plane through corners[0], corners[1], corners[2]."""
+    v1 = corners[1] - corners[0]
+    v2 = corners[2] - corners[0]
+    n = np.cross(v1, v2)
+    return n / np.linalg.norm(n)
+
+
+def test_capture_square_shape():
+    corners = capture_square_corners(np.eye(4), 55.0, 42.0, depth=0.75)
+    assert corners.shape == (4, 3)
+
+
+def test_capture_square_is_planar_identity_pose():
+    corners = capture_square_corners(np.eye(4), 55.0, 42.0, depth=0.75)
+    n = _plane_normal(corners)
+    # The 4th corner must lie in the same plane as the first three.
+    assert abs(np.dot(corners[3] - corners[0], n)) < 1e-9
+
+
+def test_capture_square_is_planar_rotated_pose():
+    # A 90-deg yaw about world-up: still must be exactly coplanar (the whole
+    # point of this helper vs. _fov_frustum_lines's spherical corners).
+    pose = np.eye(4)
+    c, s = np.cos(np.pi / 2), np.sin(np.pi / 2)
+    pose[:3, :3] = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+    pose[:3, 3] = [1.0, -2.0, 3.0]
+    corners = capture_square_corners(pose, 55.0, 42.0, depth=0.75)
+    n = _plane_normal(corners)
+    assert abs(np.dot(corners[3] - corners[0], n)) < 1e-9
+
+
+def test_capture_square_all_corners_at_fixed_depth_along_forward():
+    # Every corner sits exactly `depth` along the pose's forward axis from the
+    # apex -- true for identity AND a rotated pose, unlike _fov_frustum_lines's
+    # sphere-normalized corners (which only hit `range_m` on the diagonal rays).
+    pose = np.eye(4)
+    c, s = np.cos(0.7), np.sin(0.7)
+    pose[:3, :3] = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+    pose[:3, 3] = [2.0, 1.0, -1.0]
+    apex = pose[:3, 3]
+    forward = pose[:3, 2]
+    depth = 0.75
+    corners = capture_square_corners(pose, 55.0, 42.0, depth=depth)
+    along = (corners - apex) @ forward
+    assert np.allclose(along, depth)
+
+
+def test_capture_square_size_matches_fov_and_depth():
+    depth = 1.0
+    fov_h, fov_v = 60.0, 40.0
+    corners = capture_square_corners(np.eye(4), fov_h, fov_v, depth=depth)
+    width = np.linalg.norm(corners[1] - corners[0])   # top-left -> top-right
+    height = np.linalg.norm(corners[2] - corners[1])  # top-right -> bottom-right
+    assert width == pytest.approx(2.0 * depth * np.tan(np.deg2rad(fov_h) / 2.0))
+    assert height == pytest.approx(2.0 * depth * np.tan(np.deg2rad(fov_v) / 2.0))
+
+
+def test_capture_square_in_front_of_identity_pose():
+    corners = capture_square_corners(np.eye(4), 55.0, 42.0, depth=0.75)
+    assert np.all(corners[:, 2] > 0.0)
+
+
+def test_capture_square_follows_pose_rotation():
+    # 180-deg yaw: the square lands behind the origin along -z, like the FoV
+    # frustum's equivalent test.
+    pose = np.eye(4)
+    c, s = np.cos(np.pi), np.sin(np.pi)
+    pose[:3, :3] = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+    corners = capture_square_corners(pose, 55.0, 42.0, depth=0.75)
+    assert np.all(corners[:, 2] < 0.0)
+
+
+# ---- Camera-follow ("first-person") mode: eye/center/up --------------------
+
+def test_follow_camera_identity_pose_eye_behind_center_ahead():
+    eye, center, up = follow_camera_target(np.eye(4), back_off=0.3, look_ahead=1.0)
+    assert np.allclose(eye, [0.0, 0.0, -0.3])
+    assert np.allclose(center, [0.0, 0.0, 1.0])
+    assert np.allclose(up, [0.0, -1.0, 0.0])   # world_up() convention
+
+
+def test_follow_camera_translated_pose():
+    pose = np.eye(4)
+    pose[:3, 3] = [5.0, 2.0, -3.0]
+    eye, center, up = follow_camera_target(pose, back_off=0.3, look_ahead=1.0)
+    assert np.allclose(eye, [5.0, 2.0, -3.3])
+    assert np.allclose(center, [5.0, 2.0, -2.0])
+
+
+def test_follow_camera_zero_back_off_puts_eye_at_sensor():
+    pose = np.eye(4)
+    pose[:3, 3] = [1.0, 2.0, 3.0]
+    eye, _, _ = follow_camera_target(pose, back_off=0.0, look_ahead=1.0)
+    assert np.allclose(eye, [1.0, 2.0, 3.0])
+
+
+def test_follow_camera_rotated_pose_eye_and_center_along_forward():
+    # 90-deg yaw about world-up: forward becomes +x, so eye/center displace
+    # along x instead of z.
+    pose = np.eye(4)
+    c, s = np.cos(np.pi / 2), np.sin(np.pi / 2)
+    pose[:3, :3] = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+    eye, center, up = follow_camera_target(pose, back_off=0.3, look_ahead=1.0)
+    assert np.allclose(eye, [-0.3, 0.0, 0.0])
+    assert np.allclose(center, [1.0, 0.0, 0.0])
+    assert np.allclose(up, [0.0, -1.0, 0.0])   # up stays world-up, not rotated with the pose
+
+
+def test_follow_camera_up_defaults_to_world_up_regardless_of_override_param():
+    eye, center, up = follow_camera_target(np.eye(4))
+    assert up.shape == (3,)
+    assert np.allclose(up, [0.0, -1.0, 0.0])
 
 
 # ---- Issue #6: save-path formatting ----------------------------------------

@@ -36,6 +36,7 @@ class _FakeMouseSelf:
         self._cam_target = np.zeros(3)   # non-None -> BUTTON_DOWN isn't ignored
         self._drag = None
         self._showcase_ease = showcase_ease
+        self.follow_camera_enabled = False   # camera-follow mode is off in these tests
 
 
 def test_button_down_cancels_in_flight_showcase_ease():

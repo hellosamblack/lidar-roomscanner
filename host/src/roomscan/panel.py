@@ -76,6 +76,8 @@ _WALL_MODES = ("solid", "translucent", "wireframe")
 _SLAM_TRAJ_GEOM = "__slam_trajectory__"
 _FOV_GEOM = "__fov_indicator__"        # faint camera FoV frustum, RECORDING/SLAM only
 _FOV_RANGE_M = 0.5                     # how far out the frustum rays/edges are drawn
+_CAPTURE_SQUARE_GEOM = "__capture_square__"  # bright planar capture-area quad, RECORDING/SLAM
+_CAPTURE_SQUARE_DEPTH_M = 0.75          # fixed depth (m) the capture square is drawn at
 _GIZMO_GEOM = "__imu_gizmo__"
 _RESULTS_DIR = "results"               # Showcase FINAL save target (mesh + trajectory)
 _GIZMO_ANCHOR = np.array([0.0, 0.0, 0.0], dtype=np.float64)  # fixed scene anchor; calibrate later
@@ -113,6 +115,17 @@ _ZOOM_STEP = 0.9          # radius *= 0.9**wheel_dy
 _SHOWCASE_ORBIT_STEP = 0.003    # rad per rendered frame -- a gentle few-deg/sec orbit
 _SHOWCASE_EASE_S = 1.5          # seconds to ease the camera into the final framing
 
+# Camera-follow ("first-person") mode (owner request): default OFF, toggled
+# per-view. `_FOLLOW_BACK_OFF_M` pulls the eye a hair behind the sensor along
+# -forward for a touch of context (0 would put the eye exactly at the sensor);
+# `_FOLLOW_LOOK_AHEAD_M` is how far ahead of the sensor the look-at center
+# sits. `_FOLLOW_SMOOTH` is the per-tick lerp fraction toward the target
+# eye/center so per-frame pose noise (SLAM jitter) doesn't jitter the view --
+# light smoothing, not a lag-behind follow.
+_FOLLOW_BACK_OFF_M = 0.3
+_FOLLOW_LOOK_AHEAD_M = 1.0
+_FOLLOW_SMOOTH = 0.25
+
 _HELP_LINES = [
     "",
     "Mouse:  left-drag orbit (yaw only)  |  ctrl / middle-drag pan  |  wheel zoom",
@@ -145,6 +158,9 @@ _HELP_LINES = [
     "IR Monitor  live 2D reflectance image; gray/turbo; Freeze holds the range.",
     "SLAM        live pose + map view (Phase 6): mesh + trajectory replace the",
     "            raw cloud, off the GUI/reader threads; Clear resets the map too.",
+    "            A bright square shows exactly what the sensor is capturing now;",
+    "            Follow camera (first-person) rides the sensor's pose instead",
+    "            of free-orbit -- off by default, toggle back off to resume orbit.",
     "Capture     Record to captures/*.bin; replay adds Pause + fps.",
     "Events      device EVENTs, command results, connect/disconnect.",
     "",
@@ -249,6 +265,68 @@ def _fov_frustum_lines(pose, fov_h_deg: float, fov_v_deg: float,
         [1, 2], [2, 3], [3, 4], [4, 1],   # far rectangle
     ], dtype=np.int64)
     return points, lines
+
+
+def capture_square_corners(pose, fov_h_deg: float, fov_v_deg: float,
+                           depth: float = _CAPTURE_SQUARE_DEPTH_M):
+    """(4,3) ndarray: the camera FoV footprint at `pose`, as a genuinely
+    PLANAR rectangle at `depth` metres in front of the sensor -- what the
+    sensor is capturing RIGHT NOW (owner request: "show a square indicating
+    the capture area"). Corner order top-left/top-right/bottom-right/
+    bottom-left (matching `_fov_frustum_lines`'s corner ordering), each:
+
+        corner = apex + depth*forward +/- (depth*tan(fov_h/2))*right
+                                       +/- (depth*tan(fov_v/2))*up
+
+    computed directly in camera space (all 4 corners share z_cam == depth)
+    and then rotated+translated by the rigid `pose` -- a rotation+translation
+    of a planar set of points is still planar, so this is coplanar by
+    construction. Unlike `_fov_frustum_lines` (whose far corners are
+    normalized onto a sphere of radius `range_m` -- a cosmetic
+    simplification that's fine for a faint hint-only indicator), this is the
+    shape we actually claim is "the capture area", so it must be exact.
+
+    `pose` is a 4x4 world<-camera matrix in the Open3D CV convention
+    (x-right, y-down, z-forward -- same as `slam/frames.py`'s poses and
+    `_fov_frustum_lines`). Pure -- unit-tested."""
+    pose = np.asarray(pose, dtype=np.float64)
+    apex = pose[:3, 3]
+    r = pose[:3, :3]
+    half_h = depth * np.tan(np.deg2rad(fov_h_deg) / 2.0)
+    half_v = depth * np.tan(np.deg2rad(fov_v_deg) / 2.0)
+    corners_cam = np.array([
+        [-half_h, -half_v, depth],   # top-left (y-down -> negative y is up)
+        [half_h, -half_v, depth],    # top-right
+        [half_h, half_v, depth],     # bottom-right
+        [-half_h, half_v, depth],    # bottom-left
+    ])
+    return apex + corners_cam @ r.T
+
+
+def follow_camera_target(pose, back_off: float = _FOLLOW_BACK_OFF_M,
+                         look_ahead: float = _FOLLOW_LOOK_AHEAD_M, up=None):
+    """(eye, center, up) camera placement for camera-follow mode (owner
+    request: "make SLAM mode be from the perspective of the camera"). `eye`
+    sits `back_off` metres BEHIND the sensor along -forward (a hair of
+    context so the view isn't pinned exactly to the sensor's nose; pass 0 to
+    put the eye exactly at the sensor position), `center` sits `look_ahead`
+    metres AHEAD of the sensor along +forward (what `look_at` aims the
+    camera at, so the view translates+rotates with the sensor as it's
+    carried around), and `up` is the fixed world-up convention (`_WORLD_UP`
+    == `slam.frames.world_up()`, `[0,-1,0]`) unless overridden.
+
+    `pose` is a 4x4 world<-camera matrix, same convention as
+    `capture_square_corners`/`_fov_frustum_lines`. Pure -- unit-tested; feeds
+    `_apply_follow_camera`, which additionally smooths eye/center across
+    ticks so per-frame pose noise doesn't jitter the view."""
+    pose = np.asarray(pose, dtype=np.float64)
+    sensor_pos = pose[:3, 3]
+    forward = pose[:3, 2]
+    if up is None:
+        up = _WORLD_UP
+    eye = sensor_pos - back_off * forward
+    center = sensor_pos + look_ahead * forward
+    return eye, center, np.asarray(up, dtype=np.float64)
 
 
 def _eta_seconds(elapsed_s: float, fraction: float) -> float | None:
@@ -471,7 +549,18 @@ class ControlPanel:
 
         # FoV indicator (owner request): faint camera-frustum LineSet, shown
         # during RECORDING/SLAM, recomputed only when the pose actually moves.
+        # The bright capture-area square (_CAPTURE_SQUARE_GEOM) shares this
+        # same pose-change gate (see _update_fov_geometry).
         self._fov_last_pose = None
+
+        # Camera-follow ("first-person") mode (owner request): off by default,
+        # toggled by chk_follow_camera. `_follow_eye`/`_follow_center` hold the
+        # smoothed camera state across ticks (see _apply_follow_camera); reset
+        # to None whenever follow is (re-)enabled so it snaps to the first pose
+        # instead of lerping in from a stale/zero position.
+        self.follow_camera_enabled = False
+        self._follow_eye = None
+        self._follow_center = None
 
         # "See-through walls" (owner request, Phase 6): classify each SLAM/TSDF
         # mesh triangle as wall (vertical surface) vs floor/ceiling (see
@@ -540,6 +629,12 @@ class ControlPanel:
         self.fov_material = rendering.MaterialRecord()
         self.fov_material.shader = "unlitLine"
         self.fov_material.line_width = 1.0
+        # Capture-area square (owner request): bright + thick so it reads
+        # clearly, distinct from the faint FoV frustum (gray, 1px) and the
+        # green trajectory line.
+        self.capture_square_material = rendering.MaterialRecord()
+        self.capture_square_material.shader = "unlitLine"
+        self.capture_square_material.line_width = 3.0
         self._dark_bg = True
 
         self._build_scene()
@@ -732,6 +827,14 @@ class ControlPanel:
         self.cb_wall_mode.set_on_selection_changed(self._on_wall_mode)
         wg.add_child(self.cb_wall_mode)
         slam.add_child(wg)
+        # Camera-follow (owner request): governs both this view and Showcase
+        # mode's RECORDING phase (see _render_slam_frame/_render_showcase_
+        # recording) since both share the SLAM/Showcase mesh pipeline. Off by
+        # default -- free-orbit stays the default camera behavior.
+        self.chk_follow_camera = gui.Checkbox("Follow camera (first-person)")
+        self.chk_follow_camera.checked = False
+        self.chk_follow_camera.set_on_checked(self._on_follow_camera_toggle)
+        slam.add_child(self.chk_follow_camera)
 
         # --- Showcase (Task 12): record -> live preview -> post-process -> reveal.
         # Mutually exclusive with the SLAM view above (see _on_showcase_toggle /
@@ -1105,6 +1208,8 @@ class ControlPanel:
         self.lbl_slam_tracking.text = f"tracking: {'LOST' if step.tracking_lost else 'ok'}"
         self.lbl_slam_ms.text = f"slam_ms: {step.slam_ms:.1f}"
         self._update_fov_geometry(step.pose)
+        if self.follow_camera_enabled:
+            self._apply_follow_camera(step.pose)
 
         sc = self.scene_widget.scene
         # mesh extraction is already throttled inside the worker (every K
@@ -1181,7 +1286,12 @@ class ControlPanel:
         this is only ever called once per processed frame, not per GUI
         tick), via the pure `_fov_frustum_lines` helper. `pose` is None-safe
         (removes the geometry instead) even though no current caller passes
-        None, matching the module's general defensiveness."""
+        None, matching the module's general defensiveness.
+
+        Also (re)draws the bright capture-area square (`_update_capture_square`,
+        owner request: "show a square indicating the capture area") -- it
+        shares this method's pose/None gating since both indicators are
+        derived from the same per-frame pose."""
         sc = self.scene_widget.scene
         if pose is None:
             self._remove_fov_geometry()
@@ -1197,20 +1307,87 @@ class ControlPanel:
         # with < 2 points hard-crashes Filament -- guard it here too, even
         # though `_fov_frustum_lines` always returns a fixed 5-point/8-line
         # shape today.
-        if len(points) < 2 or len(lines) == 0:
+        if len(points) >= 2 and len(lines) > 0:
+            ls = self._o3d.geometry.LineSet()
+            ls.points = self._o3d.utility.Vector3dVector(points)
+            ls.lines = self._o3d.utility.Vector2iVector(lines)
+            ls.colors = self._o3d.utility.Vector3dVector(
+                np.tile([[0.55, 0.55, 0.6]], (len(lines), 1)))   # faint gray, not attention-grabbing
+            sc.add_geometry(_FOV_GEOM, ls, self.fov_material)
+        self._update_capture_square(pose)
+
+    def _update_capture_square(self, pose):
+        """Bright planar quad outlining exactly what the sensor is capturing
+        RIGHT NOW at `_CAPTURE_SQUARE_DEPTH_M` (owner request) -- 4 corners
+        from the pure `capture_square_corners` helper + the closing edge
+        (4 line segments, a closed loop), distinct in color from both the
+        faint FoV frustum (muted gray) and the green trajectory line. Shown
+        whenever there's a live pose (RECORDING/SLAM), independent of
+        camera-follow mode -- it indicates the capture area either way."""
+        sc = self.scene_widget.scene
+        corners = capture_square_corners(pose, self.args.fov_h, self.args.fov_v,
+                                         _CAPTURE_SQUARE_DEPTH_M)
+        lines = np.array([[0, 1], [1, 2], [2, 3], [3, 0]], dtype=np.int64)
+        if sc.has_geometry(_CAPTURE_SQUARE_GEOM):
+            sc.remove_geometry(_CAPTURE_SQUARE_GEOM)
+        # BUG-009 (see _render_slam_frame's trajectory upload): a LineSet with
+        # < 2 points hard-crashes Filament -- guard it here too, even though
+        # `capture_square_corners` always returns a fixed 4-point shape today.
+        if len(corners) < 2 or len(lines) == 0:
             return
         ls = self._o3d.geometry.LineSet()
-        ls.points = self._o3d.utility.Vector3dVector(points)
+        ls.points = self._o3d.utility.Vector3dVector(corners)
         ls.lines = self._o3d.utility.Vector2iVector(lines)
         ls.colors = self._o3d.utility.Vector3dVector(
-            np.tile([[0.55, 0.55, 0.6]], (len(lines), 1)))   # faint gray, not attention-grabbing
-        sc.add_geometry(_FOV_GEOM, ls, self.fov_material)
+            np.tile([[0.1, 0.85, 1.0]], (len(lines), 1)))   # bright cyan -- distinct + clear
+        sc.add_geometry(_CAPTURE_SQUARE_GEOM, ls, self.capture_square_material)
 
     def _remove_fov_geometry(self):
         sc = self.scene_widget.scene
         if sc.has_geometry(_FOV_GEOM):
             sc.remove_geometry(_FOV_GEOM)
+        if sc.has_geometry(_CAPTURE_SQUARE_GEOM):
+            sc.remove_geometry(_CAPTURE_SQUARE_GEOM)
         self._fov_last_pose = None
+
+    def _apply_follow_camera(self, pose):
+        """Camera-follow mode (owner request: "make SLAM mode be from the
+        perspective of the camera"): each time this is called (once per
+        processed frame with a live pose, from `_render_slam_frame` /
+        `_render_showcase_recording` -- same call sites `_update_fov_geometry`
+        uses), ease the render camera toward `follow_camera_target(pose)`
+        instead of the free-orbit turntable, so the view translates+rotates
+        as the sensor is carried/aimed around the room.
+
+        Light exponential smoothing (`_FOLLOW_SMOOTH` per call) keeps
+        per-frame SLAM pose noise from jittering the view -- not a
+        lag-behind follow, just enough to take the edge off. The free-orbit
+        state (`_cam_target`/`_cam_az`/`_cam_radius`) is deliberately left
+        untouched here, so toggling follow back off (`_on_follow_camera_toggle`)
+        resumes free-orbit exactly where it was, via one `_apply_camera()`
+        call -- it never gets stuck on the last follow-mode frame."""
+        if self.scene_widget.frame.width <= 0 or self.scene_widget.frame.height <= 0:
+            return
+        eye, center, up = follow_camera_target(pose)
+        if self._follow_eye is None:
+            self._follow_eye, self._follow_center = eye, center
+        else:
+            self._follow_eye = self._follow_eye + _FOLLOW_SMOOTH * (eye - self._follow_eye)
+            self._follow_center = self._follow_center + _FOLLOW_SMOOTH * (center - self._follow_center)
+        self.scene_widget.look_at(self._follow_center.astype(np.float32),
+                                  self._follow_eye.astype(np.float32),
+                                  up.astype(np.float32))
+
+    def _on_follow_camera_toggle(self, checked):
+        self.follow_camera_enabled = checked
+        self._follow_eye = None
+        self._follow_center = None
+        if not checked:
+            # Restore free-orbit immediately -- _cam_target/_cam_az/_cam_radius
+            # were never touched while following, so this snaps straight back
+            # to where free-orbit was left, not stuck on the last followed frame.
+            self._apply_camera()
+        self.bus.publish(f"Follow camera -> {'on' if checked else 'off'}")
 
     def _on_wall_mode(self, text, index):
         """Combobox handler for the "see-through walls" control (owner
@@ -1324,6 +1501,14 @@ class ControlPanel:
             self._on_showcase_toggle(False)
         self.slam_enabled = checked
         if not checked:
+            if self.follow_camera_enabled:
+                # Follow-camera only ever drives the view from a SLAM/Showcase
+                # pose (_render_slam_frame/_render_showcase_recording) -- leaving
+                # SLAM without also releasing it would strand the classic view
+                # with mouse nav swallowed (_on_mouse) and nothing left to drive
+                # the camera. Force it off so free-orbit is always reachable.
+                self.chk_follow_camera.checked = False
+                self._on_follow_camera_toggle(False)
             if self.slam_worker is not None:
                 self.slam_worker.stop()
                 self.slam_worker = None
@@ -1392,6 +1577,8 @@ class ControlPanel:
             self._show_showcase_trajectory(trajectory)
             self._slam_camera_frame(mesh, trajectory)
             self._update_fov_geometry(step.pose)
+            if self.follow_camera_enabled:
+                self._apply_follow_camera(step.pose)
         self._set_showcase_banner(
             f"REC Recording - scanning... ({self._showcase_rec_frames} frames "
             f"| tracking: {tracking_txt})")
@@ -1734,6 +1921,12 @@ class ControlPanel:
             self.progress_bar.visible = False
             self._set_showcase_banner("Press Record to scan the room.")
         else:
+            if self.follow_camera_enabled:
+                # See the matching guard in _on_slam_toggle: leaving Showcase
+                # without releasing follow would strand the classic view with
+                # mouse nav swallowed and nothing left to drive the camera.
+                self.chk_follow_camera.checked = False
+                self._on_follow_camera_toggle(False)
             self._join_showcase_workers()
             self.showcase_phase = next_phase(self.showcase_phase, cleared=True)   # -> IDLE
             self._showcase_orbit_enabled = False
@@ -1888,6 +2081,12 @@ class ControlPanel:
         res = gui.SceneWidget.EventCallbackResult
         if self._cam_target is None:
             return res.IGNORED
+        if self.follow_camera_enabled:
+            # Camera-follow mode owns the view every tick (_apply_follow_camera)
+            # -- swallow manual nav instead of letting it mutate the free-orbit
+            # state (_cam_az/_cam_radius/pan) behind the scenes, which would
+            # otherwise cause a jump the moment follow is toggled back off.
+            return res.CONSUMED
         et = e.type
         if et == gui.MouseEvent.Type.WHEEL:
             if e.wheel_dy:
