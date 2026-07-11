@@ -226,10 +226,13 @@ faster and lighter).
 `translation` mode: **0 tracking-loss**, a 1.095 m loop gap over a 67.85 m path
 (~1.6 % drift for prior-free frame-to-model odometry with **no loop closure**),
 and a smooth trajectory (max per-frame step 0.100 m). As a bonus it now also
-sits at/under the 35 ms preview target at the median. `6dof` diverges badly on
-the thin 54×42 frames (28 m gap, 31 % lost) — `translation` remains the default
-by a wide margin. Fused mesh: `slam_map.ply` ≈ 125 MB / ~1.6 M vertices,
-non-degenerate.
+sits at/under the 35 ms preview target at the median. `6dof` diverges badly
+(28 m gap, 31 % lost): full point-to-plane ICP wanders on the thin, noisy 54×42
+frames, and it is additionally hurt by sharing the `max_iter=6` default — which
+was tuned for the translation solver — so more poorly-converged 6dof frames now
+pass the gate and integrate. `6dof` is not the default and was not separately
+retuned; `translation` remains the default by a wide margin. Fused mesh:
+`slam_map.ply` ≈ 125 MB / ~1.6 M vertices, non-degenerate.
 
 **vs. the baseline above:** tracking-loss **31 % → 0 %**; max per-frame step
 **0.769 m → 0.100 m**; drift essentially unchanged (1.077 → 1.095 m, within run
