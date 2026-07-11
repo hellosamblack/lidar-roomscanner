@@ -54,6 +54,58 @@ def test_run_once_returns_false_when_nothing_submitted():
     assert w.latest() is None
 
 
+def test_first_frame_tracking_lost_does_not_crash():
+    """If the very first frame ever submitted is degenerate (tracking-lost),
+    Mapper.step never integrates into the TSDF, so the map is still empty
+    when the worker's mesh-extraction throttle would otherwise fire on
+    "first processed frame". This must not raise (Task 10 bugfix) -- the
+    worker should still publish a result (so the panel HUD updates), just
+    with no/empty mesh."""
+    w = SlamWorker(W, H, voxel_size=0.02)
+    degenerate = np.zeros((H, W), dtype=np.float32)   # all-invalid -> bootstrap frame is lost
+    w.submit(degenerate, (1.0, 0.0, 0.0, 0.0), 101325.0)
+    w.run_once()                                       # must not raise
+    latest = w.latest()
+    assert latest is not None
+    mesh, traj, step = latest
+    assert len(traj) == 1
+    assert step.tracking_lost
+    assert mesh is None or len(mesh.vertex.positions) == 0
+
+    # NOTE: Mapper.step's bootstrap gate is keyed off `not self.trajectory`
+    # (i.e. "has step() ever run"), not "has the TSDF ever integrated" --
+    # once *any* frame has run (lost or not), later frames take the
+    # model-based ICP path, which can never recover if the map is still
+    # empty (raycast() -> None -> lost again). So a worker whose very first
+    # frame is lost stays lost forever; it does NOT self-heal on a
+    # subsequent valid frame. That's a separate, pre-existing gap in
+    # Mapper's tracking state machine (out of scope here -- this task's
+    # fix is only "don't crash"; see task-10-report.md). A *fresh* worker
+    # bootstraps normally, per test_worker_processes_and_publishes above.
+
+
+def test_mesh_throttle_counts_successful_frames_not_processed_frames():
+    """The mesh-extraction throttle must key off successful (integrated)
+    frames, not merely processed ones -- a lost frame must not itself
+    trigger (a pointless, and pre-fix crash-prone) mesh() call, but must
+    still publish so the HUD updates."""
+    w = SlamWorker(W, H, voxel_size=0.02, mesh_every=2)
+    w.submit(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    w.run_once()                                        # frame 1: successful bootstrap
+    mesh1, traj1, step1 = w.latest()
+    assert not step1.tracking_lost
+    assert mesh1 is not None and len(mesh1.vertex.positions) >= 0
+    assert w._frames_integrated == 1
+
+    degenerate = np.zeros((H, W), dtype=np.float32)
+    w.submit(degenerate, (1.0, 0.0, 0.0, 0.0), 101325.0)
+    w.run_once()                                        # frame 2: tracking-lost, still publishes
+    mesh2, traj2, step2 = w.latest()
+    assert step2.tracking_lost
+    assert len(traj2) == 2
+    assert w._frames_integrated == 1                    # lost frame must not bump the counter
+
+
 def test_start_stop_processes_in_background_and_does_not_hang():
     w = SlamWorker(W, H, voxel_size=0.02)
     w.start()

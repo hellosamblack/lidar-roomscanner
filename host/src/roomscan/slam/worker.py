@@ -33,8 +33,10 @@ class SlamWorker:
     `submit(depth, quat, pressure)` stores the latest input (dropping any
     older, unprocessed one). `run_once()` pops it, steps the mapper, and
     publishes `(mesh, trajectory, FrameStep)` -- mesh extraction is throttled
-    to every `mesh_every` processed frames (always on the first, so a caller
-    sees geometry immediately); trajectory + step publish every frame.
+    to every `mesh_every` *successful* (non-tracking-lost) frames, since only
+    those integrate into the TSDF (always on the first success, so a caller
+    sees geometry as soon as there is any); trajectory + step publish every
+    frame regardless, so the HUD keeps updating even while tracking-lost.
     `start()`/`stop()` run `run_once()` in a background loop, mirroring
     `panel.py`'s `_run_reader` lifecycle (daemon thread, joined on stop).
     """
@@ -44,6 +46,7 @@ class SlamWorker:
         self._mapper = Mapper(width, height, **mapper_kwargs)
         self._mesh_every = max(1, int(mesh_every))
         self._frames_processed = 0
+        self._frames_integrated = 0     # successful (non-tracking-lost) frames only
         self._last_mesh = None
 
         self._in_lock = threading.Lock()
@@ -72,8 +75,17 @@ class SlamWorker:
         depth, quat, pressure = item
         step = self._mapper.step(depth, quat, pressure)
         self._frames_processed += 1
-        if self._frames_processed == 1 or self._frames_processed % self._mesh_every == 0:
-            self._last_mesh = self._mapper.mesh()
+        if not step.tracking_lost:
+            # Only a successful (integrated) frame can have changed the TSDF,
+            # and only then is `mesh()` guaranteed non-empty -- gate the
+            # throttle on this count, not on frames merely processed. A
+            # tracking-lost frame still publishes below (HUD keeps updating),
+            # it just doesn't force a fresh (and, on a still-empty map,
+            # pointless) mesh extraction. See tsdf.py's own empty-map guard
+            # for the belt-and-braces backstop.
+            self._frames_integrated += 1
+            if self._frames_integrated == 1 or self._frames_integrated % self._mesh_every == 0:
+                self._last_mesh = self._mapper.mesh()
         trajectory = list(self._mapper.trajectory)   # copy: caller must not see it mutate later
         with self._out_lock:
             self._out_slot = (self._last_mesh, trajectory, step)

@@ -64,6 +64,20 @@ def test_raycast_with_explicit_block_coords():
     assert len(pts) > 500
     assert abs(np.median(pts[:, 2]) - 1.0) < m_voxel_tol()
 
+def test_mesh_and_point_cloud_on_empty_map_return_empty_not_raise():
+    # Task 10 bugfix: extract_triangle_mesh()/extract_point_cloud() raise a
+    # C++ HashMap error ("Input number of keys should > 0") when nothing has
+    # ever been integrated. mesh()/point_cloud() must guard this and return
+    # an empty geometry of the correct type instead.
+    m = TsdfMap(voxel_size=0.02)
+    mesh = m.mesh()
+    assert isinstance(mesh, o3d.t.geometry.TriangleMesh)
+    assert len(mesh.vertex.positions) == 0
+
+    pc = m.point_cloud()
+    assert isinstance(pc, o3d.t.geometry.PointCloud)
+    assert pc.point.positions.numpy().shape[0] == 0
+
 def test_raycast_empty_map_with_depth_hint_returns_none():
     # The empty-map guard must fire before any block-coord computation, even
     # when a depth_hint is supplied (Mapper may pass one before any

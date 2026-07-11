@@ -132,7 +132,25 @@ class TsdfMap:
         return pc
 
     def mesh(self) -> o3d.t.geometry.TriangleMesh:
+        if self._empty:
+            # `extract_triangle_mesh()` raises a C++ HashMap error ("Input
+            # number of keys should > 0") on an empty map -- e.g. the very
+            # first frame ever submitted is tracking-lost, so `integrate()`
+            # is never called. Return an empty mesh of the same shape/dtypes
+            # `extract_triangle_mesh()` itself returns for a populated-but-
+            # isosurface-free map (verified empirically), instead of
+            # propagating that crash to callers (worker/CLI/panel).
+            m = o3d.t.geometry.TriangleMesh(device=_CPU)
+            m.vertex.positions = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=_CPU)
+            m.vertex.colors = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=_CPU)
+            m.triangle.indices = o3d.core.Tensor(np.zeros((0, 3), dtype=np.int32), device=_CPU)
+            return m
         return self._vbg.extract_triangle_mesh()
 
     def point_cloud(self) -> o3d.t.geometry.PointCloud:
+        if self._empty:
+            pc = o3d.t.geometry.PointCloud(_CPU)
+            pc.point.positions = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=_CPU)
+            pc.point.colors = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=_CPU)
+            return pc
         return self._vbg.extract_point_cloud()
