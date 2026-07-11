@@ -150,3 +150,40 @@ def test_weight_threshold_defaults_to_three_matching_prior_behavior():
     # verify the new explicit constructor knob preserves that default.
     m = TsdfMap(voxel_size=0.02, depth_max=5.0)
     assert m.weight_threshold == 3.0
+
+
+def test_device_defaults_to_cpu_and_accepts_explicit_string_or_device():
+    # Device-configurability (Phase 6 follow-up): default is unchanged
+    # ("CPU:0"), and both a device string and an already-resolved
+    # o3d.core.Device are accepted -- the two forms a caller (Mapper, CLI)
+    # might pass through.
+    assert TsdfMap(voxel_size=0.02)._device == o3d.core.Device("CPU:0")
+    assert TsdfMap(voxel_size=0.02, device="CPU:0")._device == o3d.core.Device("CPU:0")
+    assert TsdfMap(voxel_size=0.02, device=o3d.core.Device("CPU:0"))._device == o3d.core.Device("CPU:0")
+
+
+def test_geometry_created_on_the_configured_device():
+    # Every Open3D object TsdfMap creates (VBG-backed extractions, the
+    # raycast point cloud, the empty-map placeholders) must live on
+    # self._device, not a hard-coded CPU -- otherwise a future CUDA run
+    # would silently produce CPU/CUDA-mismatched geometry.
+    dev = o3d.core.Device("CPU:0")
+    m = TsdfMap(voxel_size=0.02, depth_max=5.0, device=dev)
+    K = pinhole(W, H, device=dev)
+    depth = _wall_depth(1.0)
+
+    # empty-map placeholders
+    assert m.mesh().vertex.positions.device == dev
+    assert m.point_cloud().point.positions.device == dev
+
+    m.integrate(depth, K, np.eye(4))
+    model = m.raycast(K, np.eye(4), W, H)
+    assert model is not None
+    assert model.point.positions.device == dev
+    # This is the exact "GPU-safety" pattern used throughout the SLAM code
+    # (a CUDA tensor must be moved home before .numpy()) -- .cpu() is a
+    # documented no-op on an already-CPU tensor, so this is safe to run
+    # unconditionally regardless of device.
+    pts = model.point.positions.cpu().numpy()
+    assert len(pts) > 500
+    assert m.mesh().vertex.positions.device == dev

@@ -103,8 +103,10 @@ def compare_kiss(depths, intr, fov_h: float, fov_v: float) -> dict | None:
 
 
 def intr_width(intr) -> int:
-    return int(round(intr.numpy()[0, 2] * 2))
+    # intr may live on a non-CPU compute device (Mapper(device=...)); .cpu()
+    # is a no-op when it's already on CPU.
+    return int(round(intr.cpu().numpy()[0, 2] * 2))
 
 
 def intr_height(intr) -> int:
-    return int(round(intr.numpy()[1, 2] * 2))
+    return int(round(intr.cpu().numpy()[1, 2] * 2))

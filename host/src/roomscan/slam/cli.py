@@ -61,11 +61,12 @@ def _load_frames(path, max_frames=None):
     return frames, width, height
 
 
-def _run(frames, width, height, cfg, mode):
+def _run(frames, width, height, cfg, mode, device=None):
     mapper = Mapper(width, height, cfg.fov_h, cfg.fov_v, icp_mode=mode,
                     voxel_size=cfg.voxel_size, baro_weight=cfg.baro_weight,
                     max_dist=cfg.max_dist, min_fitness=cfg.min_fitness, max_rmse=cfg.max_rmse,
-                    min_confidence=cfg.min_confidence, weight_threshold=cfg.weight_threshold)
+                    min_confidence=cfg.min_confidence, weight_threshold=cfg.weight_threshold,
+                    device=device if device is not None else cfg.device)
     timings, ts = [], []
     for depth, reflectance, confidence, quat, pa, t_s in frames:
         step = mapper.step(depth, quat, pa, reflectance=reflectance, confidence=confidence)
@@ -78,6 +79,11 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="roomscan-slam")
     ap.add_argument("capture")
     ap.add_argument("--icp-mode", choices=["translation", "6dof"], default=None)
+    ap.add_argument("--device", default=None,
+                    help='Open3D compute device, e.g. "CPU:0" or "CUDA:0" '
+                         "(default: [slam].device in roomscan.toml, else CPU:0). "
+                         "Only CPU:0 is testable until a CUDA-enabled Open3D build "
+                         "is installed.")
     ap.add_argument("--compare-modes", action="store_true")
     ap.add_argument("--benchmark", action="store_true")
     ap.add_argument("--out-mesh", default="slam_map.ply")
@@ -95,7 +101,7 @@ def main(argv=None) -> int:
     modes = ["translation", "6dof"] if args.compare_modes else [args.icp_mode or cfg.icp_mode]
     results = {}
     for mode in modes:
-        mapper, timings, ts = _run(frames, width, height, cfg, mode)
+        mapper, timings, ts = _run(frames, width, height, cfg, mode, device=args.device)
         tstats = metrics.trajectory_stats(mapper.trajectory)
         mstats = metrics.timing_stats(timings)
         results[mode] = (mapper, tstats, mstats, ts)
@@ -109,7 +115,9 @@ def main(argv=None) -> int:
     chosen = modes[0]
     mapper, _, _, ts = results[chosen]
     import open3d as o3d
-    o3d.t.io.write_triangle_mesh(args.out_mesh, mapper.mesh())
+    # mesh() may live on a non-CPU compute device (--device); write_triangle_mesh
+    # is host-side I/O -- .cpu() is a no-op when it's already on CPU.
+    o3d.t.io.write_triangle_mesh(args.out_mesh, mapper.mesh().cpu())
     metrics.write_tum(args.out_traj, ts, mapper.trajectory)
     print(f"\n[slam] wrote {args.out_mesh} and {args.out_traj} (mode={chosen})")
 

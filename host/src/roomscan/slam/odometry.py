@@ -16,7 +16,11 @@ import numpy as np
 import open3d as o3d
 
 _reg = o3d.t.pipelines.registration
-_CPU = o3d.core.Device("CPU:0")
+
+
+def _resolve_device(device) -> o3d.core.Device:
+    return device if isinstance(device, o3d.core.Device) else o3d.core.Device(device)
+
 
 # Condition-number ceiling for the 3x3 translation normal-equations matrix
 # A = sum(n_i n_i^T). A perfectly (or near-) planar target has all normals
@@ -36,7 +40,8 @@ class RegistrationResult:
 
 def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: np.ndarray,
                      t0: np.ndarray, max_dist: float, max_iter: int,
-                     tol: float = 1e-7) -> tuple[np.ndarray, float, float, bool]:
+                     tol: float = 1e-7,
+                     device: str | o3d.core.Device = "CPU:0") -> tuple[np.ndarray, float, float, bool]:
     """Iterated closest-point, translation-only, point-to-plane. `rotated_src`
     is the source cloud with the (held-fixed) prior rotation already applied.
     Returns (t, fitness, rmse, singular) -- fitness/rmse mirror Open3D's ICP
@@ -44,8 +49,9 @@ def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: 
     point-to-plane residual among matches); singular=True means the normal
     equations were too ill-conditioned to trust (e.g. constant-normal planar
     geometry) and the caller should treat this as a failed registration."""
+    dev = _resolve_device(device)
     n_source = rotated_src.shape[0]
-    tgt_t = o3d.core.Tensor(tgt_pts, device=_CPU)
+    tgt_t = o3d.core.Tensor(tgt_pts, device=dev)
     nns = o3d.core.nns.NearestNeighborSearch(tgt_t)
     nns.hybrid_index()
 
@@ -54,12 +60,12 @@ def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: 
     for _ in range(max_iter):
         query = rotated_src + t
         idx, _dist2, counts = nns.hybrid_search(
-            o3d.core.Tensor(query, device=_CPU), max_dist, 1)
-        matched = counts.numpy().reshape(-1) > 0
+            o3d.core.Tensor(query, device=dev), max_dist, 1)
+        matched = counts.cpu().numpy().reshape(-1) > 0
         n_valid = int(matched.sum())
         if n_valid == 0:
             return t, 0.0, float("inf"), False
-        rows = idx.numpy().reshape(-1)[matched]
+        rows = idx.cpu().numpy().reshape(-1)[matched]
         q = tgt_pts[rows]
         n = tgt_normals[rows]
         p = query[matched]
@@ -82,7 +88,7 @@ def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: 
 def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointCloud,
              init_pose: np.ndarray, mode: str = "translation", max_dist: float = 0.05,
              min_fitness: float = 0.3, max_rmse: float = 0.05,
-             max_iter: int = 6) -> RegistrationResult:
+             max_iter: int = 6, device: str | o3d.core.Device = "CPU:0") -> RegistrationResult:
     # max_iter=6 (Task 9.5): chosen for ACCURACY, not speed. Swept against the
     # real capture (docs/phase6-slam-validation.md "Post-optimization"): trajectory
     # drift is MONOTONICALLY WORSE with more iterations --
@@ -98,12 +104,13 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
 
     if mode == "translation":
         R = init_pose[:3, :3]
-        src_pts = source.point.positions.numpy().astype(np.float64, copy=False)
-        tgt_pts = target.point.positions.numpy().astype(np.float64, copy=False)
-        tgt_normals = target.point.normals.numpy().astype(np.float64, copy=False)
+        src_pts = source.point.positions.cpu().numpy().astype(np.float64, copy=False)
+        tgt_pts = target.point.positions.cpu().numpy().astype(np.float64, copy=False)
+        tgt_normals = target.point.normals.cpu().numpy().astype(np.float64, copy=False)
         rotated_src = (R @ src_pts.T).T
         t, fitness, rmse, singular = _translation_icp(
-            rotated_src, tgt_pts, tgt_normals, init_pose[:3, 3], max_dist, max_iter)
+            rotated_src, tgt_pts, tgt_normals, init_pose[:3, 3], max_dist, max_iter,
+            device=device)
         if singular:
             return RegistrationResult(pose=init_pose.copy(), fitness=0.0,
                                       rmse=float("inf"), ok=False)
@@ -113,7 +120,7 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
         ok = bool(fitness >= min_fitness and rmse <= max_rmse)
         return RegistrationResult(pose=T, fitness=float(fitness), rmse=float(rmse), ok=ok)
 
-    init = o3d.core.Tensor(init_pose, device=_CPU)
+    init = o3d.core.Tensor(init_pose, device=_resolve_device(device))
     criteria = _reg.ICPConvergenceCriteria(max_iteration=max_iter)
     try:
         result = _reg.icp(source, target, max_dist, init,
@@ -125,7 +132,7 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
         # Degrade to tracking-lost instead of crashing the mapper.
         return RegistrationResult(pose=init_pose.copy(), fitness=0.0,
                                   rmse=float("inf"), ok=False)
-    T = result.transformation.numpy().copy()
+    T = result.transformation.cpu().numpy().copy()
     ok = bool(result.fitness >= min_fitness and result.inlier_rmse <= max_rmse)
     return RegistrationResult(pose=T, fitness=float(result.fitness),
                               rmse=float(result.inlier_rmse), ok=ok)

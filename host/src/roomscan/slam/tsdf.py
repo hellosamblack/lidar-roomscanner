@@ -1,6 +1,12 @@
 """TSDF map: a thin wrapper over Open3D's tensor VoxelBlockGrid for frame-to-model
 SLAM. All poses are 4x4 world<-camera; integrate/raycast take the world->camera
-`extrinsic` = inv(pose). CPU only.
+`extrinsic` = inv(pose). Runs on whichever `device` (str or o3d.core.Device,
+default "CPU:0") it's constructed with -- CPU-only today because the
+installed Open3D 0.19 build has no CUDA support here, but every tensor this
+class creates lives on `self._device`, so a CUDA-enabled build would run
+unchanged with `device="CUDA:0"`. `raycast()`'s `.numpy()` pulls (`vertex`/
+`normal`/`depth`) go through `.cpu()` first since those tensors live on the
+compute device.
 
 Open3D 0.19 API notes (verified against the installed build -- see
 .superpowers/sdd/task-4-report.md for the full trace):
@@ -57,19 +63,23 @@ from __future__ import annotations
 import numpy as np
 import open3d as o3d
 
-_CPU = o3d.core.Device("CPU:0")
+
+def _resolve_device(device) -> o3d.core.Device:
+    return device if isinstance(device, o3d.core.Device) else o3d.core.Device(device)
 
 
 class TsdfMap:
     def __init__(self, voxel_size: float = 0.01, trunc_multiplier: float = 8.0,
                  block_resolution: int = 8, block_count: int = 40000,
                  depth_scale: float = 1000.0, depth_max: float = 5.0,
-                 weight_threshold: float = 3.0):
+                 weight_threshold: float = 3.0,
+                 device: str | o3d.core.Device = "CPU:0"):
         self.voxel_size = voxel_size
         self.trunc_multiplier = trunc_multiplier
         self.depth_scale = depth_scale
         self.depth_max = depth_max
         self.weight_threshold = weight_threshold
+        self._device = _resolve_device(device)
         self._empty = True
         self._vbg = o3d.t.geometry.VoxelBlockGrid(
             attr_names=("tsdf", "weight", "color"),
@@ -78,18 +88,18 @@ class TsdfMap:
             voxel_size=voxel_size,
             block_resolution=block_resolution,
             block_count=block_count,
-            device=_CPU,
+            device=self._device,
         )
 
     def _depth_image(self, depth_mm: np.ndarray) -> o3d.t.geometry.Image:
         d = np.ascontiguousarray(depth_mm, dtype=np.float32)
-        return o3d.t.geometry.Image(o3d.core.Tensor(d, device=_CPU))
+        return o3d.t.geometry.Image(o3d.core.Tensor(d, device=self._device))
 
     def _color_image(self, color: np.ndarray) -> o3d.t.geometry.Image:
         # Must be float32 in [0,1] to pair with our float32 depth image --
         # see the module docstring's "color overload" note.
         c = np.ascontiguousarray(color, dtype=np.float32)
-        return o3d.t.geometry.Image(o3d.core.Tensor(c, device=_CPU))
+        return o3d.t.geometry.Image(o3d.core.Tensor(c, device=self._device))
 
     def integrate(self, depth_mm: np.ndarray, intrinsic: o3d.core.Tensor,
                   extrinsic: np.ndarray, color: np.ndarray | None = None) -> None:
@@ -100,8 +110,8 @@ class TsdfMap:
         (the default) keeps the original depth-only overload -- unchanged
         behavior for callers that don't have a color image handy."""
         depth = self._depth_image(depth_mm)
-        ext = o3d.core.Tensor(np.asarray(extrinsic, dtype=np.float64), device=_CPU)
-        intr = intrinsic.to(_CPU)
+        ext = o3d.core.Tensor(np.asarray(extrinsic, dtype=np.float64), device=self._device)
+        intr = intrinsic.to(self._device)
         coords = self._vbg.compute_unique_block_coordinates(
             depth, intr, ext, self.depth_scale, self.depth_max, self.trunc_multiplier)
         if color is not None:
@@ -120,8 +130,8 @@ class TsdfMap:
         `Mapper` can bound `raycast()`'s cost to the current view instead of
         the whole map."""
         depth = self._depth_image(depth_mm)
-        ext = o3d.core.Tensor(np.asarray(extrinsic, dtype=np.float64), device=_CPU)
-        intr = intrinsic.to(_CPU)
+        ext = o3d.core.Tensor(np.asarray(extrinsic, dtype=np.float64), device=self._device)
+        intr = intrinsic.to(self._device)
         return self._vbg.compute_unique_block_coordinates(
             depth, intr, ext, self.depth_scale, self.depth_max, self.trunc_multiplier)
 
@@ -136,8 +146,8 @@ class TsdfMap:
         omit both to fall back to the original all-active-blocks behavior."""
         if self._empty:
             return None
-        ext = o3d.core.Tensor(np.asarray(extrinsic, dtype=np.float64), device=_CPU)
-        intr = intrinsic.to(_CPU)
+        ext = o3d.core.Tensor(np.asarray(extrinsic, dtype=np.float64), device=self._device)
+        intr = intrinsic.to(self._device)
         if block_coords is not None:
             coords = block_coords
         elif depth_hint is not None:
@@ -157,15 +167,17 @@ class TsdfMap:
             depth_max=self.depth_max, weight_threshold=1.0,
             trunc_voxel_multiplier=self.trunc_multiplier,
             range_map_down_factor=1)
-        vertex = result["vertex"].numpy().reshape(-1, 3)
-        normal = -result["normal"].numpy().reshape(-1, 3)
-        depth = result["depth"].numpy().reshape(-1)
+        # ray_cast's outputs live on self._device (may be CUDA) -- move to
+        # host before .numpy() (a no-op when self._device is already CPU).
+        vertex = result["vertex"].cpu().numpy().reshape(-1, 3)
+        normal = -result["normal"].cpu().numpy().reshape(-1, 3)
+        depth = result["depth"].cpu().numpy().reshape(-1)
         keep = depth > 0.0
         if not keep.any():
             return None
-        pc = o3d.t.geometry.PointCloud(_CPU)
-        pc.point.positions = o3d.core.Tensor(vertex[keep].astype(np.float32))
-        pc.point.normals = o3d.core.Tensor(normal[keep].astype(np.float32))
+        pc = o3d.t.geometry.PointCloud(self._device)
+        pc.point.positions = o3d.core.Tensor(vertex[keep].astype(np.float32), device=self._device)
+        pc.point.normals = o3d.core.Tensor(normal[keep].astype(np.float32), device=self._device)
         return pc
 
     def mesh(self) -> o3d.t.geometry.TriangleMesh:
@@ -177,17 +189,17 @@ class TsdfMap:
             # `extract_triangle_mesh()` itself returns for a populated-but-
             # isosurface-free map (verified empirically), instead of
             # propagating that crash to callers (worker/CLI/panel).
-            m = o3d.t.geometry.TriangleMesh(device=_CPU)
-            m.vertex.positions = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=_CPU)
-            m.vertex.colors = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=_CPU)
-            m.triangle.indices = o3d.core.Tensor(np.zeros((0, 3), dtype=np.int32), device=_CPU)
+            m = o3d.t.geometry.TriangleMesh(device=self._device)
+            m.vertex.positions = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=self._device)
+            m.vertex.colors = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=self._device)
+            m.triangle.indices = o3d.core.Tensor(np.zeros((0, 3), dtype=np.int32), device=self._device)
             return m
         return self._vbg.extract_triangle_mesh(self.weight_threshold)
 
     def point_cloud(self) -> o3d.t.geometry.PointCloud:
         if self._empty:
-            pc = o3d.t.geometry.PointCloud(_CPU)
-            pc.point.positions = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=_CPU)
-            pc.point.colors = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=_CPU)
+            pc = o3d.t.geometry.PointCloud(self._device)
+            pc.point.positions = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=self._device)
+            pc.point.colors = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=self._device)
             return pc
         return self._vbg.extract_point_cloud(self.weight_threshold)

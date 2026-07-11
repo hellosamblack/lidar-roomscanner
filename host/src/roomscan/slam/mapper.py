@@ -1,12 +1,20 @@
 """Frame-to-model SLAM orchestrator. Per-frame: deproject -> predict pose from the
 SFLP prior -> raycast model -> point-to-plane ICP -> baro soft-Z -> integrate.
-See docs/superpowers/specs/2026-07-10-phase6-slam-design.md sections 3, 5."""
+See docs/superpowers/specs/2026-07-10-phase6-slam-design.md sections 3, 5.
+
+`device` (str or o3d.core.Device, default "CPU:0") is resolved once in
+__init__ and forwarded to every Open3D piece it owns (TsdfMap, the pinhole
+intrinsic, source_cloud, register) so the whole per-frame pipeline runs on a
+single compute device -- CPU today, and unchanged "CUDA:0" once a CUDA build
+of Open3D is installed. Any tensor pulled off that device (e.g. the raycast
+model's `positions` here) is moved home with `.cpu()` before `.numpy()`."""
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
 
 import numpy as np
+import open3d as o3d
 
 from ..colors import normalize as _percentile_normalize
 from ..deproject import Deprojector
@@ -36,14 +44,17 @@ class Mapper:
                  min_fitness: float = 0.3, max_rmse: float = 0.05,
                  min_confidence: float | None = _DEFAULT_MIN_CONFIDENCE,
                  weight_threshold: float = 3.0,
+                 device: str | o3d.core.Device = "CPU:0",
                  clock=time.perf_counter):
         self.width, self.height = width, height
         self.icp_mode = icp_mode
         self.baro_weight = baro_weight
         self.min_confidence = min_confidence
+        self._device = device if isinstance(device, o3d.core.Device) else o3d.core.Device(device)
         self._deproj = Deprojector(width, height, fov_h, fov_v)
-        self._intr = pinhole(width, height, fov_h, fov_v)
-        self._tsdf = TsdfMap(voxel_size=voxel_size, weight_threshold=weight_threshold)
+        self._intr = pinhole(width, height, fov_h, fov_v, device=self._device)
+        self._tsdf = TsdfMap(voxel_size=voxel_size, weight_threshold=weight_threshold,
+                             device=self._device)
         self._gate = dict(max_dist=max_dist, min_fitness=min_fitness, max_rmse=max_rmse)
         self._clock = clock
         self._t_prev = np.zeros(3)
@@ -109,7 +120,7 @@ class Mapper:
         elif not self._bootstrapped:
             pose = T_pred                                   # bootstrap: accept prior
         else:
-            src = source_cloud(pts, valid)
+            src = source_cloud(pts, valid, device=self._device)
             # Bound raycast to the current view frustum (Task 9.5 Lever 1):
             # the current depth frame at the predicted pose is our best
             # estimate of which voxel blocks the live camera can see, so pass
@@ -121,7 +132,7 @@ class Mapper:
             # frame was lost).
             model = self._tsdf.raycast(self._intr, np.linalg.inv(T_pred),
                                        self.width, self.height, depth_hint=depth_mm)
-            if model is None or model.point.positions.numpy().shape[0] < _MIN_VALID_POINTS:
+            if model is None or model.point.positions.cpu().numpy().shape[0] < _MIN_VALID_POINTS:
                 lost = True
                 pose = T_pred
             else:
@@ -136,7 +147,8 @@ class Mapper:
                 # local frame -- so ICP's initial guess is identity (not T_pred), and
                 # the resulting correction must be composed onto T_pred afterward to
                 # get a world pose: pose_world = T_pred @ correction.
-                res = register(src, model, np.eye(4), mode=self.icp_mode, **self._gate)
+                res = register(src, model, np.eye(4), mode=self.icp_mode,
+                              device=self._device, **self._gate)
                 fitness, rmse = res.fitness, res.rmse
                 if res.ok:
                     pose = self._apply_baro_z(T_pred @ res.pose, pressure_pa)

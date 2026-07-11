@@ -35,6 +35,12 @@ class SlamConfig:
     # captures/phase6_motion_ref.bin -- see task-quality-report.md.
     min_confidence: float = 20.0
     weight_threshold: float = 3.0
+    # Compute device for the Open3D tensor pipeline (TsdfMap/pinhole/
+    # source_cloud/register). "CPU:0" today -- the installed Open3D 0.19
+    # build here has no CUDA support -- but "CUDA:0" (or any other
+    # o3d.core.Device string) runs unchanged once a CUDA-enabled build is
+    # installed; see slam/mapper.py's docstring.
+    device: str = "CPU:0"
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "SlamConfig":

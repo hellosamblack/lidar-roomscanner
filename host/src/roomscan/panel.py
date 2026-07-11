@@ -1042,7 +1042,9 @@ class ControlPanel:
             return
         pts_list = [np.zeros((1, 3))]
         if mesh is not None and len(mesh.vertex.positions) > 0:
-            pts_list.append(mesh.vertex.positions.numpy())
+            # mesh may live on a non-CPU compute device (Mapper(device=...));
+            # .cpu() is a no-op when it's already on CPU.
+            pts_list.append(mesh.vertex.positions.cpu().numpy())
         if trajectory:
             pts_list.append(np.array([T[:3, 3] for T in trajectory]))
         all_pts = np.vstack(pts_list)
@@ -1102,7 +1104,11 @@ class ControlPanel:
         """
         from .slam.shading import shade_colors, wall_triangle_mask
         sc = self.scene_widget.scene
-        legacy_mesh = mesh.to_legacy()
+        # mesh may live on a non-CPU compute device (Mapper(device=...)) --
+        # Filament (the GUI renderer) only ever renders CPU geometry, and
+        # to_legacy() itself requires a CPU tensor mesh; .cpu() is a no-op
+        # when it's already on CPU.
+        legacy_mesh = mesh.cpu().to_legacy()
         legacy_mesh.compute_vertex_normals()
         # The TSDF mesh's vertex colors are always [0,0,0] (integrate() is
         # depth-only, see tsdf.py) and this material is defaultUnlit with no
@@ -1285,7 +1291,9 @@ class ControlPanel:
         Returns None on a still-degenerate (zero-extent) scan."""
         pts_list = [np.zeros((1, 3))]
         if mesh is not None and len(mesh.vertex.positions) > 0:
-            pts_list.append(mesh.vertex.positions.numpy())
+            # mesh may live on a non-CPU compute device (Mapper(device=...));
+            # .cpu() is a no-op when it's already on CPU.
+            pts_list.append(mesh.vertex.positions.cpu().numpy())
         if trajectory:
             pts_list.append(np.array([T[:3, 3] for T in trajectory]))
         all_pts = np.vstack(pts_list)

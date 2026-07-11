@@ -19,6 +19,7 @@ def test_defaults():
     assert c.fov_v == 42.0
     assert c.min_confidence == 20.0
     assert c.weight_threshold == 3.0
+    assert c.device == "CPU:0"
 
 
 def test_load_missing_returns_defaults(tmp_path):
@@ -44,3 +45,19 @@ def test_load_corrupt_returns_defaults(tmp_path):
     p = tmp_path / "roomscan.toml"
     p.write_text("this is not toml =====", encoding="utf-8")
     assert SlamConfig.load(p) == SlamConfig()
+
+
+def test_load_reads_device_from_slam_table(tmp_path):
+    """`device` is a plain string field like the other knobs -- CUDA:0 is not
+    testable here (no CUDA build), but the config plumbing itself is: any
+    string from the [slam] table round-trips unchanged, and an unspecified
+    `device` still defaults to "CPU:0"."""
+    p = tmp_path / "roomscan.toml"
+    p.write_text('[slam]\ndevice = "CUDA:0"\n', encoding="utf-8")
+    c = SlamConfig.load(p)
+    assert c.device == "CUDA:0"
+    assert c.voxel_size == 0.01   # unspecified => default, unaffected by device
+
+    p2 = tmp_path / "roomscan2.toml"
+    p2.write_text('[slam]\nicp_mode = "6dof"\n', encoding="utf-8")
+    assert SlamConfig.load(p2).device == "CPU:0"

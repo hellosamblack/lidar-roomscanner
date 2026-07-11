@@ -1,4 +1,5 @@
 import numpy as np
+import open3d as o3d
 from roomscan.slam.intrinsics import pinhole
 from roomscan.slam.mapper import Mapper, FrameStep
 
@@ -142,3 +143,25 @@ def test_pose_translation_tracks_a_synthetic_shift():
     assert not step.tracking_lost
     # camera translation z should be ~ +0.05 (moved toward the wall)
     assert abs(step.pose[2, 3] - 0.05) < 0.03
+
+
+def test_mapper_accepts_explicit_cpu_device_string():
+    # Device-configurability (Phase 6 follow-up): passing device="CPU:0"
+    # explicitly must behave identically to the omitted-argument default --
+    # CUDA:0 isn't testable without a CUDA-enabled Open3D build, but the
+    # plumbing that would carry it (Mapper -> TsdfMap/pinhole/source_cloud/
+    # register) is exercised here with the one device we can verify.
+    m = Mapper(W, H, voxel_size=0.02, device="CPU:0")
+    assert m._device == o3d.core.Device("CPU:0")
+    step = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert not step.tracking_lost
+    assert m.mesh().vertex.positions.device == o3d.core.Device("CPU:0")
+
+
+def test_mapper_accepts_device_as_o3d_device_instance():
+    # device may also already be an o3d.core.Device (e.g. passed through
+    # from a caller that resolved it itself) -- not just a string.
+    m = Mapper(W, H, voxel_size=0.02, device=o3d.core.Device("CPU:0"))
+    assert m._device == o3d.core.Device("CPU:0")
+    step = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert not step.tracking_lost
