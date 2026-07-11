@@ -161,17 +161,31 @@ def absolute_heading(quat, mag_ut) -> float:
     return tilt_compensated_heading(tilt_only, mag_ut)
 
 
+# True physical mapping derived from board orientation:
+# ToF (CV) frame: X=Right, Y=Down, Z=Forward
+# SFLP body frame: X=Up, Y=Right, Z=Forward (when board held vertically, USB down)
+# Thus: X_body = -Y_cv; Y_body = X_cv; Z_body = Z_cv
+T_CV_TO_BODY = np.array([
+    [ 0.0, -1.0,  0.0],
+    [ 1.0,  0.0,  0.0],
+    [ 0.0,  0.0,  1.0]
+])
+
+# SFLP World frame: X=North, Y=West, Z=Up
+# Open3D CV World: X=Right(East), Y=Down(-Up), Z=Forward(North)
+# Thus: X_cv = -Y_world; Y_cv = -Z_world; Z_cv = X_world
+T_WORLD_TO_CV = np.array([
+    [ 0.0, -1.0,  0.0],
+    [ 0.0,  0.0, -1.0],
+    [ 1.0,  0.0,  0.0]
+])
+
 def gizmo_pose(quat: tuple[float, float, float, float], scale: float,
                anchor: tuple[float, float, float]) -> np.ndarray:
     """4x4 pose for the orientation gizmo: rotation from quaternion, uniform scale, placed
     at anchor. Suitable for Open3D geometry.transform()."""
-    R_align = np.array([
-        [1.0,  0.0,  0.0],
-        [0.0,  0.0, -1.0],
-        [0.0, -1.0,  0.0]
-    ])
     r = quat_to_matrix(*quat)
-    r_mapped = R_align @ r @ R_align.T
+    r_mapped = T_WORLD_TO_CV @ r @ T_CV_TO_BODY
     m = np.eye(4)
     m[:3, :3] = r_mapped * scale
     m[:3, 3] = np.array(anchor, dtype=np.float64)
@@ -186,27 +200,18 @@ def ir_gravity_rot(quat: tuple[float, float, float, float]) -> int:
     Method:
       1. Rotate the world-gravity vector [0, 0, -1] (SFLP Z-up world frame)
          into the sensor body frame: g_body = R.T @ [0, 0, -1].
-      2. The sensor depth axis is the SFLP body Y axis.  The image plane is
-         therefore the SFLP body XZ plane, with X = sensor right and Z pointing
-         toward sensor physical −Y (i.e., image up).  The in-plane gravity
-         components are gx (sensor right) and gz (image up).
-      3. The in-plane roll angle is atan2(gx, −gz) — 0° when gravity is along
-         +image-down (body −Z), increasing CCW.  Snap to nearest 90° and
-         return as a 0–3 rot90 count.
-
-    Identity check: level sensor, depth forward, image rows going physically
-    down → g_body≈[0,0,-1] → gx≈0, gz≈-1 → atan2(0,1)≈0 → 0 turns.
-    Pure — unit-testable without Open3D."""
+      2. The image plane is the CV XY plane. CV Right = SFLP Y. CV Down = SFLP -X.
+      3. The in-plane gravity components are gx = g_body[1] and gy = -g_body[0].
+      4. The in-plane roll angle is atan2(gx, gy) — 0° when gravity is along
+         +image-down, increasing CCW. Snap to nearest 90° and return rot90 count.
+    """
     r = quat_to_matrix(*quat)   # body → world
-    # gravity in world frame (SFLP Z-up convention: world −Z is down)
     gravity_world = np.array([0.0, 0.0, -1.0])
     g_body = r.T @ gravity_world   # sensor body frame gravity vector
-    gx, gz = float(g_body[0]), float(g_body[2])   # in-plane (XZ) components
-    # atan2(gx, -gz): 0° when gravity is along body -Z (image down at identity)
-    angle_deg = math.degrees(math.atan2(gx, -gz))
-    # Negate: gravity pulling right means we need a CW correction (k=3 = -1 mod 4),
-    # not a CCW correction.  step = -round(angle/90) mod 4.
-    step = (-int(round(angle_deg / 90.0))) % 4
+    gx, gy = float(g_body[1]), float(-g_body[0])   # in-plane components
+    angle_deg = math.degrees(math.atan2(gx, gy))
+    # Snap to nearest 90° and convert to rot90 count (CCW turns)
+    step = int(round(angle_deg / 90.0)) % 4
     return step
 
 

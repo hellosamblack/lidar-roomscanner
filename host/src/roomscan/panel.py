@@ -304,7 +304,7 @@ class ControlPanel:
         # real transitions (init/active/gated:*) still log once each.
         self._last_fusion_status = "off"
         self._gizmo_added = False
-        self._baseline_quat = None
+        self._baseline_yaw = None
         self.persistence = False  # only show currently perceived image, no persistence (for now)
         self.stats = Stats()
         # metrics HUD: per-sensor rate meters + a background resource sampler.
@@ -722,21 +722,16 @@ class ControlPanel:
         # Retrieve fused orientation
         quat = self.sensor_state.fused_quat()
         quat_display = quat
-        if quat is not None and self._baseline_quat is not None:
-            from .sensors import quat_mul
-            qb = self._baseline_quat
-            qb_inv = (qb[0], -qb[1], -qb[2], -qb[3])
-            quat_display = quat_mul(quat, qb_inv)
+        if quat is not None and self._baseline_yaw is not None:
+            from .sensors import graft_yaw
+            quat_display = graft_yaw(quat, -self._baseline_yaw)
 
         if quat_display is not None:
-            from .sensors import quat_to_matrix
-            R_align = np.array([
-                [1.0,  0.0,  0.0],
-                [0.0,  0.0, -1.0],
-                [0.0, -1.0,  0.0]
-            ])
+            from .sensors import quat_to_matrix, T_WORLD_TO_CV, T_CV_TO_BODY
+            # Apply quaternion rotation using the true physical coordinate mappings
             r = quat_to_matrix(*quat_display)
-            r_mapped = R_align @ r @ R_align.T
+            # Transform rotation back to CV frame for Open3D rendering
+            r_mapped = T_WORLD_TO_CV @ r @ T_CV_TO_BODY
         else:
             r_mapped = np.eye(3)
 
@@ -760,7 +755,7 @@ class ControlPanel:
             rot_pts = _rot_xy(pts, self._rot)
             
             # Map points into the fixed world using camera orientation
-            world_pts = rot_pts @ r_mapped.T
+            world_pts = (r_mapped @ rot_pts.T).T
 
             # Reset accumulation if camera set flag was cleared
             if not self._camera_set:
@@ -1074,11 +1069,9 @@ class ControlPanel:
         Graceful no-data: quietly does nothing until IMU_QUAT/ENV frames arrive."""
         quat = self.sensor_state.fused_quat()
         quat_display = quat
-        if quat is not None and self._baseline_quat is not None:
-            from .sensors import quat_mul
-            qb = self._baseline_quat
-            qb_inv = (qb[0], -qb[1], -qb[2], -qb[3])
-            quat_display = quat_mul(quat, qb_inv)
+        if quat is not None and self._baseline_yaw is not None:
+            from .sensors import graft_yaw
+            quat_display = graft_yaw(quat, -self._baseline_yaw)
         if self.imu_gizmo and quat_display is not None:
             self._update_camera_gizmo(quat_display)
         status = self.sensor_state.fusion_status()
@@ -1149,8 +1142,9 @@ class ControlPanel:
     def _on_reset_orientation(self):
         quat = self.sensor_state.fused_quat()
         if quat is not None:
-            self._baseline_quat = quat
-            self.bus.publish("yaw-fusion -> baseline reset")
+            from .sensors import quat_yaw_deg
+            self._baseline_yaw = quat_yaw_deg(quat)
+            self.bus.publish(f"yaw-fusion -> baseline reset (yaw = {self._baseline_yaw:.1f} deg)")
             self._on_clear_scan()
 
     def _on_clear_scan(self):
