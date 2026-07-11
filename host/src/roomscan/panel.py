@@ -848,6 +848,10 @@ class ControlPanel:
             return
         # Frame both the camera center [0.0, 0.0, 0.0] and the painted points
         pts_for_bounds = np.vstack([all_pts, [0.0, 0.0, 0.0]])
+        if self.persistence and self._accumulated_mesh is not None and len(self._accumulated_mesh.vertices) > 0:
+            mesh_verts = np.asarray(self._accumulated_mesh.vertices)
+            if len(mesh_verts):
+                pts_for_bounds = np.vstack([pts_for_bounds, mesh_verts])
         bounds = self._o3d.geometry.AxisAlignedBoundingBox.create_from_points(
             self._o3d.utility.Vector3dVector(pts_for_bounds))
         ext = float(bounds.get_extent().max())
