@@ -61,17 +61,45 @@ def write_tum(path, timestamps: list[float], poses: list[np.ndarray]) -> None:
 
 
 def compare_kiss(depths, intr, fov_h: float, fov_v: float) -> dict | None:
+    """Feed the same depth stream through KISS-ICP (whole-cloud frame-to-map
+    odometry, no SFLP/baro priors) as an independent drift benchmark. Returns
+    None (with a message) if kiss-icp isn't installed -- this keeps
+    --benchmark optional on platforms where it won't build."""
     try:
-        from kiss_icp.pipeline import OdometryPipeline  # noqa: F401
+        from kiss_icp.kiss_icp import KissICP
+        from kiss_icp.config import KISSConfig
+        from kiss_icp.config.config import DataConfig, MappingConfig
     except ImportError:
         print("[slam] kiss-icp not installed; skipping benchmark "
               "(pip install 'roomscan[slam]')")
         return None
-    # Minimal adapter: deproject each depth to a cloud and feed KISS-ICP.
-    # Implementer: wire kiss_icp's API here; return path_length / start_end_gap.
+
     from ..deproject import Deprojector
-    dep = Deprojector(intr_width(intr), intr_height(intr), fov_h, fov_v)
-    raise NotImplementedError("kiss adapter wired in Task 9 validation")
+    width, height = intr_width(intr), intr_height(intr)
+    dep = Deprojector(width, height, fov_h, fov_v)
+
+    # deskew=False: our depth frames are effectively instantaneous snapshots
+    # (no per-point timestamps to deskew against); voxel_size=0.05m matches
+    # indoor room scale (KISS-ICP's own guidance: ~max_range/100).
+    cfg = KISSConfig(data=DataConfig(deskew=False), mapping=MappingConfig(voxel_size=0.05))
+    odom = KissICP(cfg)
+
+    translations = [np.zeros(3)]
+    for depth_mm in depths:
+        pts, valid = dep.grid(depth_mm)
+        cloud = pts[valid].astype(np.float64)
+        if cloud.shape[0] < 10:
+            continue  # too few points for KISS-ICP's own registration to run
+        timestamps = np.zeros(cloud.shape[0], dtype=np.float64)
+        odom.register_frame(cloud, timestamps)
+        translations.append(odom.last_pose[:3, 3].copy())
+
+    t = np.array(translations)
+    if len(t) < 2:
+        return {"path_length_m": 0.0, "start_end_gap_m": 0.0}
+    steps = np.linalg.norm(np.diff(t, axis=0), axis=1)
+    return {"path_length_m": float(steps.sum()),
+            "start_end_gap_m": float(np.linalg.norm(t[-1] - t[0]))}
 
 
 def intr_width(intr) -> int:

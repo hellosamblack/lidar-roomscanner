@@ -10,11 +10,14 @@ dev = ["pytest>=8", "ruff>=0.4"]
 # Metrics-HUD GPU/VRAM readout via NVML. Optional: without it the panel falls
 # back to `nvidia-smi`, then to "GPU n/a" on non-NVIDIA hosts (metrics.py).
 monitor = ["nvidia-ml-py>=12"]
+# Optional KISS-ICP offline odometry benchmark (roomscan.slam.metrics.compare_kiss).
+slam = ["kiss-icp>=1.0"]
 
 [project.scripts]
 roomscan-view = "roomscan.viewer:main"
 roomscan-panel = "roomscan.panel:main"
 roomscan-ctl = "roomscan.control:main"
+roomscan-slam = "roomscan.slam.cli:main"
 
 [tool.pytest.ini_options]
 # Resolve `roomscan` from ./src and `tools` from ./ without relying on an
