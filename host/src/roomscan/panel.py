@@ -1191,8 +1191,10 @@ class ControlPanel:
         `Mapper.step`'s pre-existing default."""
         if self.slam_worker is None:
             from .slam.worker import SlamWorker
+            from .slam.config import preferred_device
             h, w = depth.shape
-            self.slam_worker = SlamWorker(w, h, fov_h=self.args.fov_h, fov_v=self.args.fov_v)
+            self.slam_worker = SlamWorker(w, h, fov_h=self.args.fov_h, fov_v=self.args.fov_v,
+                                          device=preferred_device())
             self.slam_worker.start()
 
         quat = self.sensor_state.fused_quat()
@@ -1578,10 +1580,12 @@ class ControlPanel:
         that's already enough (no extra transform call needed). Issue #2:
         updates the faint FoV indicator from this step's pose."""
         from .slam.worker import SlamWorker
+        from .slam.config import preferred_device
         if self._showcase_preview_worker is None:
             h, w = depth.shape
             self._showcase_preview_worker = SlamWorker(w, h, fov_h=self.args.fov_h,
-                                                        fov_v=self.args.fov_v)
+                                                        fov_v=self.args.fov_v,
+                                                        device=preferred_device())
             self._showcase_preview_worker.start()
 
         quat = self.sensor_state.fused_quat()
@@ -1750,9 +1754,12 @@ class ControlPanel:
         writes on a short-lived daemon thread -- a large mesh (~100 MB) can
         take a moment and this must not stall the GUI tick -- and logs the
         saved paths via `self.bus` (drained onto the log pane on the UI
-        tick, so the bus is the safe cross-thread channel). `mesh.cpu()` is
-        taken on the GUI thread up front (device-ready: a no-op on CPU) so
-        the worker thread only touches host tensors.
+        tick, so the bus is the safe cross-thread channel). The `mesh.cpu()`
+        device->host copy runs INSIDE the save thread (not on the GUI tick):
+        on a CUDA build that copy of a ~100 MB mesh is a real D2H transfer
+        that must not stall the UI; the mesh is the final, no-longer-mutated
+        result at FINAL, so reading it from the save thread is safe (a no-op
+        on CPU).
 
         No-op on an empty mesh (a degenerate/failed scan -- nothing worth
         writing). Never raises into the caller; any write failure is logged."""
@@ -1762,13 +1769,13 @@ class ControlPanel:
         o3d = self._o3d
         ts = time.strftime("%Y%m%d_%H%M%S")
         mesh_path, traj_path = _showcase_result_paths(ts)
-        mesh_cpu = mesh.cpu()   # move home on the GUI thread; worker sees host tensors only
         traj = list(trajectory or [])
 
         def _save():
             from .slam import metrics as slam_metrics
             try:
                 Path(_RESULTS_DIR).mkdir(parents=True, exist_ok=True)
+                mesh_cpu = mesh.cpu()   # D2H copy off the GUI thread (no-op on CPU)
                 o3d.t.io.write_triangle_mesh(mesh_path, mesh_cpu)
                 # TUM needs a timestamp per pose; we don't carry per-pose wall
                 # times to FINAL, so use a monotone synthetic index -- fine for
@@ -1886,10 +1893,12 @@ class ControlPanel:
             if gen != self._showcase_generation:
                 return   # superseded before loading even started
             from .slam.showcase import PostProcessWorker
+            from .slam.config import preferred_device
             try:
                 worker = PostProcessWorker.from_capture(
                     path, mesh_every=25, icp_mode="translation",
-                    fov_h=self.args.fov_h, fov_v=self.args.fov_v)
+                    fov_h=self.args.fov_h, fov_v=self.args.fov_v,
+                    device=preferred_device())
             except Exception as exc:
                 self.bus.publish(f"showcase: failed to load capture {path!r}: {exc!r}")
                 return

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from roomscan.slam.config import SlamConfig
+from roomscan.slam.config import SlamConfig, preferred_device
 
 
 def test_defaults():
@@ -61,3 +61,28 @@ def test_load_reads_device_from_slam_table(tmp_path):
     p2 = tmp_path / "roomscan2.toml"
     p2.write_text('[slam]\nicp_mode = "6dof"\n', encoding="utf-8")
     assert SlamConfig.load(p2).device == "CPU:0"
+
+
+def test_preferred_device_returns_valid_string(monkeypatch):
+    """preferred_device() returns a well-formed Open3D device string and
+    tracks o3d.core.cuda.is_available(): CUDA:0 when CUDA is present, else
+    CPU:0. Both branches exercised by faking is_available()."""
+    import open3d as o3d
+
+    monkeypatch.setattr(o3d.core.cuda, "is_available", lambda: True)
+    assert preferred_device() == "CUDA:0"
+
+    monkeypatch.setattr(o3d.core.cuda, "is_available", lambda: False)
+    assert preferred_device() == "CPU:0"
+
+
+def test_preferred_device_degrades_to_cpu_on_error(monkeypatch):
+    """Any failure probing CUDA support degrades safely to CPU:0 (never
+    raises), so a broken/partial Open3D install can't crash the panel."""
+    import open3d as o3d
+
+    def _boom():
+        raise RuntimeError("cuda probe blew up")
+
+    monkeypatch.setattr(o3d.core.cuda, "is_available", _boom)
+    assert preferred_device() == "CPU:0"

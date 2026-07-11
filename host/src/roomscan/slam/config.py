@@ -14,6 +14,24 @@ from typing import Optional
 from ..config import config_path
 
 
+def preferred_device() -> str:
+    """Best available Open3D compute device string: ``"CUDA:0"`` when the
+    installed Open3D build reports working CUDA support, else ``"CPU:0"``.
+
+    Lets the live panel auto-accelerate the SLAM tensor pipeline the moment a
+    CUDA-enabled Open3D is installed, with zero config change, while staying on
+    CPU with the stock (CPU-only) wheel. ``open3d`` is imported lazily so this
+    module stays importable in environments without it (e.g. some tests). Any
+    import/attribute error degrades safely to CPU."""
+    try:
+        import open3d as o3d
+        if o3d.core.cuda.is_available():
+            return "CUDA:0"
+    except Exception:
+        pass
+    return "CPU:0"
+
+
 @dataclass
 class SlamConfig:
     """SLAM configuration read from [slam] table in roomscan.toml.
