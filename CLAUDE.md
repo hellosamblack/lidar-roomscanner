@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`roomscanner/` is the **active development workspace** for a tethered handheld **3D room scanner**. The end goal: an STM32H563ZI board streams timestamped ToF (+ later IMU/env) frames to a PC that runs real-time SLAM (Open3D Tensor G-ICP + TSDF), with an offline pass fusing 4K phone video into a ToF-seeded 3D Gaussian Splat.
+`roomscanner/` is the **active development workspace** for a tethered handheld **3D room scanner**. The end goal: an STM32H563ZI board streams timestamped ToF (+ later IMU/env) frames to a PC that runs real-time SLAM (Open3D tensor ICP + TSDF), with an offline pass fusing 4K phone video into a ToF-seeded 3D Gaussian Splat.
 
 New work — the PC-side visualizer, the binary frame protocol, and any new firmware — happens **here**. The existing STM32 firmware lives in a separate **reference package** (`../53L9A1/`) that we treat as **read-only reference**, not something we edit in place.
 
@@ -95,7 +95,7 @@ Full detail in `ROADMAP.md`. Summary:
 - **Phase 3 (+3.5) — ✅ done. UI & runtime configuration**: COMMAND/ACK control channel (usecase/exposure/reinit), EVENT frames + bounded recovery, recording/playback, config persistence, and the `roomscan-panel` GUI (IR monitor, device controls, capture, events).
 - **Phase 4 — ✅ done. X-NUCLEO-IKS4A1 integrated** (2026-07-10): streams 9 (SFLP quat) + 10 (env via LSM sensor hub), panel sensors group, host yaw fusion — see the architecture bullet above for what's still open. Edge-AI (in-sensor MLC/ISPU) belongs at this tier, not on the M33 — see the edge-ai-tooling memory.
 - **Phase 5 — ⏸ shelved (2026-07-10): transport upgrade to Ethernet** (lwIP/UDP + PTP + zero-config direct link) — I3C readout, not USB, is the bandwidth wall; revival triggers in `ROADMAP.md`. Older docs may use the pre-swap numbering (Ethernet=4, IKS4A1=5).
-- **Phase 6 — ← next. Real-time SLAM** on PC: SFLP rotation prior, 3-DoF G-ICP, scalable TSDF, IR-as-intensity, baro Z-constraint.
+- **Phase 6 — ← next. Real-time SLAM** on PC: SFLP rotation prior, 3-DoF constrained point-to-plane ICP frame-to-model vs. TSDF raycast (VoxelBlockGrid), IR-as-intensity, baro Z-constraint. Note (2026-07-10): Open3D has **no tensor G-ICP** — point-to-plane is primary, `small_gicp` is the GICP fallback; KISS-ICP kept as offline odometry benchmark; FAST-LIO2/Point-LIO/CT-ICP/PIN-SLAM/SHINE rejected (scanning-LiDAR assumptions vs. our 54×42 depth imager) — details in `ROADMAP.md` Phase 6.
 - **Phase 7 — offline**: COLMAP pose priors + depth-regularized 3D Gaussian Splatting.
 
 Guiding order (per project owner): mature the visualizer and UI/config on the ToF sensor alone **before** adding the IKS4A1 board. *(Satisfied — both are done; Phase 6 SLAM should likewise be validated against recorded captures before hardware-in-the-loop.)*

@@ -1,7 +1,7 @@
 # Roadmap — 53L9A1 3D Room Mapping
 
 Product goal: a **tethered handheld 3D room scanner**. The STM32H563 streams timestamped sensor
-frames to a PC running real-time SLAM (Open3D Tensor G-ICP + TSDF); an offline pass fuses 4K phone
+frames to a PC running real-time SLAM (Open3D tensor ICP + TSDF); an offline pass fuses 4K phone
 video into a ToF-seeded 3D Gaussian Splat. Full design + critical review:
 [`references/roadmapResearch.md`](./references/roadmapResearch.md).
 
@@ -589,14 +589,42 @@ streams exist — good ordering), and the zero-config link; none of it blocks th
 
 ### Phase 6 — Real-time SLAM (PC)  ← **next up (2026-07-10)**
 
-SFLP quaternion as rotation prior → 3-DoF constrained Open3D Tensor G-ICP → scalable TSDF
-(VoxelBlockGrid), IR as intensity channel, barometer as soft 1-DoF Z constraint.
+SFLP quaternion as rotation prior → 3-DoF constrained **point-to-plane ICP, frame-to-model** against the
+TSDF raycast (Open3D tensor pipeline: `t.pipelines.registration` + VoxelBlockGrid), IR as intensity
+channel, barometer as soft 1-DoF Z constraint.
 
+- **Registration correction (2026-07-10):** the previously-specced "Open3D Tensor G-ICP" **does not
+  exist** — verified against installed 0.19.0: `t.pipelines.registration` offers only point-to-point,
+  point-to-plane, colored, and Doppler ICP; Generalized ICP lives only in the legacy CPU pipeline.
+  Point-to-plane is the primary choice anyway (indoor scenes are plane-dominated; per-point covariances
+  add little at 54×42 resolution). If GICP proves necessary, use
+  [`small_gicp`](https://github.com/koide3/small_gicp) (koide3, v1.0.1 2026-06, pip-installable,
+  Windows CI, multithreaded) — not Open3D's legacy GICP.
+- **Track frame-to-model, not frame-to-frame:** register each frame against a point cloud raycast from
+  the VoxelBlockGrid at the predicted pose (KinectFusion-style). This suppresses most odometry drift and
+  matters more than the ICP flavor.
+- **SLAM-stack survey (2026-07-10, owner question):** modern LiDAR stacks evaluated and rejected as the
+  engine — the sensor is a 54×42 depth *imager* (~63 k pts/s, 55°×42° FoV, global exposure), i.e. an
+  RGB-D/KinectFusion-class problem, not scanning-LiDAR odometry:
+  - FAST-LIO2 / Point-LIO / CT-ICP: need raw high-rate IMU + per-point timestamps and wide-FoV
+    long-range scans; degenerate on a 55° cone in room-scale scenes; ROS/Linux-centric. **Rejected.**
+  - SHINE-Mapping: offline mapping only, superseded by PIN-SLAM (same lab). **Rejected.**
+  - KISS-ICP (v1.3.0 2026-04, pip, sensor-agnostic): odometry-only, no prior/constraint hooks —
+    **kept as an offline benchmark**: run it on deprojected recorded captures to sanity-check our
+    odometry numbers.
+  - PIN-SLAM (TRO'24, active, RGB-D-capable): research-grade, GPU-hungry, thin input at 2,268 pts/frame —
+    **parked as an optional offline experiment** on recorded captures; not the real-time engine.
+  - Open3D health: release cadence is slow (0.19.0 = 2025-01) but commits are steady through 2026-07;
+    our usage is primitive-level (ICP + VoxelBlockGrid), so the cadence is low-risk.
 - Baro is a *soft* constraint — indoor pressure transients (HVAC, door openings) are several Pa
   (~12 Pa/m); never treat as ground truth.
 - Accel-derived translation is **not** an input (double-integration drift); translation comes from ICP.
-- CPU-first: Open3D tensor pipeline runs on CPU; CUDA optional. Validate real-time budget with recorded
-  Phase 1/2 datasets before hardware-in-the-loop.
+- CPU-first: registration on 2,268-pt frames is sub-ms on CPU; the whole pipeline should hold 28 Hz
+  without CUDA. Note the **Windows pip wheel is CPU-only** (`o3d.core.cuda.is_available() == False`);
+  CUDA means a source build (`-DBUILD_CUDA_MODULE=ON`, MSVC) or WSL2 (Linux CUDA wheels; fine for
+  recorded-capture work, needs usbipd for live device). Only do this if profiling shows VoxelBlockGrid
+  integrate/raycast blowing the ~35 ms frame budget — the RTX 4080's real job is Phase 7 (3DGS
+  training). Validate real-time budget with recorded Phase 1/2 datasets before hardware-in-the-loop.
 - **Real-time RGB camera (owner question 2026-07-08, architecture decided):** live high-fidelity image
   mapping uses a webcam **plugged directly into the PC**, physically mounted on the handheld rig (the
   scanner is tethered anyway — the camera's USB run rides the same tether as the Ethernet cable).
