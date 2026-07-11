@@ -45,6 +45,70 @@ def test_6dof_leaves_rotation_free():
     assert np.allclose(res.pose[:3, 3], np.zeros(3), atol=1e-2)
 
 
+def _corner_cloud(n=15):
+    """Inside corner of a unit box: three mutually perpendicular faces
+    (z=0, x=0, y=0), giving point normals along all three axes so 6dof
+    point-to-plane ICP has enough structure to constrain a full 3-DoF
+    rotation (unlike the single near-planar `_plane_cloud`, which suffers
+    rotational ambiguity)."""
+    lin = np.linspace(0.05, 0.95, n)
+    a, b = np.meshgrid(lin, lin)
+    a = a.ravel()
+    b = b.ravel()
+    zeros = np.zeros_like(a)
+    floor = np.stack([a, b, zeros], axis=1)    # z=0 face, normal ~ +/-z
+    wall_x = np.stack([zeros, a, b], axis=1)   # x=0 face, normal ~ +/-x
+    wall_y = np.stack([a, zeros, b], axis=1)   # y=0 face, normal ~ +/-y
+    pts = np.concatenate([floor, wall_x, wall_y], axis=0).astype(np.float32)
+    pc = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
+    pc.point.positions = o3d.core.Tensor(pts)
+    pc.estimate_normals()
+    return pc
+
+
+def _rotation_matrix(axis, angle):
+    axis = axis / np.linalg.norm(axis)
+    K = np.array([[0, -axis[2], axis[1]],
+                  [axis[2], 0, -axis[0]],
+                  [-axis[1], axis[0], 0]])
+    return np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+
+
+def test_mode_switch_is_discriminating():
+    # Discriminates the mode branch: source is the corner cloud rotated by a
+    # KNOWN, nonzero rotation about a body diagonal (constrained by all three
+    # perpendicular faces), with init_pose = eye(4). 6dof ICP must recover a
+    # rotation close to the true inverse rotation (not identity); translation
+    # mode on the identical inputs must hold the prior's rotation exactly
+    # (= identity here), regardless of what ICP itself estimates. A mutation
+    # forcing the rotation-override to fire unconditionally (`if True:`)
+    # would collapse the 6dof result's rotation to identity too, failing the
+    # first assertion below.
+    target = _corner_cloud()
+    tgt_pts = target.point.positions.numpy()
+    centroid = tgt_pts.mean(axis=0)
+
+    axis = np.array([1.0, 1.0, 1.0])
+    angle = np.deg2rad(7.0)
+    R_true = _rotation_matrix(axis, angle)
+
+    src_pts = (R_true @ (tgt_pts - centroid).T).T + centroid
+    source = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
+    source.point.positions = o3d.core.Tensor(src_pts.astype(np.float32))
+
+    res_6dof = register(source, target, np.eye(4), mode="6dof", max_dist=0.2)
+    assert res_6dof.ok
+    # ICP aligns source (= R_true @ target, about the shared centroid) back
+    # onto target, so the recovered rotation should be R_true's inverse
+    # (== transpose, since it's a rotation) -- and clearly not identity.
+    assert np.allclose(res_6dof.pose[:3, :3], R_true.T, atol=0.05)
+    assert not np.allclose(res_6dof.pose[:3, :3], np.eye(3), atol=0.05)
+
+    res_translation = register(source, target, np.eye(4), mode="translation", max_dist=0.2)
+    assert res_translation.ok
+    assert np.allclose(res_translation.pose[:3, :3], np.eye(3), atol=1e-9)
+
+
 def test_low_overlap_trips_gate():
     target = _plane_cloud()
     far = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
