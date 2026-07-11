@@ -74,7 +74,10 @@ _MESH_GEOM = "surface"
 _MESH_WALLS_GEOM = "__slam_walls__"   # see-through-walls split, SLAM/Showcase only
 _WALL_MODES = ("solid", "translucent", "wireframe")
 _SLAM_TRAJ_GEOM = "__slam_trajectory__"
+_FOV_GEOM = "__fov_indicator__"        # faint camera FoV frustum, RECORDING/SLAM only
+_FOV_RANGE_M = 0.5                     # how far out the frustum rays/edges are drawn
 _GIZMO_GEOM = "__imu_gizmo__"
+_RESULTS_DIR = "results"               # Showcase FINAL save target (mesh + trajectory)
 _GIZMO_ANCHOR = np.array([0.0, 0.0, 0.0], dtype=np.float64)  # fixed scene anchor; calibrate later
 _UI_PERIOD = 0.25               # <=4 Hz label / sensors / metrics / log refresh
                                 # (the IR pane is NOT throttled here -- it renders
@@ -216,6 +219,68 @@ def _wall_submesh(verts, colors, tris):
     m.triangles = o3d.utility.Vector3iVector(new_tris)
     m.vertex_colors = o3d.utility.Vector3dVector(colors[uniq])
     return m
+
+
+def _fov_frustum_lines(pose, fov_h_deg: float, fov_v_deg: float,
+                       range_m: float = _FOV_RANGE_M):
+    """(points (5,3), lines (8,2)) outlining a small pyramid frustum for the
+    camera FoV at `pose` (4x4 world<-camera, Open3D CV convention: x-right,
+    y-down, z-forward -- the same convention `slam/frames.py`'s poses use):
+    the camera origin plus its four FoV corners at `range_m` along the view
+    direction, and the 8 edges (4 rays from the origin + the far rectangle)
+    that outline it. Pure -- unit-tested; feeds the faint FoV `LineSet`
+    (`_FOV_GEOM`) drawn during RECORDING/SLAM (owner request)."""
+    pose = np.asarray(pose, dtype=np.float64)
+    origin = pose[:3, 3]
+    r = pose[:3, :3]
+    half_h = np.tan(np.deg2rad(fov_h_deg) / 2.0)
+    half_v = np.tan(np.deg2rad(fov_v_deg) / 2.0)
+    corners_cam = np.array([
+        [-half_h, -half_v, 1.0],   # "upper" (y-down -> negative y is up)
+        [half_h, -half_v, 1.0],
+        [half_h, half_v, 1.0],
+        [-half_h, half_v, 1.0],
+    ])
+    corners_cam /= np.linalg.norm(corners_cam, axis=1, keepdims=True)
+    corners_world = origin + range_m * (corners_cam @ r.T)
+    points = np.vstack([origin[None, :], corners_world])
+    lines = np.array([
+        [0, 1], [0, 2], [0, 3], [0, 4],   # 4 rays from the camera origin
+        [1, 2], [2, 3], [3, 4], [4, 1],   # far rectangle
+    ], dtype=np.int64)
+    return points, lines
+
+
+def _eta_seconds(elapsed_s: float, fraction: float) -> float | None:
+    """Estimated remaining seconds from elapsed wall time and completion
+    `fraction` in [0, 1]: eta = elapsed * (1 - frac) / frac. None when
+    `fraction` is too small to safely extrapolate from (would blow up) or
+    already done -- callers should show no ETA in that case. Pure --
+    unit-tested."""
+    if fraction is None or fraction <= 1e-3 or fraction >= 1.0:
+        return None
+    return elapsed_s * (1.0 - fraction) / fraction
+
+
+def _format_eta(seconds: float | None) -> str:
+    """'~M:SS left' from a remaining-seconds estimate, or '' when `seconds`
+    is None (too early to estimate) or negative. Pure -- unit-tested; ASCII
+    only (no unicode tilde/ellipsis substitutes -- see Issue #4)."""
+    if seconds is None or seconds < 0:
+        return ""
+    total = int(round(seconds))
+    m, s = divmod(total, 60)
+    return f"~{m}:{s:02d} left"
+
+
+def _showcase_result_paths(ts: str, results_dir: str = _RESULTS_DIR) -> tuple[str, str]:
+    """(mesh_path, trajectory_path) for a Showcase FINAL save at timestamp
+    `ts` (e.g. ``time.strftime("%Y%m%d_%H%M%S")``) -- pure, unit-tested.
+    Mirrors `_on_record`'s ``captures/panel_<ts>.bin`` naming, but in a
+    separate ``results/`` dir since these are processed OUTPUTS, not raw
+    device captures."""
+    base = f"{results_dir}/showcase_{ts}"
+    return f"{base}.ply", f"{base}.tum"
 
 
 class _Pacer:
@@ -404,6 +469,10 @@ class ControlPanel:
         self.slam_worker = None
         self._slam_last_mesh_obj = None   # identity check: skip re-upload of an unchanged mesh
 
+        # FoV indicator (owner request): faint camera-frustum LineSet, shown
+        # during RECORDING/SLAM, recomputed only when the pose actually moves.
+        self._fov_last_pose = None
+
         # "See-through walls" (owner request, Phase 6): classify each SLAM/TSDF
         # mesh triangle as wall (vertical surface) vs floor/ceiling (see
         # slam/shading.wall_triangle_mask) and render walls translucent or as
@@ -434,6 +503,7 @@ class ControlPanel:
         self._showcase_orbit_enabled = False
         self._showcase_ease = None             # camera ease-in state (see _advance_showcase_orbit)
         self._showcase_process_start_ts = None
+        self._showcase_save_thread = None      # short-lived thread: final mesh+trajectory -> disk
 
         # command state
         self._pending_exposure: tuple[int, float] | None = None
@@ -465,6 +535,11 @@ class ControlPanel:
         self.wall_wire_material = rendering.MaterialRecord()
         self.wall_wire_material.shader = "unlitLine"
         self.wall_wire_material.line_width = 2.0
+        # FoV indicator (owner request): faint thin lines, muted gray so it
+        # reads as a hint rather than competing with the mesh/trajectory.
+        self.fov_material = rendering.MaterialRecord()
+        self.fov_material.shader = "unlitLine"
+        self.fov_material.line_width = 1.0
         self._dark_bg = True
 
         self._build_scene()
@@ -508,6 +583,14 @@ class ControlPanel:
         self.showcase_banner = gui.Label("")
         self.showcase_banner.visible = False
         self.window.add_child(self.showcase_banner)
+
+        # PROCESSING-phase progress bar (Issue #3): a real gui.ProgressBar
+        # (0..1 = the PostProcessWorker's latest().fraction), stacked just
+        # below the banner text; hidden outside PROCESSING.
+        self.progress_bar = gui.ProgressBar()
+        self.progress_bar.value = 0.0
+        self.progress_bar.visible = False
+        self.window.add_child(self.progress_bar)
 
     def _group(self, title, *, open=True):
         """A collapsable group added to the panel, with consistent margins."""
@@ -762,8 +845,12 @@ class ControlPanel:
         em = self.window.theme.font_size
         banner_h = int(1.6 * em)
         banner_y = r.y + pad + (h + pad if self.overlay.visible else 0)
-        self.showcase_banner.frame = gui.Rect(r.x + pad, banner_y,
-                                              min(scene_w - 2 * pad, int(32 * em)), banner_h)
+        banner_w = min(scene_w - 2 * pad, int(32 * em))
+        self.showcase_banner.frame = gui.Rect(r.x + pad, banner_y, banner_w, banner_h)
+        # Progress bar: stacked directly below the banner text, same width.
+        pb_h = int(0.4 * em)
+        pb_y = banner_y + banner_h + int(0.15 * em)
+        self.progress_bar.frame = gui.Rect(r.x + pad, pb_y, banner_w, pb_h)
 
     # ---- lifecycle ----------------------------------------------------------
     def start(self):
@@ -776,6 +863,9 @@ class ControlPanel:
         if self.slam_worker is not None:
             self.slam_worker.stop()        # join the SLAM worker thread before teardown
         self._join_showcase_workers()      # join Showcase's preview/post-process/loader threads
+        if self._showcase_save_thread is not None:
+            self._showcase_save_thread.join(timeout=10.0)   # let an in-flight result save finish
+            self._showcase_save_thread = None
         self.resource_sampler.stop()       # join the sampler thread before teardown
         self.pacer.paused.clear()          # unblock a paused reader so it can exit
         try:
@@ -980,7 +1070,17 @@ class ControlPanel:
         worker's own thread does the actual `Mapper.step` work, so this stays
         cheap (a lock-guarded submit + a lock-guarded read). No serial writes
         happen here or on the worker thread, per the module's threading
-        contract (see panel.py's module docstring and slam/worker.py)."""
+        contract (see panel.py's module docstring and slam/worker.py).
+
+        Issue #1 (reflectance-in-live): `self._latest_outputs` is the same
+        dict `_render_frame` just decoded this frame (set before dispatching
+        here) -- when the native transform is available it already carries
+        "reflectance"/"confidence" planes (`run()` requests all three
+        outputs whenever the DLL is present), so forwarding them to
+        `submit()` needs no extra transform call, just reading what's
+        already there. `.get(...)` degrades to None for a depth-only source
+        (Phase 1 DEPTH_ZF32 passthrough, or no transform DLL), exactly
+        `Mapper.step`'s pre-existing default."""
         if self.slam_worker is None:
             from .slam.worker import SlamWorker
             h, w = depth.shape
@@ -991,7 +1091,10 @@ class ControlPanel:
         if quat is not None:
             env = self.sensor_state.latest_env()
             pressure = env.pressure_pa if env is not None else None
-            self.slam_worker.submit(depth, quat, pressure)
+            outputs = self._latest_outputs or {}
+            self.slam_worker.submit(depth, quat, pressure,
+                                    reflectance=outputs.get("reflectance"),
+                                    confidence=outputs.get("confidence"))
 
         latest = self.slam_worker.latest()
         if latest is None:
@@ -1001,6 +1104,7 @@ class ControlPanel:
         mesh, trajectory, step = latest
         self.lbl_slam_tracking.text = f"tracking: {'LOST' if step.tracking_lost else 'ok'}"
         self.lbl_slam_ms.text = f"slam_ms: {step.slam_ms:.1f}"
+        self._update_fov_geometry(step.pose)
 
         sc = self.scene_widget.scene
         # mesh extraction is already throttled inside the worker (every K
@@ -1068,6 +1172,45 @@ class ControlPanel:
             sc.remove_geometry(_MESH_GEOM)
         if sc.has_geometry(_MESH_WALLS_GEOM):
             sc.remove_geometry(_MESH_WALLS_GEOM)
+        self._remove_fov_geometry()
+
+    def _update_fov_geometry(self, pose):
+        """Faint camera-FoV frustum indicator (owner request), shown during
+        RECORDING/SLAM. Recomputed only when `pose` has actually moved (a
+        plain array-equality check against the last pose used -- cheap, and
+        this is only ever called once per processed frame, not per GUI
+        tick), via the pure `_fov_frustum_lines` helper. `pose` is None-safe
+        (removes the geometry instead) even though no current caller passes
+        None, matching the module's general defensiveness."""
+        sc = self.scene_widget.scene
+        if pose is None:
+            self._remove_fov_geometry()
+            return
+        pose = np.asarray(pose, dtype=np.float64)
+        if self._fov_last_pose is not None and np.array_equal(pose, self._fov_last_pose):
+            return
+        self._fov_last_pose = pose.copy()
+        points, lines = _fov_frustum_lines(pose, self.args.fov_h, self.args.fov_v)
+        if sc.has_geometry(_FOV_GEOM):
+            sc.remove_geometry(_FOV_GEOM)
+        # BUG-009 (see _render_slam_frame's trajectory upload): a LineSet
+        # with < 2 points hard-crashes Filament -- guard it here too, even
+        # though `_fov_frustum_lines` always returns a fixed 5-point/8-line
+        # shape today.
+        if len(points) < 2 or len(lines) == 0:
+            return
+        ls = self._o3d.geometry.LineSet()
+        ls.points = self._o3d.utility.Vector3dVector(points)
+        ls.lines = self._o3d.utility.Vector2iVector(lines)
+        ls.colors = self._o3d.utility.Vector3dVector(
+            np.tile([[0.55, 0.55, 0.6]], (len(lines), 1)))   # faint gray, not attention-grabbing
+        sc.add_geometry(_FOV_GEOM, ls, self.fov_material)
+
+    def _remove_fov_geometry(self):
+        sc = self.scene_widget.scene
+        if sc.has_geometry(_FOV_GEOM):
+            sc.remove_geometry(_FOV_GEOM)
+        self._fov_last_pose = None
 
     def _on_wall_mode(self, text, index):
         """Combobox handler for the "see-through walls" control (owner
@@ -1101,8 +1244,20 @@ class ControlPanel:
         Always removes any stale `_MESH_GEOM`/`_MESH_WALLS_GEOM` first so a
         mode switch (or a wall-only mesh) never leaves a leftover geometry
         from the previous upload.
+
+        Issue #1 (reflectance-in-live): `mesh.vertex.colors` is a real
+        reflectance-derived grayscale image once `TsdfMap.integrate()` was
+        fed a `color` array (Task 13, now wired from the live panel too --
+        see `_render_slam_frame`/`_render_showcase_recording`), or the
+        uniform all-[0,0,0] black a depth-only integration always produces
+        (`mesh_colors_are_meaningful` tells the two apart). When meaningful,
+        that color is used as the base and MODULATED by `shade_brightness`
+        (the scalar Lambert term `shade_colors` itself bakes into its fixed
+        base color) so the surface still reads as 3D; otherwise this falls
+        back to plain `shade_colors`, byte-identical to this method's
+        pre-Task-14 behavior.
         """
-        from .slam.shading import shade_colors, wall_triangle_mask
+        from .slam.shading import mesh_colors_are_meaningful, shade_brightness, shade_colors, wall_triangle_mask
         sc = self.scene_widget.scene
         # mesh may live on a non-CPU compute device (Mapper(device=...)) --
         # Filament (the GUI renderer) only ever renders CPU geometry, and
@@ -1110,12 +1265,18 @@ class ControlPanel:
         # when it's already on CPU.
         legacy_mesh = mesh.cpu().to_legacy()
         legacy_mesh.compute_vertex_normals()
-        # The TSDF mesh's vertex colors are always [0,0,0] (integrate() is
-        # depth-only, see tsdf.py) and this material is defaultUnlit with no
-        # scene lights -- bake a fixed-light shade in so it's not invisible
-        # black (see slam/shading.py's module docstring).
-        legacy_mesh.vertex_colors = self._o3d.utility.Vector3dVector(
-            shade_colors(np.asarray(legacy_mesh.vertex_normals)))
+        normals = np.asarray(legacy_mesh.vertex_normals)
+        raw_colors = np.asarray(legacy_mesh.vertex_colors)
+        if mesh_colors_are_meaningful(raw_colors):
+            brightness = shade_brightness(normals)
+            final_colors = np.clip(raw_colors * brightness[:, None], 0.0, 1.0)
+        else:
+            # The TSDF mesh's vertex colors are always [0,0,0] here (no color
+            # was integrated) and this material is defaultUnlit with no scene
+            # lights -- bake a fixed-light shade in so it's not invisible
+            # black (see slam/shading.py's module docstring).
+            final_colors = shade_colors(normals)
+        legacy_mesh.vertex_colors = self._o3d.utility.Vector3dVector(final_colors)
 
         if sc.has_geometry(_MESH_GEOM):
             sc.remove_geometry(_MESH_GEOM)
@@ -1173,6 +1334,7 @@ class ControlPanel:
                 self._render_frame(self._last_item)
         else:
             self._camera_set = False          # reframe onto SLAM content once it appears
+            self._remove_live_view_geometries()   # owner report: stale cloud must not show through
         self.bus.publish(f"SLAM view -> {'on' if checked else 'off'}")
 
     # ---- Showcase mode (Task 12): record -> live preview -> post-process -> reveal ----
@@ -1198,7 +1360,12 @@ class ControlPanel:
         from this frame's depth + fused quat/pressure, and show its latest
         rough mesh + trajectory. The panel's `Recorder` (started by the Record
         button, see _on_record) is simultaneously writing the raw .bin
-        alongside this -- entirely independent of this preview."""
+        alongside this -- entirely independent of this preview.
+
+        Issue #1: forwards `self._latest_outputs`' reflectance/confidence
+        planes to `submit()` -- see `_render_slam_frame`'s docstring for why
+        that's already enough (no extra transform call needed). Issue #2:
+        updates the faint FoV indicator from this step's pose."""
         from .slam.worker import SlamWorker
         if self._showcase_preview_worker is None:
             h, w = depth.shape
@@ -1211,7 +1378,10 @@ class ControlPanel:
         if quat is not None:
             env = self.sensor_state.latest_env()
             pressure = env.pressure_pa if env is not None else None
-            self._showcase_preview_worker.submit(depth, quat, pressure)
+            outputs = self._latest_outputs or {}
+            self._showcase_preview_worker.submit(depth, quat, pressure,
+                                                 reflectance=outputs.get("reflectance"),
+                                                 confidence=outputs.get("confidence"))
             self._showcase_rec_frames += 1
 
         latest = self._showcase_preview_worker.latest()
@@ -1221,31 +1391,49 @@ class ControlPanel:
             self._show_showcase_mesh(mesh)
             self._show_showcase_trajectory(trajectory)
             self._slam_camera_frame(mesh, trajectory)
+            self._update_fov_geometry(step.pose)
         self._set_showcase_banner(
-            f"● Recording — scanning… ({self._showcase_rec_frames} frames "
-            f"· tracking: {tracking_txt})")
+            f"REC Recording - scanning... ({self._showcase_rec_frames} frames "
+            f"| tracking: {tracking_txt})")
 
     def _render_showcase_processing(self):
         """PROCESSING phase: render whatever the background `PostProcessWorker`
         has published so far -- the scene stays interactive (orbitable) the
         whole time; each newer, more-complete mesh simply swaps in over the
         last one (see _show_showcase_mesh's identity check). On its terminal
-        (done=True) publish, hands off to _enter_showcase_final."""
+        (done=True) publish, hands off to _enter_showcase_final.
+
+        Issue #3: drives the real `gui.ProgressBar` (0..1 = `latest.fraction`)
+        and an ETA computed from elapsed wall time (`_showcase_process_start_ts`,
+        set in `_enter_showcase_processing`) via `_eta_seconds`/`_format_eta`.
+        The bar is only visible while there's an actual in-progress fraction
+        to show (not while still loading the capture, nor once FINAL)."""
         worker = self._showcase_post_worker
         if worker is None:
-            self._set_showcase_banner("Processing… loading capture…")
+            self.progress_bar.visible = False
+            self._set_showcase_banner("Processing... loading capture...")
             return
         latest = worker.latest()
         if latest is None:
-            self._set_showcase_banner("Processing… 0%")
+            self.progress_bar.visible = False
+            self._set_showcase_banner("Processing  0%")
             return
         self._show_showcase_mesh(latest.mesh)
         self._show_showcase_trajectory(latest.trajectory)
         self._slam_camera_frame(latest.mesh, latest.trajectory)
         if latest.done:
+            self.progress_bar.visible = False
             self._enter_showcase_final(latest)
         else:
-            self._set_showcase_banner(f"Processing… {latest.fraction * 100:.0f}%")
+            frac = latest.fraction
+            self.progress_bar.value = frac
+            self.progress_bar.visible = True
+            elapsed = time.monotonic() - (self._showcase_process_start_ts or time.monotonic())
+            eta_str = _format_eta(_eta_seconds(elapsed, frac))
+            text = f"Processing  {frac * 100:.0f}%"
+            if eta_str:
+                text += f"  {eta_str}"
+            self._set_showcase_banner(text)
 
     def _show_showcase_mesh(self, mesh):
         """Upload `mesh` if it's new (identity check -- mesh extraction is
@@ -1334,10 +1522,50 @@ class ControlPanel:
         elapsed = now - (self._showcase_process_start_ts or now)
         stats = progress.stats or {}
         self._set_showcase_banner(
-            f"Scan complete — {stats.get('frames', 0)} frames · "
-            f"drift {stats.get('gap_m', 0.0):.2f} m · {stats.get('verts', 0)} verts · "
+            f"Scan complete - {stats.get('frames', 0)} frames | "
+            f"drift {stats.get('gap_m', 0.0):.2f} m | {stats.get('verts', 0)} verts | "
             f"{elapsed:.1f}s")
         self.bus.publish("showcase: scan complete")
+        self._save_showcase_result(progress.mesh, progress.trajectory)
+
+    def _save_showcase_result(self, mesh, trajectory):
+        """Issue #6: persist the final fused mesh (`.ply`) + trajectory
+        (`.tum`) to `results/showcase_<ts>.{ply,tum}` when a Showcase scan
+        reaches FINAL, so the owner's scans aren't lost. Runs the actual
+        writes on a short-lived daemon thread -- a large mesh (~100 MB) can
+        take a moment and this must not stall the GUI tick -- and logs the
+        saved paths via `self.bus` (drained onto the log pane on the UI
+        tick, so the bus is the safe cross-thread channel). `mesh.cpu()` is
+        taken on the GUI thread up front (device-ready: a no-op on CPU) so
+        the worker thread only touches host tensors.
+
+        No-op on an empty mesh (a degenerate/failed scan -- nothing worth
+        writing). Never raises into the caller; any write failure is logged."""
+        if mesh is None or len(mesh.vertex.positions) == 0:
+            self.bus.publish("showcase: nothing to save (empty mesh)")
+            return
+        o3d = self._o3d
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        mesh_path, traj_path = _showcase_result_paths(ts)
+        mesh_cpu = mesh.cpu()   # move home on the GUI thread; worker sees host tensors only
+        traj = list(trajectory or [])
+
+        def _save():
+            from .slam import metrics as slam_metrics
+            try:
+                Path(_RESULTS_DIR).mkdir(parents=True, exist_ok=True)
+                o3d.t.io.write_triangle_mesh(mesh_path, mesh_cpu)
+                # TUM needs a timestamp per pose; we don't carry per-pose wall
+                # times to FINAL, so use a monotone synthetic index -- fine for
+                # a relative trajectory dump (the poses are what matter).
+                timestamps = [float(i) for i in range(len(traj))]
+                slam_metrics.write_tum(traj_path, timestamps, traj)
+                self.bus.publish(f"showcase: saved {mesh_path} + {traj_path}")
+            except Exception as exc:
+                self.bus.publish(f"showcase: save failed: {exc!r}")
+
+        self._showcase_save_thread = threading.Thread(target=_save, daemon=True)
+        self._showcase_save_thread.start()
 
     def _advance_showcase_orbit(self):
         """FINAL phase, called every rendered frame: advance the camera-ease
@@ -1392,8 +1620,9 @@ class ControlPanel:
         self._showcase_orbit_enabled = False
         self._showcase_ease = None
         self._camera_set = False
-        self._remove_slam_geometries()
-        self._set_showcase_banner("● Recording — scanning…")
+        self._remove_slam_geometries()   # also clears any stale FoV indicator (Issue #2)
+        self.progress_bar.visible = False
+        self._set_showcase_banner("REC Recording - scanning...")
 
     def _enter_showcase_processing(self, path):
         """Stop button pressed while RECORDING: tear down the live preview
@@ -1408,7 +1637,9 @@ class ControlPanel:
             self._showcase_preview_worker = None
         self._showcase_post_worker = None
         self._showcase_process_start_ts = time.monotonic()
-        self._set_showcase_banner("Processing… loading capture…")
+        self._remove_fov_geometry()   # FoV indicator is RECORDING/SLAM-only (Issue #2)
+        self.progress_bar.visible = False
+        self._set_showcase_banner("Processing... loading capture...")
         if not path:
             self.bus.publish("showcase: no capture path to process")
             return
@@ -1498,7 +1729,9 @@ class ControlPanel:
             self._showcase_ease = None
             self._camera_set = False
             self._showcase_last_mesh_obj = None
+            self._remove_live_view_geometries()   # owner report: stale cloud must not show through
             self.showcase_banner.visible = True
+            self.progress_bar.visible = False
             self._set_showcase_banner("Press Record to scan the room.")
         else:
             self._join_showcase_workers()
@@ -1508,10 +1741,27 @@ class ControlPanel:
             self._remove_slam_geometries()
             self._showcase_last_mesh_obj = None
             self.showcase_banner.visible = False
+            self.progress_bar.visible = False
             self._camera_set = False
             if self._last_item is not None:   # re-render the last frame as a normal cloud
                 self._render_frame(self._last_item)
         self.bus.publish(f"Showcase mode -> {'on' if checked else 'off'}")
+
+    def _remove_live_view_geometries(self):
+        """Remove the classic point-cloud/surface-mesh view's geometries from
+        the scene -- called when ENTERING SLAM/Showcase mode (owner report:
+        the previous turbo-colored point cloud + point grid otherwise
+        persisted behind the SLAM/Showcase mesh). Leaves the SLAM/
+        Showcase-only geometries (`_MESH_GEOM`/`_MESH_WALLS_GEOM`/
+        `_SLAM_TRAJ_GEOM`/`_FOV_GEOM`) alone -- those are managed by
+        `_upload_slam_mesh`/`_remove_slam_geometries` and populate on the
+        very next SLAM/Showcase frame. The IMU gizmo is left alone
+        deliberately: it shows the live camera orientation regardless of
+        view mode, not a "previous view" artifact."""
+        sc = self.scene_widget.scene
+        if sc.has_geometry(_GEOM):
+            sc.remove_geometry(_GEOM)
+        self._remove_mesh_geometry()
 
     def _show_geometries(self, all_pts):
         """Push the dot cloud to the scene and (re)frame the camera from the
@@ -1895,8 +2145,9 @@ class ControlPanel:
             self.showcase_phase = next_phase(self.showcase_phase, cleared=True)
             self._showcase_orbit_enabled = False
             self._showcase_ease = None
-            self._remove_slam_geometries()
+            self._remove_slam_geometries()   # also clears the FoV indicator (Issue #2)
             self._showcase_last_mesh_obj = None
+            self.progress_bar.visible = False
             self._set_showcase_banner("Press Record to scan the room.")
             self.bus.publish("showcase cleared -> idle")
         self.bus.publish("scan cleared")

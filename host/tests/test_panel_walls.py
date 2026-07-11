@@ -52,6 +52,13 @@ class _FakeWallPanel:
         self.bus = LogBus()
         self._slam_last_mesh_obj = "sentinel"
         self._showcase_last_mesh_obj = "sentinel"
+        # `_remove_slam_geometries` now also tears down the FoV indicator
+        # (Task 14, Issue #2) -- give the stand-in what that real method
+        # touches so it runs unmodified through this fake scene.
+        self._fov_last_pose = None
+
+    def _remove_fov_geometry(self):
+        panel_mod.ControlPanel._remove_fov_geometry(self)
 
 
 def _corner_tensor_mesh():
