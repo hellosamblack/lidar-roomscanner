@@ -164,18 +164,90 @@ check; verifying vertex/triangle counts loaded cleanly (via
 `o3d.t.io.read_triangle_mesh`) was used as the automated non-degeneracy
 check instead.
 
+## Post-optimization (Task 9.5) — accuracy first
+
+**Owner reframing (2026-07-11):** the *final offline reconstruction's accuracy*
+is what matters; a lengthy post-processing pass is acceptable; the < 35 ms/frame
+figure is only a **live-preview target** (the panel worker drops frames under
+load), not a hard gate. Three levers were applied against that objective.
+
+**Lever 1 — bound raycast to the view frustum.** `TsdfMap.raycast` previously
+scanned *all active blocks*, so its cost grew with total map size (the p99/max
+tail, and the reason `translation` looked slower than `6dof`: it tracked better
+→ integrated more → bigger map). It now raycasts only the current-view frustum
+blocks (Open3D's `t_reconstruction_system/ray_casting.py` pattern; `Mapper`
+passes the current depth as the hint, falling back to all-active blocks when no
+hint is given so `test_slam_tsdf.py` is unchanged). **Raycast median 36 ms → 19 ms**
+(profiled over 1500 frames); the camera-local vertex convention and `pose =
+T_pred @ res.pose` composition are untouched.
+
+**Lever 2 — genuine 3-DoF translation solve.** `register(mode="translation")`
+previously ran the full 6-DoF point-to-plane ICP and *discarded* the rotation —
+paying full cost and risking singular 6×6 solves, and reporting gate stats from
+a fit it partly threw away. It now runs a true iterated translation-only
+point-to-plane solve (rotation held at the prior; 3×3 normal equations with a
+condition-number guard that flags rank-deficient planar geometry as a failed
+registration instead of crashing). **This cut tracking-loss from 31 % to 0/3184**
+— every frame now integrates — and the reported fitness/RMSE now reflect the
+actual translation alignment.
+
+**Lever 3 — gate retuning: not needed.** With Lever 2 at 0 tracking-loss, the
+`min_fitness`/`max_rmse` gates reject nothing; no retuning was warranted.
+
+### Parameter sweeps (accuracy; runtime unconstrained)
+
+`max_iter` (translation mode, voxel 0.01, full capture):
+
+| max_iter | start_end_gap_m | path_m | max_step_m | lost | median_ms |
+|---|---|---|---|---|---|
+| **6** | **1.095** | 67.85 | 0.100 | 0 | 32–34 |
+| 12 | 1.401 | 70.81 | 0.100 | 0 | 35 |
+| 20 | 1.872 | 74.46 | 0.177 | 1 | 41 |
+| 30 | 2.072 | 75.04 | 0.212 | 0 | 44 |
+
+Drift is **monotonically worse with more iterations** — over-iterating the
+translation-only solve overfits each frame's noisy point-to-plane residual on
+54×42 ToF data and accumulates drift. `max_iter=6` is the drift minimum (and,
+incidentally, near the preview budget — but accuracy is why it's the default).
+
+`voxel_size` (max_iter 6): `0.01 → gap 1.095`, `0.0075 → 1.053`, `0.005 → 2.052`.
+The 0.0075 edge over 0.01 (~4 cm on a 68 m path) is **within the ~15–20 %
+run-to-run nondeterminism**, while 0.005 fragments the map on ToF noise and
+triples runtime. **voxel=0.01 retained** (statistically equal on accuracy,
+faster and lighter).
+
+### Final result
+
+| mode | n | path_m | gap_m | max_step_m | lost | median_ms | p90 | p99 | over-35 ms |
+|---|---|---|---|---|---|---|---|---|---|
+| **translation (default)** | 3184 | 67.85 | **1.095** | 0.100 | **0 (0 %)** | 32.4 | 43.0 | 53.9 | 37.6 % |
+| 6dof | 3184 | 101.22 | 28.05 | 0.319 | 999 (31 %) | 50.7 | 67.9 | 85.7 | 74.2 % |
+
+`translation` mode: **0 tracking-loss**, a 1.095 m loop gap over a 67.85 m path
+(~1.6 % drift for prior-free frame-to-model odometry with **no loop closure**),
+and a smooth trajectory (max per-frame step 0.100 m). As a bonus it now also
+sits at/under the 35 ms preview target at the median. `6dof` diverges badly on
+the thin 54×42 frames (28 m gap, 31 % lost) — `translation` remains the default
+by a wide margin. Fused mesh: `slam_map.ply` ≈ 125 MB / ~1.6 M vertices,
+non-degenerate.
+
+**vs. the baseline above:** tracking-loss **31 % → 0 %**; max per-frame step
+**0.769 m → 0.100 m**; drift essentially unchanged (1.077 → 1.095 m, within run
+noise) but now produced from a gap-free trajectory that integrates *every*
+frame rather than 69 % of them.
+
 ## Summary
 
 - CLI + tests: `roomscan-slam` implemented and TDD'd (RED → GREEN), full
-  host suite green (303 tests).
-- Gate: **FAILS** for both modes (translation 69.8 ms median, 6dof 36.7 ms
-  median vs. the 35 ms budget) — flagged for the controller, not fudged.
-- Chosen default: `translation` (already `SlamConfig`'s built-in default;
-  unchanged) — lower drift, far fewer tracking-lost frames, despite being
-  the slower mode.
-- Tracking-lost (31–75% depending on mode/run) is real and non-trivial but
-  not "every frame lost"; the quat/pressure pairing lag was directly ruled
-  out as the cause via a controlled 800-frame A/B comparison.
-- KISS-ICP installed and was wired into `compare_kiss` for real (not left
-  as a graceful-None stub); benchmark result is a plausible independent
-  cross-check.
+  host suite green (307 tests after Task 9.5).
+- **Accuracy (the goal): translation mode reconstructs the room with 0/3184
+  tracking-loss, 1.095 m loop drift over 67.85 m, and a smooth trajectory** —
+  after Task 9.5's frustum-bounded raycast + genuine 3-DoF translation solve.
+- Live-preview timing (not a gate): translation median 32.4 ms/frame; the panel
+  worker drops frames under load, so the preview stays responsive regardless.
+- Chosen default: `translation` (already `SlamConfig`'s built-in default) — it
+  now wins on every axis (0 loss, low drift, smooth) and `6dof` diverges on
+  these thin ToF frames.
+- The pre-optimization gate-failure analysis, the ruled-out quat/pressure
+  pairing lag, and the KISS-ICP cross-check (`path=47.6 m`) are retained above
+  for the record.
