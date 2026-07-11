@@ -51,6 +51,24 @@ major effort, before the next phase's plan executes.
   and a corrupted/malformed-input case exercised on hardware, not just a single well-formed sample
   (caught in Phase 3 Task 2's parse-while-draining rework).
 
+## Executed 2026-07-10 (post-Phase-4 follow-up / pre-Phase-6 retro)
+
+Covers the merges that landed *after* the Phase 4 retro below: PR #7 (camera-panel world accumulation),
+the IMU-axis-mapping fixes (`14f6a4b`/`cb2b01c`/`55108ec`/`3c6c93d`), BUG-001/002/004/007/008, on-rig
+mag calibration, and PR #8 (Phase 6 SLAM decision doc). This work was host-side viz/bug fixes on
+worktrees, not an SDD phase — so the extraction is a **reference doc**, not tooling.
+
+- **`docs/coordinate-frames.md` created** — THE extraction. Frame conventions (ToF/CV, SFLP body, SFLP
+  Z-up world, Open3D Y-up CV world), the two structural transforms (`T_CV_TO_BODY`, `T_WORLD_TO_CV`), the
+  shared body→world sandwich `T_WORLD_TO_CV @ R @ T_CV_TO_BODY` (reused by `gizmo_pose` and panel
+  accumulation), the mag `AXIS_CONVENTION`, and gravity/down handling were scattered across `sensors.py`
+  + `panel.py` and re-derived wrong repeatedly (BUG-004 yaw-as-roll, the IMU-axis commits). Consolidated
+  with `file:line` citations. Phase 6 SLAM operates entirely in these frames — this directly makes the
+  next milestone easier (the retro rule's whole point). Wired a pointer into ROADMAP.md Phase 6.
+- **Deliberately skipped**: no new scripts (the bug fixes were one-off host edits, no repeated HW ritual);
+  no `protocol-change` edits (no wire change since streams 9/10); BUG-005/006 remain open/anomaly as
+  tracked in `BUGS.md`, not retro material.
+
 ## Executed 2026-07-10 (Phase 4 / IKS4A1 retro)
 
 Distinct from earlier retros: most friction was converted **during** the push, not after it — the

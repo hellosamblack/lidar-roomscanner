@@ -593,6 +593,10 @@ SFLP quaternion as rotation prior → 3-DoF constrained **point-to-plane ICP, fr
 TSDF raycast (Open3D tensor pipeline: `t.pipelines.registration` + VoxelBlockGrid), IR as intensity
 channel, barometer as soft 1-DoF Z constraint.
 
+**Read `docs/coordinate-frames.md` first** — every pose/prior/constraint here lives in one of the four
+documented frames; the world frame, the body→world sandwich (`T_WORLD_TO_CV @ R @ T_CV_TO_BODY`), and the
+baro-Z-is-Open3D-−Y mapping are all specified there.
+
 - **Registration correction (2026-07-10):** the previously-specced "Open3D Tensor G-ICP" **does not
   exist** — verified against installed 0.19.0: `t.pipelines.registration` offers only point-to-point,
   point-to-plane, colored, and Doppler ICP; Generalized ICP lives only in the legacy CPU pipeline.
