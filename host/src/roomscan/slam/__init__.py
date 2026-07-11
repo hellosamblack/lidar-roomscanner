@@ -1,2 +1,5 @@
 """Real-time SLAM subpackage (Phase 6). See docs/coordinate-frames.md and
 docs/superpowers/specs/2026-07-10-phase6-slam-design.md."""
+from .showcase import PostProcessWorker, Progress, ShowcasePhase, next_phase
+
+__all__ = ["PostProcessWorker", "Progress", "ShowcasePhase", "next_phase"]
