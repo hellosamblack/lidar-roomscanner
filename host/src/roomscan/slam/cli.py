@@ -66,6 +66,10 @@ def _run(frames, width, height, cfg, mode, device=None):
                     voxel_size=cfg.voxel_size, baro_weight=cfg.baro_weight,
                     max_dist=cfg.max_dist, min_fitness=cfg.min_fitness, max_rmse=cfg.max_rmse,
                     min_confidence=cfg.min_confidence, weight_threshold=cfg.weight_threshold,
+                    stationary_hold=cfg.stationary_hold, stationary_window=cfg.stationary_window,
+                    stationary_coherence=cfg.stationary_coherence,
+                    stationary_step_ceiling=cfg.stationary_step_ceiling,
+                    stationary_rot_ceiling=cfg.stationary_rot_ceiling,
                     device=device if device is not None else cfg.device)
     timings, ts = [], []
     for depth, reflectance, confidence, quat, pa, t_s in frames:

@@ -145,6 +145,42 @@ def test_pose_translation_tracks_a_synthetic_shift():
     assert abs(step.pose[2, 3] - 0.05) < 0.03
 
 
+def test_stationary_hold_dejitters_report_without_touching_map():
+    """Stationarity hold (owner: still device -> still model). Feed a noisy but
+    stationary sensor (constant quat, jittery depth) to two mappers -- one with
+    the hold, one without. The hold must:
+      * de-jitter the REPORTED trajectory (some frames frozen -> held_count>0,
+        and late-frame reported steps smaller than gate-off), while
+      * leaving the map + tracking prior BYTE-IDENTICAL (accuracy untouched):
+        the internal _t_prev and the extracted mesh vertex count match exactly.
+    """
+    q = (0.70710678, 0.0, 0.70710678, 0.0)
+    rng = np.random.default_rng(7)
+    base = _textured_wall(1.20)
+    # Pre-generate identical noisy frames so both mappers see the same input.
+    frames = [(base + rng.normal(0, 3.0, base.shape)).astype(np.float32)  # ~3 mm depth noise
+              for _ in range(30)]
+
+    m_off = Mapper(W, H, voxel_size=0.02, icp_mode="translation", stationary_hold=False)
+    m_on = Mapper(W, H, voxel_size=0.02, icp_mode="translation", stationary_hold=True)
+    off_pos, on_pos = [], []
+    for f in frames:
+        off_pos.append(m_off.step(f, q, 101325.0).pose[:3, 3].copy())
+        on_pos.append(m_on.step(f, q, 101325.0).pose[:3, 3].copy())
+
+    # Map + tracking prior: identical inputs -> identical true ICP pose, so the
+    # internal translation baseline and the extracted mesh must match exactly.
+    assert np.allclose(m_off._t_prev, m_on._t_prev, atol=0.0)
+    assert len(m_off.mesh().vertex.positions) == len(m_on.mesh().vertex.positions)
+
+    # The hold engaged and calmed the reported trajectory.
+    assert m_on.held_count > 0
+    off_pos, on_pos = np.array(off_pos), np.array(on_pos)
+    off_step = np.linalg.norm(np.diff(off_pos[10:], axis=0), axis=1).mean()
+    on_step = np.linalg.norm(np.diff(on_pos[10:], axis=0), axis=1).mean()
+    assert on_step < off_step
+
+
 def test_mapper_accepts_explicit_cpu_device_string():
     # Device-configurability (Phase 6 follow-up): passing device="CPU:0"
     # explicitly must behave identically to the omitted-argument default --

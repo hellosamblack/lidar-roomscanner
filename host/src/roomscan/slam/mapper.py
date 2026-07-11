@@ -21,6 +21,7 @@ from ..deproject import Deprojector
 from .cloud import source_cloud
 from .frames import baro_height_m, predict_pose, world_up
 from .intrinsics import pinhole
+from .motion import StationarityGate
 from .odometry import register
 from .tsdf import TsdfMap
 
@@ -45,6 +46,11 @@ class Mapper:
                  min_confidence: float | None = _DEFAULT_MIN_CONFIDENCE,
                  weight_threshold: float = 3.0,
                  device: str | o3d.core.Device = "CPU:0",
+                 stationary_hold: bool = True,
+                 stationary_window: int = 10,
+                 stationary_coherence: float = 0.5,
+                 stationary_step_ceiling: float = 0.03,
+                 stationary_rot_ceiling: float = 0.3,
                  clock=time.perf_counter):
         self.width, self.height = width, height
         self.icp_mode = icp_mode
@@ -57,6 +63,20 @@ class Mapper:
                              device=self._device)
         self._gate = dict(max_dist=max_dist, min_fitness=min_fitness, max_rmse=max_rmse)
         self._clock = clock
+        # Stationarity hold (owner: "device is stationary, tweak it until this
+        # is true in our model"): the ICP translation noise random-walks the
+        # position when still. `StationarityGate` holds the pose during
+        # incoherent jitter while passing coherent motion; None disables it,
+        # restoring byte-identical pre-hold behavior. See slam/motion.py.
+        self._stationary_gate = (
+            StationarityGate(window=stationary_window,
+                             coherence_thresh=stationary_coherence,
+                             step_ceiling_m=stationary_step_ceiling,
+                             rot_ceiling_deg=stationary_rot_ceiling)
+            if stationary_hold else None)
+        self.held_count = 0         # frames whose reported translation was frozen
+        self._display_pos = None    # de-jittered reported position (hold target)
+        self._quat_prev = None      # for the stationarity gate's rotation signal
         self._t_prev = np.zeros(3)
         self._ref_pa: float | None = None
         self.trajectory: list[np.ndarray] = []
@@ -111,7 +131,18 @@ class Mapper:
         n_valid = int(valid.sum())
         T_pred = predict_pose(quat, self._t_prev)
 
+        # Per-frame rotation magnitude (deg) from the SFLP prior, for the
+        # stationarity gate: separates a still tripod (~0) from an actively
+        # aimed handheld scan. angle = 2*acos(|<q_prev, q>|).
+        rot_delta_deg = 0.0
+        if self._quat_prev is not None and quat is not None:
+            dot = abs(float(np.dot(self._quat_prev, quat)))
+            rot_delta_deg = float(np.degrees(2.0 * np.arccos(min(1.0, dot))))
+        if quat is not None:
+            self._quat_prev = np.asarray(quat, dtype=np.float64)
+
         lost = False
+        held = False
         fitness = rmse = 0.0
 
         if n_valid < _MIN_VALID_POINTS:
@@ -152,20 +183,49 @@ class Mapper:
                 fitness, rmse = res.fitness, res.rmse
                 if res.ok:
                     pose = self._apply_baro_z(T_pred @ res.pose, pressure_pa)
+                    # Stationarity gate (owner: "device is stationary -> model
+                    # should be too"). Feed the RAW ICP-estimated increment
+                    # (never a held value, or the gate could never see motion
+                    # resume). A True verdict de-jitters the REPORTED pose only
+                    # (see report_pose below): the map integration and tracking
+                    # prior always use the true ICP `pose`, so a false hold can
+                    # never corrupt the reconstruction -- final-map accuracy is
+                    # identical to gate-off. The hold just stops the previewed
+                    # camera/trajectory from random-walking while the sensor
+                    # sits still.
+                    held = (self._stationary_gate is not None and
+                            self._stationary_gate.update(pose[:3, 3] - self._t_prev,
+                                                         rot_delta_deg))
+                    if held:
+                        self.held_count += 1
                 else:
                     lost = True
                     pose = T_pred
 
         if not lost:
+            # Map + tracking prior use the TRUE ICP pose -- accuracy is
+            # unaffected by the stationarity gate (see the `held` comment).
             self._tsdf.integrate(depth_mm, self._intr, np.linalg.inv(pose), color=color)
             self._t_prev = pose[:3, 3].copy()
             self._bootstrapped = True
         else:
             self.tracking_lost_count += 1
 
-        self.trajectory.append(pose.copy())
+        # Reported/preview pose: during a stationary hold, freeze the reported
+        # translation at the last non-held position so the previewed camera and
+        # trajectory don't jitter while the sensor sits still. Rotation (the
+        # already-stable SFLP prior) always passes through, and the map/tracking
+        # above are untouched, so this is a display-only de-jitter.
+        report_pose = pose
+        if held and self._display_pos is not None:
+            report_pose = pose.copy()
+            report_pose[:3, 3] = self._display_pos
+        else:
+            self._display_pos = pose[:3, 3].copy()
+
+        self.trajectory.append(report_pose.copy())
         slam_ms = (self._clock() - t0) * 1000.0
-        return FrameStep(pose=pose, fitness=fitness, rmse=rmse,
+        return FrameStep(pose=report_pose, fitness=fitness, rmse=rmse,
                          tracking_lost=lost, slam_ms=slam_ms)
 
     def mesh(self):

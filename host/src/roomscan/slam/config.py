@@ -53,6 +53,14 @@ class SlamConfig:
     # captures/phase6_motion_ref.bin -- see task-quality-report.md.
     min_confidence: float = 20.0
     weight_threshold: float = 3.0
+    # Stationarity hold: freeze the pose when the ICP translation is incoherent
+    # jitter (device effectively still) so the estimate doesn't random-walk on
+    # a stationary sensor. Coherent motion passes untouched. See slam/motion.py.
+    stationary_hold: bool = True
+    stationary_window: int = 10
+    stationary_coherence: float = 0.5
+    stationary_step_ceiling: float = 0.03
+    stationary_rot_ceiling: float = 0.3
     # Compute device for the Open3D tensor pipeline (TsdfMap/pinhole/
     # source_cloud/register). "CPU:0" today -- the installed Open3D 0.19
     # build here has no CUDA support -- but "CUDA:0" (or any other
