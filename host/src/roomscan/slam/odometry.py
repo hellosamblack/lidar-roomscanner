@@ -82,7 +82,16 @@ def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: 
 def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointCloud,
              init_pose: np.ndarray, mode: str = "translation", max_dist: float = 0.05,
              min_fitness: float = 0.3, max_rmse: float = 0.05,
-             max_iter: int = 12) -> RegistrationResult:
+             max_iter: int = 6) -> RegistrationResult:
+    # max_iter=6 (Task 9.5): chosen for ACCURACY, not speed. Swept against the
+    # real capture (docs/phase6-slam-validation.md "Post-optimization"): trajectory
+    # drift is MONOTONICALLY WORSE with more iterations --
+    #   iter=6 gap=1.095 m,  iter=12 gap=1.401,  iter=20 gap=1.872,  iter=30 gap=2.072
+    # (all with 0/3184 tracking-lost). Over-iterating the translation-only solve
+    # overfits each frame's noisy point-to-plane residual on the 54x42 ToF data and
+    # accumulates drift, so fewer iterations track the true motion better. iter=6 is
+    # the drift minimum; it also happens to sit near the ~35 ms/frame live-preview
+    # target, but accuracy -- not that budget -- is why it's the default.
     if mode not in ("translation", "6dof"):
         raise ValueError(f"unknown mode {mode!r}")
     init_pose = np.asarray(init_pose, dtype=np.float64)
