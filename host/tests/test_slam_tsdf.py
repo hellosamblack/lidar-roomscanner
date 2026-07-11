@@ -31,3 +31,43 @@ def test_integrate_then_raycast_recovers_wall():
 
 def m_voxel_tol():
     return 0.05  # within a few voxels of the true plane
+
+def test_raycast_with_depth_hint_matches_full_raycast():
+    # Task 9.5 Lever 1: raycast() bounded to the current-view frustum (via a
+    # depth_hint) must return geometry equivalent to the original
+    # all-active-blocks path, not merely "some points".
+    m = TsdfMap(voxel_size=0.02, depth_max=5.0)
+    K = pinhole(W, H)
+    depth = _wall_depth(1.0)
+    m.integrate(depth, K, np.eye(4))
+    full = m.raycast(K, np.eye(4), W, H)
+    bounded = m.raycast(K, np.eye(4), W, H, depth_hint=depth)
+    assert full is not None and bounded is not None
+    full_pts = full.point.positions.numpy()
+    bounded_pts = bounded.point.positions.numpy()
+    # same wall recovered from the bounded query
+    assert abs(np.median(bounded_pts[:, 2]) - np.median(full_pts[:, 2])) < 1e-6
+    assert abs(len(bounded_pts) - len(full_pts)) <= 2   # frustum == whole map here
+
+def test_raycast_with_explicit_block_coords():
+    # frustum_block_coords() + raycast(block_coords=...) is the lower-level
+    # entry point Mapper uses when it wants to reuse computed coords.
+    m = TsdfMap(voxel_size=0.02, depth_max=5.0)
+    K = pinhole(W, H)
+    depth = _wall_depth(1.0)
+    m.integrate(depth, K, np.eye(4))
+    coords = m.frustum_block_coords(depth, K, np.eye(4))
+    assert coords.shape[0] > 0
+    model = m.raycast(K, np.eye(4), W, H, block_coords=coords)
+    assert model is not None
+    pts = model.point.positions.numpy()
+    assert len(pts) > 500
+    assert abs(np.median(pts[:, 2]) - 1.0) < m_voxel_tol()
+
+def test_raycast_empty_map_with_depth_hint_returns_none():
+    # The empty-map guard must fire before any block-coord computation, even
+    # when a depth_hint is supplied (Mapper may pass one before any
+    # integration has happened, e.g. after a lost bootstrap frame).
+    m = TsdfMap(voxel_size=0.02)
+    K = pinhole(W, H)
+    assert m.raycast(K, np.eye(4), W, H, depth_hint=_wall_depth(1.0)) is None

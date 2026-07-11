@@ -79,8 +79,17 @@ class Mapper:
             pose = T_pred                                   # bootstrap: accept prior
         else:
             src = source_cloud(pts, valid)
+            # Bound raycast to the current view frustum (Task 9.5 Lever 1):
+            # the current depth frame at the predicted pose is our best
+            # estimate of which voxel blocks the live camera can see, so pass
+            # it as a depth hint instead of raycasting every active block
+            # ever integrated (whose cost scales with total map size).
+            # TsdfMap.raycast checks its own empty-map guard before deriving
+            # frustum coords from the hint, so this is safe even if the map
+            # has never been integrated into yet (e.g. an earlier bootstrap
+            # frame was lost).
             model = self._tsdf.raycast(self._intr, np.linalg.inv(T_pred),
-                                       self.width, self.height)
+                                       self.width, self.height, depth_hint=depth_mm)
             if model is None or model.point.positions.numpy().shape[0] < _MIN_VALID_POINTS:
                 lost = True
                 pose = T_pred
