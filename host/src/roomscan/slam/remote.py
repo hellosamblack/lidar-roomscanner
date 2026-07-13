@@ -4,6 +4,7 @@ Same interface as slam.worker.SlamWorker, so panel.py is agnostic to which one
 it holds. On any socket failure the caller falls back to the local worker."""
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
@@ -20,11 +21,16 @@ class RemoteSlamWorker:
     def __init__(self, width, height, addr="127.0.0.1:5555", mesh_every=5,
                  connect_timeout=1.0, **mapper_kwargs):
         self._w, self._h = width, height
-        host, _, port = addr.partition(":")
-        self._host, self._port = host, int(port)
+        self._addr = addr
         self._connect_timeout = connect_timeout
         self._sock = None
         self._fid = 0
+        # Forward the client's mapper params to the service so the remote
+        # Mapper is built with the same effective config (except `device`,
+        # which the container owns). Sent on every submitted frame; the
+        # server only needs to read it once, on lazy worker creation.
+        self._cfg_json = json.dumps(
+            {k: v for k, v in mapper_kwargs.items() if k != "device"})
 
         self._in_lock = threading.Lock()
         self._in_slot = None
@@ -40,11 +46,13 @@ class RemoteSlamWorker:
 
     def connect(self) -> bool:
         try:
+            host, _, port = self._addr.partition(":")
+            port = int(port)
             self._sock = socket.create_connection(
-                (self._host, self._port), timeout=self._connect_timeout)
+                (host, port), timeout=self._connect_timeout)
             self._sock.settimeout(None)
             return True
-        except OSError:
+        except (OSError, ValueError):
             self._sock = None
             return False
 
@@ -54,7 +62,8 @@ class RemoteSlamWorker:
             msg = {"fid": self._fid,
                    "depth": np.asarray(depth, np.float32),
                    "quat": np.asarray(quat, np.float32),
-                   "pressure": None if pressure is None else float(pressure)}
+                   "pressure": None if pressure is None else float(pressure),
+                   "cfg": self._cfg_json}
             if reflectance is not None:
                 msg["reflectance"] = np.asarray(reflectance, np.float32)
             if confidence is not None:
@@ -73,7 +82,7 @@ class RemoteSlamWorker:
         if self._threads:
             return
         if self._sock is None and not self.connect():
-            raise ConnectionError(f"slam-service unreachable at {self._host}:{self._port}")
+            raise ConnectionError(f"slam-service unreachable at {self._addr}")
         self._stop_evt.clear()
         self._threads = [threading.Thread(target=self._send_loop, daemon=True),
                          threading.Thread(target=self._recv_loop, daemon=True)]

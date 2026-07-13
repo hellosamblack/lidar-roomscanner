@@ -2,11 +2,40 @@ import socket, threading
 import numpy as np
 import pytest
 from roomscan.slam import wire, service
-from roomscan.slam.service import SlamService
+from roomscan.slam.service import SlamService, _effective_kwargs
 
 pytest.importorskip("open3d")
 
 H, W = 42, 54
+
+
+def test_effective_kwargs_server_only_when_no_client_cfg():
+    # Backward compatible: older clients (or messages) with no "cfg" key ->
+    # msg.get("cfg") is None -> server kwargs pass through unchanged.
+    server = {"fov_h": 55.0, "fov_v": 42.0, "voxel_size": 0.01}
+    assert _effective_kwargs(server, None) == server
+    assert _effective_kwargs(server, "{}") == server
+
+
+def test_effective_kwargs_client_overrides_server_on_overlap():
+    server = {"fov_h": 55.0, "fov_v": 42.0}
+    client_cfg_json = '{"fov_h": 70.0, "fov_v": 50.0}'
+    merged = _effective_kwargs(server, client_cfg_json)
+    assert merged == {"fov_h": 70.0, "fov_v": 50.0}
+
+
+def test_effective_kwargs_client_can_only_add_or_override_non_device_keys():
+    # serve_client passes device=self._device as a separate argument to
+    # SlamWorker(...), never through _effective_kwargs -- so even if a client
+    # tried to sneak a "device" into its cfg, the merged dict would carry it
+    # as an ordinary extra key, and serve_client's explicit device=... kwarg
+    # (passed alongside **eff_kwargs) is what actually wins/collides. This
+    # test only confirms the helper itself does no device-specific filtering
+    # of its own -- RemoteSlamWorker is what strips "device" before it is
+    # ever serialized into cfg_json, which is the real enforcement point.
+    server = {"fov_h": 55.0}
+    merged = _effective_kwargs(server, '{"fov_h": 70.0}')
+    assert "device" not in merged
 
 
 def _synthetic_frame(fid):

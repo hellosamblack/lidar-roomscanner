@@ -5,6 +5,7 @@ docs/superpowers/specs/2026-07-13-slam-gpu-container-service-design.md."""
 from __future__ import annotations
 
 import argparse
+import json
 import socket
 import sys
 
@@ -15,11 +16,23 @@ from .config import SlamConfig
 from .worker import SlamWorker
 
 
+def _effective_kwargs(server_kwargs: dict, client_cfg_json: str | None) -> dict:
+    """Merge the service's own mapper kwargs with the client's requested cfg,
+    client overriding server on overlap. Robust to a missing/None/"{}" cfg
+    (older clients, or a client with nothing to override) -- server kwargs
+    pass through unchanged. `device` is never part of either dict here: the
+    client strips it before sending, and callers keep it as a separate,
+    server-owned argument to SlamWorker(...)."""
+    client_cfg = json.loads(client_cfg_json or "{}")
+    return {**server_kwargs, **client_cfg}
+
+
 class SlamService:
     def __init__(self, device="CUDA:0", mesh_every=5, **mapper_kwargs):
         self._device = device
         self._mesh_every = mesh_every
         self._mapper_kwargs = mapper_kwargs
+        self._last_effective_kwargs = None
 
     def serve_client(self, conn) -> None:
         worker = None
@@ -32,8 +45,10 @@ class SlamService:
             depth = np.asarray(msg["depth"], np.float32)
             if worker is None:
                 h, w = depth.shape
+                eff_kwargs = _effective_kwargs(self._mapper_kwargs, msg.get("cfg"))
+                self._last_effective_kwargs = eff_kwargs
                 worker = SlamWorker(w, h, mesh_every=self._mesh_every,
-                                    device=self._device, **self._mapper_kwargs)
+                                    device=self._device, **eff_kwargs)
             quat = np.asarray(msg["quat"], np.float32)
             pressure = msg.get("pressure")
             refl = msg.get("reflectance")

@@ -23,11 +23,11 @@ def _serve_on_ephemeral(device="CPU:0"):
         finally:
             conn.close()
     th = threading.Thread(target=loop, daemon=True); th.start()
-    return port, lsock, th
+    return port, lsock, th, srv
 
 
 def test_remote_worker_publishes_results():
-    port, lsock, th = _serve_on_ephemeral()
+    port, lsock, th, srv = _serve_on_ephemeral()
     rw = RemoteSlamWorker(W, H, addr=f"127.0.0.1:{port}", fov_h=55.0, fov_v=42.0)
     assert rw.connect() is True
     rw.start()
@@ -54,10 +54,46 @@ def test_connect_returns_false_when_no_server():
     assert rw.latest() is None       # never raises
 
 
+def test_connect_returns_false_for_malformed_addr_missing_port():
+    # Finding 2: a malformed remote_addr (no ":port") must not raise out of
+    # __init__ or connect() -- address parsing is deferred to connect(), and
+    # a parse failure there must behave like any other unreachable service.
+    rw = RemoteSlamWorker(W, H, addr="127.0.0.1")   # no ":port" at all
+    assert rw.connect() is False
+    assert rw.latest() is None       # never raises
+
+
+def test_remote_worker_forwards_client_mapper_cfg_to_service():
+    # Finding 1: the client's mapper kwargs (fov_h/fov_v here) must reach the
+    # server's lazily-created SlamWorker, overriding the service's own
+    # defaults -- not be silently dropped.
+    port, lsock, th, srv = _serve_on_ephemeral()   # server defaults: fov_h=55.0, fov_v=42.0
+    rw = RemoteSlamWorker(W, H, addr=f"127.0.0.1:{port}", fov_h=70.0, fov_v=50.0)
+    assert rw.connect() is True
+    rw.start()
+    depth = np.full((H, W), 500.0, np.float32)
+    quat = np.array([1.0, 0.0, 0.0, 0.0], np.float32)
+    got = None
+    for _ in range(200):                       # poll up to ~2 s for the first result
+        rw.submit(depth, quat, None)
+        time.sleep(0.01)
+        got = rw.latest()
+        if got is not None:
+            break
+    rw.stop(); lsock.close(); th.join(timeout=2)
+    assert got is not None
+
+    # The server must have built its lazily-created worker with the client's
+    # fov (70.0/50.0), not its own defaults (55.0/42.0).
+    assert srv._last_effective_kwargs is not None
+    assert srv._last_effective_kwargs["fov_h"] == 70.0
+    assert srv._last_effective_kwargs["fov_v"] == 50.0
+
+
 def test_start_is_idempotent_and_stop_start_cycle_is_clean():
     # Finding 2: a second start() while already running must be a clean no-op
     # (not spawn a second send/recv thread pair on top of the first).
-    port, lsock, th = _serve_on_ephemeral()
+    port, lsock, th, srv = _serve_on_ephemeral()
     rw = RemoteSlamWorker(W, H, addr=f"127.0.0.1:{port}", fov_h=55.0, fov_v=42.0)
     assert rw.connect() is True
     rw.start()
