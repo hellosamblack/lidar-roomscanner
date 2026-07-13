@@ -1,0 +1,11 @@
+# Build context is the repo root; the image only needs host/ (via `COPY host/`).
+host/.venv/
+**/__pycache__/
+**/*.pyc
+.git/
+.superpowers/
+results/
+docs/
+references/
+firmware/
+*.bin
