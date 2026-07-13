@@ -73,7 +73,7 @@ def serve(host="0.0.0.0", port=5555, device="CUDA:0", **mapper_kwargs) -> None:
         print(f"[slam-service] client {addr} connected", flush=True)
         try:
             srv.serve_client(conn)
-        except (ConnectionError, OSError) as e:
+        except Exception as e:
             print(f"[slam-service] client dropped: {e}", flush=True)
         finally:
             conn.close()

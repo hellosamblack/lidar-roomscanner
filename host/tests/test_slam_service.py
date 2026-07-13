@@ -42,3 +42,39 @@ def test_service_returns_stepresult_per_frame():
     seqs = [r["mesh_seq"] for r in results]
     assert seqs == sorted(seqs)
     assert any("mesh_v" in r for r in results)
+
+
+def test_serve_survives_bad_client_and_keeps_serving():
+    """A malformed frame (missing 'depth') raises inside serve_client; the
+    accept loop must catch it, close that connection, and keep serving the
+    next client rather than crashing the process."""
+    srv = SlamService(device="CPU:0", fov_h=55.0, fov_v=42.0)
+    lsock = socket.socket(); lsock.bind(("127.0.0.1", 0)); lsock.listen(2)
+    port = lsock.getsockname()[1]
+
+    def accept_two():
+        for _ in range(2):
+            conn, _ = lsock.accept()
+            try:
+                srv.serve_client(conn)
+            except Exception:
+                pass
+            finally:
+                conn.close()
+    th = threading.Thread(target=accept_two, daemon=True); th.start()
+
+    # First client: malformed frame missing the required "depth" key ->
+    # KeyError inside serve_client. Connection should just end.
+    bad_cli = socket.create_connection(("127.0.0.1", port))
+    wire.send_message(bad_cli, {"fid": 0, "quat": np.array([1.0, 0.0, 0.0, 0.0], np.float32)})
+    bad_cli.close()
+
+    # Second client: valid synthetic frame. Server must still be alive.
+    good_cli = socket.create_connection(("127.0.0.1", port), timeout=5)
+    wire.send_message(good_cli, _synthetic_frame(0))
+    result = wire.recv_message(good_cli)
+    good_cli.close(); lsock.close(); th.join(timeout=2)
+
+    assert result is not None
+    assert result["fid"] == 0
+    assert result["pose"].shape == (4, 4)
