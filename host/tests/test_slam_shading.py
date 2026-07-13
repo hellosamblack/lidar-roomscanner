@@ -14,7 +14,12 @@ the result is non-black and varies across vertices.
 import numpy as np
 import open3d as o3d
 
-from roomscan.slam.shading import shade_colors, wall_triangle_mask
+from roomscan.slam.shading import (
+    height_base_colors,
+    shade_colors,
+    wall_triangle_mask,
+    wavefront_glow,
+)
 from roomscan.slam.tsdf import TsdfMap
 from roomscan.slam.intrinsics import pinhole
 from roomscan.slam.frames import world_up
@@ -73,6 +78,105 @@ def test_two_sided_lambert_matches_its_mirror():
     out_fwd = shade_colors(n)
     out_back = shade_colors(-n)
     assert np.allclose(out_fwd, out_back)
+
+
+# ---- height_base_colors + shade_colors(base=...) ("the stage") -------------
+
+def test_shade_colors_default_base_is_backward_compatible():
+    # Passing no base must be byte-identical to the pre-stage behavior.
+    rng = np.random.default_rng(1)
+    normals = rng.normal(size=(50, 3))
+    normals /= np.linalg.norm(normals, axis=1, keepdims=True)
+    base_default = np.array([0.82, 0.80, 0.75])
+    expected = shade_colors(normals, base=base_default)
+    np.testing.assert_array_equal(shade_colors(normals), expected)
+
+
+def test_shade_colors_per_vertex_base():
+    normals = np.array([[0.3, -0.8, 0.5], [0.3, -0.8, 0.5]])
+    normals = normals / np.linalg.norm(normals, axis=1, keepdims=True)
+    base = np.array([[0.9, 0.1, 0.1], [0.1, 0.1, 0.9]])
+    out = shade_colors(normals, base=base)
+    # same normal -> same Lambert term, so the ratio out/base is equal per row
+    assert out[0, 0] > out[0, 2]   # first vertex is reddish
+    assert out[1, 2] > out[1, 0]   # second vertex is bluish
+
+
+def test_height_base_colors_floor_cool_upper_warm_ydown():
+    # y-down: smaller y is physically higher -> warm; larger y is floor -> cool.
+    verts = np.array([[0, -2.0, 0], [0, 0.0, 0]])   # [higher, lower(floor)]
+    cols = height_base_colors(verts)
+    upper, floor = cols[0], cols[1]
+    assert upper[0] > floor[0]          # warmer (more red) up high
+    # "cooler at the floor" is a RELATIVE blue-vs-red judgment: the warm
+    # off-white upper tint has a high absolute blue channel too (it's near
+    # white), so compare blue-minus-red, not the raw blue channel.
+    assert (floor[2] - floor[0]) > (upper[2] - upper[0])
+    np.testing.assert_allclose(upper, [0.86, 0.84, 0.80], atol=1e-9)
+    np.testing.assert_allclose(floor, [0.34, 0.52, 0.60], atol=1e-9)
+
+
+def test_height_tint_hue_multiplier_tints_grey_by_height():
+    from roomscan.slam.shading import height_tint_hue
+    # y-down: higher (smaller y) -> warm multiplier (red>blue); floor -> cool.
+    verts = np.array([[0, -2.0, 0], [0, 0.0, 0]])   # [higher, floor]
+    hue = height_tint_hue(verts)
+    upper, floor = hue[0], hue[1]
+    assert upper[0] > upper[2]          # warm up high: red multiplier > blue
+    assert floor[2] > floor[0]          # cool at floor: blue multiplier > red
+    # centered near 1 so it tints a grey without gross darkening
+    assert 0.7 < hue.mean() < 1.15
+
+
+def test_height_tint_hue_degenerate_and_empty():
+    from roomscan.slam.shading import height_tint_hue
+    np.testing.assert_allclose(height_tint_hue(np.array([[0, 1.0, 0], [0, 1.0, 0]])),
+                               np.ones((2, 3)))
+    assert height_tint_hue(np.zeros((0, 3))).shape == (0, 3)
+
+
+def test_height_base_colors_degenerate_and_empty():
+    flat = height_base_colors(np.array([[0, 1.0, 0], [0, 1.0, 0]]))
+    np.testing.assert_allclose(flat, np.tile([0.82, 0.80, 0.75], (2, 1)))
+    assert height_base_colors(np.zeros((0, 3))).shape == (0, 3)
+
+
+# ---- wavefront_glow (the "materialization" signature) ----------------------
+
+_ACCENT = np.array([0.18, 0.88, 0.82])
+
+
+def test_wavefront_glow_full_at_sensor():
+    # A vertex exactly at the sensor gets the max blend toward accent (strength).
+    colors = np.array([[0.5, 0.5, 0.5]])
+    out = wavefront_glow(np.array([[0.0, 0.0, 0.0]]), [0.0, 0.0, 0.0], colors,
+                         radius=1.0, strength=0.7)
+    expected = 0.3 * np.array([0.5, 0.5, 0.5]) + 0.7 * _ACCENT
+    np.testing.assert_allclose(out[0], expected, atol=1e-9)
+
+
+def test_wavefront_glow_zero_beyond_radius():
+    colors = np.array([[0.5, 0.5, 0.5]])
+    out = wavefront_glow(np.array([[2.0, 0.0, 0.0]]), [0.0, 0.0, 0.0], colors, radius=1.0)
+    np.testing.assert_allclose(out[0], colors[0])   # untouched past the radius
+
+
+def test_wavefront_glow_monotonic_with_distance():
+    origin = np.array([0.0, 0.0, 0.0])
+    verts = np.array([[0.1, 0, 0], [0.4, 0, 0], [0.8, 0, 0]])
+    base = np.tile([0.5, 0.5, 0.5], (3, 1))
+    out = wavefront_glow(verts, origin, base, radius=1.0)
+    # nearer vertex -> closer to accent -> larger blue channel here (accent B high)
+    assert out[0, 2] > out[1, 2] > out[2, 2]
+
+
+def test_wavefront_glow_empty_passthrough_and_bounds():
+    assert wavefront_glow(np.zeros((0, 3)), [0, 0, 0], np.zeros((0, 3))).shape == (0, 3)
+    rng = np.random.default_rng(2)
+    verts = rng.normal(size=(64, 3))
+    cols = rng.uniform(size=(64, 3))
+    out = wavefront_glow(verts, [0, 0, 0], cols)
+    assert out.min() >= 0.0 and out.max() <= 1.0
 
 
 # ---- headless end-to-end: TsdfMap mesh -> shade_colors ---------------------

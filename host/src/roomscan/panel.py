@@ -60,6 +60,7 @@ from .shading import MODES as _NEAR_MODES
 from .shading import cloud_colors
 from .sources import FileSource, Recorder, SerialSource, pump
 from .surface import grid_triangles, grid_triangles_3d
+from . import theme
 from .viewer import Stats, _build_arg_parser
 
 # Usecase id -> label (only binning-2 profiles are usable at full res; see ROADMAP
@@ -74,6 +75,8 @@ _MESH_GEOM = "surface"
 _MESH_WALLS_GEOM = "__slam_walls__"   # see-through-walls split, SLAM/Showcase only
 _WALL_MODES = ("solid", "translucent", "wireframe")
 _SLAM_TRAJ_GEOM = "__slam_trajectory__"
+_TRAJ_HEAD_GEOM = "__slam_traj_head__"  # glowing marker at the sensor's current pose
+_FLOOR_GRID_GEOM = "__floor_grid__"    # grounded stage grid, SLAM/Showcase only
 _FOV_GEOM = "__fov_indicator__"        # faint camera FoV frustum, RECORDING/SLAM only
 _FOV_RANGE_M = 0.5                     # how far out the frustum rays/edges are drawn
 _CAPTURE_SQUARE_GEOM = "__capture_square__"  # bright planar capture-area quad, RECORDING/SLAM
@@ -85,8 +88,6 @@ _UI_PERIOD = 0.25               # <=4 Hz label / sensors / metrics / log refresh
                                 # (the IR pane is NOT throttled here -- it renders
                                 #  per frame, in lockstep with the point cloud)
 _EXPOSURE_DEBOUNCE = 0.4        # s to settle before sending a dragged exposure value
-_BG_DARK = [0.05, 0.05, 0.08, 1.0]
-_BG_LIGHT = [0.90, 0.90, 0.92, 1.0]
 
 # Constrained turntable camera: azimuth-only orbit (no elevation/tilt term exists)
 # + pan + zoom, world-up fixed in look_at so the view can never roll or pitch --
@@ -617,7 +618,9 @@ class ControlPanel:
         self.mesh_material.shader = "defaultUnlit"
         self.slam_line_material = rendering.MaterialRecord()
         self.slam_line_material.shader = "unlitLine"
-        self.slam_line_material.line_width = 3.0
+        self.slam_line_material.line_width = 4.0   # trajectory ribbon (Phase 6 UX)
+        self.traj_head_material = rendering.MaterialRecord()
+        self.traj_head_material.shader = "defaultUnlit"
         # See-through walls (Phase 6): translucent-mesh + wall-wireframe materials.
         # "defaultUnlitTransparency" is Open3D 0.19's unlit alpha-blend shader
         # (confirmed present: <open3d install>/resources/defaultUnlitTransparency.filamat);
@@ -640,6 +643,12 @@ class ControlPanel:
         self.capture_square_material = rendering.MaterialRecord()
         self.capture_square_material.shader = "unlitLine"
         self.capture_square_material.line_width = 3.0
+        # Floor grid ("the stage"): a single faint hairline, quieter than the
+        # FoV frustum so it grounds the room without competing with it.
+        self.floor_material = rendering.MaterialRecord()
+        self.floor_material.shader = "unlitLine"
+        self.floor_material.line_width = 1.0
+        self._floor_last_bounds = None   # (min,max) the current grid was built for
         self._dark_bg = True
 
         self._build_scene()
@@ -656,7 +665,15 @@ class ControlPanel:
         gui = self._gui
         self.scene_widget = gui.SceneWidget()
         self.scene_widget.scene = self.rendering.Open3DScene(self.window.renderer)
-        self.scene_widget.scene.set_background(_BG_DARK)
+        # Graded "stage" background (Phase 6 UX): a vertical gradient reads as a
+        # horizon and gives the scene depth, vs the old flat void. Filament
+        # stretches the image to the viewport, so a tall thin gradient suffices;
+        # the paired clear color matches its midpoint (theme.BG_CLEAR_*).
+        self._bg_grad_dark = self._np_to_o3d(
+            theme.vertical_gradient(2, 512, theme.STAGE_TOP_DARK, theme.STAGE_BOTTOM_DARK))
+        self._bg_grad_light = self._np_to_o3d(
+            theme.vertical_gradient(2, 512, theme.STAGE_TOP_LIGHT, theme.STAGE_BOTTOM_LIGHT))
+        self.scene_widget.scene.set_background(theme.BG_CLEAR_DARK, self._bg_grad_dark)
         # Own the camera nav so it can't tilt: our set_on_mouse handles orbit/pan/
         # zoom and returns CONSUMED, replacing the built-in arcball entirely (a
         # HANDLED return still lets the arcball run afterward -- that's what let
@@ -691,6 +708,17 @@ class ControlPanel:
         self.progress_bar.value = 0.0
         self.progress_bar.visible = False
         self.window.add_child(self.progress_bar)
+
+        # Showcase FINAL "reveal card" (Phase 6 UX): a rendered instrument card
+        # (cards.render_scan_complete_card) shown as a lower-third over the 3D
+        # scene the moment a scan completes, replacing the system-font banner
+        # for that moment. A separate ImageWidget from the transient banner so
+        # the plain REC/PROCESSING text plumbing stays untouched; positioned in
+        # _on_layout, sized from its rendered image (mirrors the metrics HUD).
+        self.reveal_card = gui.ImageWidget(self._np_to_o3d(blank))
+        self._reveal_card_size = (10, 10)
+        self.reveal_card.visible = False
+        self.window.add_child(self.reveal_card)
 
     def _group(self, title, *, open=True):
         """A collapsable group added to the panel, with consistent margins."""
@@ -959,6 +987,13 @@ class ControlPanel:
         pb_h = int(0.4 * em)
         pb_y = banner_y + banner_h + int(0.15 * em)
         self.progress_bar.frame = gui.Rect(r.x + pad, pb_y, banner_w, pb_h)
+        # Reveal card: centered horizontally in the scene, in the lower third,
+        # at its native rendered size. Computed unconditionally (cheap); its
+        # own `.visible` gates whether it's actually drawn.
+        cw, ch = self._reveal_card_size
+        card_x = r.x + max(pad, (scene_w - cw) // 2)
+        card_y = r.y + r.height - ch - int(3 * em)
+        self.reveal_card.frame = gui.Rect(card_x, card_y, cw, ch)
 
     # ---- lifecycle ----------------------------------------------------------
     def start(self):
@@ -1232,25 +1267,15 @@ class ControlPanel:
         # *same* mesh object to the renderer every GUI tick in between.
         if (mesh is not None and mesh is not self._slam_last_mesh_obj
                 and len(mesh.vertex.positions) > 0):
-            self._upload_slam_mesh(mesh)
+            self._upload_slam_mesh(mesh, glow_origin=step.pose[:3, 3])
+            self._update_floor_grid(mesh.vertex.positions.cpu().numpy())
             self._slam_last_mesh_obj = mesh
 
-        # BUG-009 (fixed): a LineSet with < 2 points has 0 line segments and
-        # hard-crashes Filament ("vertexCount cannot be 0", then a native
-        # segfault) on add_geometry -- skip the upload entirely until there's
-        # a real segment to draw. Same guard `_show_showcase_trajectory`
-        # (Showcase mode) already uses.
-        if trajectory and len(trajectory) >= 2 and not self.follow_camera_enabled:
-            pts = np.array([T[:3, 3] for T in trajectory], dtype=np.float64)
-            lines = self._o3d.geometry.LineSet()
-            lines.points = self._o3d.utility.Vector3dVector(pts)
-            idx = np.stack([np.arange(len(pts) - 1), np.arange(1, len(pts))], axis=1)
-            lines.lines = self._o3d.utility.Vector2iVector(idx)
-            lines.colors = self._o3d.utility.Vector3dVector(
-                np.tile([[0.1, 0.9, 0.3]], (len(idx), 1)))
-            if sc.has_geometry(_SLAM_TRAJ_GEOM):
-                sc.remove_geometry(_SLAM_TRAJ_GEOM)
-            sc.add_geometry(_SLAM_TRAJ_GEOM, lines, self.slam_line_material)
+        # Trajectory ribbon + head marker (Phase 6 UX) -- skipped entirely in
+        # follow/first-person mode (the eye is at the sensor). The <2-point
+        # BUG-009 guard now lives inside `_upload_trajectory`.
+        if not self.follow_camera_enabled:
+            self._upload_trajectory(trajectory)
 
         self._slam_camera_frame(mesh, trajectory)
 
@@ -1288,11 +1313,90 @@ class ControlPanel:
         sc = self.scene_widget.scene
         if sc.has_geometry(_SLAM_TRAJ_GEOM):
             sc.remove_geometry(_SLAM_TRAJ_GEOM)
+        if sc.has_geometry(_TRAJ_HEAD_GEOM):
+            sc.remove_geometry(_TRAJ_HEAD_GEOM)
         if sc.has_geometry(_MESH_GEOM):
             sc.remove_geometry(_MESH_GEOM)
         if sc.has_geometry(_MESH_WALLS_GEOM):
             sc.remove_geometry(_MESH_WALLS_GEOM)
+        self._remove_floor_grid()
         self._remove_fov_geometry()
+
+    def _remove_floor_grid(self):
+        sc = self.scene_widget.scene
+        if sc.has_geometry(_FLOOR_GRID_GEOM):
+            sc.remove_geometry(_FLOOR_GRID_GEOM)
+        self._floor_last_bounds = None
+
+    def _update_floor_grid(self, verts):
+        """(Re)build the grounded 'stage' floor grid from the current map's
+        bounds (`verts`, an (N,3) array of the just-uploaded mesh's vertices).
+        Only rebuilds when the bounds shift by more than the grid pitch -- the
+        grid needn't track every sub-pitch mesh growth, and rebuilding a
+        LineSet every mesh extraction would churn the renderer needlessly.
+        Placed at the map's floor plane via the pure `theme.floor_grid_lines`;
+        shared by the SLAM view and Showcase mode (both call `_upload_slam_mesh`)."""
+        if verts is None or len(verts) == 0:
+            return
+        from .slam.frames import world_up
+        mn = verts.min(axis=0)
+        mx = verts.max(axis=0)
+        spacing = 0.5
+        if self._floor_last_bounds is not None:
+            omn, omx = self._floor_last_bounds
+            if (np.abs(mn - omn).max() < spacing and np.abs(mx - omx).max() < spacing
+                    and self.scene_widget.scene.has_geometry(_FLOOR_GRID_GEOM)):
+                return
+        pts, lines = theme.floor_grid_lines(mn, mx, up=world_up(), spacing=spacing)
+        sc = self.scene_widget.scene
+        if sc.has_geometry(_FLOOR_GRID_GEOM):
+            sc.remove_geometry(_FLOOR_GRID_GEOM)
+        if len(pts) >= 2 and len(lines) > 0:   # BUG-009: never upload an empty LineSet
+            ls = self._o3d.geometry.LineSet()
+            ls.points = self._o3d.utility.Vector3dVector(pts)
+            ls.lines = self._o3d.utility.Vector2iVector(lines)
+            ls.colors = self._o3d.utility.Vector3dVector(
+                np.tile([list(theme.FLOOR_GRID)], (len(lines), 1)))
+            sc.add_geometry(_FLOOR_GRID_GEOM, ls, self.floor_material)
+            self._floor_last_bounds = (mn, mx)
+
+    def _upload_trajectory(self, trajectory, *, with_head=True):
+        """(Re)upload the trajectory as a fading cyan 'ribbon' (dim oldest ->
+        bright newest, via `theme.trajectory_ramp`) plus an optional glowing
+        head marker at the sensor's current pose -- the motion read that
+        replaces the old flat lime debug line. Shared by the SLAM view and
+        Showcase mode. `with_head` is False in camera-follow/first-person mode
+        (the eye is AT the sensor, so a marker in front of it just occludes).
+
+        BUG-009: a LineSet with < 2 points has 0 segments and hard-crashes
+        Filament -- callers already gate on `len(trajectory) >= 2`, and this
+        removes both geometries and returns for anything shorter."""
+        sc = self.scene_widget.scene
+        if trajectory is None or len(trajectory) < 2:
+            if sc.has_geometry(_SLAM_TRAJ_GEOM):
+                sc.remove_geometry(_SLAM_TRAJ_GEOM)
+            if sc.has_geometry(_TRAJ_HEAD_GEOM):
+                sc.remove_geometry(_TRAJ_HEAD_GEOM)
+            return
+        pts = np.array([T[:3, 3] for T in trajectory], dtype=np.float64)
+        lines = self._o3d.geometry.LineSet()
+        lines.points = self._o3d.utility.Vector3dVector(pts)
+        idx = np.stack([np.arange(len(pts) - 1), np.arange(1, len(pts))], axis=1)
+        lines.lines = self._o3d.utility.Vector2iVector(idx)
+        lines.colors = self._o3d.utility.Vector3dVector(theme.trajectory_ramp(len(idx)))
+        if sc.has_geometry(_SLAM_TRAJ_GEOM):
+            sc.remove_geometry(_SLAM_TRAJ_GEOM)
+        sc.add_geometry(_SLAM_TRAJ_GEOM, lines, self.slam_line_material)
+
+        if sc.has_geometry(_TRAJ_HEAD_GEOM):
+            sc.remove_geometry(_TRAJ_HEAD_GEOM)
+        if with_head:
+            extent = float(np.ptp(pts, axis=0).max())
+            radius = max(extent * 0.02, 0.01)
+            head = self._o3d.geometry.TriangleMesh.create_sphere(radius=radius)
+            head.translate(pts[-1])
+            head.paint_uniform_color(list(theme.ACCENT))
+            sc.add_geometry(_TRAJ_HEAD_GEOM, head, self.traj_head_material)
 
     def _update_fov_geometry(self, pose):
         """Faint camera-FoV frustum indicator (owner request), shown during
@@ -1354,7 +1458,7 @@ class ControlPanel:
         ls.points = self._o3d.utility.Vector3dVector(corners)
         ls.lines = self._o3d.utility.Vector2iVector(lines)
         ls.colors = self._o3d.utility.Vector3dVector(
-            np.tile([[0.1, 0.85, 1.0]], (len(lines), 1)))   # bright cyan -- distinct + clear
+            np.tile([list(theme.ACCENT)], (len(lines), 1)))   # accent cyan -- the live capture beam
         sc.add_geometry(_CAPTURE_SQUARE_GEOM, ls, self.capture_square_material)
 
     def _remove_fov_geometry(self):
@@ -1405,6 +1509,8 @@ class ControlPanel:
             self._gizmo_added = False
         if sc.has_geometry(_SLAM_TRAJ_GEOM):
             sc.remove_geometry(_SLAM_TRAJ_GEOM)
+        if sc.has_geometry(_TRAJ_HEAD_GEOM):
+            sc.remove_geometry(_TRAJ_HEAD_GEOM)
 
     def _on_follow_camera_toggle(self, checked):
         self.follow_camera_enabled = checked
@@ -1429,7 +1535,7 @@ class ControlPanel:
         self._showcase_last_mesh_obj = None
         self.bus.publish(f"wall mode -> {text}")
 
-    def _upload_slam_mesh(self, mesh):
+    def _upload_slam_mesh(self, mesh, glow_origin=None):
         """Shade + upload a SLAM/TSDF tensor `mesh` (non-None, non-empty --
         callers gate on that already). Shared by the classic SLAM view
         (`_render_slam_frame`) and Showcase mode (`_show_showcase_mesh`) so
@@ -1462,7 +1568,11 @@ class ControlPanel:
         back to plain `shade_colors`, byte-identical to this method's
         pre-Task-14 behavior.
         """
-        from .slam.shading import mesh_colors_are_meaningful, shade_brightness, shade_colors, wall_triangle_mask
+        from .slam.shading import (height_base_colors, height_tint_hue,
+                                    mesh_colors_are_meaningful,
+                                    shade_brightness, shade_colors, wall_triangle_mask,
+                                    wavefront_glow)
+        from .slam.frames import world_up
         sc = self.scene_widget.scene
         # mesh may live on a non-CPU compute device (Mapper(device=...)) --
         # Filament (the GUI renderer) only ever renders CPU geometry, and
@@ -1473,14 +1583,28 @@ class ControlPanel:
         normals = np.asarray(legacy_mesh.vertex_normals)
         raw_colors = np.asarray(legacy_mesh.vertex_colors)
         if mesh_colors_are_meaningful(raw_colors):
+            # Live reflectance mesh: keep its own grey texture but grade it by
+            # height ("the stage") so the room reads cool-low / warm-high instead
+            # of a flat grey -- height_tint_hue is a luma-preserving multiplier.
             brightness = shade_brightness(normals)
-            final_colors = np.clip(raw_colors * brightness[:, None], 0.0, 1.0)
+            hue = height_tint_hue(np.asarray(legacy_mesh.vertices), world_up())
+            final_colors = np.clip(raw_colors * brightness[:, None] * hue, 0.0, 1.0)
         else:
             # The TSDF mesh's vertex colors are always [0,0,0] here (no color
             # was integrated) and this material is defaultUnlit with no scene
             # lights -- bake a fixed-light shade in so it's not invisible
-            # black (see slam/shading.py's module docstring).
-            final_colors = shade_colors(normals)
+            # black (see slam/shading.py's module docstring). The base albedo
+            # is height-cued ("the stage"): cool at the floor, warm up high, so
+            # depth reads at a glance instead of a flat clay monochrome.
+            base = height_base_colors(np.asarray(legacy_mesh.vertices), world_up())
+            final_colors = shade_colors(normals, base=base)
+        # Materialization wavefront (live scanning only): glow the surface near
+        # the sensor's current position. Blended in BEFORE the wall split so
+        # both the opaque and wall submeshes inherit it (they copy vertex
+        # colors). None on the finished PROCESSING/FINAL mesh -> no glow.
+        if glow_origin is not None:
+            final_colors = wavefront_glow(np.asarray(legacy_mesh.vertices),
+                                          glow_origin, final_colors)
         legacy_mesh.vertex_colors = self._o3d.utility.Vector3dVector(final_colors)
 
         if sc.has_geometry(_MESH_GEOM):
@@ -1603,7 +1727,7 @@ class ControlPanel:
         if latest is not None:
             mesh, trajectory, step = latest
             tracking_txt = "lost" if step.tracking_lost else "ok"
-            self._show_showcase_mesh(mesh)
+            self._show_showcase_mesh(mesh, glow_origin=step.pose[:3, 3])
             if not self.follow_camera_enabled:
                 self._show_showcase_trajectory(trajectory)
             self._slam_camera_frame(mesh, trajectory)
@@ -1654,42 +1778,25 @@ class ControlPanel:
                 text += f"  {eta_str}"
             self._set_showcase_banner(text)
 
-    def _show_showcase_mesh(self, mesh):
+    def _show_showcase_mesh(self, mesh, glow_origin=None):
         """Upload `mesh` if it's new (identity check -- mesh extraction is
         already throttled inside the worker) and non-empty. Shares the
         classic SLAM view's geometry name/material (via `_upload_slam_mesh`)
         since the two modes are mutually exclusive and never rendered in the
-        same frame."""
+        same frame. `glow_origin` (the sensor's current position) enables the
+        materialization wavefront during RECORDING; None (PROCESSING/FINAL)
+        leaves the finished mesh unglowed."""
         if mesh is None or mesh is self._showcase_last_mesh_obj or len(mesh.vertex.positions) == 0:
             return
-        self._upload_slam_mesh(mesh)
+        self._upload_slam_mesh(mesh, glow_origin=glow_origin)
+        self._update_floor_grid(mesh.vertex.positions.cpu().numpy())
         self._showcase_last_mesh_obj = mesh
 
     def _show_showcase_trajectory(self, trajectory):
-        # NOTE: intentionally stricter than _render_slam_frame's equivalent
-        # block (classic SLAM view, which uploads a LineSet even for a
-        # single-point trajectory). Reproduced live (replaying
-        # captures/phase6_motion_ref.bin, ticking the panel through the
-        # classic SLAM view too): uploading a LineSet with 1 point / 0 line
-        # segments as the first "unlitLine"-shaded geometry ever added to a
-        # fresh scene hard-crashes Filament ("VertexBuffer ... vertexCount
-        # cannot be 0", then a native segfault) -- a pre-existing bug in
-        # Task 10's code (filed in BUGS.md), not something to inherit into
-        # this new method just because the shape matches. Skipping until
-        # there are >= 2 points sidesteps it entirely for Showcase mode.
-        if len(trajectory) < 2:
-            return
-        sc = self.scene_widget.scene
-        pts = np.array([T[:3, 3] for T in trajectory], dtype=np.float64)
-        lines = self._o3d.geometry.LineSet()
-        lines.points = self._o3d.utility.Vector3dVector(pts)
-        idx = np.stack([np.arange(len(pts) - 1), np.arange(1, len(pts))], axis=1)
-        lines.lines = self._o3d.utility.Vector2iVector(idx)
-        lines.colors = self._o3d.utility.Vector3dVector(
-            np.tile([[0.1, 0.9, 0.3]], (len(idx), 1)))
-        if sc.has_geometry(_SLAM_TRAJ_GEOM):
-            sc.remove_geometry(_SLAM_TRAJ_GEOM)
-        sc.add_geometry(_SLAM_TRAJ_GEOM, lines, self.slam_line_material)
+        # Trajectory ribbon + head marker (Phase 6 UX), shared with the SLAM
+        # view via `_upload_trajectory`. The <2-point guard (BUG-009: a 0-segment
+        # LineSet hard-crashes Filament) lives inside that helper.
+        self._upload_trajectory(trajectory)
 
     def _showcase_target_camera(self, mesh, trajectory):
         """(center, radius) to frame `mesh` + `trajectory`'s bounds -- the same
@@ -1740,10 +1847,11 @@ class ControlPanel:
         self._showcase_orbit_enabled = True
         elapsed = now - (self._showcase_process_start_ts or now)
         stats = progress.stats or {}
-        self._set_showcase_banner(
-            f"Scan complete - {stats.get('frames', 0)} frames | "
-            f"drift {stats.get('gap_m', 0.0):.2f} m | {stats.get('verts', 0)} verts | "
-            f"{elapsed:.1f}s")
+        # The reveal moment (Phase 6 UX): a rendered instrument card instead of
+        # the system-font debug banner. _show_reveal_card hides the text banner
+        # and falls back to it if the render ever fails.
+        self._show_reveal_card(stats.get("frames", 0), stats.get("gap_m", 0.0),
+                               stats.get("verts", 0), elapsed)
         self.bus.publish("showcase: scan complete")
         self._save_showcase_result(progress.mesh, progress.trajectory)
 
@@ -1937,7 +2045,35 @@ class ControlPanel:
             self._showcase_loader_thread = None
 
     def _set_showcase_banner(self, text):
+        # Any transient status (IDLE prompt / REC / PROCESSING) means we are NOT
+        # in the FINAL reveal -- drop the reveal card and show the text banner.
         self.showcase_banner.text = text
+        self._hide_reveal_card()
+
+    def _hide_reveal_card(self):
+        self.reveal_card.visible = False
+
+    def _show_reveal_card(self, frames, drift_m, verts, elapsed_s):
+        """Render + show the FINAL 'scan complete' reveal card and hide the
+        transient text banner. Re-lays-out the window so the card picks up its
+        freshly-rendered native size (see `_on_layout`). Never raises into the
+        FINAL transition -- a card-render failure must not lose the scan."""
+        from . import cards
+        try:
+            img = cards.render_scan_complete_card(frames, drift_m, verts, elapsed_s)
+        except Exception as exc:   # fall back to the plain banner on any render error
+            self.bus.publish(f"reveal card render failed: {exc!r}")
+            self.showcase_banner.text = (
+                f"Scan complete - {int(frames)} frames | drift {drift_m:.2f} m | "
+                f"{verts} verts | {elapsed_s:.1f}s")
+            self.showcase_banner.visible = True
+            return
+        h, w = img.shape[:2]
+        self.reveal_card.update_image(self._np_to_o3d(img))
+        self._reveal_card_size = (w, h)
+        self.reveal_card.visible = True
+        self.showcase_banner.visible = False
+        self.window.set_needs_layout()
 
     def _on_showcase_toggle(self, checked):
         from .slam.showcase import next_phase
@@ -1972,6 +2108,7 @@ class ControlPanel:
             self._showcase_last_mesh_obj = None
             self.showcase_banner.visible = False
             self.progress_bar.visible = False
+            self._hide_reveal_card()
             self._camera_set = False
             if self._last_item is not None:   # re-render the last frame as a normal cloud
                 self._render_frame(self._last_item)
@@ -2328,7 +2465,10 @@ class ControlPanel:
 
     def _on_bg(self, checked):
         self._dark_bg = checked
-        self.scene_widget.scene.set_background(_BG_DARK if checked else _BG_LIGHT)
+        if checked:
+            self.scene_widget.scene.set_background(theme.BG_CLEAR_DARK, self._bg_grad_dark)
+        else:
+            self.scene_widget.scene.set_background(theme.BG_CLEAR_LIGHT, self._bg_grad_light)
 
     def _on_metrics_overlay(self, checked):
         self.metrics_overlay = checked

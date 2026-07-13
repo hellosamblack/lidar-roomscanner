@@ -392,7 +392,7 @@ def test_upload_uses_reflectance_colors_when_present():
 
 def test_upload_falls_back_to_shade_for_depth_only_mesh():
     # A depth-only TSDF mesh has all-black vertex colours -> fall back to the
-    # fixed shade_colors tint (byte-identical to pre-Task-14 behaviour).
+    # height-cued "stage" shade (floor cool, upper warm), Phase 6 UX.
     W, H = 54, 42
     m = TsdfMap(voxel_size=0.02, depth_max=5.0)
     K = pinhole(W, H)
@@ -409,11 +409,13 @@ def test_upload_falls_back_to_shade_for_depth_only_mesh():
     geom, _mat = fake.scene_widget.scene.geoms[panel_mod._MESH_GEOM]
     uploaded = np.asarray(geom.vertex_colors)
 
-    from roomscan.slam.shading import shade_colors
+    from roomscan.slam.shading import height_base_colors, shade_colors
+    from roomscan.slam.frames import world_up
     legacy = mesh.cpu().to_legacy()
     legacy.compute_vertex_normals()
-    expected = shade_colors(np.asarray(legacy.vertex_normals))
-    assert np.allclose(uploaded, expected)   # exact fallback, unchanged behaviour
+    base = height_base_colors(np.asarray(legacy.vertices), world_up())
+    expected = shade_colors(np.asarray(legacy.vertex_normals), base=base)
+    assert np.allclose(uploaded, expected)   # height-cued "stage" fallback (Phase 6 UX)
 
 
 # ---- Issue #6: save-to-disk (real files, off the GUI thread) ---------------

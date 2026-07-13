@@ -56,9 +56,15 @@ class _FakeWallPanel:
         # (Task 14, Issue #2) -- give the stand-in what that real method
         # touches so it runs unmodified through this fake scene.
         self._fov_last_pose = None
+        # `_remove_slam_geometries` now also tears down the floor grid (Phase 6
+        # "stage" UX) -- give the stand-in what that path touches.
+        self._floor_last_bounds = None
 
     def _remove_fov_geometry(self):
         panel_mod.ControlPanel._remove_fov_geometry(self)
+
+    def _remove_floor_grid(self):
+        panel_mod.ControlPanel._remove_floor_grid(self)
 
 
 def _corner_tensor_mesh():
