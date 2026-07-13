@@ -12,18 +12,34 @@ from roomscan.slam.worker import SlamWorker
 
 def drive(worker, frames):
     ms = []
+    is_remote = not hasattr(worker, "run_once")
+    last = None  # last published result tuple (identity), remote only
     for depth, refl, conf, quat, pa, t in frames:
         worker.submit(depth, quat, pa, reflectance=refl, confidence=conf)
-        # remote: poll latest until a new result arrives; local: run_once
-        if hasattr(worker, "run_once"):
+        if is_remote:
+            # _out_slot persists across reads (never cleared), so a plain
+            # "non-None" poll would re-read the previous frame's stale result
+            # and break immediately. Wait for a genuinely NEW published tuple
+            # instead -- each publish in _recv_loop is a fresh tuple object,
+            # so `is not last` distinguishes new from stale. This also paces
+            # us to the server's true round-trip cadence, so the single-slot
+            # _in_slot mailbox is drained before the next submit() (no frames
+            # silently dropped). remote_ms below is therefore the
+            # container-reported per-frame slam_ms (GPU compute time),
+            # sampled 1:1 with submitted frames.
+            got = None
+            for _ in range(400):                 # wait up to ~2s for THIS frame's result
+                time.sleep(0.005)
+                cur = worker.latest()
+                if cur is not None and cur is not last:
+                    got = cur
+                    last = cur
+                    break
+            # if no new result arrived (timeout), skip this frame rather than
+            # recording a stale duplicate
+        else:
             worker.run_once()
             got = worker.latest()
-        else:
-            got = None
-            for _ in range(200):
-                time.sleep(0.005); got = worker.latest()
-                if got is not None:
-                    break
         if got is not None:
             ms.append(got[2].slam_ms)
     return ms
