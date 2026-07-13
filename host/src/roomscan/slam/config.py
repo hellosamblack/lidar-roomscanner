@@ -67,6 +67,11 @@ class SlamConfig:
     # o3d.core.Device string) runs unchanged once a CUDA-enabled build is
     # installed; see slam/mapper.py's docstring.
     device: str = "CPU:0"
+    # Compute backend for the live worker: "local" runs Mapper in-process
+    # (default, unchanged behavior); "remote" ships frames to a SlamService
+    # (GPU WSL container) at remote_addr, falling back to local if unreachable.
+    backend: str = "local"
+    remote_addr: str = "127.0.0.1:5555"
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "SlamConfig":

@@ -1227,9 +1227,11 @@ class ControlPanel:
         if self.slam_worker is None:
             from .slam.worker import SlamWorker
             from .slam.config import preferred_device
+            from .slam.backend import make_slam_worker
             h, w = depth.shape
-            self.slam_worker = SlamWorker(w, h, fov_h=self.args.fov_h, fov_v=self.args.fov_v,
-                                          device=preferred_device())
+            self.slam_worker = make_slam_worker(w, h, fov_h=self.args.fov_h,
+                                                fov_v=self.args.fov_v,
+                                                device=preferred_device())
             self.slam_worker.start()
 
         quat = self.sensor_state.fused_quat()
@@ -1705,11 +1707,12 @@ class ControlPanel:
         updates the faint FoV indicator from this step's pose."""
         from .slam.worker import SlamWorker
         from .slam.config import preferred_device
+        from .slam.backend import make_slam_worker
         if self._showcase_preview_worker is None:
             h, w = depth.shape
-            self._showcase_preview_worker = SlamWorker(w, h, fov_h=self.args.fov_h,
-                                                        fov_v=self.args.fov_v,
-                                                        device=preferred_device())
+            self._showcase_preview_worker = make_slam_worker(w, h, fov_h=self.args.fov_h,
+                                                             fov_v=self.args.fov_v,
+                                                             device=preferred_device())
             self._showcase_preview_worker.start()
 
         quat = self.sensor_state.fused_quat()
