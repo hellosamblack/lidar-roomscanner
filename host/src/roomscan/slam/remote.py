@@ -70,6 +70,8 @@ class RemoteSlamWorker:
         return self._tracking_lost_count
 
     def start(self) -> None:
+        if self._threads:
+            return
         if self._sock is None and not self.connect():
             raise ConnectionError(f"slam-service unreachable at {self._host}:{self._port}")
         self._stop_evt.clear()
@@ -116,7 +118,7 @@ class RemoteSlamWorker:
             except OSError:
                 pass
             self._sock.close()
-            self._sock = None
         for t in self._threads:
             t.join(timeout=1.5)
         self._threads = []
+        self._sock = None

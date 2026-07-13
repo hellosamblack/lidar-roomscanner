@@ -52,3 +52,30 @@ def test_connect_returns_false_when_no_server():
     rw = RemoteSlamWorker(W, H, addr="127.0.0.1:1", connect_timeout=0.3)
     assert rw.connect() is False
     assert rw.latest() is None       # never raises
+
+
+def test_start_is_idempotent_and_stop_start_cycle_is_clean():
+    # Finding 2: a second start() while already running must be a clean no-op
+    # (not spawn a second send/recv thread pair on top of the first).
+    port, lsock, th = _serve_on_ephemeral()
+    rw = RemoteSlamWorker(W, H, addr=f"127.0.0.1:{port}", fov_h=55.0, fov_v=42.0)
+    assert rw.connect() is True
+    rw.start()
+    rw.start()  # second call: must no-op, not leak a duplicate thread pair
+    assert len(rw._threads) == 2
+
+    rw.stop()
+    assert rw._threads == []
+    assert rw._sock is None
+
+    # Finding 1: stop() must null self._sock only after the worker threads have
+    # joined. Exercise a start/stop cycle again and confirm it completes cleanly
+    # within the bounded join timeout (no hang, no thread pair leaked).
+    assert rw.connect() is True
+    rw.start()
+    assert len(rw._threads) == 2
+    rw.stop()
+    assert rw._threads == []
+    assert rw._sock is None
+
+    lsock.close(); th.join(timeout=2)
