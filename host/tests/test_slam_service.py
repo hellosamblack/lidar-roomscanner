@@ -1,7 +1,7 @@
 import socket, threading
 import numpy as np
 import pytest
-from roomscan.slam import wire
+from roomscan.slam import wire, service
 from roomscan.slam.service import SlamService
 
 pytest.importorskip("open3d")
@@ -46,22 +46,17 @@ def test_service_returns_stepresult_per_frame():
 
 def test_serve_survives_bad_client_and_keeps_serving():
     """A malformed frame (missing 'depth') raises inside serve_client; the
-    accept loop must catch it, close that connection, and keep serving the
-    next client rather than crashing the process."""
-    srv = SlamService(device="CPU:0", fov_h=55.0, fov_v=42.0)
-    lsock = socket.socket(); lsock.bind(("127.0.0.1", 0)); lsock.listen(2)
+    real serve() accept loop must catch it, close that connection, and keep
+    serving the next client rather than crashing the process."""
+    lsock = socket.socket(); lsock.bind(("127.0.0.1", 0)); lsock.listen(1)
     port = lsock.getsockname()[1]
 
-    def accept_two():
-        for _ in range(2):
-            conn, _ = lsock.accept()
-            try:
-                srv.serve_client(conn)
-            except Exception:
-                pass
-            finally:
-                conn.close()
-    th = threading.Thread(target=accept_two, daemon=True); th.start()
+    th = threading.Thread(
+        target=service.serve,
+        kwargs=dict(device="CPU:0", fov_h=55.0, fov_v=42.0, _sock=lsock),
+        daemon=True,
+    )
+    th.start()
 
     # First client: malformed frame missing the required "depth" key ->
     # KeyError inside serve_client. Connection should just end.
@@ -70,10 +65,14 @@ def test_serve_survives_bad_client_and_keeps_serving():
     bad_cli.close()
 
     # Second client: valid synthetic frame. Server must still be alive.
-    good_cli = socket.create_connection(("127.0.0.1", port), timeout=5)
+    good_cli = socket.create_connection(("127.0.0.1", port))
+    good_cli.settimeout(5)
     wire.send_message(good_cli, _synthetic_frame(0))
     result = wire.recv_message(good_cli)
-    good_cli.close(); lsock.close(); th.join(timeout=2)
+
+    good_cli.close()
+    lsock.close()
+    th.join(timeout=2)
 
     assert result is not None
     assert result["fid"] == 0

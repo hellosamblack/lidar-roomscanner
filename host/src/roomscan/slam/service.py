@@ -62,14 +62,20 @@ class SlamService:
             wire.send_message(conn, out)
 
 
-def serve(host="0.0.0.0", port=5555, device="CUDA:0", **mapper_kwargs) -> None:
+def serve(host="0.0.0.0", port=5555, device="CUDA:0", *, _sock=None, **mapper_kwargs) -> None:
     srv = SlamService(device=device, **mapper_kwargs)
-    lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    lsock.bind((host, port)); lsock.listen(1)
+    if _sock is not None:
+        lsock = _sock
+    else:
+        lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        lsock.bind((host, port)); lsock.listen(1)
     print(f"[slam-service] listening on {host}:{port} device={device}", flush=True)
     while True:
-        conn, addr = lsock.accept()
+        try:
+            conn, addr = lsock.accept()
+        except OSError:
+            break
         print(f"[slam-service] client {addr} connected", flush=True)
         try:
             srv.serve_client(conn)
