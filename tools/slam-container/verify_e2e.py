@@ -74,8 +74,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("capture")
     ap.add_argument("--addr", default="127.0.0.1:5555")
+    ap.add_argument("--max-frames", type=int, default=None,
+                    help="cap frames (e.g. to stay under the GPU-memory wall on long scans)")
     args = ap.parse_args()
-    frames, w, h = _load_frames(args.capture)
+    frames, w, h = _load_frames(args.capture, max_frames=args.max_frames)
     print(f"{len(frames)} frames {w}x{h}")
 
     rw = RemoteSlamWorker(w, h, addr=args.addr, fov_h=55.0, fov_v=42.0)
