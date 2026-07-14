@@ -22,6 +22,8 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-008 | fixed   | host/viewer   | Minimizing the roomscanner panel triggers Filament Camera preconditions warning |
 | BUG-009 | fixed   | host/panel    | SLAM/Showcase trajectory LineSet with a single point hard-crashes Filament (segfault) |
 | BUG-010 | by-design | host/panel  | A Recorder capture started well into a session lacks CALIB and can't be post-processed |
+| BUG-011 | fixed   | host/panel    | Floating HUD toggles unclickable — control `ImageWidget`s swallow clicks before the SceneWidget's `set_on_mouse` |
+| BUG-012 | fixed   | host/panel    | Per-frame `srgbColor` Filament console spam from `defaultUnlitTransparency` material |
 
 ---
 
@@ -191,5 +193,55 @@ Recording from the very start of a replay file works fine. Marked `by-design` ra
 because live mode (the feature's primary use case) is fixed; a full replay-mode fix would need
 `_load_frames` to tolerate a missing CALIB (e.g. reuse the panel's already-warm `TransformStage`
 instead of a fresh one) -- out of scope here.
+
+## BUG-011 — Floating HUD toggles unclickable (mouse passthrough)
+
+- **Status:** **fixed** 2026-07-14 · **Reported:** 2026-07-14 (owner, on-rig) · **Area:** host/panel
+- **Where:** `host/src/roomscan/panel.py` — HUD widget creation in `_build_overlay`, `_on_mouse`
+
+The two-mode/HUD redesign (Phase 6 panel UX) draws each floating control (mode switch, view toggle,
+action cluster, IR control, status chip) as a `gui.ImageWidget` added to the window and positioned
+over the `SceneWidget`. Click routing was done through `scene_widget.set_on_mouse(self._on_mouse)` →
+`HudLayout.hit_test`. But Open3D dispatches a mouse event to the **topmost child widget** whose frame
+contains the cursor: over a control that is its `ImageWidget`, which has no handler and does not
+forward, so the SceneWidget's `set_on_mouse` never fired and `hit_test` never ran. Every HUD toggle
+was dead (camera orbit still worked everywhere the controls didn't cover). This was the exact failure
+the Task-9 note in `_on_mouse` anticipated ("if the ImageWidget itself consumes clicks...").
+
+**Fix:** `gui.ImageWidget` has its own `set_on_mouse`, so each HUD widget now binds
+`w.set_on_mouse(self._on_hud_widget_mouse)` — the widget that's actually on top handles its own
+clicks. The new handler reuses the existing `HudLayout.hit_test` / `_dispatch_hud_hit` unchanged
+(event coords are window-absolute, so segments and the IR opacity slider work as-is) and consumes
+every event over a control so it never leaks to camera nav. The now-dead HUD-intercept block was
+removed from `_on_mouse` — that also fixed a latent bug where a click in a *hidden* control's screen
+region still dispatched to it (the SceneWidget handler used the full layout regardless of visibility).
+Regression tests in `host/tests/test_panel_modes.py` (`test_on_hud_widget_mouse_*`). The on-screen
+click still wants an owner eyeball (Filament can't render headless), but the mechanism is API-sound.
+
+## BUG-012 — Per-frame `srgbColor` Filament console spam
+
+- **Status:** **fixed** 2026-07-14 · **Reported:** 2026-07-14 (owner) · **Area:** host/panel
+- **Where:** Open3D 0.19 library bug; worked around in `host/src/roomscan/logfilter.py` (wired in
+  `panel.py` `run()`)
+
+The console floods, at the sensor frame rate, with:
+```
+in ... filament::UniformInterfaceBlock::getUniformOffset(...):NNN
+reason: uniform named "srgbColor" not found
+```
+Root cause (verified against the shipped resources): of Open3D 0.19's `.filamat` shaders **only**
+`defaultUnlit.filamat` declares the `srgbColor` uniform; `defaultUnlitTransparency.filamat` does not —
+yet Open3D's shared `FilamentScene::UpdateDefaultUnlit` binds `srgbColor` unconditionally, so Filament
+warns on every material bind of a translucent geometry. The first-person IR billboard
+(`_update_ir_overlay`) does `remove_geometry`+`add_geometry` with that transparency material **every
+frame** in first-person mode (the default), so one warning prints per frame. It is cosmetic — rendering
+is unaffected. Filament writes it at the C runtime level (fd 2), so `contextlib.redirect_stderr` and
+Open3D's verbosity control can't touch it.
+
+**Fix:** `logfilter.install_filament_stderr_filter()` interposes an OS pipe on fd 2 and a daemon reader
+thread that drops exactly the two warning lines (matched on the `srgbColor` / `getUniformOffset`
+substrings — specific enough that no genuine error collides) and re-emits everything else verbatim.
+Verified end-to-end: a UCRT-level write (the same runtime Filament links) of the warning is dropped
+while a sentinel survives (`host/tests/test_logfilter.py`). Opt out with `ROOMSCAN_KEEP_FILAMENT_LOGS=1`.
 
 **Fix:** Added checks in `_on_layout` to return early if the window width or height is `<= 0`, or if the resulting `scene_w` is `<= 0`. Constrained `panel_w` to be at least `0` so it doesn't become negative. Additionally, guarded camera operations in `_reset_camera` and `_apply_camera` to skip execution if `scene_widget.frame` width or height are `<= 0` (preventing setup of degenerate projection matrices).

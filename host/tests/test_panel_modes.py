@@ -122,6 +122,42 @@ def test_dispatch_ir_label_toggles():
     assert fake.ir_overlay_enabled is True
 
 
+def test_on_hud_widget_mouse_dispatches_click_and_consumes():
+    """The floating-HUD ImageWidgets carry their OWN set_on_mouse (they sit atop
+    the SceneWidget, which never sees clicks over them -- the mouse-passthrough
+    bug). A BUTTON_DOWN over a control must route through HudLayout.hit_test ->
+    _dispatch_hud_hit and be consumed."""
+    gui = __import__("pytest").importorskip("open3d").visualization.gui
+    from roomscan.hud import HudLayout, MODE_SWITCH
+    fake = _FakeHudPanel()
+    fake._gui = gui
+    fake._hud_layout = HudLayout(0, 0, 1000, 700, mode="slam")
+    fake._dispatch_hud_hit = lambda hit: panel_mod.ControlPanel._dispatch_hud_hit(fake, hit)
+    x, y, w, h = fake._hud_layout.rects()[MODE_SWITCH]
+    ev = type("E", (), {"type": gui.MouseEvent.Type.BUTTON_DOWN,
+                        "x": x + w * 0.75, "y": y + h / 2})()
+    res = panel_mod.ControlPanel._on_hud_widget_mouse(fake, ev)
+    assert res == gui.Widget.EventCallbackResult.CONSUMED
+    assert fake.mode == panel_mod.VIEW_SLAM          # second segment -> SLAM
+
+
+def test_on_hud_widget_mouse_consumes_move_without_dispatch():
+    """MOVE/hover over a control is consumed (so it never leaks to camera nav)
+    but drives no action."""
+    gui = __import__("pytest").importorskip("open3d").visualization.gui
+    from roomscan.hud import HudLayout, MODE_SWITCH
+    fake = _FakeHudPanel()
+    fake._gui = gui
+    fake._hud_layout = HudLayout(0, 0, 1000, 700, mode="slam")
+    fake._dispatch_hud_hit = lambda hit: panel_mod.ControlPanel._dispatch_hud_hit(fake, hit)
+    x, y, w, h = fake._hud_layout.rects()[MODE_SWITCH]
+    ev = type("E", (), {"type": gui.MouseEvent.Type.MOVE,
+                        "x": x + w * 0.75, "y": y + h / 2})()
+    res = panel_mod.ControlPanel._on_hud_widget_mouse(fake, ev)
+    assert res == gui.Widget.EventCallbackResult.CONSUMED
+    assert fake._mode_calls == []                    # MOVE dispatched nothing
+
+
 def test_load_dialog_dispatches_by_kind(monkeypatch):
     calls = {}
 

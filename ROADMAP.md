@@ -633,12 +633,15 @@ channel, barometer as soft 1-DoF Z constraint.
 > quad); a camera-gizmo-flicker fix (gizmo gated on orbit only); and `mode`/`camera`/`ir_overlay`/
 > `ir_opacity` config persistence. The HUD mode-switch + view-toggle are the **sole** mode/camera
 > authority (the old SLAM/Showcase/Follow checkboxes were removed). **Status: code-complete + reviewed,
-> 554 host tests green; ALL GUI-runtime behavior is UNVERIFIED-BY-RUNTIME** (Filament needs a display) —
-> a supervised on-rig run must verify: the floating-`ImageWidget` mouse-fallthrough **probe**
-> (`host/tools/panel_hud_probe.py`; gates whether the HUD needs an invisible-button click layer), the
-> smoke pass (`host/tools/panel_ui_smoke.py`), mode/camera switching + first-person cameras, IR billboard
-> texture render/UV orientation + opacity, settings-dialog re-open widget lifetime, and dialog scroll
-> reachability (currently a plain `Vert` — may need `ScrollableVert`).
+> 561 host tests green.** The **mouse-fallthrough question is RESOLVED on-rig (2026-07-14):** the floating
+> `ImageWidget`s DID consume clicks (the SceneWidget's `set_on_mouse` never saw them) — fixed not with the
+> planned invisible-button layer but by giving each HUD widget its own `set_on_mouse`
+> (`_on_hud_widget_mouse`) that reuses `HudLayout.hit_test` unchanged (BUG-011). The per-frame `srgbColor`
+> Filament console spam was fixed alongside it (BUG-012, `logfilter.py`). **Remaining GUI-runtime behavior
+> is still UNVERIFIED-BY-RUNTIME** (Filament needs a display) — a supervised on-rig run should still
+> eyeball: the smoke pass (`host/tools/panel_ui_smoke.py`), mode/camera switching + first-person cameras,
+> IR billboard texture render/UV orientation + opacity, settings-dialog re-open widget lifetime, and
+> dialog scroll reachability (currently a plain `Vert` — may need `ScrollableVert`).
 
 #### Sub-phase 6.G — SLAM GPU-memory hardening (long-scan OOM)  ← **next**
 

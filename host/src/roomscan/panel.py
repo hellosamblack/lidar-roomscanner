@@ -818,14 +818,18 @@ class ControlPanel:
         self.window.add_child(self.reveal_card)
 
         # Floating HUD controls (spec §5.1): one ImageWidget per control, drawn
-        # by hud.render_* and positioned in _on_layout. Interaction is routed
-        # through _on_mouse -> HudLayout.hit_test (see _dispatch_hud_hit).
+        # by hud.render_* and positioned in _on_layout. Each control carries its
+        # OWN set_on_mouse -- it's a Window child stacked over the SceneWidget,
+        # so Open3D routes clicks on it to the control, NOT to the SceneWidget's
+        # set_on_mouse (that's the mouse-passthrough the Task-9 note flagged;
+        # hit_test dispatch lives in _on_hud_widget_mouse).
         from . import hud as _hud
         self._hud = _hud
         self.hud_widgets = {}
         for cid in (_hud.MODE_SWITCH, _hud.VIEW_TOGGLE, _hud.ACTION_CLUSTER,
                     _hud.IR_CONTROL, _hud.STATUS_CHIP):
             w = gui.ImageWidget(self._np_to_o3d_rgba(np.zeros((*_hud.SIZES[cid][::-1], 4), np.uint8)))
+            w.set_on_mouse(self._on_hud_widget_mouse)
             self.window.add_child(w)
             self.hud_widgets[cid] = w
 
@@ -2611,21 +2615,33 @@ class ControlPanel:
         self.scene_widget.look_at(self._cam_target.astype(np.float32),
                                   eye.astype(np.float32), _WORLD_UP)   # fixed up -> never tilts/rolls
 
-    def _on_mouse(self, e):
+    def _on_hud_widget_mouse(self, e):
+        """Mouse handler bound to each floating-HUD ImageWidget (spec §5.1).
+
+        Every HUD control is its own Window child stacked over the SceneWidget,
+        so Open3D dispatches a click on it to THIS callback -- the SceneWidget's
+        set_on_mouse never sees clicks over a control (the mouse-passthrough the
+        Task-9 note anticipated). Event coords are window-absolute (same frame
+        as the SceneWidget), so the shared HudLayout.hit_test maps them
+        directly. Consume every event over a control so a click there can never
+        fall through to camera nav. Invisible controls aren't mouse targets, so
+        clicks in a hidden control's region correctly reach the scene instead.
+        """
         gui = self._gui
-        res = gui.SceneWidget.EventCallbackResult
-        # Floating-HUD intercept (Task 9): route clicks/drags over a HUD control
-        # to _dispatch_hud_hit FIRST -- before the _cam_target guard and the
-        # follow-camera swallow, both of which would otherwise eat the event.
-        # NOTE: if a supervised bench run shows the ImageWidget itself consumes
-        # clicks (probe fails), the owner-verified fallback is an invisible
-        # gui.Button layer per control rect (see task brief's probe gate).
+        res = gui.Widget.EventCallbackResult
         if getattr(self, "_hud_layout", None) is not None and e.type in (
                 gui.MouseEvent.Type.BUTTON_DOWN, gui.MouseEvent.Type.DRAG):
             hit = self._hud_layout.hit_test(int(e.x), int(e.y))
             if hit is not None:
-                if self._dispatch_hud_hit(hit):
-                    return res.CONSUMED
+                self._dispatch_hud_hit(hit)
+        return res.CONSUMED
+
+    def _on_mouse(self, e):
+        gui = self._gui
+        res = gui.SceneWidget.EventCallbackResult
+        # HUD clicks are handled per-control by _on_hud_widget_mouse (each HUD
+        # ImageWidget owns its own set_on_mouse); the SceneWidget only ever gets
+        # events over the open scene, so it drives camera nav alone here.
         if self._cam_target is None:
             return res.IGNORED
         if self.follow_camera_enabled:
@@ -3317,6 +3333,13 @@ def run(args, *, smoke_ticks: int = 0) -> int:
     pacer = _Pacer(interval)
     if not dll:
         bus.publish("transform DLL absent — depth only, IR/reflectance unavailable")
+
+    # Silence Open3D 0.19's benign per-frame Filament "srgbColor" warning
+    # (defaultUnlitTransparency lacks the uniform UpdateDefaultUnlit binds) before
+    # the engine spins up. Cosmetic-only; see logfilter.py. Opt out with
+    # ROOMSCAN_KEEP_FILAMENT_LOGS=1.
+    from .logfilter import install_filament_stderr_filter
+    install_filament_stderr_filter()
 
     gui.Application.instance.initialize()
     panel = ControlPanel(args, source, client, stage, bus, recorder, pacer)
