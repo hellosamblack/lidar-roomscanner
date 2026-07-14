@@ -4,6 +4,8 @@ controls. No Open3D imports -- unit-tested like theme.py/cards.py.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from . import instrument
@@ -121,3 +123,72 @@ def render_status_chip(tracking: str, fps: float) -> np.ndarray:
     d.text((24, (h - 12) / 2), f"{tracking.upper():<5} {fps:4.0f} fps", font=font,
            fill=instrument.TEXT + (255,))
     return _finish(img)
+
+
+MARGIN = 12
+_IR_TRACK_X0 = 40          # must match render_ir_control's track start
+_IR_TRACK_PAD_RIGHT = 12
+
+
+@dataclass(frozen=True)
+class ControlHit:
+    control: str
+    segment: int | None = None
+    fraction: float | None = None
+
+
+class HudLayout:
+    def __init__(self, scene_x, scene_y, scene_w, scene_h, *,
+                 is_replay: bool = False, mode: str = "slam"):
+        self.x, self.y, self.w, self.h = scene_x, scene_y, scene_w, scene_h
+        self.is_replay = is_replay
+        self.mode = mode
+
+    def rects(self):
+        top = self.y + MARGIN
+        bottom = lambda ch: self.y + self.h - MARGIN - SIZES[ch][1]
+        mw, mh = SIZES[MODE_SWITCH]
+        vw, vh = SIZES[VIEW_TOGGLE]
+        sw, sh = SIZES[STATUS_CHIP]
+        aw, ah = SIZES[ACTION_CLUSTER]
+        iw, ih = SIZES[IR_CONTROL]
+        out = {
+            MODE_SWITCH: (self.x + (self.w - mw) // 2, top, mw, mh),
+            VIEW_TOGGLE: (self.x + self.w - MARGIN - vw, top, vw, vh),
+            STATUS_CHIP: (self.x + MARGIN, bottom(STATUS_CHIP), sw, sh),
+            IR_CONTROL: (self.x + self.w - MARGIN - iw, bottom(IR_CONTROL), iw, ih),
+        }
+        if self.mode == "slam":
+            out[ACTION_CLUSTER] = (self.x + (self.w - aw) // 2, bottom(ACTION_CLUSTER), aw, ah)
+        return out
+
+    @staticmethod
+    def _in(rect, px, py):
+        x, y, w, h = rect
+        return x <= px < x + w and y <= py < y + h
+
+    def hit_test(self, px, py):
+        rects = self.rects()
+        # Fixed 2-segment controls -> segment index by x.
+        for ch in (MODE_SWITCH, VIEW_TOGGLE):
+            if ch in rects and self._in(rects[ch], px, py):
+                x, _, w, _ = rects[ch]
+                seg = min(1, max(0, int((px - x) / (w / 2))))
+                return ControlHit(ch, segment=seg)
+        # Action cluster: variable button count (phase-driven) -> return a
+        # fraction; the panel maps it to a button index by the current labels.
+        if ACTION_CLUSTER in rects and self._in(rects[ACTION_CLUSTER], px, py):
+            x, _, w, _ = rects[ACTION_CLUSTER]
+            frac = float(np.clip((px - x) / max(1, w), 0.0, 1.0))
+            return ControlHit(ACTION_CLUSTER, fraction=frac)
+        if IR_CONTROL in rects and self._in(rects[IR_CONTROL], px, py):
+            x, _, w, _ = rects[IR_CONTROL]
+            local = px - x
+            if local < _IR_TRACK_X0:
+                return ControlHit(IR_CONTROL, segment=0)          # label -> toggle
+            tx0, tx1 = _IR_TRACK_X0, w - _IR_TRACK_PAD_RIGHT
+            frac = float(np.clip((local - tx0) / max(1, tx1 - tx0), 0.0, 1.0))
+            return ControlHit(IR_CONTROL, fraction=frac)
+        if STATUS_CHIP in rects and self._in(rects[STATUS_CHIP], px, py):
+            return ControlHit(STATUS_CHIP)
+        return None

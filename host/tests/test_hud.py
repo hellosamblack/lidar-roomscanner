@@ -57,3 +57,53 @@ def test_renders_have_transparent_margin():
     img = hud.render_mode_switch("slam")
     # top-left corner pixel is in the 1px transparent margin
     assert img[0, 0, 3] == 0
+
+
+from roomscan.hud import ControlHit, HudLayout
+
+
+def test_layout_rects_present_for_slam():
+    lay = HudLayout(0, 0, 1000, 700, mode="slam")
+    r = lay.rects()
+    assert set(r) >= {hud.MODE_SWITCH, hud.VIEW_TOGGLE, hud.STATUS_CHIP,
+                      hud.ACTION_CLUSTER, hud.IR_CONTROL}
+
+
+def test_layout_real_time_hides_action_cluster():
+    lay = HudLayout(0, 0, 1000, 700, mode="real_time")
+    assert hud.ACTION_CLUSTER not in lay.rects()
+
+
+def test_mode_switch_is_top_center():
+    lay = HudLayout(0, 0, 1000, 700, mode="slam")
+    x, y, w, h = lay.rects()[hud.MODE_SWITCH]
+    assert y == 12                                   # top row
+    assert abs((x + w / 2) - 500) <= 1               # horizontally centered
+
+
+def test_hit_test_mode_switch_second_segment():
+    lay = HudLayout(0, 0, 1000, 700, mode="slam")
+    x, y, w, h = lay.rects()[hud.MODE_SWITCH]
+    hit = lay.hit_test(int(x + w * 0.75), int(y + h / 2))
+    assert hit == ControlHit(hud.MODE_SWITCH, segment=1)
+
+
+def test_hit_test_miss_returns_none():
+    lay = HudLayout(0, 0, 1000, 700, mode="slam")
+    assert lay.hit_test(500, 350) is None            # dead center of the scene
+
+
+def test_hit_test_ir_slider_fraction():
+    lay = HudLayout(0, 0, 1000, 700, mode="slam")
+    x, y, w, h = lay.rects()[hud.IR_CONTROL]
+    # click ~ the far right of the track region -> fraction near 1.0
+    hit = lay.hit_test(int(x + w - 14), int(y + h / 2))
+    assert hit.control == hud.IR_CONTROL
+    assert hit.fraction is not None and hit.fraction > 0.8
+
+
+def test_hit_test_status_chip_readonly():
+    lay = HudLayout(0, 0, 1000, 700, mode="slam")
+    x, y, w, h = lay.rects()[hud.STATUS_CHIP]
+    hit = lay.hit_test(int(x + w / 2), int(y + h / 2))
+    assert hit == ControlHit(hud.STATUS_CHIP)
