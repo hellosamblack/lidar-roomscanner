@@ -53,7 +53,11 @@ def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: 
     n_source = rotated_src.shape[0]
     tgt_t = o3d.core.Tensor(tgt_pts, device=dev)
     nns = o3d.core.nns.NearestNeighborSearch(tgt_t)
-    nns.hybrid_index()
+    # Pass the search radius at index-build time: the GPU HybridIndex REQUIRES
+    # it ("radius is required for GPU HybridIndex"), while the CPU index treats
+    # it as optional -- so passing max_dist here works on both devices (on CPU
+    # it was previously omitted, which is equivalent).
+    nns.hybrid_index(max_dist)
 
     t = np.asarray(t0, dtype=np.float64).copy()
     fitness, rmse = 0.0, float("inf")

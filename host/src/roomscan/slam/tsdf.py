@@ -68,6 +68,16 @@ def _resolve_device(device) -> o3d.core.Device:
     return device if isinstance(device, o3d.core.Device) else o3d.core.Device(device)
 
 
+# Open3D's VoxelBlockGrid takes the camera intrinsic/extrinsic as CPU:0 Float64
+# tensors REGARDLESS of the grid's own device -- integrate/ray_cast/
+# compute_unique_block_coordinates internally call InverseTransformation, which
+# asserts CPU:0. On a CPU grid self._device is already CPU:0 so it never
+# mattered; on CUDA, passing a CUDA extrinsic raises "Tensor has device CUDA:0,
+# but is expected to have CPU:0". Keep these two tensors on CPU always; the
+# depth/color images and raycast outputs stay on the compute device.
+_CPU = o3d.core.Device("CPU:0")
+
+
 class TsdfMap:
     def __init__(self, voxel_size: float = 0.01, trunc_multiplier: float = 8.0,
                  block_resolution: int = 8, block_count: int = 40000,
@@ -110,8 +120,8 @@ class TsdfMap:
         (the default) keeps the original depth-only overload -- unchanged
         behavior for callers that don't have a color image handy."""
         depth = self._depth_image(depth_mm)
-        ext = o3d.core.Tensor(np.asarray(extrinsic, dtype=np.float64), device=self._device)
-        intr = intrinsic.to(self._device)
+        ext = o3d.core.Tensor(np.asarray(extrinsic, dtype=np.float64), device=_CPU)
+        intr = intrinsic.to(_CPU)
         coords = self._vbg.compute_unique_block_coordinates(
             depth, intr, ext, self.depth_scale, self.depth_max, self.trunc_multiplier)
         if color is not None:
@@ -130,8 +140,8 @@ class TsdfMap:
         `Mapper` can bound `raycast()`'s cost to the current view instead of
         the whole map."""
         depth = self._depth_image(depth_mm)
-        ext = o3d.core.Tensor(np.asarray(extrinsic, dtype=np.float64), device=self._device)
-        intr = intrinsic.to(self._device)
+        ext = o3d.core.Tensor(np.asarray(extrinsic, dtype=np.float64), device=_CPU)
+        intr = intrinsic.to(_CPU)
         return self._vbg.compute_unique_block_coordinates(
             depth, intr, ext, self.depth_scale, self.depth_max, self.trunc_multiplier)
 
@@ -146,8 +156,8 @@ class TsdfMap:
         omit both to fall back to the original all-active-blocks behavior."""
         if self._empty:
             return None
-        ext = o3d.core.Tensor(np.asarray(extrinsic, dtype=np.float64), device=self._device)
-        intr = intrinsic.to(self._device)
+        ext = o3d.core.Tensor(np.asarray(extrinsic, dtype=np.float64), device=_CPU)
+        intr = intrinsic.to(_CPU)
         if block_coords is not None:
             coords = block_coords
         elif depth_hint is not None:
