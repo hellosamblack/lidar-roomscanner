@@ -2681,11 +2681,134 @@ class ControlPanel:
             return True    # read-only, but consume so it doesn't orbit the camera
         return False
 
-    # Task-9 stubs: minimal state setters so the module imports and the dispatch
-    # tests pass. The real mode/camera/action behavior lands in Tasks 10/11.
-    def _set_mode(self, m): self.mode = m
-    def _set_camera(self, c): self.camera_mode = c
-    def _do_action(self, seg): pass
+    # ---- Mode / camera / action wiring (Task 10) ----------------------------
+    def _set_mode(self, m):
+        if m == self.mode:
+            return
+        self.mode = m
+        if m == VIEW_SLAM:
+            self.chk_slam_checked = True                 # (no sidebar checkbox now)
+            self._on_slam_toggle(True)
+        else:
+            if self.showcase_enabled:
+                self._on_showcase_toggle(False)
+            self._on_slam_toggle(False)
+        self._apply_camera_mode()
+        self.window.set_needs_layout()                   # ACTION_CLUSTER visibility changed
+        self.bus.publish(f"mode -> {m}")
+
+    def _set_camera(self, c):
+        if c == self.camera_mode:
+            return
+        self.camera_mode = c
+        self._apply_camera_mode()
+        self.window.set_needs_layout()                   # IR_CONTROL visibility changed
+        self.bus.publish(f"camera -> {c}")
+
+    def _apply_camera_mode(self):
+        """Reconcile the SLAM pose-follow flag + Real-Time fixed camera with the
+        current (mode, camera)."""
+        want_follow = follow_active(self.mode, self.camera_mode)
+        if want_follow != self.follow_camera_enabled:
+            self.follow_camera_enabled = want_follow
+            self._follow_eye = None
+            self._follow_center = None
+            if not want_follow:
+                self._apply_camera()                     # restore free-orbit
+        if real_time_first_person(self.mode, self.camera_mode):
+            self._apply_real_time_first_person()
+
+    def _apply_real_time_first_person(self):
+        """Real-Time first-person: a fixed sensor-origin camera looking along
+        the sensor +Z (the raw cloud is already in the sensor frame), per spec
+        §3. Eye slightly behind the origin; center one metre ahead."""
+        if self.scene_widget.frame.width <= 0 or self.scene_widget.frame.height <= 0:
+            return
+        eye = np.array([0.0, 0.0, -_FOLLOW_BACK_OFF_M], dtype=np.float32)
+        center = np.array([0.0, 0.0, _FOLLOW_LOOK_AHEAD_M], dtype=np.float32)
+        self.scene_widget.look_at(center, eye, _WORLD_UP)
+
+    def _hud_action_labels(self):
+        phase = self.showcase_phase.name.lower() if (self.mode == VIEW_SLAM and self.showcase_phase) else "idle"
+        return {
+            "idle": ["REC", "LOAD", "CLR"],
+            "recording": ["STOP", "CLR"],
+            "processing": ["PROCESSING"],
+            "final": ["LOAD", "CLR"],
+        }.get(phase, ["REC", "LOAD", "CLR"])
+
+    def _do_action(self, segment):
+        labels = self._hud_action_labels()
+        if segment is None or segment >= len(labels):
+            return
+        label = labels[segment]
+        if label in ("REC", "STOP"):
+            # Toggle the record button + run the existing handler (which bridges
+            # into the Showcase record->process flow when showcase_enabled).
+            self.btn_record.is_on = not self.btn_record.is_on
+            self._on_record()
+        elif label == "LOAD":
+            self._load_dialog()
+        elif label == "CLR":
+            self._on_clear_scan()
+
+    def _load_dialog(self):
+        gui = self._gui
+        dlg = gui.FileDialog(gui.FileDialog.OPEN, "Load capture or mesh", self.window.theme)
+        dlg.add_filter(".bin", "Capture (.bin)")
+        dlg.add_filter(".ply", "Mesh (.ply)")
+        dlg.set_on_cancel(self.window.close_dialog)
+
+        def _chosen(path):
+            self.window.close_dialog()
+            self._load_path(path)
+        dlg.set_on_done(_chosen)
+        self.window.show_dialog(dlg)
+
+    def _load_path(self, path):
+        kind = load_kind(path)
+        if kind == "capture":
+            self._process_capture(path)
+        elif kind == "mesh":
+            self._display_mesh_file(path)
+        else:
+            self.bus.publish(f"load: unsupported file {path!r}")
+
+    def _process_capture(self, path):
+        """Run the existing Showcase record->process->reveal pipeline on a saved
+        .bin (spec §3): ensure SLAM mode + Showcase on, then reuse
+        _enter_showcase_processing's loader against the given path."""
+        if self.mode != VIEW_SLAM:
+            self._set_mode(VIEW_SLAM)
+        if not self.showcase_enabled:
+            self._on_showcase_toggle(True)
+        from .slam.showcase import next_phase
+        self.showcase_phase = next_phase(self.showcase_phase, record_pressed=True)   # -> RECORDING
+        self._enter_showcase_processing(path)          # tears into PROCESSING on `path`
+        self.bus.publish(f"load capture -> {path}")
+
+    def _display_mesh_file(self, path):
+        """Display a saved .ply mesh (orbit, no reprocessing), spec §3."""
+        o3d = self._o3d
+        try:
+            mesh = o3d.io.read_triangle_mesh(path)
+        except Exception as exc:
+            self.bus.publish(f"load mesh failed: {exc!r}")
+            return
+        if len(mesh.triangles) == 0:
+            self.bus.publish("load mesh: empty")
+            return
+        self._set_camera(CAM_ORBIT)
+        mesh.compute_vertex_normals()
+        sc = self.scene_widget.scene
+        if sc.has_geometry(_MESH_GEOM):
+            sc.remove_geometry(_MESH_GEOM)
+        sc.add_geometry(_MESH_GEOM, mesh, self.mesh_material)
+        self._camera_set = False
+        self._last_all_pts = np.asarray(mesh.vertices)
+        self._reset_camera()
+        self.bus.publish(f"load mesh -> {path}")
+
     def _toggle_ir_overlay(self): self.ir_overlay_enabled = not self.ir_overlay_enabled
     def _set_ir_opacity(self, f): self.ir_opacity = float(f)
 

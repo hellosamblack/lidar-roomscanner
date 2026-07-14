@@ -120,3 +120,18 @@ def test_dispatch_ir_label_toggles():
     fake = _FakeHudPanel()
     panel_mod.ControlPanel._dispatch_hud_hit(fake, ControlHit(IR_CONTROL, segment=0))
     assert fake.ir_overlay_enabled is True
+
+
+def test_load_dialog_dispatches_by_kind(monkeypatch):
+    calls = {}
+
+    class _FakeLoadPanel:
+        def _process_capture(self, path): calls["capture"] = path
+        def _display_mesh_file(self, path): calls["mesh"] = path
+        bus = type("B", (), {"publish": lambda self, m: None})()
+
+    fake = _FakeLoadPanel()
+    panel_mod.ControlPanel._load_path(fake, "captures/a.bin")
+    panel_mod.ControlPanel._load_path(fake, "results/b.ply")
+    panel_mod.ControlPanel._load_path(fake, "x.txt")
+    assert calls == {"capture": "captures/a.bin", "mesh": "results/b.ply"}
