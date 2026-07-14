@@ -746,6 +746,13 @@ class ControlPanel:
         self.window.set_on_close(self._on_close)
         self.window.set_on_tick_event(self._on_tick)
         self.window.set_on_key(self._on_key)   # H -> help dialog
+
+        # Apply the saved/CLI mode + camera so the window opens in the right
+        # state (spec §3: both default to first-person; mode defaults to SLAM).
+        if self.mode == VIEW_SLAM:
+            self._on_slam_toggle(True)
+        self._apply_camera_mode()
+
         self.bus.publish(f"connected: {'replay ' + str(args.replay) if self.is_replay else 'live ' + str(getattr(source, 'port', '?'))}")
 
     # ---- construction -------------------------------------------------------
