@@ -618,6 +618,27 @@ channel, barometer as soft 1-DoF Z constraint.
 > split's bandwidth win; **(2)** the client is now **backward-compatible** — it recovers an inline mesh
 > from a legacy untagged service and warns once (commit c500b0d), so a stale container no longer blanks
 > the view. On-rig blank-surface bug (2026-07-14) traced to exactly this skew and fixed.
+>
+> **Panel UI redesign (2026-07-14)** — the `roomscan-panel` GUI was restructured from a sidebar-driven,
+> multi-mode window into a **two-mode, first-person-by-default, HUD-driven** instrument, per
+> `docs/superpowers/specs/2026-07-13-panel-ui-redesign-design.md` +
+> `docs/superpowers/plans/2026-07-14-panel-ui-redesign.md` (subagent-driven, 13 tasks + 4 review fixes,
+> `feature/phase6-slam`, commits `d654f93..8e24f6b`). What shipped: two view modes **Real-Time / SLAM**
+> (SLAM absorbs the former Showcase record→process→reveal flow — no separate Showcase concept in the UI);
+> a **First-person/Orbit** camera toggle defaulting to first-person in both modes; the always-visible
+> sidebar retired in favor of a **menubar + one settings dialog** (`settings_dialog.py`); a **floating
+> in-scene HUD** (mode switch, view toggle, action cluster, IR control, status chip) custom-drawn in the
+> instrument language — new pure, unit-tested modules `instrument.py` (drawing primitives shared with
+> `cards.py`), `hud.py` (renders + `HudLayout` hit-test), `ir_overlay.py` (first-person IR billboard
+> quad); a camera-gizmo-flicker fix (gizmo gated on orbit only); and `mode`/`camera`/`ir_overlay`/
+> `ir_opacity` config persistence. The HUD mode-switch + view-toggle are the **sole** mode/camera
+> authority (the old SLAM/Showcase/Follow checkboxes were removed). **Status: code-complete + reviewed,
+> 554 host tests green; ALL GUI-runtime behavior is UNVERIFIED-BY-RUNTIME** (Filament needs a display) —
+> a supervised on-rig run must verify: the floating-`ImageWidget` mouse-fallthrough **probe**
+> (`host/tools/panel_hud_probe.py`; gates whether the HUD needs an invisible-button click layer), the
+> smoke pass (`host/tools/panel_ui_smoke.py`), mode/camera switching + first-person cameras, IR billboard
+> texture render/UV orientation + opacity, settings-dialog re-open widget lifetime, and dialog scroll
+> reachability (currently a plain `Vert` — may need `ScrollableVert`).
 
 **Read `docs/coordinate-frames.md` first** — every pose/prior/constraint here lives in one of the four
 documented frames; the world frame, the body→world sandwich (`T_WORLD_TO_CV @ R @ T_CV_TO_BODY`), and the
