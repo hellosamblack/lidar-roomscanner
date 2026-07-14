@@ -457,3 +457,20 @@ def test_save_showcase_result_noop_on_empty_mesh(tmp_path, monkeypatch):
     # nothing written, no thread spawned
     assert fake._showcase_save_thread is None
     assert not (tmp_path / "results").exists()
+
+
+# ---- Final-review #2: redundant mode checkboxes removed --------------------
+
+
+def test_no_redundant_mode_checkboxes_in_panel():
+    """Final-review #2: the HUD mode switch + view toggle are the SOLE mode/
+    camera authority. The old settings-dialog checkboxes must stay removed so
+    they can't desync from / strand the HUD (spec: 'one clear mode switch')."""
+    import pathlib
+    import roomscan.panel as panel_mod
+    src = pathlib.Path(panel_mod.__file__).read_text(encoding="utf-8")
+    for banned in ("self.chk_slam", "self.chk_showcase", "self.chk_follow_camera",
+                   "chk_slam_checked"):
+        assert banned not in src, f"redundant mode control reintroduced: {banned}"
+    # chk_trajectory (a real display option) is allowed to remain.
+    assert "self.chk_trajectory" in src

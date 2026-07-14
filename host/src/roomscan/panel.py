@@ -644,7 +644,7 @@ class ControlPanel:
         self._fov_last_pose = None
 
         # Camera-follow ("first-person") mode (owner request): off by default,
-        # toggled by chk_follow_camera. `_follow_eye`/`_follow_center` hold the
+        # toggled by the HUD view switch (_set_camera). `_follow_eye`/`_follow_center` hold the
         # smoothed camera state across ticks (see _apply_follow_camera); reset
         # to None whenever follow is (re-)enabled so it snaps to the first pose
         # instead of lerping in from a stale/zero position.
@@ -963,11 +963,10 @@ class ControlPanel:
         ir.add_child(self.chk_freeze)
 
         # --- SLAM (Phase 6, Task 10): live pose + map view -------------------
+        # Mode is owned solely by the HUD mode switch (final-review #2); this
+        # group holds SLAM-mode DISPLAY options only (trajectory trail, walls,
+        # tracking labels), not mode/camera controls.
         slam = self._group(root, "SLAM", open=False)
-        self.chk_slam = gui.Checkbox("SLAM view (mesh + trajectory)")
-        self.chk_slam.checked = False
-        self.chk_slam.set_on_checked(self._on_slam_toggle)
-        slam.add_child(self.chk_slam)
         # Trajectory ribbon (owner decision, Task 12): hidden by default -- see
         # `_show_trajectory`'s docstring in __init__ for why (O(scan-length)
         # rebuild every frame it's shown).
@@ -991,25 +990,6 @@ class ControlPanel:
         self.cb_wall_mode.set_on_selection_changed(self._on_wall_mode)
         wg.add_child(self.cb_wall_mode)
         slam.add_child(wg)
-        # Camera-follow (owner request): governs both this view and Showcase
-        # mode's RECORDING phase (see _render_slam_frame/_render_showcase_
-        # recording) since both share the SLAM/Showcase mesh pipeline. Off by
-        # default -- free-orbit stays the default camera behavior.
-        self.chk_follow_camera = gui.Checkbox("Follow camera (first-person)")
-        self.chk_follow_camera.checked = False
-        self.chk_follow_camera.set_on_checked(self._on_follow_camera_toggle)
-        slam.add_child(self.chk_follow_camera)
-
-        # --- Showcase (Task 12): record -> live preview -> post-process -> reveal.
-        # Mutually exclusive with the SLAM view above (see _on_showcase_toggle /
-        # _on_slam_toggle); the phase banner + stats render inside the 3D view
-        # itself (a floating gui.Label -- see _build_overlay/_on_layout), not here.
-        show = self._group(root, "Showcase", open=False)
-        self.chk_showcase = gui.Checkbox("Showcase mode (record -> live preview -> reveal)")
-        self.chk_showcase.checked = False
-        self.chk_showcase.set_on_checked(self._on_showcase_toggle)
-        show.add_child(self.chk_showcase)
-        show.add_child(gui.Label("Record to scan, Stop to process. Clear resets to idle."))
 
         # --- Sensors (LSM6DSV16X: tilt-compensated heading + pressure/temp) ---
         if self.sensors_panel:
@@ -2019,7 +1999,6 @@ class ControlPanel:
             # Mutually exclusive with Showcase mode (see _on_showcase_toggle's
             # symmetric guard) -- this one added line is the only change to this
             # method's pre-existing body below.
-            self.chk_showcase.checked = False
             self._on_showcase_toggle(False)
         self.slam_enabled = checked
         if not checked:
@@ -2029,7 +2008,6 @@ class ControlPanel:
                 # SLAM without also releasing it would strand the classic view
                 # with mouse nav swallowed (_on_mouse) and nothing left to drive
                 # the camera. Force it off so free-orbit is always reachable.
-                self.chk_follow_camera.checked = False
                 self._on_follow_camera_toggle(False)
             if self.slam_worker is not None:
                 self.slam_worker.stop()
@@ -2464,7 +2442,6 @@ class ControlPanel:
         if checked and self.slam_enabled:
             # Mutually exclusive with the classic SLAM view (symmetric guard
             # to the one added in _on_slam_toggle).
-            self.chk_slam.checked = False
             self._on_slam_toggle(False)
         self.showcase_enabled = checked
         if checked:
@@ -2482,7 +2459,6 @@ class ControlPanel:
                 # See the matching guard in _on_slam_toggle: leaving Showcase
                 # without releasing follow would strand the classic view with
                 # mouse nav swallowed and nothing left to drive the camera.
-                self.chk_follow_camera.checked = False
                 self._on_follow_camera_toggle(False)
             self._join_showcase_workers()
             self.showcase_phase = next_phase(self.showcase_phase, cleared=True)   # -> IDLE
@@ -2725,7 +2701,6 @@ class ControlPanel:
             return
         self.mode = m
         if m == VIEW_SLAM:
-            self.chk_slam_checked = True                 # (no sidebar checkbox now)
             self._on_slam_toggle(True)
         else:
             if self.showcase_enabled:
