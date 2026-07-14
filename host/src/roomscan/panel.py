@@ -593,6 +593,8 @@ class ControlPanel:
         self.camera_mode = args.camera if getattr(args, "camera", None) in (CAM_FIRST_PERSON, CAM_ORBIT) else CAM_FIRST_PERSON
         self.ir_overlay_enabled = bool(getattr(args, "ir_overlay", False))
         self.ir_opacity = float(getattr(args, "ir_opacity", 0.5) or 0.5)
+        self._hud_tracking = "--"   # status chip: "--" | "ok" | "lost", set by
+                                     # _render_slam_frame/_render_showcase_recording
         self._hud_layout = None
         self._hud_img_state = {}    # control-id -> last (state-key) rendered, to skip re-render
 
@@ -1276,7 +1278,7 @@ class ControlPanel:
                 imu_gizmo=self.imu_gizmo, sensors_panel=self.sensors_panel,
                 gizmo_scale=self.gizmo_scale, metrics_overlay=self.metrics_overlay,
                 mode=getattr(self, "mode", "slam"),
-                camera=getattr(self, "camera", "first_person"),
+                camera=getattr(self, "camera_mode", "first_person"),
                 ir_overlay=getattr(self, "ir_overlay_enabled", False),
                 ir_opacity=getattr(self, "ir_opacity", 0.5))
             path = cfg.save()
@@ -1518,6 +1520,7 @@ class ControlPanel:
             return
         mesh, trajectory, step = latest
         self.lbl_slam_tracking.text = f"tracking: {'LOST' if step.tracking_lost else 'ok'}"
+        self._hud_tracking = "lost" if step.tracking_lost else "ok"
         self.lbl_slam_ms.text = f"slam_ms: {step.slam_ms:.1f}"
         self._update_fov_geometry(step.pose)
         if self.follow_camera_enabled:
@@ -2040,6 +2043,7 @@ class ControlPanel:
             self._remove_ir_overlay()                 # drop the first-person IR billboard
             self._slam_last_mesh_obj = None
             self._camera_set = False
+            self._hud_tracking = "--"
             if self._last_item is not None:   # re-render the last frame as a normal cloud
                 self._render_frame(self._last_item)
         else:
@@ -2101,6 +2105,7 @@ class ControlPanel:
         if latest is not None:
             mesh, trajectory, step = latest
             tracking_txt = "lost" if step.tracking_lost else "ok"
+            self._hud_tracking = tracking_txt
             self._show_showcase_mesh(mesh, glow_origin=step.pose[:3, 3])
             if not self.follow_camera_enabled:
                 self._show_showcase_trajectory(trajectory)
@@ -2489,6 +2494,7 @@ class ControlPanel:
             self.progress_bar.visible = False
             self._hide_reveal_card()
             self._camera_set = False
+            self._hud_tracking = "--"
             if self._last_item is not None:   # re-render the last frame as a normal cloud
                 self._render_frame(self._last_item)
         self.bus.publish(f"Showcase mode -> {'on' if checked else 'off'}")

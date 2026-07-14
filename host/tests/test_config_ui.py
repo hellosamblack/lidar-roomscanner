@@ -1,5 +1,5 @@
 """Round-trip + default tests for the redesign's new config fields."""
-from roomscan.config import ViewerConfig
+from roomscan.config import ViewerConfig, config_path
 
 
 def test_new_fields_defaults():
@@ -27,6 +27,8 @@ def test_unknown_keys_ignored_still_loads(tmp_path):
     assert ViewerConfig.load(path).mode == "slam"
 
 
+import types
+
 import roomscan.panel as panel_mod
 
 
@@ -42,3 +44,42 @@ def test_startup_applies_saved_mode_camera():
     assert (mode, camera) == (panel_mod.VIEW_SLAM, panel_mod.CAM_ORBIT)
     assert bool(a.ir_overlay) is True
     assert float(a.ir_opacity) == 0.7
+
+
+def test_persist_config_saves_camera_mode(monkeypatch, tmp_path):
+    """Regression for the final-review finding: `_persist_config` built its
+    ViewerConfig with `camera=getattr(self, "camera", ...)`, but the panel's
+    live attribute is `self.camera_mode` -- there is no `self.camera` -- so
+    an ORBIT choice was silently dropped on --save-config and always
+    persisted as the "first_person" default. This drives the REAL unbound
+    `ControlPanel._persist_config` against a lightweight stand-in exposing
+    exactly the `self.*` surface the method reads, then reloads the file it
+    wrote and asserts the saved `camera` reflects `self.camera_mode`."""
+    monkeypatch.setenv("APPDATA", str(tmp_path))  # config_dir()/config_path() read this fresh
+
+    fake = types.SimpleNamespace(
+        color_mode="reflectance",
+        args=types.SimpleNamespace(fov_h=55.0, fov_v=42.0, replay_fps=0.0,
+                                    port=None, panel_width=340),
+        material=types.SimpleNamespace(point_size=5.0),
+        ir_colormap="gray",
+        ir_freeze=False,
+        near_mode="window",
+        near_cutoff_m=1.5,
+        near_emphasis=0.5,
+        imu_gizmo=True,
+        sensors_panel=True,
+        gizmo_scale=0.15,
+        metrics_overlay=True,
+        mode="real_time",
+        camera_mode="orbit",           # <-- the field the bug drops
+        ir_overlay_enabled=False,
+        ir_opacity=0.5,
+        bus=types.SimpleNamespace(publish=lambda msg: None),
+    )
+
+    panel_mod.ControlPanel._persist_config(fake)
+
+    saved = ViewerConfig.load(config_path())
+    assert saved.camera == "orbit"
+    assert saved.mode == "real_time"
