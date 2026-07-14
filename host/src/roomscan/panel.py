@@ -2576,7 +2576,8 @@ class ControlPanel:
         return self._np_to_o3d(img)
 
     def _update_camera_gizmo(self, quat_display):
-        if self.imu_gizmo and quat_display is not None:
+        if gizmo_should_update(getattr(self, "camera_mode", CAM_ORBIT), self.imu_gizmo) \
+                and quat_display is not None:
             sc = self.scene_widget.scene
             if not self._gizmo_added:
                 # Construct 3D camera geometry (unlit body + lens + red shutter button)
@@ -2610,7 +2611,8 @@ class ControlPanel:
         if quat is not None and self._baseline_yaw is not None:
             from .sensors import graft_yaw
             quat_display = graft_yaw(quat, -self._baseline_yaw)
-        if self.imu_gizmo and quat_display is not None:
+        if gizmo_should_update(getattr(self, "camera_mode", CAM_ORBIT), self.imu_gizmo) \
+                and quat_display is not None:
             self._update_camera_gizmo(quat_display)
         status = self.sensor_state.fusion_status()
         if status != self._last_fusion_status:
