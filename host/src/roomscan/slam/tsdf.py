@@ -190,6 +190,20 @@ class TsdfMap:
         pc.point.normals = o3d.core.Tensor(normal[keep].astype(np.float32), device=self._device)
         return pc
 
+    def _extract_vbg(self):
+        """The VoxelBlockGrid to extract a mesh/point cloud FROM. On CUDA the
+        marching-cubes extractor (`ExtractTriangleMeshCUDA`) allocates an
+        "assistance mesh structure" sized to the active-block count that OOMs
+        on a grown map (Open3D's own error: "consider ... tsdf_volume.cpu() to
+        perform mesh extraction on CPU"); we saw it fail at ~25k blocks on a
+        12 GB GPU. Per-frame integrate/raycast stay on the GPU (that's where
+        the speedup is); only this throttled, display-only extraction moves to
+        the host. `.cpu()` copies the grid to CPU; no-op guard keeps the CPU
+        path (self._device already CPU) allocation-free."""
+        if "CUDA" in str(self._device).upper():
+            return self._vbg.cpu()
+        return self._vbg
+
     def mesh(self) -> o3d.t.geometry.TriangleMesh:
         if self._empty:
             # `extract_triangle_mesh()` raises a C++ HashMap error ("Input
@@ -204,7 +218,7 @@ class TsdfMap:
             m.vertex.colors = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=self._device)
             m.triangle.indices = o3d.core.Tensor(np.zeros((0, 3), dtype=np.int32), device=self._device)
             return m
-        return self._vbg.extract_triangle_mesh(self.weight_threshold)
+        return self._extract_vbg().extract_triangle_mesh(self.weight_threshold)
 
     def point_cloud(self) -> o3d.t.geometry.PointCloud:
         if self._empty:
@@ -212,4 +226,4 @@ class TsdfMap:
             pc.point.positions = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=self._device)
             pc.point.colors = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=self._device)
             return pc
-        return self._vbg.extract_point_cloud(self.weight_threshold)
+        return self._extract_vbg().extract_point_cloud(self.weight_threshold)
