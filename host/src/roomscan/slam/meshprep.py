@@ -126,6 +126,7 @@ class MeshPrep:
         self._fps_budget_ms = float(fps_budget_ms)
         self._up = up
         self._last_upload_ms = 0.0
+        self._decimating = False
 
         self._in_lock = threading.Lock()
         self._in_slot = None            # (mesh, mesh_seq, glow_origin, wall_mode) | None
@@ -152,7 +153,9 @@ class MeshPrep:
         if item is None:
             return False
         mesh, mesh_seq, glow_origin, wall_mode = item
-        decimate = self._last_upload_ms > self._fps_budget_ms
+        if self._last_upload_ms > self._fps_budget_ms:
+            self._decimating = True
+        decimate = self._decimating
         pkt = prepare_packet(mesh, wall_mode=wall_mode, glow_origin=glow_origin,
                              mesh_seq=mesh_seq, vertex_budget=self._vertex_budget,
                              decimate=decimate, up=self._up)

@@ -166,3 +166,42 @@ def test_meshprep_adaptive_decimates_after_slow_upload():
     prep.submit(m, mesh_seq=2, glow_origin=None, wall_mode="solid")
     prep.run_once()
     assert prep.latest().decimated is True
+
+
+def test_meshprep_decimation_latches_no_oscillation():
+    """Once a slow upload proves the map is expensive, decimation must stay
+    latched on even after a subsequent (decimated, therefore cheap) upload
+    measures fast -- otherwise the controller oscillates full-res/decimated
+    every other frame."""
+    m = _grid_tensor_mesh(40)               # ~1600 verts
+    prep = MeshPrep(vertex_budget=200, fps_budget_ms=8.0)
+
+    # no upload measured yet -> full-res
+    prep.submit(m, mesh_seq=1, glow_origin=None, wall_mode="solid")
+    prep.run_once()
+    assert prep.latest().decimated is False
+
+    # slow upload (full-res mesh was expensive to upload) -> latch on
+    prep.note_upload_ms(50.0)
+    prep.submit(m, mesh_seq=2, glow_origin=None, wall_mode="solid")
+    prep.run_once()
+    assert prep.latest().decimated is True
+
+    # the decimated mesh's upload now measures fast -- must NOT flip back
+    prep.note_upload_ms(4.0)
+    prep.submit(m, mesh_seq=3, glow_origin=None, wall_mode="solid")
+    prep.run_once()
+    assert prep.latest().decimated is True
+
+
+def test_meshprep_small_map_stays_full_res_even_when_latched():
+    """A small map (below vertex_budget) must stay full-res regardless of the
+    latch state -- prepare_packet's own source-size guard is what protects
+    small maps, not the controller flipping decimate back off."""
+    m = _grid_tensor_mesh(20)                # ~400 verts
+    prep = MeshPrep(vertex_budget=10_000, fps_budget_ms=8.0)
+
+    prep.note_upload_ms(50.0)                # would latch _decimating True
+    prep.submit(m, mesh_seq=1, glow_origin=None, wall_mode="solid")
+    prep.run_once()
+    assert prep.latest().decimated is False
