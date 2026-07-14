@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 from roomscan.slam.remote import RemoteSlamWorker
 from roomscan.slam.service import SlamService
+from roomscan.slam import wire
 
 pytest.importorskip("open3d")
 
@@ -136,3 +137,70 @@ def test_remote_worker_accumulates_trajectory_from_pose_deltas():
                 break
     rw.stop(); lsock.close(); th.join(timeout=2)
     assert last_len >= 3
+
+
+def _serve_legacy_untagged_on_ephemeral():
+    """A fake service that speaks the PRE-Component-B combined format: one
+    message per frame with NO 'type' tag, the mesh arrays inline (only when a
+    new mesh appears), and a full 'traj'. Emulates a GPU container image built
+    before the pose/mesh split -- the exact skew that silently blanked the live
+    view (client got pose/traj but never a mesh). The new client must stay
+    backward-compatible and still recover the inline mesh."""
+    import open3d as o3d
+    v = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], np.float32)
+    t = np.array([[0, 1, 2]], np.int32)
+    m = o3d.t.geometry.TriangleMesh()
+    m.vertex["positions"] = o3d.core.Tensor(v)
+    m.triangle["indices"] = o3d.core.Tensor(t)
+
+    lsock = socket.socket(); lsock.bind(("127.0.0.1", 0)); lsock.listen(1)
+    port = lsock.getsockname()[1]
+
+    def loop():
+        conn, _ = lsock.accept()
+        fid = 0
+        try:
+            while True:
+                req = wire.recv_message(conn)
+                if req is None:
+                    break
+                out = {                                   # legacy combined message, no "type"
+                    "fid": fid,
+                    "pose": np.eye(4, dtype=np.float32),
+                    "fitness": 0.9, "rmse": 0.01,
+                    "tracking_lost": False, "slam_ms": 5.0,
+                    "traj": np.zeros((0, 4, 4), np.float32),
+                    "tracking_lost_count": 0,
+                    "mesh_seq": 1 if fid >= 2 else 0,
+                }
+                if fid == 2:                              # a new mesh appears once, inline
+                    out.update(wire.mesh_to_arrays(m))
+                wire.send_message(conn, out)
+                fid += 1
+        except OSError:
+            pass
+        finally:
+            conn.close()
+    th = threading.Thread(target=loop, daemon=True); th.start()
+    return port, lsock, th
+
+
+def test_remote_worker_backward_compatible_with_legacy_untagged_service():
+    import roomscan.slam.wire as _wire  # noqa: F401  (ensure wire imported)
+    port, lsock, th = _serve_legacy_untagged_on_ephemeral()
+    rw = RemoteSlamWorker(W, H, addr=f"127.0.0.1:{port}", fov_h=55.0, fov_v=42.0)
+    assert rw.connect() is True
+    rw.start()
+    depth = np.full((H, W), 500.0, np.float32)
+    quat = np.array([1.0, 0.0, 0.0, 0.0], np.float32)
+    got_mesh = False
+    for _ in range(200):
+        rw.submit(depth, quat, None)
+        time.sleep(0.01)
+        got = rw.latest()
+        if got is not None and got[0] is not None:   # a non-None mesh recovered
+            got_mesh = True
+            break
+    rw.stop(); lsock.close(); th.join(timeout=2)
+    assert got_mesh, ("client must recover the inline mesh from a legacy "
+                      "untagged service (container built before the split)")

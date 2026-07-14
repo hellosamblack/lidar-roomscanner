@@ -5,6 +5,7 @@ it holds. On any socket failure the caller falls back to the local worker."""
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import threading
 import time
@@ -15,6 +16,8 @@ from . import wire
 from .mapper import FrameStep
 
 _IDLE_SLEEP_S = 0.005
+
+logger = logging.getLogger(__name__)
 
 
 class RemoteSlamWorker:
@@ -41,6 +44,7 @@ class RemoteSlamWorker:
         self._last_mesh_seq = -1
         self._last_mesh = None
         self._trajectory = []          # accumulated from pose deltas (no full-traj resend)
+        self._warned_legacy = False    # one-time warn on a pre-split (untagged) service
 
         self._threads = []
         self._stop_evt = threading.Event()
@@ -114,7 +118,24 @@ class RemoteSlamWorker:
                     self._last_mesh = wire.arrays_to_mesh(res)
                     self._last_mesh_seq = res["mesh_seq"]
                 continue
-            # pose message: update step, grow the trajectory, publish
+            # A pose message (new tagged format) OR a legacy untagged combined
+            # message from a service built before the pose/mesh split -- e.g. a
+            # GPU container image that predates Component B. The new POSE message
+            # never carries mesh arrays, so an inline "mesh_v" here means we're
+            # talking to a legacy service; recover its mesh (otherwise the live
+            # view is silently starved of surfaces -- pose/traj fine, mesh None)
+            # and warn once to rebuild the container for the pose/mesh-split win.
+            if "mesh_v" in res and res.get("mesh_seq") != self._last_mesh_seq:
+                self._last_mesh = wire.arrays_to_mesh(res)
+                self._last_mesh_seq = res.get("mesh_seq", self._last_mesh_seq)
+                if not self._warned_legacy:
+                    self._warned_legacy = True
+                    logger.warning(
+                        "remote SLAM service speaks the legacy pre-split wire "
+                        "format (untagged combined message with inline mesh); "
+                        "recovering meshes in compatibility mode. Rebuild the "
+                        "SLAM container image to get the pose/mesh-split "
+                        "bandwidth win (tools/slam-container/build.ps1).")
             step = FrameStep(pose=np.asarray(res["pose"], np.float64),
                              fitness=res["fitness"], rmse=res["rmse"],
                              tracking_lost=res["tracking_lost"], slam_ms=res["slam_ms"])
