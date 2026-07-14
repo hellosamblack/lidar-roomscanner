@@ -44,7 +44,7 @@ def _synthetic_frame(fid):
     return {"fid": fid, "depth": depth, "quat": quat, "pressure": None}
 
 
-def test_service_returns_stepresult_per_frame():
+def test_service_sends_pose_per_frame_and_mesh_when_ready():
     srv = SlamService(device="CPU:0", fov_h=55.0, fov_v=42.0)
     lsock = socket.socket(); lsock.bind(("127.0.0.1", 0)); lsock.listen(1)
     port = lsock.getsockname()[1]
@@ -55,22 +55,35 @@ def test_service_returns_stepresult_per_frame():
         conn.close()
     th = threading.Thread(target=accept_once, daemon=True); th.start()
 
-    cli = socket.create_connection(("127.0.0.1", port))
-    results = []
-    for fid in range(4):
+    cli = socket.create_connection(("127.0.0.1", port)); cli.settimeout(5)
+
+    def drain_until_pose():
+        """Read messages until a pose arrives; collect any mesh seen first/after."""
+        got_mesh = []
+        while True:
+            m = wire.recv_message(cli)
+            assert m is not None
+            if m["type"] == wire.MESH:
+                got_mesh.append(m)
+            elif m["type"] == wire.POSE:
+                return m, got_mesh
+
+    poses, mesh_seen = [], 0
+    for fid in range(8):
         wire.send_message(cli, _synthetic_frame(fid))
-        results.append(wire.recv_message(cli))
+        pose, meshes = drain_until_pose()
+        poses.append(pose)
+        mesh_seen += len(meshes)
+        for mm in meshes:
+            assert "mesh_v" in mm and mm["mesh_seq"] >= 1
     cli.close(); lsock.close(); th.join(timeout=2)
 
-    assert [r["fid"] for r in results] == [0, 1, 2, 3]
-    for r in results:
-        assert r["pose"].shape == (4, 4)
-        assert isinstance(r["tracking_lost"], bool)
-        assert r["traj"].shape[1:] == (4, 4)
-    # mesh sent at least once, and mesh_seq is monotone non-decreasing
-    seqs = [r["mesh_seq"] for r in results]
-    assert seqs == sorted(seqs)
-    assert any("mesh_v" in r for r in results)
+    assert [p["fid"] for p in poses] == list(range(8))
+    for p in poses:
+        assert p["pose"].shape == (4, 4)
+        assert isinstance(p["tracking_lost"], bool)
+        assert "traj" not in p                 # trajectory no longer resent
+    assert mesh_seen >= 1                       # a mesh was sent at least once
 
 
 def test_serve_survives_bad_client_and_keeps_serving():

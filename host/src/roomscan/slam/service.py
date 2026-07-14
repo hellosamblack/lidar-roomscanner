@@ -57,24 +57,19 @@ class SlamService:
                           reflectance=None if refl is None else np.asarray(refl, np.float32),
                           confidence=None if conf is None else np.asarray(conf, np.float32))
             worker.run_once()
-            mesh, traj, step = worker.latest()
+            mesh, _traj, step = worker.latest()
 
-            out = {
-                "fid": int(msg["fid"]),
-                "pose": np.asarray(step.pose, np.float32),
-                "fitness": float(step.fitness),
-                "rmse": float(step.rmse),
-                "tracking_lost": bool(step.tracking_lost),
-                "slam_ms": float(step.slam_ms),
-                "traj": np.asarray(traj, np.float32) if traj else np.zeros((0, 4, 4), np.float32),
-                "tracking_lost_count": int(worker.tracking_lost_count),
-            }
+            # Pose first: tiny, sent immediately, never delayed behind a mesh
+            # transfer or the (no-longer-sent) full trajectory.
+            wire.send_message(conn, wire.pose_message(
+                msg["fid"], step.pose, step.fitness, step.rmse,
+                step.tracking_lost, step.slam_ms, worker.tracking_lost_count))
+
+            # Mesh only when the worker published a new one (identity check).
             if mesh is not None and mesh is not last_mesh:
-                out.update(wire.mesh_to_arrays(mesh))
-                last_mesh = mesh
                 mesh_seq += 1
-            out["mesh_seq"] = mesh_seq
-            wire.send_message(conn, out)
+                wire.send_message(conn, wire.mesh_message(mesh_seq, mesh))
+                last_mesh = mesh
 
 
 def serve(host="0.0.0.0", port=5555, device="CUDA:0", *, _sock=None, **mapper_kwargs) -> None:
