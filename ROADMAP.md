@@ -640,6 +640,34 @@ channel, barometer as soft 1-DoF Z constraint.
 > texture render/UV orientation + opacity, settings-dialog re-open widget lifetime, and dialog scroll
 > reachability (currently a plain `Vert` — may need `ScrollableVert`).
 
+#### Sub-phase 6.G — SLAM GPU-memory hardening (long-scan OOM)  ← **next**
+
+The GPU SLAM path OOMs on a long scan: over a 68 m walk, CUDA memory creeps to **~11.7 GB** and hits a
+`ParallelFor` allocation failure. This is **not** the map itself — the raycast is already frustum-bounded
+(`slam/mapper.py`) and the ~40k-block VoxelBlockGrid is only **~410 MB** — it's Open3D's **CUDA caching
+allocator + per-frame temporaries never released** (see the `cuda-at-scale-validation` finding #4; the
+first three CUDA bugs were fixed in `8258f2d`/`d229a58`, this fourth was deferred to a GPU-hardening
+sub-project). It caps how long an unattended GPU scan can run and is the last open item from the CUDA
+at-scale validation.
+
+Scope for this sub-phase:
+- **Measure** the per-frame GPU allocation growth curve over a full-length scan (instrument
+  `o3d.core.cuda`/`nvidia-smi` alongside `verify_e2e.py --max-frames`), to confirm the leak is the
+  caching allocator + temporaries and not a real map/grid growth we missed.
+- **Suspected fix:** periodic `o3d.core.cuda.release_cache()` (throttled — e.g. every N frames or when a
+  high-water mark is crossed), releasing cached-but-unused device blocks without disturbing the live
+  per-frame integrate/raycast (which stay on GPU) or the throttled host-side extraction (already `.cpu()`
+  per bug #3's fix).
+- **Verify** the fix holds over a scan longer than the 68 m run that OOM'd, with the 2.1× per-step
+  speedup and flat-degradation curve preserved (no new per-frame stall from the cache release).
+- **Regression guard:** extend `tools/slam-container/cuda_smoke.py` with a long-run / high-block-count
+  memory-ceiling assertion so a future change can't silently reintroduce the creep.
+
+Runs in the WSL GPU container (native Windows Open3D CUDA is a dead end — CUDA 12.6 rejects Win11-26200;
+GPU runs via `wslc --gpus all` + the Linux CUDA wheel); CPU SLAM is unaffected (it already
+meets the ~28 fps sensor ceiling). Belongs to the "GPU hardening for offline" leg of the owner's
+"both, sequenced" directive — the live-view rendering leg already shipped (above).
+
 **Read `docs/coordinate-frames.md` first** — every pose/prior/constraint here lives in one of the four
 documented frames; the world frame, the body→world sandwich (`T_WORLD_TO_CV @ R @ T_CV_TO_BODY`), and the
 baro-Z-is-Open3D-−Y mapping are all specified there.
