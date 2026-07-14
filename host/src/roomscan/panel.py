@@ -553,6 +553,21 @@ class ControlPanel:
         self.slam_worker = None
         self._slam_last_mesh_obj = None   # identity check: skip re-upload of an unchanged mesh
 
+        # Component A (off-thread adaptive mesh): MeshPrep does the O(map-size)
+        # shading/decimation/wall-split/floor work off the GUI thread; the tick
+        # only uploads its ready packet at `_mesh_upload_period` s, feeding the
+        # measured upload wall-time back for adaptive decimation. See
+        # slam/meshprep.py + docs/superpowers/plans/2026-07-13-live-view-fps.md.
+        from .slam.config import SlamConfig as _SlamCfg
+        _view_cfg = _SlamCfg.load()
+        self.mesh_prep = None
+        self._mesh_prep_seq = 0
+        self._last_mesh_upload_t = 0.0
+        self._mesh_upload_period = (1.0 / _view_cfg.mesh_upload_hz
+                                    if _view_cfg.mesh_upload_hz > 0 else 0.0)
+        self._live_vertex_budget = _view_cfg.live_vertex_budget
+        self._fps_budget_ms = _view_cfg.fps_budget_ms
+
         # FoV indicator (owner request): faint camera-frustum LineSet, shown
         # during RECORDING/SLAM, recomputed only when the pose actually moves.
         # The bright capture-area square (_CAPTURE_SQUARE_GEOM) shares this
@@ -1005,6 +1020,8 @@ class ControlPanel:
         self._stop = True
         if self.slam_worker is not None:
             self.slam_worker.stop()        # join the SLAM worker thread before teardown
+        if self.mesh_prep is not None:
+            self.mesh_prep.stop()          # join the off-thread mesh-prep worker
         self._join_showcase_workers()      # join Showcase's preview/post-process/loader threads
         if self._showcase_save_thread is not None:
             self._showcase_save_thread.join(timeout=10.0)   # let an in-flight result save finish
@@ -1228,11 +1245,15 @@ class ControlPanel:
             from .slam.worker import SlamWorker
             from .slam.config import preferred_device
             from .slam.backend import make_slam_worker
+            from .slam.meshprep import MeshPrep
             h, w = depth.shape
             self.slam_worker = make_slam_worker(w, h, fov_h=self.args.fov_h,
                                                 fov_v=self.args.fov_v,
                                                 device=preferred_device())
             self.slam_worker.start()
+            self.mesh_prep = MeshPrep(vertex_budget=self._live_vertex_budget,
+                                      fps_budget_ms=self._fps_budget_ms)
+            self.mesh_prep.start()
 
         quat = self.sensor_state.fused_quat()
         if quat is not None:
@@ -1263,15 +1284,26 @@ class ControlPanel:
             # is turned off.
             self._hide_first_person_clutter()
 
-        sc = self.scene_widget.scene
-        # mesh extraction is already throttled inside the worker (every K
-        # processed frames); the identity check here avoids re-uploading the
-        # *same* mesh object to the renderer every GUI tick in between.
+        # Feed MeshPrep only when the worker publishes a genuinely NEW mesh
+        # object (identity check) -- all the O(map-size) work happens on its
+        # thread, never here.
         if (mesh is not None and mesh is not self._slam_last_mesh_obj
                 and len(mesh.vertex.positions) > 0):
-            self._upload_slam_mesh(mesh, glow_origin=step.pose[:3, 3])
-            self._update_floor_grid(mesh.vertex.positions.cpu().numpy())
+            self._mesh_prep_seq += 1
+            self.mesh_prep.submit(mesh, mesh_seq=self._mesh_prep_seq,
+                                  glow_origin=step.pose[:3, 3], wall_mode=self.wall_mode)
             self._slam_last_mesh_obj = mesh
+
+        # Upload a ready packet at most `mesh_upload_hz` times/sec; measure the
+        # upload wall-time and feed it back to MeshPrep's adaptive controller.
+        now = time.monotonic()
+        if now - self._last_mesh_upload_t >= self._mesh_upload_period:
+            packet = self.mesh_prep.latest()
+            if packet is not None:
+                t0 = time.monotonic()
+                self._upload_mesh_packet(packet)
+                self.mesh_prep.note_upload_ms((time.monotonic() - t0) * 1000.0)
+                self._last_mesh_upload_t = now
 
         # Trajectory ribbon + head marker (Phase 6 UX) -- skipped entirely in
         # follow/first-person mode (the eye is at the sensor). The <2-point
@@ -1720,6 +1752,10 @@ class ControlPanel:
             if self.slam_worker is not None:
                 self.slam_worker.stop()
                 self.slam_worker = None
+            if self.mesh_prep is not None:
+                self.mesh_prep.stop()          # join the off-thread mesh-prep worker
+                self.mesh_prep = None
+            self._last_mesh_upload_t = 0.0
             self._remove_slam_geometries()
             self._slam_last_mesh_obj = None
             self._camera_set = False
