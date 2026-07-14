@@ -128,3 +128,41 @@ def test_glow_origin_changes_colors():
     glowed = prepare_packet(m, wall_mode="solid", glow_origin=np.array([0.0, 0.0, 0.0]),
                             mesh_seq=0, vertex_budget=10_000, decimate=False)
     assert not np.allclose(base.non_wall_colors, glowed.non_wall_colors)
+
+
+from roomscan.slam.meshprep import MeshPrep
+
+
+def test_meshprep_run_once_publishes_packet_and_consumes_input():
+    m = _corner_tensor_mesh()
+    prep = MeshPrep(vertex_budget=10_000, fps_budget_ms=8.0)
+    assert prep.latest() is None
+    assert prep.run_once() is False        # empty input slot
+    prep.submit(m, mesh_seq=3, glow_origin=None, wall_mode="solid")
+    assert prep.run_once() is True
+    pkt = prep.latest()
+    assert pkt is not None and pkt.mesh_seq == 3
+    assert prep.latest() is None           # consume-once
+
+
+def test_meshprep_latest_wins_input():
+    m = _corner_tensor_mesh()
+    prep = MeshPrep(vertex_budget=10_000)
+    prep.submit(m, mesh_seq=1, glow_origin=None, wall_mode="solid")
+    prep.submit(m, mesh_seq=2, glow_origin=None, wall_mode="solid")  # overwrites
+    prep.run_once()
+    assert prep.latest().mesh_seq == 2      # only the newest survives
+
+
+def test_meshprep_adaptive_decimates_after_slow_upload():
+    m = _grid_tensor_mesh(40)               # ~1600 verts
+    prep = MeshPrep(vertex_budget=200, fps_budget_ms=8.0)
+    # last upload was fast -> full-res
+    prep.submit(m, mesh_seq=1, glow_origin=None, wall_mode="solid")
+    prep.run_once()
+    assert prep.latest().decimated is False
+    # report a slow upload -> next packet decimates
+    prep.note_upload_ms(50.0)
+    prep.submit(m, mesh_seq=2, glow_origin=None, wall_mode="solid")
+    prep.run_once()
+    assert prep.latest().decimated is True

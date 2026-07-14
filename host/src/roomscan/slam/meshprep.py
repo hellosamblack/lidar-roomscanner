@@ -113,3 +113,72 @@ def prepare_packet(mesh, *, wall_mode: str, glow_origin, mesh_seq: int,
         floor_pts=floor_pts, floor_lines=floor_lines,
         mesh_seq=mesh_seq, source_vertex_count=source_vertex_count,
         decimated=decimated, wall_mode=wall_mode)
+
+
+class MeshPrep:
+    """Runs `prepare_packet` off the GUI thread with latest-wins in/out slots and
+    an adaptive decimation controller. Mirrors slam.worker.SlamWorker's threading
+    shape (daemon thread, lock-guarded slots, bounded-join stop)."""
+
+    def __init__(self, vertex_budget: int = 150_000, fps_budget_ms: float = 8.0,
+                 up=None):
+        self._vertex_budget = int(vertex_budget)
+        self._fps_budget_ms = float(fps_budget_ms)
+        self._up = up
+        self._last_upload_ms = 0.0
+
+        self._in_lock = threading.Lock()
+        self._in_slot = None            # (mesh, mesh_seq, glow_origin, wall_mode) | None
+        self._out_lock = threading.Lock()
+        self._out_slot = None           # MeshPacket | None
+
+        self._thread: threading.Thread | None = None
+        self._stop_evt = threading.Event()
+
+    @property
+    def fps_budget_ms(self) -> float:
+        return self._fps_budget_ms
+
+    def submit(self, mesh, *, mesh_seq: int, glow_origin, wall_mode: str) -> None:
+        with self._in_lock:
+            self._in_slot = (mesh, mesh_seq, glow_origin, wall_mode)
+
+    def note_upload_ms(self, ms: float) -> None:
+        self._last_upload_ms = float(ms)
+
+    def run_once(self) -> bool:
+        with self._in_lock:
+            item, self._in_slot = self._in_slot, None
+        if item is None:
+            return False
+        mesh, mesh_seq, glow_origin, wall_mode = item
+        decimate = self._last_upload_ms > self._fps_budget_ms
+        pkt = prepare_packet(mesh, wall_mode=wall_mode, glow_origin=glow_origin,
+                             mesh_seq=mesh_seq, vertex_budget=self._vertex_budget,
+                             decimate=decimate, up=self._up)
+        with self._out_lock:
+            self._out_slot = pkt
+        return True
+
+    def latest(self):
+        with self._out_lock:
+            pkt, self._out_slot = self._out_slot, None
+        return pkt
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._stop_evt.clear()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+
+    def _run_loop(self) -> None:
+        while not self._stop_evt.is_set():
+            if not self.run_once():
+                time.sleep(_IDLE_SLEEP_S)
+
+    def stop(self) -> None:
+        self._stop_evt.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.5)
+            self._thread = None
