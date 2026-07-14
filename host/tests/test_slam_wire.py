@@ -56,3 +56,33 @@ def test_mesh_arrays_roundtrip():
     rebuilt = wire.arrays_to_mesh(d)
     np.testing.assert_array_equal(rebuilt.vertex["positions"].numpy(), v)
     np.testing.assert_array_equal(rebuilt.triangle["indices"].numpy(), t)
+
+
+def test_pose_message_roundtrip():
+    pose = np.eye(4, dtype=np.float32)
+    msg = wire.pose_message(5, pose, fitness=0.8, rmse=0.02,
+                            tracking_lost=False, slam_ms=9.1, tracking_lost_count=3)
+    assert msg["type"] == wire.POSE
+    out = wire.decode_message(wire.encode_message(msg))
+    assert out["type"] == "pose"
+    assert out["fid"] == 5
+    assert out["fitness"] == pytest.approx(0.8)
+    assert out["tracking_lost"] is False
+    assert out["tracking_lost_count"] == 3
+    np.testing.assert_array_equal(out["pose"], pose)
+    assert "mesh_v" not in out            # a pose message carries no mesh
+
+
+def test_mesh_message_roundtrip():
+    o3d = pytest.importorskip("open3d")
+    v = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], np.float32)
+    t = np.array([[0, 1, 2]], np.int32)
+    src = o3d.t.geometry.TriangleMesh()
+    src.vertex["positions"] = o3d.core.Tensor(v)
+    src.triangle["indices"] = o3d.core.Tensor(t)
+    msg = wire.mesh_message(4, src)
+    assert msg["type"] == wire.MESH and msg["mesh_seq"] == 4
+    out = wire.decode_message(wire.encode_message(msg))
+    assert out["type"] == "mesh" and out["mesh_seq"] == 4
+    rebuilt = wire.arrays_to_mesh(out)
+    np.testing.assert_array_equal(rebuilt.vertex["positions"].numpy(), v)

@@ -88,3 +88,31 @@ def arrays_to_mesh(d: dict):
     if "mesh_c" in d:
         m.vertex["colors"] = o3c.Tensor(np.asarray(d["mesh_c"], np.float32))
     return m
+
+
+POSE = "pose"
+MESH = "mesh"
+
+
+def pose_message(fid, pose, fitness, rmse, tracking_lost, slam_ms,
+                 tracking_lost_count) -> dict:
+    """A per-frame `pose` message: tiny + fixed-size, sent every frame so it is
+    never delayed behind a growing mesh (Component B)."""
+    return {
+        "type": POSE,
+        "fid": int(fid),
+        "pose": np.asarray(pose, np.float32),
+        "fitness": float(fitness),
+        "rmse": float(rmse),
+        "tracking_lost": bool(tracking_lost),
+        "slam_ms": float(slam_ms),
+        "tracking_lost_count": int(tracking_lost_count),
+    }
+
+
+def mesh_message(mesh_seq, mesh) -> dict:
+    """A `mesh` message: sent only when a new throttled mesh is ready. Carries
+    the same array payload as `mesh_to_arrays` plus its `mesh_seq` identity."""
+    out = {"type": MESH, "mesh_seq": int(mesh_seq)}
+    out.update(mesh_to_arrays(mesh))
+    return out
