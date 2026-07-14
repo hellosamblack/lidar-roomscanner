@@ -561,6 +561,16 @@ class ControlPanel:
         self.slam_worker = None
         self._slam_last_mesh_obj = None   # identity check: skip re-upload of an unchanged mesh
 
+        # Trajectory ribbon (owner decision, whole-branch review Task 12):
+        # hidden by default -- `_upload_trajectory` rebuilds the whole
+        # ribbon+head from scratch (O(scan-length)) every call, so leaving it
+        # on by default undermines the "flat fps as the map grows" goal. A
+        # checkbox (chk_trajectory) opts back in; when shown, its rebuild is
+        # throttled at the same cadence as the mesh upload (see
+        # `_last_traj_upload_t`/`_mesh_upload_period` in `_render_slam_frame`).
+        self._show_trajectory = False
+        self._last_traj_upload_t = 0.0
+
         # Component A (off-thread adaptive mesh): MeshPrep does the O(map-size)
         # shading/decimation/wall-split/floor work off the GUI thread; the tick
         # only uploads its ready packet at `_mesh_upload_period` s, feeding the
@@ -867,6 +877,13 @@ class ControlPanel:
         self.chk_slam.checked = False
         self.chk_slam.set_on_checked(self._on_slam_toggle)
         slam.add_child(self.chk_slam)
+        # Trajectory ribbon (owner decision, Task 12): hidden by default -- see
+        # `_show_trajectory`'s docstring in __init__ for why (O(scan-length)
+        # rebuild every frame it's shown).
+        self.chk_trajectory = gui.Checkbox("Trajectory trail")
+        self.chk_trajectory.checked = False
+        self.chk_trajectory.set_on_checked(self._on_trajectory_toggle)
+        slam.add_child(self.chk_trajectory)
         self.lbl_slam_tracking = gui.Label("tracking: --")
         slam.add_child(self.lbl_slam_tracking)
         self.lbl_slam_ms = gui.Label("slam_ms: --")
@@ -1329,11 +1346,19 @@ class ControlPanel:
                 self.mesh_prep.note_upload_ms((time.monotonic() - t0) * 1000.0)
                 self._last_mesh_upload_t = now
 
-        # Trajectory ribbon + head marker (Phase 6 UX) -- skipped entirely in
-        # follow/first-person mode (the eye is at the sensor). The <2-point
-        # BUG-009 guard now lives inside `_upload_trajectory`.
-        if not self.follow_camera_enabled:
-            self._upload_trajectory(trajectory)
+        # Trajectory ribbon + head marker (Phase 6 UX) -- hidden by default
+        # (owner decision, Task 12: `_upload_trajectory` rebuilds the whole
+        # ribbon from scratch, O(scan-length), so it's opt-in via
+        # chk_trajectory / `_show_trajectory`) and, even when shown, skipped
+        # entirely in follow/first-person mode (the eye is at the sensor).
+        # When shown, throttled at the same cadence as the mesh upload above
+        # (reusing `now`/`_mesh_upload_period`) so its rebuild cost doesn't
+        # scale with frame rate. The <2-point BUG-009 guard still lives
+        # inside `_upload_trajectory`.
+        if self._show_trajectory and not self.follow_camera_enabled:
+            if now - self._last_traj_upload_t >= self._mesh_upload_period:
+                self._upload_trajectory(trajectory)
+                self._last_traj_upload_t = now
 
         self._slam_camera_frame(mesh, trajectory)
 
@@ -1581,6 +1606,24 @@ class ControlPanel:
             self._apply_camera()
         self.bus.publish(f"Follow camera -> {'on' if checked else 'off'}")
 
+    def _on_trajectory_toggle(self, checked):
+        """Checkbox handler for the trajectory ribbon (owner decision, Task
+        12): hidden by default because `_upload_trajectory` rebuilds the
+        whole ribbon+head from scratch every call -- O(scan-length). Reset
+        the throttle timer so turning it on uploads promptly instead of
+        waiting out a stale `_mesh_upload_period` window; turning it off
+        removes any copy already in the scene (mirrors
+        `_hide_first_person_clutter`'s removal of the same two geometries)."""
+        self._show_trajectory = bool(checked)
+        self._last_traj_upload_t = 0.0
+        if not checked:
+            sc = self.scene_widget.scene
+            if sc.has_geometry(_SLAM_TRAJ_GEOM):
+                sc.remove_geometry(_SLAM_TRAJ_GEOM)
+            if sc.has_geometry(_TRAJ_HEAD_GEOM):
+                sc.remove_geometry(_TRAJ_HEAD_GEOM)
+        self.bus.publish(f"Trajectory trail -> {'on' if checked else 'off'}")
+
     def _on_wall_mode(self, text, index):
         """Combobox handler for the "see-through walls" control (owner
         request): governs both the classic SLAM view and Showcase mode,
@@ -1780,6 +1823,7 @@ class ControlPanel:
                 self.mesh_prep.stop()          # join the off-thread mesh-prep worker
                 self.mesh_prep = None
             self._last_mesh_upload_t = 0.0
+            self._last_traj_upload_t = 0.0
             self._remove_slam_geometries()
             self._slam_last_mesh_obj = None
             self._camera_set = False
