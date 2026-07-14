@@ -721,7 +721,8 @@ class ControlPanel:
         self._dark_bg = True
 
         self._build_scene()
-        self._build_panel()
+        self._build_settings_widgets()   # grouped controls, detached (opened via menu)
+        self._build_menubar()            # View / Device / Overlays / Help
         self._build_overlay()
         self.window.set_on_layout(self._on_layout)
         self.window.set_on_close(self._on_close)
@@ -789,13 +790,16 @@ class ControlPanel:
         self.reveal_card.visible = False
         self.window.add_child(self.reveal_card)
 
-    def _group(self, title, *, open=True):
-        """A collapsable group added to the panel, with consistent margins."""
+    def _group(self, parent, title, *, open=True):
+        """A collapsable group added to `parent`, with consistent margins.
+
+        `parent` is the settings-dialog root (was the retired side panel)."""
         gui = self._gui
         em = self.window.theme.font_size
         g = gui.CollapsableVert(title, 0.15 * em, gui.Margins(0.5 * em, 0.15 * em, 0, 0.15 * em))
         g.set_is_open(open)
-        self.panel.add_child(g)
+        parent.add_child(g)
+        self._settings_groups[title] = g
         return g
 
     def _labeled_grid(self):
@@ -805,22 +809,34 @@ class ControlPanel:
         em = self.window.theme.font_size
         return gui.VGrid(2, 0.5 * em, gui.Margins(0, 0.15 * em, 0, 0.15 * em))
 
-    def _build_panel(self):
+    def _build_settings_widgets(self):
+        """Construct the former sidebar's grouped controls ONCE into a detached
+        root (``self._settings_root``) that is NOT added to the window. The
+        menu-opened settings dialog (``settings_dialog.build_settings_dialog``)
+        wraps this one root in a ``gui.Dialog``; the tick and the ``_on_*``
+        handlers still reference every control by attribute on ``self`` -- only
+        the parenting moved off the retired always-visible side panel.
+
+        ``self._settings_groups`` maps each CollapsableVert's title to the widget
+        so the dialog can expand the requested section (View/Device from the
+        menu) and collapse the rest."""
         gui = self._gui
         em = self.window.theme.font_size
-        self.panel = gui.ScrollableVert(0.15 * em, gui.Margins(0.4 * em, 0.4 * em, 0.4 * em, 0.4 * em))
+        self._settings_groups = {}
+        self._settings_root = gui.Vert(0.15 * em, gui.Margins(0.4 * em, 0.4 * em, 0.4 * em, 0.4 * em))
+        root = self._settings_root
 
         # --- Status (live readout only — no usecase/color echo; those live in the
-        #     View/Device controls that already show them) ---
-        st = self._group("Status")
+        #     View/Device controls that already show them). Kept at the dialog top,
+        #     non-collapsible (the tick updates these labels; harmless when closed). ---
         self.lbl_conn = gui.Label("connecting...")
         self.lbl_counts = gui.Label("frames 0")
         self.lbl_counts2 = gui.Label("")
         for w in (self.lbl_conn, self.lbl_counts, self.lbl_counts2):
-            st.add_child(w)
+            root.add_child(w)
 
         # --- View (used most -> near the top) ---
-        view = self._group("View")
+        view = self._group(root, "View")
         vg = self._labeled_grid()
         vg.add_child(gui.Label("Color"))
         self.cb_color = gui.Combobox()
@@ -867,7 +883,7 @@ class ControlPanel:
         view.add_child(vrow)
 
         # --- Surface (opt-in: interpolate adjacent points into a mesh) ---
-        surf = self._group("Surface", open=False)
+        surf = self._group(root, "Surface", open=False)
         self.chk_surface = gui.Checkbox("Enable surface interpolation")
         self.chk_surface.checked = self.surface_enabled
         self.chk_surface.set_on_checked(self._on_surface_enabled)
@@ -889,7 +905,7 @@ class ControlPanel:
         surf.add_child(sg)
 
         # --- IR Monitor ---
-        ir = self._group("IR Monitor")
+        ir = self._group(root, "IR Monitor")
         blank = self._np_to_o3d(np.zeros((42 * _IR_UPSCALE, 54 * _IR_UPSCALE, 3), dtype=np.uint8))
         self.ir_widget = gui.ImageWidget(blank)
         ir.add_child(self.ir_widget)
@@ -908,7 +924,7 @@ class ControlPanel:
         ir.add_child(self.chk_freeze)
 
         # --- SLAM (Phase 6, Task 10): live pose + map view -------------------
-        slam = self._group("SLAM", open=False)
+        slam = self._group(root, "SLAM", open=False)
         self.chk_slam = gui.Checkbox("SLAM view (mesh + trajectory)")
         self.chk_slam.checked = False
         self.chk_slam.set_on_checked(self._on_slam_toggle)
@@ -949,7 +965,7 @@ class ControlPanel:
         # Mutually exclusive with the SLAM view above (see _on_showcase_toggle /
         # _on_slam_toggle); the phase banner + stats render inside the 3D view
         # itself (a floating gui.Label -- see _build_overlay/_on_layout), not here.
-        show = self._group("Showcase", open=False)
+        show = self._group(root, "Showcase", open=False)
         self.chk_showcase = gui.Checkbox("Showcase mode (record -> live preview -> reveal)")
         self.chk_showcase.checked = False
         self.chk_showcase.set_on_checked(self._on_showcase_toggle)
@@ -958,7 +974,7 @@ class ControlPanel:
 
         # --- Sensors (LSM6DSV16X: tilt-compensated heading + pressure/temp) ---
         if self.sensors_panel:
-            sg = self._group("Sensors")
+            sg = self._group(root, "Sensors")
             self.compass_widget = gui.ImageWidget(self._np_to_o3d(render_compass(0.0)))
             sg.add_child(gui.Label("Heading (tilt-compensated)"))
             sg.add_child(self.compass_widget)
@@ -973,7 +989,7 @@ class ControlPanel:
             sg.add_child(self.btn_reset_orientation)
 
         # --- Device ---
-        dev = self._group("Device")
+        dev = self._group(root, "Device")
         row = gui.Horiz(0.25 * em)
         for text, cmd, param, label in (
             ("Ping", CommandCode.PING, 0, "ping"),
@@ -1004,7 +1020,7 @@ class ControlPanel:
             dev.add_child(gui.Label("(inactive in replay)"))
 
         # --- Capture ---
-        cap = self._group("Capture", open=not self.is_replay)
+        cap = self._group(root, "Capture", open=not self.is_replay)
         self.btn_record = gui.Button("Record")
         self.btn_record.toggleable = True
         self.btn_record.set_on_clicked(self._on_record)
@@ -1023,13 +1039,76 @@ class ControlPanel:
             fg.add_child(self.sl_fps)
             cap.add_child(fg)
 
-        # --- Events (collapsed by default — expand to watch the log) ---
-        ev = self._group("Events", open=False)
+        # --- Events (collapsed by default — expand to watch the log). Kept as a
+        #     collapsible section at the dialog bottom so nothing floats. ---
+        ev = self._group(root, "Events", open=False)
         self.lv_events = gui.ListView()
         self.lv_events.set_items([])
         ev.add_child(self.lv_events)
 
-        self.window.add_child(self.panel)
+        # Close row pinned at the bottom of the (detached) dialog root.
+        close = gui.Button("Close")
+        close.set_on_clicked(self.window.close_dialog)
+        crow = gui.Horiz()
+        crow.add_stretch()
+        crow.add_child(close)
+        root.add_child(crow)
+        # NOTE: root is intentionally NOT added to the window -- it is a detached
+        # tree wrapped in a gui.Dialog on demand by settings_dialog.py.
+
+    # ---- menubar (replaces the retired sidebar) -----------------------------
+    def _build_menubar(self):
+        gui = self._gui
+        app = gui.Application.instance
+        menubar = gui.Menu()
+
+        view_menu = gui.Menu()
+        view_menu.add_item("Settings...", 100)
+        device_menu = gui.Menu()
+        device_menu.add_item("Settings...", 101)
+        overlays = gui.Menu()
+        overlays.add_item("Metrics HUD", 110)
+        overlays.set_checked(110, self.metrics_overlay)
+        overlays.add_item("Sensors", 111)
+        overlays.set_checked(111, self.sensors_panel)
+        help_menu = gui.Menu()
+        help_menu.add_item("Help", 120)
+
+        menubar.add_menu("View", view_menu)
+        menubar.add_menu("Device", device_menu)
+        menubar.add_menu("Overlays", overlays)
+        menubar.add_menu("Help", help_menu)
+        app.menubar = menubar
+        # keep refs alive + let the Overlays check-state be re-synced when the
+        # toggles fire from elsewhere (set_checked must target the owning submenu)
+        self._menubar = menubar
+        self._overlays_menu = overlays
+
+        self.window.set_on_menu_item_activated(100, lambda: self._open_settings("View"))
+        self.window.set_on_menu_item_activated(101, lambda: self._open_settings("Device"))
+        self.window.set_on_menu_item_activated(110, self._toggle_metrics_menu)
+        self.window.set_on_menu_item_activated(111, self._toggle_sensors_menu)
+        self.window.set_on_menu_item_activated(120, self._show_help)
+
+    def _open_settings(self, section):
+        from . import settings_dialog
+        self.window.show_dialog(settings_dialog.build_settings_dialog(self, section=section))
+
+    def _toggle_metrics_menu(self):
+        self.metrics_overlay = not self.metrics_overlay
+        self.overlay.visible = self.metrics_overlay
+        # keep the sidebar-era checkbox (now in the dialog) and the menu in sync
+        if hasattr(self, "chk_metrics"):
+            self.chk_metrics.checked = self.metrics_overlay
+        if getattr(self, "_overlays_menu", None) is not None:
+            self._overlays_menu.set_checked(110, self.metrics_overlay)
+        self.bus.publish(f"metrics overlay -> {'on' if self.metrics_overlay else 'off'}")
+
+    def _toggle_sensors_menu(self):
+        self.sensors_panel = not self.sensors_panel
+        if getattr(self, "_overlays_menu", None) is not None:
+            self._overlays_menu.set_checked(111, self.sensors_panel)
+        self.bus.publish(f"sensors -> {'on' if self.sensors_panel else 'off'}")
 
     def _on_layout(self, ctx):
         gui = self._gui
@@ -1037,15 +1116,11 @@ class ControlPanel:
         # Return early if window is minimized or has degenerate dimensions
         if r.width <= 0 or r.height <= 0:
             return
-        panel_w = int(getattr(self.args, "panel_width", 340))
-        # Prevent panel_w from going negative or exceeding window bounds
-        panel_w = max(0, min(panel_w, r.width - 100))
-        scene_w = r.width - panel_w
-        # Prevent degenerate 3D viewport frames
-        if scene_w <= 0:
-            return
-        self.scene_widget.frame = gui.Rect(r.x, r.y, scene_w, r.height)
-        self.panel.frame = gui.Rect(r.x + r.width - panel_w, r.y, panel_w, r.height)
+        # No sidebar anymore -> the 3D scene owns the full content rect. The
+        # floating HUD/overlay widgets are positioned over it below (metrics HUD,
+        # banner, progress, reveal card); HUD control widgets land here in Task 9.
+        scene_w = r.width
+        self.scene_widget.frame = gui.Rect(r.x, r.y, r.width, r.height)
         # metrics HUD image: pinned to the scene's top-left at its native size
         w, h = self._overlay_size
         pad = int(0.5 * self.window.theme.font_size)
