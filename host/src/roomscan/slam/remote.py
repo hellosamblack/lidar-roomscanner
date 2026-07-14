@@ -40,6 +40,7 @@ class RemoteSlamWorker:
 
         self._last_mesh_seq = -1
         self._last_mesh = None
+        self._trajectory = []          # accumulated from pose deltas (no full-traj resend)
 
         self._threads = []
         self._stop_evt = threading.Event()
@@ -108,16 +109,19 @@ class RemoteSlamWorker:
                 break
             if res is None:
                 break
+            if res.get("type") == wire.MESH:
+                if res["mesh_seq"] != self._last_mesh_seq and "mesh_v" in res:
+                    self._last_mesh = wire.arrays_to_mesh(res)
+                    self._last_mesh_seq = res["mesh_seq"]
+                continue
+            # pose message: update step, grow the trajectory, publish
             step = FrameStep(pose=np.asarray(res["pose"], np.float64),
                              fitness=res["fitness"], rmse=res["rmse"],
                              tracking_lost=res["tracking_lost"], slam_ms=res["slam_ms"])
-            traj = [np.asarray(p, np.float64) for p in res["traj"]]
             self._tracking_lost_count = res["tracking_lost_count"]
-            if res["mesh_seq"] != self._last_mesh_seq and "mesh_v" in res:
-                self._last_mesh = wire.arrays_to_mesh(res)
-                self._last_mesh_seq = res["mesh_seq"]
+            self._trajectory.append(np.asarray(res["pose"], np.float64))
             with self._out_lock:
-                self._out_slot = (self._last_mesh, traj, step)
+                self._out_slot = (self._last_mesh, list(self._trajectory), step)
 
     def stop(self) -> None:
         self._stop_evt.set()

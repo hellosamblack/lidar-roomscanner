@@ -115,3 +115,24 @@ def test_start_is_idempotent_and_stop_start_cycle_is_clean():
     assert rw._sock is None
 
     lsock.close(); th.join(timeout=2)
+
+
+def test_remote_worker_accumulates_trajectory_from_pose_deltas():
+    port, lsock, th, srv = _serve_on_ephemeral()
+    rw = RemoteSlamWorker(W, H, addr=f"127.0.0.1:{port}", fov_h=55.0, fov_v=42.0)
+    assert rw.connect() is True
+    rw.start()
+    depth = np.full((H, W), 500.0, np.float32)
+    quat = np.array([1.0, 0.0, 0.0, 0.0], np.float32)
+    last_len = 0
+    for _ in range(400):                       # drive enough frames to grow the traj
+        rw.submit(depth, quat, None)
+        time.sleep(0.01)
+        got = rw.latest()
+        if got is not None:
+            _mesh, traj, _step = got
+            last_len = len(traj)
+            if last_len >= 3:                  # trajectory grew from >=3 pose deltas
+                break
+    rw.stop(); lsock.close(); th.join(timeout=2)
+    assert last_len >= 3
