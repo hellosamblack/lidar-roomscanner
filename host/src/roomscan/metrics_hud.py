@@ -75,8 +75,12 @@ class _Row:
         self.accent = accent            # fixed color override (else green/amber/red)
 
 
-def _rows(snap: MetricsSnapshot, usb_capacity_bps: float, fps_target: float) -> list[_Row]:
+def _rows(snap: MetricsSnapshot, usb_capacity_bps: float, fps_target: float,
+          view_fps: float = 0.0) -> list[_Row]:
     rows: list[_Row] = []
+    rows.append(_Row("VIEW", f"{view_fps:.0f}",
+                     frac=view_fps / fps_target if fps_target > 0 else None,
+                     accent=_BLUE))
     rows.append(_Row("FPS", f"{snap.render_fps:.0f}",
                      frac=snap.render_fps / fps_target if fps_target > 0 else None,
                      accent=_BLUE))
@@ -112,13 +116,13 @@ def _rows(snap: MetricsSnapshot, usb_capacity_bps: float, fps_target: float) -> 
     return rows
 
 
-def render_hud(snap: MetricsSnapshot, *, width: int = 320, row_h: int = 22,
+def render_hud(snap: MetricsSnapshot, *, view_fps: float = 0.0, width: int = 320, row_h: int = 22,
                usb_capacity_bps: float = USB_FS_CAPACITY_BPS,
                fps_target: float = FPS_TARGET) -> np.ndarray:
     """Pure: MetricsSnapshot -> (H, W, 3) uint8 RGB HUD image."""
     from PIL import Image, ImageDraw
 
-    rows = _rows(snap, usb_capacity_bps, fps_target)
+    rows = _rows(snap, usb_capacity_bps, fps_target, view_fps=view_fps)
     top, bottom = 8, 6
     height = top + max(1, len(rows)) * row_h + bottom   # grows with the CPU-core rows
     img = Image.new("RGB", (width, height), _BG)

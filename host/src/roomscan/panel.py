@@ -526,6 +526,14 @@ class ControlPanel:
         self._fault_reported = False
         self._last_ui = 0.0
 
+        # Viewport render-fps: counts every _on_tick firing (true refresh rate,
+        # distinct from data-fps self._fps and the per-DATA-frame metrics.render_fps).
+        # This is the ≥30/120 live-view validation metric (Component A).
+        from collections import deque as _deque
+        self._view_ticks = _deque()
+        self._view_fps_window_s = 1.0
+        self._last_view_fps_log = 0.0
+
         # view/config-backed state (normalize out-of-set values so a hand-edited
         # config can't feed an unknown colormap into reflectance_to_rgb every tick)
         self.color_mode = args.color if args.color in _COLOR_MODES else "depth"
@@ -1068,7 +1076,20 @@ class ControlPanel:
                     lambda: self._stop, self.sensor_state, self.metrics)
 
     # ---- tick (GUI main thread) --------------------------------------------
+    def _record_view_tick(self, now):
+        self._view_ticks.append(now)
+        while self._view_ticks and now - self._view_ticks[0] > self._view_fps_window_s:
+            self._view_ticks.popleft()
+
+    def _view_fps(self, now):
+        ticks = self._view_ticks
+        if len(ticks) < 2:
+            return 0.0
+        span = ticks[-1] - ticks[0]
+        return (len(ticks) - 1) / span if span > 0 else 0.0
+
     def _on_tick(self):
+        self._record_view_tick(time.monotonic())
         redraw = False
         try:
             item = self.slot.get_nowait()
@@ -1096,6 +1117,9 @@ class ControlPanel:
             self._update_sensors()
             self._update_metrics()
             self._drain_log()
+            if now - self._last_view_fps_log >= 2.0:
+                self._last_view_fps_log = now
+                self.bus.publish(f"view fps: {self._view_fps(now):.0f}")
             redraw = True
         return redraw
 
@@ -2421,7 +2445,7 @@ class ControlPanel:
         if not self.metrics_overlay:
             return
         snap = self.metrics.snapshot(time.monotonic())
-        img = render_hud(snap)
+        img = render_hud(snap, view_fps=self._view_fps(time.monotonic()))
         h, w = img.shape[:2]
         self.overlay.update_image(self._np_to_o3d(img))
         if (w, h) != self._overlay_size:      # fixed-size render -> fires once
