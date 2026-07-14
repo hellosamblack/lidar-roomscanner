@@ -105,6 +105,22 @@ def test_no_decimation_below_budget_or_when_disabled():
     assert len(pkt2.non_wall_verts) == n_src
 
 
+def test_translucent_mode_no_triangles_takes_full_res_branch():
+    # vertices but ZERO triangles -> the full-res branch fires even in
+    # translucent mode: everything lands in non_wall_*, walls stay empty.
+    verts = np.array([
+        [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0],
+    ], dtype=np.float32)
+    m = o3d.t.geometry.TriangleMesh()
+    m.vertex.positions = o3d.core.Tensor(verts)
+    m.triangle.indices = o3d.core.Tensor(np.zeros((0, 3), np.int32))
+    pkt = prepare_packet(m, wall_mode="translucent", glow_origin=None, mesh_seq=3,
+                         vertex_budget=10_000, decimate=False)
+    assert len(pkt.non_wall_tris) == 0
+    assert len(pkt.wall_tris) == 0
+    assert len(pkt.non_wall_verts) == len(verts)
+
+
 def test_glow_origin_changes_colors():
     m = _corner_tensor_mesh()
     base = prepare_packet(m, wall_mode="solid", glow_origin=None, mesh_seq=0,
