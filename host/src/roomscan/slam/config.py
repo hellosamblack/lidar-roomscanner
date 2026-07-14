@@ -72,6 +72,14 @@ class SlamConfig:
     # (GPU WSL container) at remote_addr, falling back to local if unreachable.
     backend: str = "local"
     remote_addr: str = "127.0.0.1:5555"
+    # Live-view render cadence (Component A -- off-thread adaptive mesh). The
+    # heavy mesh/ribbon/floor upload runs at most `mesh_upload_hz` times/sec on
+    # the GUI tick; MeshPrep decimates a packet to ~`live_vertex_budget` verts
+    # only once an upload's measured wall-time exceeds `fps_budget_ms` (~120 fps
+    # per-upload ceiling). Display-only: the saved map is always full-res.
+    mesh_upload_hz: float = 3.0
+    live_vertex_budget: int = 150000
+    fps_budget_ms: float = 8.0
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "SlamConfig":

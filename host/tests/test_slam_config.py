@@ -86,3 +86,26 @@ def test_preferred_device_degrades_to_cpu_on_error(monkeypatch):
 
     monkeypatch.setattr(o3d.core.cuda, "is_available", _boom)
     assert preferred_device() == "CPU:0"
+
+
+def test_view_cadence_defaults():
+    from roomscan.slam.config import SlamConfig
+    cfg = SlamConfig()
+    assert cfg.mesh_upload_hz == 3.0
+    assert cfg.live_vertex_budget == 150000
+    assert cfg.fps_budget_ms == 8.0
+
+
+def test_view_cadence_overrides_from_toml(tmp_path):
+    from roomscan.slam.config import SlamConfig
+    p = tmp_path / "roomscan.toml"
+    p.write_text(
+        "[slam]\n"
+        "mesh_upload_hz = 5.0\n"
+        "live_vertex_budget = 80000\n"
+        "fps_budget_ms = 4.0\n",
+        encoding="utf-8")
+    cfg = SlamConfig.load(p)
+    assert cfg.mesh_upload_hz == 5.0
+    assert cfg.live_vertex_budget == 80000
+    assert cfg.fps_budget_ms == 4.0
