@@ -583,6 +583,18 @@ class ControlPanel:
         self._ir_frozen: tuple[float, float] | None = None
         self._ir_unavailable_shown = False
 
+        # Two-mode / two-camera redesign state (spec 2026-07-13). These are the
+        # fields Tasks 6 & 7's getattr guards were waiting on; the floating HUD
+        # (_build_overlay/_on_layout/_refresh_hud_images/_dispatch_hud_hit) reads
+        # and mutates them. Task 10 wires slam_enabled/showcase_enabled/
+        # follow_camera_enabled off these.
+        self.mode = args.mode if getattr(args, "mode", None) in (VIEW_REAL_TIME, VIEW_SLAM) else VIEW_SLAM
+        self.camera_mode = args.camera if getattr(args, "camera", None) in (CAM_FIRST_PERSON, CAM_ORBIT) else CAM_FIRST_PERSON
+        self.ir_overlay_enabled = bool(getattr(args, "ir_overlay", False))
+        self.ir_opacity = float(getattr(args, "ir_opacity", 0.5) or 0.5)
+        self._hud_layout = None
+        self._hud_img_state = {}    # control-id -> last (state-key) rendered, to skip re-render
+
         # surface-interpolation state (opt-in: adjacent points close enough
         # get covered by a mesh instead of drawn as dots -- see docs/
         # superpowers/plans/2026-07-09-surface-interpolation-design.md)
@@ -789,6 +801,18 @@ class ControlPanel:
         self._reveal_card_size = (10, 10)
         self.reveal_card.visible = False
         self.window.add_child(self.reveal_card)
+
+        # Floating HUD controls (spec §5.1): one ImageWidget per control, drawn
+        # by hud.render_* and positioned in _on_layout. Interaction is routed
+        # through _on_mouse -> HudLayout.hit_test (see _dispatch_hud_hit).
+        from . import hud as _hud
+        self._hud = _hud
+        self.hud_widgets = {}
+        for cid in (_hud.MODE_SWITCH, _hud.VIEW_TOGGLE, _hud.ACTION_CLUSTER,
+                    _hud.IR_CONTROL, _hud.STATUS_CHIP):
+            w = gui.ImageWidget(self._np_to_o3d_rgba(np.zeros((*_hud.SIZES[cid][::-1], 4), np.uint8)))
+            self.window.add_child(w)
+            self.hud_widgets[cid] = w
 
     def _group(self, parent, title, *, open=True):
         """A collapsable group added to `parent`, with consistent margins.
@@ -1146,6 +1170,52 @@ class ControlPanel:
         card_y = r.y + r.height - ch - int(3 * em)
         self.reveal_card.frame = gui.Rect(card_x, card_y, cw, ch)
 
+        # Floating HUD controls (Task 9): position each ImageWidget from a fresh
+        # HudLayout over the full scene rect; visibility is mode/camera-gated.
+        self._hud_layout = self._hud.HudLayout(
+            r.x, r.y, r.width, r.height, is_replay=self.is_replay, mode=self.mode)
+        rects = self._hud_layout.rects()
+        for cid, w in self.hud_widgets.items():
+            if cid in rects:
+                x, y, cw2, ch2 = rects[cid]
+                w.frame = gui.Rect(x, y, cw2, ch2)
+                w.visible = self._hud_control_visible(cid)
+            else:
+                w.visible = False
+
+    def _hud_control_visible(self, cid):
+        if cid == self._hud.ACTION_CLUSTER:
+            return self.mode == VIEW_SLAM
+        if cid == self._hud.IR_CONTROL:
+            return self.camera_mode == CAM_FIRST_PERSON
+        return True
+
+    def _refresh_hud_images(self):
+        """Re-render each HUD control image only when its state changes."""
+        h = self._hud
+        phase = "idle"
+        if self.mode == VIEW_SLAM and self.showcase_phase is not None:
+            phase = self.showcase_phase.name.lower()
+        tracking = getattr(self, "_hud_tracking", "--")
+        states = {
+            h.MODE_SWITCH: ("m", self.mode),
+            h.VIEW_TOGGLE: ("v", self.camera_mode),
+            h.ACTION_CLUSTER: ("a", phase, self.is_replay),
+            h.IR_CONTROL: ("i", self.ir_overlay_enabled, round(self.ir_opacity, 2)),
+            h.STATUS_CHIP: ("s", tracking, round(self._fps)),
+        }
+        renders = {
+            h.MODE_SWITCH: lambda: h.render_mode_switch(self.mode),
+            h.VIEW_TOGGLE: lambda: h.render_view_toggle(self.camera_mode),
+            h.ACTION_CLUSTER: lambda: h.render_action_cluster(phase, self.is_replay),
+            h.IR_CONTROL: lambda: h.render_ir_control(self.ir_overlay_enabled, self.ir_opacity),
+            h.STATUS_CHIP: lambda: h.render_status_chip(tracking, self._fps),
+        }
+        for cid, key in states.items():
+            if self._hud_img_state.get(cid) != key and self.hud_widgets[cid].visible:
+                self.hud_widgets[cid].update_image(self._np_to_o3d_rgba(renders[cid]()))
+                self._hud_img_state[cid] = key
+
     # ---- lifecycle ----------------------------------------------------------
     def start(self):
         self.resource_sampler.start()
@@ -1248,6 +1318,7 @@ class ControlPanel:
             self._update_status()
             self._update_sensors()
             self._update_metrics()
+            self._refresh_hud_images()
             self._drain_log()
             if now - self._last_view_fps_log >= 2.0:
                 self._last_view_fps_log = now
@@ -2529,6 +2600,18 @@ class ControlPanel:
     def _on_mouse(self, e):
         gui = self._gui
         res = gui.SceneWidget.EventCallbackResult
+        # Floating-HUD intercept (Task 9): route clicks/drags over a HUD control
+        # to _dispatch_hud_hit FIRST -- before the _cam_target guard and the
+        # follow-camera swallow, both of which would otherwise eat the event.
+        # NOTE: if a supervised bench run shows the ImageWidget itself consumes
+        # clicks (probe fails), the owner-verified fallback is an invisible
+        # gui.Button layer per control rect (see task brief's probe gate).
+        if getattr(self, "_hud_layout", None) is not None and e.type in (
+                gui.MouseEvent.Type.BUTTON_DOWN, gui.MouseEvent.Type.DRAG):
+            hit = self._hud_layout.hit_test(int(e.x), int(e.y))
+            if hit is not None:
+                if self._dispatch_hud_hit(hit):
+                    return res.CONSUMED
         if self._cam_target is None:
             return res.IGNORED
         if self.follow_camera_enabled:
@@ -2570,6 +2653,41 @@ class ControlPanel:
             self._apply_camera()
             return res.CONSUMED
         return res.IGNORED
+
+    def _dispatch_hud_hit(self, hit) -> bool:
+        """Route a HudLayout.hit_test result to the matching action; return True
+        if the click was consumed (so _on_mouse doesn't also orbit the camera).
+        _set_mode/_set_camera/_do_action/_toggle_ir_overlay/_set_ir_opacity are
+        Task-9 stubs here; Tasks 10/11 wire the real mode/camera/action behavior."""
+        from . import hud as h    # module (not self._hud): headless-callable on a stand-in
+        if hit.control == h.MODE_SWITCH:
+            self._set_mode(VIEW_REAL_TIME if hit.segment == 0 else VIEW_SLAM)
+            return True
+        if hit.control == h.VIEW_TOGGLE:
+            self._set_camera(CAM_FIRST_PERSON if hit.segment == 0 else CAM_ORBIT)
+            return True
+        if hit.control == h.ACTION_CLUSTER:
+            labels = self._hud_action_labels()
+            idx = min(len(labels) - 1, max(0, int((hit.fraction or 0.0) * len(labels))))
+            self._do_action(idx)
+            return True
+        if hit.control == h.IR_CONTROL:
+            if hit.fraction is not None:
+                self._set_ir_opacity(hit.fraction)
+            else:
+                self._toggle_ir_overlay()
+            return True
+        if hit.control == h.STATUS_CHIP:
+            return True    # read-only, but consume so it doesn't orbit the camera
+        return False
+
+    # Task-9 stubs: minimal state setters so the module imports and the dispatch
+    # tests pass. The real mode/camera/action behavior lands in Tasks 10/11.
+    def _set_mode(self, m): self.mode = m
+    def _set_camera(self, c): self.camera_mode = c
+    def _do_action(self, seg): pass
+    def _toggle_ir_overlay(self): self.ir_overlay_enabled = not self.ir_overlay_enabled
+    def _set_ir_opacity(self, f): self.ir_opacity = float(f)
 
     def _pan(self, dx, dy):
         eye = _orbit_eye(self._cam_target, self._cam_az, self._cam_radius)
@@ -2615,6 +2733,10 @@ class ControlPanel:
         """(H,W,3) uint8 RGB -> o3d.geometry.Image, the shape gui.ImageWidget /
         update_image expect. Shared by the IR monitor and the Sensors widgets."""
         return self._o3d.geometry.Image(np.ascontiguousarray(rgb))
+
+    def _np_to_o3d_rgba(self, rgba: np.ndarray):
+        """(H,W,4) uint8 RGBA -> o3d Image for a floating HUD control."""
+        return self._o3d.geometry.Image(np.ascontiguousarray(rgba))
 
     def _update_ir(self):
         outputs = self._latest_outputs

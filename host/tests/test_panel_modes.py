@@ -72,3 +72,51 @@ def test_gizmo_added_in_orbit():
     fake = _FakeGizmoPanel(panel_mod.CAM_ORBIT)
     panel_mod.ControlPanel._update_camera_gizmo(fake, (1.0, 0.0, 0.0, 0.0))
     assert panel_mod._GIZMO_GEOM in fake.scene_widget.scene.geoms
+
+
+class _FakeHudPanel:
+    def __init__(self):
+        self.mode = panel_mod.VIEW_REAL_TIME
+        self.camera_mode = panel_mod.CAM_FIRST_PERSON
+        self.ir_overlay_enabled = False
+        self.ir_opacity = 0.5
+        self._mode_calls = []
+        self._cam_calls = []
+
+    # stubs the dispatch calls into (Task 10 supplies the real ones)
+    def _set_mode(self, m): self.mode = m; self._mode_calls.append(m)
+    def _set_camera(self, c): self.camera_mode = c; self._cam_calls.append(c)
+    def _do_action(self, seg): pass
+    def _toggle_ir_overlay(self): self.ir_overlay_enabled = not self.ir_overlay_enabled
+    def _set_ir_opacity(self, f): self.ir_opacity = f
+    def _hud_action_labels(self):
+        return ["REC", "LOAD", "CLR"]
+
+
+def test_dispatch_mode_switch_sets_slam():
+    from roomscan.hud import ControlHit, MODE_SWITCH
+    fake = _FakeHudPanel()
+    consumed = panel_mod.ControlPanel._dispatch_hud_hit(fake, ControlHit(MODE_SWITCH, segment=1))
+    assert consumed is True
+    assert fake.mode == panel_mod.VIEW_SLAM
+
+
+def test_dispatch_view_toggle_sets_orbit():
+    from roomscan.hud import ControlHit, VIEW_TOGGLE
+    fake = _FakeHudPanel()
+    panel_mod.ControlPanel._dispatch_hud_hit(fake, ControlHit(VIEW_TOGGLE, segment=1))
+    assert fake.camera_mode == panel_mod.CAM_ORBIT
+
+
+def test_dispatch_ir_fraction_sets_opacity():
+    from roomscan.hud import ControlHit, IR_CONTROL
+    fake = _FakeHudPanel()
+    panel_mod.ControlPanel._dispatch_hud_hit(fake, ControlHit(IR_CONTROL, fraction=0.75))
+    assert fake.ir_opacity == 0.75
+
+
+def test_dispatch_ir_label_toggles():
+    from roomscan.hud import ControlHit, IR_CONTROL
+    fake = _FakeHudPanel()
+    panel_mod.ControlPanel._dispatch_hud_hit(fake, ControlHit(IR_CONTROL, segment=0))
+    assert fake.ir_overlay_enabled is True
