@@ -593,6 +593,32 @@ SFLP quaternion as rotation prior → 3-DoF constrained **point-to-plane ICP, fr
 TSDF raycast (Open3D tensor pipeline: `t.pipelines.registration` + VoxelBlockGrid), IR as intensity
 channel, barometer as soft 1-DoF Z constraint.
 
+> **Live-view rendering (2026-07-14)** — the "rendering-first for live view" step (live view ≥30 fps,
+> ideally 120+, flat as the map grows; the fps goal is architecture-bound, not compute-bound). Shipped
+> per `docs/superpowers/plans/2026-07-13-live-view-fps.md` (subagent-driven, 12 tasks + 2 review fixes,
+> `feature/phase6-slam`): **(A)** an off-GUI-thread `slam/meshprep.py` (`MeshPrep`) does all O(map-size)
+> mesh work (shade / decimate / wall-split / floor-grid → plain-data `MeshPacket`); the GUI tick only
+> uploads a ready packet at `mesh_upload_hz` (default 3.0) with an **adaptive, latched** decimation
+> controller (decimate to `live_vertex_budget`=150k once an upload exceeds `fps_budget_ms`=8.0, then
+> stay decimated — no oscillation). Decimation is **display-only**; the saved map is always full-res.
+> **(B)** the remote service now streams a tiny **pose message every frame** + a **mesh message only
+> when new** (no full-trajectory resend); the client accumulates the trajectory from pose deltas. A
+> viewport render-fps counter + HUD "VIEW" row measure the goal. The live trajectory ribbon is now
+> **hidden by default** (a "Trajectory trail" checkbox) and throttled when shown. Both backends keep the
+> `latest() -> (mesh, trajectory, FrameStep)` contract. **Status: code-complete + reviewed, 506 host
+> tests green; the live ≥30/120-fps-flat numbers are UNVERIFIED-BY-RUNTIME** — the interactive GUI
+> replay needs a physical display + a map-growing capture (measure on-rig, both backends).
+>
+> **Wire-format change + container-rebuild (protocol lockstep):** Component B changed the remote
+> service→client wire format to **tagged `pose`/`mesh` messages** (was one untagged combined message
+> per frame). A GPU container image built before this change starves the new client of meshes — the
+> untagged legacy message has no `"type"` key, so the client never enters the mesh branch and the live
+> view goes **blank** (pose/trajectory still work). Two mitigations shipped: **(1)** rebuild the container
+> (`tools/slam-container/build.ps1` + `start.ps1`) so it runs the new service — required to get the
+> split's bandwidth win; **(2)** the client is now **backward-compatible** — it recovers an inline mesh
+> from a legacy untagged service and warns once (commit c500b0d), so a stale container no longer blanks
+> the view. On-rig blank-surface bug (2026-07-14) traced to exactly this skew and fixed.
+
 **Read `docs/coordinate-frames.md` first** — every pose/prior/constraint here lives in one of the four
 documented frames; the world frame, the body→world sandwich (`T_WORLD_TO_CV @ R @ T_CV_TO_BODY`), and the
 baro-Z-is-Open3D-−Y mapping are all specified there.
