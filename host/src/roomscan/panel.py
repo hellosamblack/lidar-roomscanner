@@ -82,6 +82,7 @@ _FOV_RANGE_M = 0.5                     # how far out the frustum rays/edges are 
 _CAPTURE_SQUARE_GEOM = "__capture_square__"  # bright planar capture-area quad, RECORDING/SLAM
 _CAPTURE_SQUARE_DEPTH_M = 0.75          # fixed depth (m) the capture square is drawn at
 _GIZMO_GEOM = "__imu_gizmo__"
+_IR_OVERLAY_GEOM = "__ir_overlay__"    # first-person IR billboard (spec §5.2)
 _RESULTS_DIR = "results"               # Showcase FINAL save target (mesh + trajectory)
 _GIZMO_ANCHOR = np.array([0.0, 0.0, 0.0], dtype=np.float64)  # fixed scene anchor; calibrate later
 _UI_PERIOD = 0.25               # <=4 Hz label / sensors / metrics / log refresh
@@ -710,6 +711,11 @@ class ControlPanel:
         self.wall_translucent_material = rendering.MaterialRecord()
         self.wall_translucent_material.shader = "defaultUnlitTransparency"
         self.wall_translucent_material.base_color = [1.0, 1.0, 1.0, 0.3]
+        # First-person IR billboard (spec §5.2): same unlit alpha-blend shader,
+        # base_color alpha carries the live opacity (refreshed per _update).
+        self.ir_overlay_material = rendering.MaterialRecord()
+        self.ir_overlay_material.shader = "defaultUnlitTransparency"
+        self.ir_overlay_material.base_color = [1.0, 1.0, 1.0, self.ir_opacity]
         self.wall_wire_material = rendering.MaterialRecord()
         self.wall_wire_material.shader = "unlitLine"
         self.wall_wire_material.line_width = 2.0
@@ -1355,6 +1361,13 @@ class ControlPanel:
             self.metrics.tick_render(time.monotonic())
             return
 
+        # Real-Time first-person (spec §5.2): a camera-locked IR billboard in
+        # front of the fixed sensor-origin eye. Removed otherwise / when off.
+        if real_time_first_person(self.mode, self.camera_mode) and self.ir_overlay_enabled:
+            self._update_ir_overlay([0.0, 0.0, -_FOLLOW_BACK_OFF_M], [0.0, 0.0, 1.0])
+        else:
+            self._remove_ir_overlay()
+
         pts = self.deproj(depth)
 
         # Retrieve fused orientation
@@ -1510,6 +1523,12 @@ class ControlPanel:
             # below while following, and reappears the next frame once follow
             # is turned off.
             self._hide_first_person_clutter()
+            if self.ir_overlay_enabled:
+                eye, _, _ = follow_camera_target(step.pose)
+                fwd = step.pose[:3, 2]
+                self._update_ir_overlay(eye, fwd)
+            else:
+                self._remove_ir_overlay()
 
         # Feed MeshPrep only when the worker publishes a genuinely NEW mesh
         # object (identity check) -- all the O(map-size) work happens on its
@@ -2011,6 +2030,7 @@ class ControlPanel:
             self._last_mesh_upload_t = 0.0
             self._last_traj_upload_t = 0.0
             self._remove_slam_geometries()
+            self._remove_ir_overlay()                 # drop the first-person IR billboard
             self._slam_last_mesh_obj = None
             self._camera_set = False
             if self._last_item is not None:   # re-render the last frame as a normal cloud
@@ -2082,6 +2102,11 @@ class ControlPanel:
             if self.follow_camera_enabled:
                 self._apply_follow_camera(step.pose)
                 self._hide_first_person_clutter()   # hide gizmo + trail (owner request)
+                if self.ir_overlay_enabled:
+                    eye, _, _ = follow_camera_target(step.pose)
+                    self._update_ir_overlay(eye, step.pose[:3, 2])
+                else:
+                    self._remove_ir_overlay()
         self._set_showcase_banner(
             f"REC Recording - scanning... ({self._showcase_rec_frames} frames "
             f"| tracking: {tracking_txt})")
@@ -2715,6 +2740,7 @@ class ControlPanel:
             self._follow_center = None
             if not want_follow:
                 self._apply_camera()                     # restore free-orbit
+                self._remove_ir_overlay()                # drop the first-person IR billboard
         if real_time_first_person(self.mode, self.camera_mode):
             self._apply_real_time_first_person()
 
@@ -2809,8 +2835,48 @@ class ControlPanel:
         self._reset_camera()
         self.bus.publish(f"load mesh -> {path}")
 
-    def _toggle_ir_overlay(self): self.ir_overlay_enabled = not self.ir_overlay_enabled
-    def _set_ir_opacity(self, f): self.ir_opacity = float(f)
+    def _update_ir_overlay(self, eye, forward):
+        """Build/refresh the first-person IR billboard quad (spec §5.2) from the
+        latest reflectance frame. Only meaningful in first-person; callers gate
+        on that. No-op (removes) when there's no IR frame."""
+        from . import ir_overlay
+        outputs = self._latest_outputs or {}
+        refl = outputs.get("reflectance")
+        if refl is None:
+            self._remove_ir_overlay()
+            return
+        auto = ir_range(refl)
+        rgb = reflectance_to_rgb(refl, colormap=self.ir_colormap, vmin=auto[0], vmax=auto[1],
+                                 upscale=1)
+        verts, uvs, tris = ir_overlay.camera_locked_quad(
+            eye, forward, _WORLD_UP, self.args.fov_h, self.args.fov_v, dist=1.0)
+        o3d = self._o3d
+        m = o3d.geometry.TriangleMesh()
+        m.vertices = o3d.utility.Vector3dVector(verts)
+        m.triangles = o3d.utility.Vector3iVector(tris)
+        m.triangle_uvs = o3d.utility.Vector2dVector(uvs[tris].reshape(-1, 2).astype(np.float64))
+        m.textures = [o3d.geometry.Image(np.ascontiguousarray(rgb))]
+        m.triangle_material_ids = o3d.utility.IntVector(np.zeros(len(tris), np.int32))
+        if hasattr(self.ir_overlay_material, "base_color"):   # real MaterialRecord
+            self.ir_overlay_material.base_color = [1.0, 1.0, 1.0, float(self.ir_opacity)]
+        sc = self.scene_widget.scene
+        if sc.has_geometry(_IR_OVERLAY_GEOM):
+            sc.remove_geometry(_IR_OVERLAY_GEOM)
+        sc.add_geometry(_IR_OVERLAY_GEOM, m, self.ir_overlay_material)
+
+    def _remove_ir_overlay(self):
+        sc = self.scene_widget.scene
+        if sc.has_geometry(_IR_OVERLAY_GEOM):
+            sc.remove_geometry(_IR_OVERLAY_GEOM)
+
+    def _toggle_ir_overlay(self):
+        self.ir_overlay_enabled = not self.ir_overlay_enabled
+        if not self.ir_overlay_enabled:
+            self._remove_ir_overlay()
+        self.bus.publish(f"IR overlay -> {'on' if self.ir_overlay_enabled else 'off'}")
+
+    def _set_ir_opacity(self, fraction):
+        self.ir_opacity = float(np.clip(fraction, 0.0, 1.0))
 
     def _pan(self, dx, dy):
         eye = _orbit_eye(self._cam_target, self._cam_az, self._cam_radius)

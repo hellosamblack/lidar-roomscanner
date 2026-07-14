@@ -135,3 +135,31 @@ def test_load_dialog_dispatches_by_kind(monkeypatch):
     panel_mod.ControlPanel._load_path(fake, "results/b.ply")
     panel_mod.ControlPanel._load_path(fake, "x.txt")
     assert calls == {"capture": "captures/a.bin", "mesh": "results/b.ply"}
+
+
+def test_ir_overlay_builds_and_removes_geometry():
+    __import__("pytest").importorskip("open3d")
+    import numpy as np
+    import open3d as o3d
+
+    class _Scene:
+        def __init__(self): self.geoms = {}
+        def has_geometry(self, n): return n in self.geoms
+        def add_geometry(self, n, g, m): self.geoms[n] = g
+        def remove_geometry(self, n): self.geoms.pop(n, None)
+
+    class _Fake:
+        def __init__(self):
+            self._o3d = o3d
+            self.scene_widget = type("SW", (), {"scene": _Scene()})()
+            self.args = type("A", (), {"fov_h": 55.0, "fov_v": 42.0})()
+            self.ir_opacity = 0.5
+            self._latest_outputs = {"reflectance": np.full((42, 54), 0.5, np.float32)}
+            self.ir_colormap = "gray"
+            self.ir_overlay_material = "M"
+
+    fake = _Fake()
+    panel_mod.ControlPanel._update_ir_overlay(fake, [0, 0, 0], [0, 0, 1])
+    assert panel_mod._IR_OVERLAY_GEOM in fake.scene_widget.scene.geoms
+    panel_mod.ControlPanel._remove_ir_overlay(fake)
+    assert panel_mod._IR_OVERLAY_GEOM not in fake.scene_widget.scene.geoms
