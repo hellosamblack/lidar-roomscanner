@@ -1116,7 +1116,11 @@ class ControlPanel:
                 near_mode=self.near_mode, near_cutoff_m=self.near_cutoff_m,
                 near_emphasis=self.near_emphasis,
                 imu_gizmo=self.imu_gizmo, sensors_panel=self.sensors_panel,
-                gizmo_scale=self.gizmo_scale, metrics_overlay=self.metrics_overlay)
+                gizmo_scale=self.gizmo_scale, metrics_overlay=self.metrics_overlay,
+                mode=getattr(self, "mode", "slam"),
+                camera=getattr(self, "camera", "first_person"),
+                ir_overlay=getattr(self, "ir_overlay_enabled", False),
+                ir_opacity=getattr(self, "ir_opacity", 0.5))
             path = cfg.save()
             self.bus.publish(f"saved config to {path}")
         except Exception as exc:  # never let a config write block window close
@@ -2862,7 +2866,8 @@ _PANEL_FIELDS = ("point_size", "ir_colormap", "ir_freeze_range", "panel_width",
                  "surface_enabled", "surface_mode", "surface_threshold_pct",
                  "imu_gizmo", "sensors_panel", "gizmo_scale", "metrics_overlay",
                  "yaw_fusion", "yaw_fusion_tau", "mag_cal_path",
-                 "yaw_anomaly_frac", "yaw_motion_rate_dps", "yaw_gimbal_margin_deg")
+                 "yaw_anomaly_frac", "yaw_motion_rate_dps", "yaw_gimbal_margin_deg",
+                 "mode", "camera", "ir_overlay", "ir_opacity")
 
 
 def _fill_panel_fields(args) -> None:
