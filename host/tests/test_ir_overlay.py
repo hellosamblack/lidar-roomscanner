@@ -49,3 +49,15 @@ def test_quad_size_matches_fov():
 def test_quad_translated_eye():
     v, _, _ = camera_locked_quad([5, 2, -3], [0, 0, 1], _WORLD_UP, 55.0, 42.0, 1.0)
     assert np.allclose(v.mean(axis=0), [5, 2, -2], atol=1e-9)
+
+
+def test_quad_corners_match_capture_square_convention():
+    # camera_locked_quad must use the SAME TL/TR/BR/BL vertical convention as
+    # panel.capture_square_corners (which the spec requires it to match). Build
+    # an identity pose (eye at origin, forward +z) and compare corner-for-corner.
+    from roomscan.panel import capture_square_corners
+    fov_h, fov_v, dist = 55.0, 42.0, 0.75
+    pose = np.eye(4)                      # x-right, y-down, z-forward; apex at origin
+    cap = capture_square_corners(pose, fov_h, fov_v, depth=dist)
+    quad, _, _ = camera_locked_quad([0, 0, 0], [0, 0, 1], _WORLD_UP, fov_h, fov_v, dist)
+    np.testing.assert_allclose(quad, cap, atol=1e-9)
