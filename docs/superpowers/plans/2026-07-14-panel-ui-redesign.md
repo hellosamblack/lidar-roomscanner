@@ -834,12 +834,14 @@ def camera_locked_quad(eye, forward, up, fov_h_deg, fov_v_deg, dist):
     half_w = dist * np.tan(np.deg2rad(fov_h_deg) / 2.0)
     half_v = dist * np.tan(np.deg2rad(fov_v_deg) / 2.0)
     center = eye + dist * fwd
-    # y-down world convention: quad_up points physically down, so "top" corners
-    # subtract quad_up. Order: TL, TR, BR, BL (matches capture_square_corners).
-    tl = center - half_w * right - half_v * quad_up
-    tr = center + half_w * right - half_v * quad_up
-    br = center + half_w * right + half_v * quad_up
-    bl = center - half_w * right + half_v * quad_up
+    # Match capture_square_corners' vertical convention exactly (panel.py): its
+    # camera-y is physically DOWN (x-right, y-down, z-forward), so its "top"
+    # corners use -half_v along camera-y == +half_v along quad_up (quad_up here
+    # points physically UP when up==_WORLD_UP). Order TL, TR, BR, BL.
+    tl = center - half_w * right + half_v * quad_up
+    tr = center + half_w * right + half_v * quad_up
+    br = center + half_w * right - half_v * quad_up
+    bl = center - half_w * right - half_v * quad_up
     verts = np.vstack([tl, tr, br, bl]).astype(np.float64)
     uvs = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32)
     tris = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
