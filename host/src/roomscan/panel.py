@@ -132,6 +132,42 @@ _FOLLOW_BACK_OFF_M = 0.3
 _FOLLOW_LOOK_AHEAD_M = 1.0
 _FOLLOW_SMOOTH = 0.12
 
+# --- Two-mode / two-camera redesign (spec 2026-07-13) --------------------------
+VIEW_REAL_TIME = "real_time"
+VIEW_SLAM = "slam"
+CAM_FIRST_PERSON = "first_person"
+CAM_ORBIT = "orbit"
+
+
+def follow_active(mode: str, camera: str) -> bool:
+    """The SLAM pose-follow path (rides step.pose via _apply_follow_camera) is
+    on only in SLAM mode + first-person. Real-Time first-person is a separate
+    fixed sensor-origin camera (real_time_first_person), not this path."""
+    return mode == VIEW_SLAM and camera == CAM_FIRST_PERSON
+
+
+def gizmo_should_update(camera: str, imu_gizmo: bool) -> bool:
+    """Spec §5.3 flicker fix: only add/refresh the IMU gizmo in ORBIT. In
+    first-person the gizmo is never added, so nothing removes+re-adds it every
+    tick -> no flicker."""
+    return camera == CAM_ORBIT and imu_gizmo
+
+
+def real_time_first_person(mode: str, camera: str) -> bool:
+    return mode == VIEW_REAL_TIME and camera == CAM_FIRST_PERSON
+
+
+def load_kind(path: str) -> str:
+    """Dispatch a Load target by suffix: .bin -> capture (process pipeline),
+    .ply -> mesh (display only), else unknown."""
+    low = str(path).lower()
+    if low.endswith(".bin"):
+        return "capture"
+    if low.endswith(".ply"):
+        return "mesh"
+    return "unknown"
+
+
 _HELP_LINES = [
     "",
     "Mouse:  left-drag orbit (yaw only)  |  ctrl / middle-drag pan  |  wheel zoom",
