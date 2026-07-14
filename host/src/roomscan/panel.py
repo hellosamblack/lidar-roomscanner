@@ -1646,6 +1646,60 @@ class ControlPanel:
                     np.tile([[0.45, 0.60, 0.75]], (len(wire.lines), 1)))  # muted blue-gray
                 sc.add_geometry(_MESH_WALLS_GEOM, wire, self.wall_wire_material)
 
+    def _upload_mesh_packet(self, packet):
+        """Build + add_geometry from a `MeshPrep.MeshPacket` (Component A). The
+        O(map-size) shading/decimation/wall-split already ran off the GUI thread
+        in MeshPrep; this only materializes Open3D geometry and uploads it. Twin
+        of `_upload_slam_mesh`'s upload half, sourced from packet arrays; that
+        method stays for Showcase PROCESSING/FINAL."""
+        o3d = self._o3d
+        sc = self.scene_widget.scene
+        if sc.has_geometry(_MESH_GEOM):
+            sc.remove_geometry(_MESH_GEOM)
+        if sc.has_geometry(_MESH_WALLS_GEOM):
+            sc.remove_geometry(_MESH_WALLS_GEOM)
+
+        if len(packet.non_wall_tris) > 0:
+            m = o3d.geometry.TriangleMesh()
+            m.vertices = o3d.utility.Vector3dVector(packet.non_wall_verts)
+            m.triangles = o3d.utility.Vector3iVector(packet.non_wall_tris)
+            m.vertex_colors = o3d.utility.Vector3dVector(packet.non_wall_colors)
+            sc.add_geometry(_MESH_GEOM, m, self.mesh_material)
+
+        if len(packet.wall_tris) > 0:
+            wm = o3d.geometry.TriangleMesh()
+            wm.vertices = o3d.utility.Vector3dVector(packet.wall_verts)
+            wm.triangles = o3d.utility.Vector3iVector(packet.wall_tris)
+            wm.vertex_colors = o3d.utility.Vector3dVector(packet.wall_colors)
+            if packet.wall_mode == "translucent":
+                sc.add_geometry(_MESH_WALLS_GEOM, wm, self.wall_translucent_material)
+            else:   # "wireframe"
+                wire = o3d.geometry.LineSet.create_from_triangle_mesh(wm)
+                # BUG-009: a <2-point / 0-segment LineSet hard-crashes Filament.
+                if len(wire.points) >= 2:
+                    wire.colors = o3d.utility.Vector3dVector(
+                        np.tile([[0.45, 0.60, 0.75]], (len(wire.lines), 1)))
+                    sc.add_geometry(_MESH_WALLS_GEOM, wire, self.wall_wire_material)
+
+        self._upload_floor_grid_from_packet(packet.floor_pts, packet.floor_lines)
+
+    def _upload_floor_grid_from_packet(self, pts, lines):
+        """Upload the pre-extracted floor grid from a packet. Replaces the
+        per-tick `mesh.vertex.positions.cpu().numpy()` copy that used to live in
+        `_update_floor_grid` -- MeshPrep already did that O(size) copy + bounds
+        off-thread. BUG-009: never upload a <2-point / 0-segment LineSet."""
+        o3d = self._o3d
+        sc = self.scene_widget.scene
+        if sc.has_geometry(_FLOOR_GRID_GEOM):
+            sc.remove_geometry(_FLOOR_GRID_GEOM)
+        if len(pts) >= 2 and len(lines) > 0:
+            ls = o3d.geometry.LineSet()
+            ls.points = o3d.utility.Vector3dVector(pts)
+            ls.lines = o3d.utility.Vector2iVector(lines)
+            ls.colors = o3d.utility.Vector3dVector(
+                np.tile([list(theme.FLOOR_GRID)], (len(lines), 1)))
+            sc.add_geometry(_FLOOR_GRID_GEOM, ls, self.floor_material)
+
     def _on_slam_toggle(self, checked):
         if checked and self.showcase_enabled:
             # Mutually exclusive with Showcase mode (see _on_showcase_toggle's
