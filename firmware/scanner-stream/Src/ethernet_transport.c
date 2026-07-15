@@ -7,6 +7,7 @@
 #include "ethernetif.h"
 #include "dhcpserver.h"
 #include "netif/ethernet.h"
+#include "stm32h5xx_hal.h"
 #include <string.h>
 
 struct netif gnetif;
@@ -30,15 +31,25 @@ static uint32_t frame_seq_num = 0;
 #define GW_ADDR2 253
 #define GW_ADDR3 1
 
+typedef enum {
+    DHCP_STATE_INIT,
+    DHCP_STATE_CLIENT_WAITING,
+    DHCP_STATE_CLIENT_BOUND,
+    DHCP_STATE_SERVER
+} dhcp_state_t;
+
+static dhcp_state_t dhcp_state = DHCP_STATE_INIT;
+static uint32_t dhcp_start_time = 0;
+
 static void Netif_Config(void)
 {
     ip4_addr_t ipaddr;
     ip4_addr_t netmask;
     ip4_addr_t gw;
 
-    IP4_ADDR(&ipaddr, IP_ADDR0, IP_ADDR1, IP_ADDR2, IP_ADDR3);
-    IP4_ADDR(&netmask, NETMASK_ADDR0, NETMASK_ADDR1, NETMASK_ADDR2, NETMASK_ADDR3);
-    IP4_ADDR(&gw, GW_ADDR0, GW_ADDR1, GW_ADDR2, GW_ADDR3);
+    IP4_ADDR(&ipaddr, 0, 0, 0, 0);
+    IP4_ADDR(&netmask, 0, 0, 0, 0);
+    IP4_ADDR(&gw, 0, 0, 0, 0);
 
     /* Add the network interface */
     netif_add(&gnetif, &ipaddr, &netmask, &gw, NULL, &ethernetif_init, &ethernet_input);
@@ -61,8 +72,6 @@ void ETH_Init(void)
 {
     lwip_init();
     Netif_Config();
-
-    dhcps_init();
     upcb = udp_new();
 }
 
@@ -75,11 +84,42 @@ void ETH_Process(void)
     {
         eth_link_up = true;
         netif_set_up(&gnetif);
+        
+        dhcp_state = DHCP_STATE_CLIENT_WAITING;
+        dhcp_start(&gnetif);
+        dhcp_start_time = HAL_GetTick();
     }
     else if (!netif_is_link_up(&gnetif) && eth_link_up)
     {
         eth_link_up = false;
+        if (dhcp_state == DHCP_STATE_SERVER) {
+            dhcps_deinit();
+        } else {
+            dhcp_stop(&gnetif);
+        }
         netif_set_down(&gnetif);
+        dhcp_state = DHCP_STATE_INIT;
+    }
+
+    if (eth_link_up) {
+        if (dhcp_state == DHCP_STATE_CLIENT_WAITING) {
+            if (gnetif.ip_addr.addr != 0) {
+                dhcp_state = DHCP_STATE_CLIENT_BOUND;
+            } else if ((HAL_GetTick() - dhcp_start_time) > 3000) {
+                // Timeout, switch to server
+                dhcp_stop(&gnetif);
+                
+                ip4_addr_t ipaddr, netmask, gw;
+                IP4_ADDR(&ipaddr, IP_ADDR0, IP_ADDR1, IP_ADDR2, IP_ADDR3);
+                IP4_ADDR(&netmask, NETMASK_ADDR0, NETMASK_ADDR1, NETMASK_ADDR2, NETMASK_ADDR3);
+                IP4_ADDR(&gw, GW_ADDR0, GW_ADDR1, GW_ADDR2, GW_ADDR3);
+                
+                netif_set_addr(&gnetif, &ipaddr, &netmask, &gw);
+                
+                dhcps_init();
+                dhcp_state = DHCP_STATE_SERVER;
+            }
+        }
     }
 }
 

@@ -128,3 +128,11 @@ void dhcps_init(void)
         udp_recv(dhcps_pcb, dhcps_recv, NULL);
     }
 }
+
+void dhcps_deinit(void)
+{
+    if (dhcps_pcb) {
+        udp_remove(dhcps_pcb);
+        dhcps_pcb = NULL;
+    }
+}
