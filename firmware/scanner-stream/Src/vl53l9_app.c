@@ -1896,7 +1896,7 @@ void vl53l9_app() {
             static uint32_t last_print = 0;
             uint32_t now = HAL_GetTick();
             if (now - last_print >= 1000) {
-                printf("[STREAM] Processed frame %lu (ToF only via ST-LINK)\\n", (unsigned long)rs_counter);
+                printf("[STREAM] Processed frame %lu (ToF only via ST-LINK)\n", (unsigned long)rs_counter);
                 last_print = now;
             }
             static uint32_t rs_calib_countdown = 0;
