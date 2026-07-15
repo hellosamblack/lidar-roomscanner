@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import queue
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -175,12 +178,44 @@ def main(argv=None) -> int:
     print(f"\n=== roomscan web viewer ===")
     print(f"Starting server on {url}")
     print("Press Ctrl+C to stop.")
-    
+
     # Small delay to let the server start before opening the browser
-    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-    
+    threading.Timer(1.0, lambda: _open_browser(url)).start()
+
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
     return 0
+
+
+def _open_browser(url: str) -> None:
+    """Open the viewer, and on Linux launch Chrome/Chromium with software-WebGL
+    enabled. On a headless host (no GPU -- the whole point of this deployment)
+    Chrome refuses to create a WebGL context by default, so the Three.js viewer
+    dies with "Error creating WebGL context" and the page is stuck at "Offline"
+    (confirmed on-box 2026-07-15: baseline Chrome -> NO-WEBGL; with the flag ->
+    WEBGL-OK via SwiftShader/llvmpipe). `--enable-unsafe-swiftshader` only
+    *permits* the software fallback -- a machine with a real GPU still uses it,
+    so this is safe to pass unconditionally. Set ROOMSCAN_NO_BROWSER=1 to skip
+    the auto-open entirely (e.g. when viewing from another machine)."""
+    if os.environ.get("ROOMSCAN_NO_BROWSER"):
+        print(f"[browser] auto-open disabled; open {url} yourself.", flush=True)
+        return
+    if sys.platform.startswith("linux"):
+        for exe in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+            path = shutil.which(exe)
+            if path:
+                try:
+                    subprocess.Popen(
+                        [path, "--enable-unsafe-swiftshader", url],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    print(f"[browser] opened {exe} with software WebGL enabled.", flush=True)
+                    return
+                except Exception as exc:
+                    print(f"[browser] {exe} launch failed ({exc}); falling back.", flush=True)
+                    break
+        print("[browser] no Chrome/Chromium found. If the viewer shows 'Offline' "
+              "with a WebGL error, launch your browser with software WebGL "
+              "(Chrome: --enable-unsafe-swiftshader).", flush=True)
+    webbrowser.open(url)
 
 if __name__ == "__main__":
     sys.exit(main())
