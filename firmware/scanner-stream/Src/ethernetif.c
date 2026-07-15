@@ -185,7 +185,12 @@ static void low_level_init(struct netif *netif)
 
   /* device capabilities */
   /* don't set NETIF_FLAG_ETHARP if this device is not an ethernet one */
-  netif->flags |= NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP;
+  netif->flags |= NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_IGMP;
+
+  ETH_MACFilterConfigTypeDef filterConfig;
+  HAL_ETH_GetMACFilterConfig(&EthHandle, &filterConfig);
+  filterConfig.PassAllMulticast = ENABLE;
+  HAL_ETH_SetMACFilterConfig(&EthHandle, &filterConfig);
 
   /* Initialize the RX POOL */
   LWIP_MEMPOOL_INIT(RX_POOL);

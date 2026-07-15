@@ -10,6 +10,7 @@
 #include "stm32h5xx_hal.h"
 #include <string.h>
 #include <stdio.h>
+#include "lwip/apps/mdns.h"
 
 struct netif gnetif;
 static struct udp_pcb *upcb = NULL;
@@ -73,6 +74,7 @@ void ETH_Init(void)
 {
     lwip_init();
     Netif_Config();
+    mdns_resp_init();
     upcb = udp_new();
 }
 
@@ -121,6 +123,9 @@ void ETH_Process(void)
         if (dhcp_state == DHCP_STATE_CLIENT_WAITING) {
             if (gnetif.ip_addr.addr != 0) {
                 dhcp_state = DHCP_STATE_CLIENT_BOUND;
+                mdns_resp_add_netif(&gnetif, "roomscanner", 3600);
+                mdns_resp_add_service(&gnetif, "roomscanner", "_roomscan", DNSSD_PROTO_UDP, 5000, 3600, NULL, NULL);
+                mdns_resp_netif_settings_changed(&gnetif);
                 printf("[ETH] DHCP Client Bound: IP %s\n", ip4addr_ntoa(netif_ip4_addr(&gnetif)));
             } else if ((HAL_GetTick() - dhcp_start_time) > 3000) {
                 // Timeout, switch to server
@@ -136,6 +141,9 @@ void ETH_Process(void)
                 
                 dhcps_init();
                 dhcp_state = DHCP_STATE_SERVER;
+                mdns_resp_add_netif(&gnetif, "roomscanner", 3600);
+                mdns_resp_add_service(&gnetif, "roomscanner", "_roomscan", DNSSD_PROTO_UDP, 5000, 3600, NULL, NULL);
+                mdns_resp_netif_settings_changed(&gnetif);
             }
         } else if (dhcp_state == DHCP_STATE_CLIENT_BOUND || dhcp_state == DHCP_STATE_SERVER) {
             static uint32_t last_ip_print = 0;

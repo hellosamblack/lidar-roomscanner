@@ -97,6 +97,7 @@ file(GLOB_RECURSE LWIP_SRCS
     "../vendor/lwip/src/core/*.c"
     "../vendor/lwip/src/core/ipv4/*.c"
     "../vendor/lwip/src/netif/ethernet.c"
+    "../vendor/lwip/src/apps/mdns/mdns.c"
 )
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${LWIP_SRCS}

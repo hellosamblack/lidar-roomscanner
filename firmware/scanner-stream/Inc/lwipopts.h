@@ -16,8 +16,10 @@
 /* DHCP client */
 #define LWIP_DHCP 1
 #define LWIP_DNS 0
-#define LWIP_IGMP 0
+#define LWIP_IGMP 1
 #define LWIP_NETIF_HOSTNAME 1
+#define LWIP_MDNS_RESPONDER 1
+#define LWIP_NUM_NETIF_CLIENT_DATA 1
 
 /* Memory configuration for fast UDP streaming */
 #define MEM_ALIGNMENT 4
