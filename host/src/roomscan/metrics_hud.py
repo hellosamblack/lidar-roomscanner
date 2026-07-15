@@ -75,8 +75,8 @@ class _Row:
         self.accent = accent            # fixed color override (else green/amber/red)
 
 
-def _rows(snap: MetricsSnapshot, usb_capacity_bps: float, fps_target: float,
-          view_fps: float = 0.0) -> list[_Row]:
+def _rows(snap: MetricsSnapshot, link_capacity_bps: float, fps_target: float,
+          view_fps: float = 0.0, link_label: str = "USB") -> list[_Row]:
     rows: list[_Row] = []
     rows.append(_Row("VIEW", f"{view_fps:.0f}",
                      frac=view_fps / fps_target if fps_target > 0 else None,
@@ -88,11 +88,15 @@ def _rows(snap: MetricsSnapshot, usb_capacity_bps: float, fps_target: float,
         if s.device_hz and s.device_hz > 0:
             frac = s.host_hz / s.device_hz
             val = f"{fmt_hz(s.host_hz)}/{fmt_hz(s.device_hz)} Hz"
+            if s.jitter_ms is not None:
+                val += f" j:{s.jitter_ms:.1f}ms"
             rows.append(_Row(s.label, val, frac=frac, good_high=True))
         else:                            # no usable device timestamp -> host only
             rows.append(_Row(s.label, f"{fmt_hz(s.host_hz)} Hz", frac=None))
-    rows.append(_Row("USB", fmt_rate(snap.link_bytes_per_s),
-                     frac=snap.link_bytes_per_s / usb_capacity_bps if usb_capacity_bps > 0 else None))
+    rows.append(_Row(link_label, fmt_rate(snap.link_bytes_per_s),
+                     frac=snap.link_bytes_per_s / link_capacity_bps if link_capacity_bps > 0 else None))
+    if snap.drops > 0 or snap.gaps > 0:
+        rows.append(_Row("DROP", f"{snap.drops} frm, {snap.gaps} net", frac=None, accent=_RED))
     res = snap.resources
     if res is not None:
         # One utilization bar per core our app is using (not the whole system).
@@ -117,12 +121,13 @@ def _rows(snap: MetricsSnapshot, usb_capacity_bps: float, fps_target: float,
 
 
 def render_hud(snap: MetricsSnapshot, *, view_fps: float = 0.0, width: int = 320, row_h: int = 22,
-               usb_capacity_bps: float = USB_FS_CAPACITY_BPS,
+               link_capacity_bps: float = USB_FS_CAPACITY_BPS,
+               link_label: str = "USB",
                fps_target: float = FPS_TARGET) -> np.ndarray:
     """Pure: MetricsSnapshot -> (H, W, 3) uint8 RGB HUD image."""
     from PIL import Image, ImageDraw
 
-    rows = _rows(snap, usb_capacity_bps, fps_target, view_fps=view_fps)
+    rows = _rows(snap, link_capacity_bps, fps_target, view_fps=view_fps, link_label=link_label)
     top, bottom = 8, 6
     height = top + max(1, len(rows)) * row_h + bottom   # grows with the CPU-core rows
     img = Image.new("RGB", (width, height), _BG)

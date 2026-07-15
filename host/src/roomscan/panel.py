@@ -3041,7 +3041,14 @@ class ControlPanel:
         if not self.metrics_overlay:
             return
         snap = self.metrics.snapshot(time.monotonic())
-        img = render_hud(snap, view_fps=self._view_fps(time.monotonic()))
+        from dataclasses import replace
+        snap = replace(snap, drops=self.stats.dropped_flags, gaps=self.stats.seq_gaps)
+        
+        is_udp = type(self.source).__name__ == "UdpSource"
+        link_cap = 11_000_000.0 if is_udp else 1_200_000.0
+        link_lbl = "ETH" if is_udp else "USB"
+        
+        img = render_hud(snap, view_fps=self._view_fps(time.monotonic()), link_capacity_bps=link_cap, link_label=link_lbl)
         h, w = img.shape[:2]
         self.overlay.update_image(self._np_to_o3d(img))
         if (w, h) != self._overlay_size:      # fixed-size render -> fires once

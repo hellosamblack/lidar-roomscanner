@@ -100,6 +100,20 @@ class RateMeter:
             total = sum(x[2] for x in list(s)[1:])
             return total / span
 
+    def jitter_ms(self, now: float) -> float | None:
+        with self._lock:
+            self._trim(now)
+            s = self._samples
+        if len(s) < 2:
+            return None
+        j_sum = 0.0
+        for i in range(1, len(s)):
+            dh = s[i][0] - s[i-1][0]
+            dd = (s[i][1] - s[i-1][1]) / 1e6
+            if dd > 0:
+                j_sum += abs(dh - dd)
+        return (j_sum / (len(s) - 1)) * 1000.0
+
 
 @dataclass(frozen=True)
 class StreamRate:
@@ -108,6 +122,7 @@ class StreamRate:
     device_hz: float | None
     host_hz: float
     bytes_per_s: float
+    jitter_ms: float | None
 
 
 @dataclass(frozen=True)
@@ -134,6 +149,8 @@ class MetricsSnapshot:
     streams: list[StreamRate]
     link_bytes_per_s: float
     resources: ResourceSnapshot | None
+    drops: int = 0
+    gaps: int = 0
 
 
 class MetricsRegistry:
@@ -187,7 +204,7 @@ class MetricsRegistry:
             link_bps += bps
             label = SENSOR_LABELS.get(sid)
             if label is not None:
-                streams.append(StreamRate(sid, label, m.device_hz(now), m.host_hz(now), bps))
+                streams.append(StreamRate(sid, label, m.device_hz(now), m.host_hz(now), bps, m.jitter_ms(now)))
         streams.sort(key=lambda s: _SENSOR_ORDER.get(s.stream_id, 99))
         resources = self.sampler.latest() if self.sampler is not None else None
         return MetricsSnapshot(self.render_fps(now), streams, link_bps, resources)
