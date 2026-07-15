@@ -95,7 +95,8 @@ class UdpSource:
             target = socket.gethostbyname("roomscanner.local")
             self.target_ip = target
         except socket.gaierror:
-            self.target_ip = "172.31.253.1"
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            self.target_ip = "255.255.255.255"
 
     def read(self) -> bytes:
         try:
