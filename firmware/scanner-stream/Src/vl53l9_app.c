@@ -350,11 +350,17 @@ static bool rs_send_generic_cdc(uint8_t frame_type, uint8_t stream_id, uint32_t 
     crc = rs_crc32(crc, payload, len);
     rs_put_u32(tail, crc);
 
-    if (ETH_SendFrame_Gather(hdr, RS_HEADER_SIZE, payload, len, tail, 4)) {
-        return true;
+    bool eth_sent = false;
+    if (ETH_IsUp()) {
+        eth_sent = ETH_SendFrame_Gather(hdr, RS_HEADER_SIZE, payload, len, tail, 4);
     }
     
-    return rs_cdc_send(hdr, RS_HEADER_SIZE) && rs_cdc_send(payload, len) && rs_cdc_send(tail, 4);
+    bool usb_sent = false;
+    if (tud_cdc_connected()) {
+        usb_sent = rs_cdc_send(hdr, RS_HEADER_SIZE) && rs_cdc_send(payload, len) && rs_cdc_send(tail, 4);
+    }
+    
+    return eth_sent || usb_sent;
 }
 
 static void rs_send_frame_cdc(uint8_t stream_id, uint32_t seq, uint8_t flags, const uint8_t *payload,
@@ -1501,6 +1507,7 @@ void vl53l9_app() {
     /* Sensor is up and the loop below pumps tud_task(): present the USB
      * device only now (D+ pull-up was held off after tud_init in main.c so
      * the host never saw a device we couldn't answer). */
+    tusb_init();
     tud_connect();
 
 #if CONF_STREAM_RAW
