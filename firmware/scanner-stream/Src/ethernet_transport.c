@@ -9,6 +9,7 @@
 #include "netif/ethernet.h"
 #include "stm32h5xx_hal.h"
 #include <string.h>
+#include <stdio.h>
 
 struct netif gnetif;
 static struct udp_pcb *upcb = NULL;
@@ -84,20 +85,29 @@ void ETH_Process(void)
     if (HAL_GetTick() - last_link_check > 500) {
         last_link_check = HAL_GetTick();
         ethernet_link_check_state(&gnetif);
+        static bool last_printed_up = false;
+        bool up = netif_is_link_up(&gnetif);
+        if (up != last_printed_up || (HAL_GetTick() % 5000 < 500)) {
+            printf("[ETH] Link State Poll: %s\n", up ? "UP" : "DOWN");
+            last_printed_up = up;
+        }
     }
 
     if (netif_is_link_up(&gnetif) && !eth_link_up)
     {
         eth_link_up = true;
+        printf("[ETH] Link UP\n");
         netif_set_up(&gnetif);
         
         dhcp_state = DHCP_STATE_CLIENT_WAITING;
         dhcp_start(&gnetif);
         dhcp_start_time = HAL_GetTick();
+        printf("[ETH] DHCP Client Started\n");
     }
     else if (!netif_is_link_up(&gnetif) && eth_link_up)
     {
         eth_link_up = false;
+        printf("[ETH] Link DOWN\n");
         if (dhcp_state == DHCP_STATE_SERVER) {
             dhcps_deinit();
         } else {
@@ -111,8 +121,10 @@ void ETH_Process(void)
         if (dhcp_state == DHCP_STATE_CLIENT_WAITING) {
             if (gnetif.ip_addr.addr != 0) {
                 dhcp_state = DHCP_STATE_CLIENT_BOUND;
+                printf("[ETH] DHCP Client Bound: IP %s\n", ip4addr_ntoa(netif_ip4_addr(&gnetif)));
             } else if ((HAL_GetTick() - dhcp_start_time) > 3000) {
                 // Timeout, switch to server
+                printf("[ETH] DHCP Client Timeout, switching to Server (172.31.253.1)\n");
                 dhcp_stop(&gnetif);
                 
                 ip4_addr_t ipaddr, netmask, gw;
@@ -124,6 +136,12 @@ void ETH_Process(void)
                 
                 dhcps_init();
                 dhcp_state = DHCP_STATE_SERVER;
+            }
+        } else if (dhcp_state == DHCP_STATE_CLIENT_BOUND || dhcp_state == DHCP_STATE_SERVER) {
+            static uint32_t last_ip_print = 0;
+            if (HAL_GetTick() - last_ip_print > 5000) {
+                last_ip_print = HAL_GetTick();
+                printf("[ETH] Current IP: %s (%s mode)\n", ip4addr_ntoa(netif_ip4_addr(&gnetif)), dhcp_state == DHCP_STATE_SERVER ? "Server" : "Client");
             }
         }
     }
