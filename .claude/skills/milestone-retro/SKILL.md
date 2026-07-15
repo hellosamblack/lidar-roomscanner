@@ -51,6 +51,14 @@ major effort, before the next phase's plan executes.
   and a corrupted/malformed-input case exercised on hardware, not just a single well-formed sample
   (caught in Phase 3 Task 2's parse-while-draining rework).
 
+## Executed 2026-07-14 (Phase 5 Ethernet retro)
+
+- **ROADMAP.md / CLAUDE.md trued up**: Phase 5 marked complete (no longer shelved). The architecture decision was updated to reflect USB CDC OR Ethernet UDP as the transport links.
+- **Memory updated**: `recent.md` logging the descriptor exhaustion and initialization wait-loop fixes.
+- **Scripts**: Promoted `test_send.py` and `test_udp_receive.py` in `host/tools/` for UDP network testing and headless device streaming validation.
+- **Skill update**: Noted that the headless wait loop must check `ETH_HasTarget()` alongside USB connection to prevent hanging Ethernet-only boots.
+- **Deliberately skipped**: No new project rules required.
+
 ## Executed 2026-07-10 (post-Phase-4 follow-up / pre-Phase-6 retro)
 
 Covers the merges that landed *after* the Phase 4 retro below: PR #7 (camera-panel world accumulation),
