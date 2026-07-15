@@ -55,7 +55,7 @@ from .sensors import (
     gizmo_pose,
     tilt_compensated_heading,
 )
-from .sensors_widgets import render_compass, render_sparkline
+from .sensors_widgets import render_compass, render_sparkline, render_sensors_overlay
 from .shading import MODES as _NEAR_MODES
 from .shading import cloud_colors
 from .sources import FileSource, Recorder, SerialSource, pump
@@ -127,11 +127,16 @@ _SHOWCASE_EASE_S = 1.5          # seconds to ease the camera into the final fram
 # sensor stationary on a tripod). An EMA at alpha attenuates the steady-state
 # noise std by sqrt(alpha/(2-alpha)): 0.25 -> 0.38x, 0.12 -> 0.25x. It cannot
 # fully remove the jitter (the root is per-frame ICP translation noise on the
-# 54x42 depth), but 0.12 takes it from "shaky" to "gently floating" while the
-# added lag (~8 ticks / ~0.3 s at 28 fps) stays acceptable for a live preview.
+# 54x42 depth), but 0.12 takes it from "shaky" to "gently floating".
+# The flat 0.12 EMA also lagged REAL motion ~0.3 s ("feels like the system
+# didn't notice you moved" -- owner). `_follow_alpha` makes the weight
+# velocity-adaptive instead: sub-`_FOLLOW_SNAP_M` frame motion (ICP noise while
+# ~stationary) still smooths at `_FOLLOW_SMOOTH`, but genuine motion ramps the
+# weight to 1.0 so the camera position tracks 1:1 with no perceived lag.
 _FOLLOW_BACK_OFF_M = 0.3
 _FOLLOW_LOOK_AHEAD_M = 1.0
 _FOLLOW_SMOOTH = 0.12
+_FOLLOW_SNAP_M = 0.03      # per-frame eye motion (m) at/above which the follow camera tracks 1:1
 
 # --- Two-mode / two-camera redesign (spec 2026-07-13) --------------------------
 VIEW_REAL_TIME = "real_time"
@@ -370,6 +375,16 @@ def follow_camera_target(pose, back_off: float = _FOLLOW_BACK_OFF_M,
     eye = sensor_pos - back_off * forward
     center = sensor_pos + look_ahead * forward
     return eye, center, np.asarray(up, dtype=np.float64)
+
+
+def _follow_alpha(motion_m: float) -> float:
+    """Velocity-adaptive EMA weight for the follow camera (`_apply_follow_camera`).
+    Per-frame eye motion below `_FOLLOW_SNAP_M` (ICP translation noise while the
+    sensor is ~stationary) smooths at `_FOLLOW_SMOOTH` to stay steady; genuine
+    motion ramps the weight linearly to 1.0 so the view tracks the sensor 1:1
+    with no perceived lag (owner: "camera position should never be decimated").
+    Pure -- unit-tested."""
+    return float(np.clip(motion_m / _FOLLOW_SNAP_M, _FOLLOW_SMOOTH, 1.0))
 
 
 def _eta_seconds(elapsed_s: float, fraction: float) -> float | None:
@@ -751,8 +766,10 @@ class ControlPanel:
 
         # Apply the saved/CLI mode + camera so the window opens in the right
         # state (spec §3: both default to first-person; mode defaults to SLAM).
+        # SLAM mode arms the Showcase record->process->reveal machine (see
+        # _set_mode), not the classic always-on SLAM view.
         if self.mode == VIEW_SLAM:
-            self._on_slam_toggle(True)
+            self._on_showcase_toggle(True)
         self._apply_camera_mode()
 
         self.bus.publish(f"connected: {'replay ' + str(args.replay) if self.is_replay else 'live ' + str(getattr(source, 'port', '?'))}")
@@ -790,6 +807,15 @@ class ControlPanel:
         self._overlay_size = (10, 10)            # (w, h) tracked for _on_layout
         self.overlay.visible = self.metrics_overlay
         self.window.add_child(self.overlay)
+
+        # Floating Sensors overlay (Overlays -> Sensors): a compass + pressure/
+        # temp sparkline panel drawn over the top-right of the scene, mirroring
+        # the metrics HUD. (The settings dialog's Sensors group keeps the Reset
+        # Baseline control; this is the always-on-top readout the menu toggles.)
+        self.sensors_overlay = gui.ImageWidget(self._np_to_o3d(blank))
+        self._sensors_overlay_size = (10, 10)
+        self.sensors_overlay.visible = self.sensors_panel
+        self.window.add_child(self.sensors_overlay)
 
         # Showcase mode's phase banner (Task 12) -- a plain floating Label,
         # stacked just below the metrics HUD image (see _on_layout), hidden
@@ -1129,6 +1155,8 @@ class ControlPanel:
 
     def _toggle_sensors_menu(self):
         self.sensors_panel = not self.sensors_panel
+        self.sensors_overlay.visible = self.sensors_panel      # floating Sensors HUD
+        self.window.set_needs_layout()
         if getattr(self, "_overlays_menu", None) is not None:
             self._overlays_menu.set_checked(111, self.sensors_panel)
         self.bus.publish(f"sensors -> {'on' if self.sensors_panel else 'off'}")
@@ -1144,15 +1172,27 @@ class ControlPanel:
         # banner, progress, reveal card); HUD control widgets land here in Task 9.
         scene_w = r.width
         self.scene_widget.frame = gui.Rect(r.x, r.y, r.width, r.height)
+        # Real-Time first-person needs its fixed camera + projection applied once
+        # the viewport has a real size -- at __init__/config-restore time the
+        # frame is still 0x0 so _apply_camera_mode's call no-ops. Re-apply here so
+        # a session that opens straight into Real-Time first-person isn't left
+        # with an unset projection (the "IR/first-person shows nothing" case);
+        # also keeps the aspect correct across resizes.
+        if real_time_first_person(getattr(self, "mode", None), getattr(self, "camera_mode", None)):
+            self._apply_real_time_first_person()
         # metrics HUD image: pinned to the scene's top-left at its native size
         w, h = self._overlay_size
         pad = int(0.5 * self.window.theme.font_size)
+        em = self.window.theme.font_size
         self.overlay.frame = gui.Rect(r.x + pad, r.y + pad, w, h)
+        # Sensors overlay: top-right, tucked just under the view toggle (top row).
+        sw_w, sw_h = self._sensors_overlay_size
+        self.sensors_overlay.frame = gui.Rect(
+            r.x + r.width - pad - sw_w, r.y + pad + int(3.2 * em), sw_w, sw_h)
         # Showcase banner: stacked just below the metrics HUD image (if visible),
         # spanning most of the scene's width. Computed unconditionally (cheap;
         # mirrors the overlay's own always-computed frame above) -- visibility
         # alone gates whether it's actually drawn.
-        em = self.window.theme.font_size
         banner_h = int(1.6 * em)
         banner_y = r.y + pad + (h + pad if self.overlay.visible else 0)
         banner_w = min(scene_w - 2 * pad, int(32 * em))
@@ -1354,9 +1394,11 @@ class ControlPanel:
             self.metrics.tick_render(time.monotonic())
             return
 
-        # Real-Time first-person (spec §5.2): a camera-locked IR billboard in
-        # front of the fixed sensor-origin eye. Removed otherwise / when off.
-        if real_time_first_person(self.mode, self.camera_mode) and self.ir_overlay_enabled:
+        # Real-Time first-person (spec §5.2): you look OUT through the sensor at
+        # the live cloud fixed in front, with the IR billboard layered ahead when
+        # enabled. Orbit instead shows the gravity-aligned cloud you can inspect.
+        fp = real_time_first_person(self.mode, self.camera_mode)
+        if fp and self.ir_overlay_enabled:
             self._update_ir_overlay([0.0, 0.0, -_FOLLOW_BACK_OFF_M], [0.0, 0.0, 1.0])
         else:
             self._remove_ir_overlay()
@@ -1370,17 +1412,24 @@ class ControlPanel:
             from .sensors import graft_yaw
             quat_display = graft_yaw(quat, -self._baseline_yaw)
 
-        if quat_display is not None:
+        if fp:
+            # Sensor-fixed: keep the cloud in the raw sensor frame so it stays
+            # dead ahead as you aim the sensor (true first-person), and hide the
+            # camera model -- you're inside it (owner: "not first person the way
+            # SLAM is"). No IMU rotation applied here. The first-person view
+            # itself is (re)applied after the cloud render below.
+            r_mapped = np.eye(3)
+            self._remove_camera_gizmo()
+        elif quat_display is not None:
             from .sensors import quat_to_matrix, T_WORLD_TO_CV, T_CV_TO_BODY
-            # Apply quaternion rotation using the true physical coordinate mappings
+            # Orbit: gravity-align the cloud via the fused orientation so it can
+            # be inspected upright, and show the camera-orientation gizmo.
             r = quat_to_matrix(*quat_display)
-            # Transform rotation back to CV frame for Open3D rendering
             r_mapped = T_WORLD_TO_CV @ r @ T_CV_TO_BODY
+            self._update_camera_gizmo(quat_display)
         else:
             r_mapped = np.eye(3)
-
-        # Update the visual camera entity's transform at frame rate
-        self._update_camera_gizmo(quat_display)
+            self._update_camera_gizmo(quat_display)
 
         if len(pts):
             plane = None if self.color_mode == "depth" else outputs.get(self.color_mode)
@@ -1452,6 +1501,15 @@ class ControlPanel:
             self.pcd.points = o3d.utility.Vector3dVector(np.zeros((0, 3)))
             self.pcd.colors = o3d.utility.Vector3dVector(np.zeros((0, 3)))
             self._show_geometries(np.zeros((0, 3)))
+        # Real-Time first-person: `_show_geometries` above just established the
+        # projection via `_reset_camera` (setup_camera on the cloud bounds, same
+        # as the classic view); override its orbit framing with the fixed
+        # look-out-through-the-sensor view here, EVERY frame -- mirrors SLAM's
+        # setup_camera-once + per-frame follow look_at. Doing it per-frame (not a
+        # one-shot pin) is what makes first-person work from the very first frame,
+        # with no orbit->first-person round-trip needed to prime the camera.
+        if fp:
+            self._apply_real_time_first_person()
         self._shown += 1
         self.metrics.tick_render(time.monotonic())   # rendered-FPS counter
 
@@ -1773,11 +1831,26 @@ class ControlPanel:
         if self._follow_eye is None:
             self._follow_eye, self._follow_center = eye, center
         else:
-            self._follow_eye = self._follow_eye + _FOLLOW_SMOOTH * (eye - self._follow_eye)
-            self._follow_center = self._follow_center + _FOLLOW_SMOOTH * (center - self._follow_center)
+            # Velocity-adaptive weight: track real motion 1:1 (no lag), smooth
+            # only sub-_FOLLOW_SNAP_M jitter when ~stationary (see _follow_alpha).
+            alpha = _follow_alpha(float(np.linalg.norm(eye - self._follow_eye)))
+            self._follow_eye = self._follow_eye + alpha * (eye - self._follow_eye)
+            self._follow_center = self._follow_center + alpha * (center - self._follow_center)
         self.scene_widget.look_at(self._follow_center.astype(np.float32),
                                   self._follow_eye.astype(np.float32),
                                   up.astype(np.float32))
+
+    def _remove_camera_gizmo(self):
+        """Drop the IMU "camera model" gizmo from the scene (and clear
+        `_gizmo_added` so it's cleanly re-added on the next orbit frame).
+        `_update_camera_gizmo` already stops UPDATING it in first-person
+        (`gizmo_should_update`), but a copy added while in orbit would otherwise
+        linger in the first-person view -- the "3D model of the camera" the
+        owner reported seeing."""
+        sc = self.scene_widget.scene
+        if sc.has_geometry(_GIZMO_GEOM):
+            sc.remove_geometry(_GIZMO_GEOM)
+            self._gizmo_added = False
 
     def _hide_first_person_clutter(self):
         """Remove the IMU gizmo ("camera icon") and the trajectory trail while
@@ -2642,6 +2715,10 @@ class ControlPanel:
         # HUD clicks are handled per-control by _on_hud_widget_mouse (each HUD
         # ImageWidget owns its own set_on_mouse); the SceneWidget only ever gets
         # events over the open scene, so it drives camera nav alone here.
+        if real_time_first_person(self.mode, self.camera_mode):
+            # Real-Time first-person is a fixed look-out-through-the-sensor view;
+            # swallow nav so a stray drag can't arcball out of it (like follow).
+            return res.CONSUMED
         if self._cam_target is None:
             return res.IGNORED
         if self.follow_camera_enabled:
@@ -2717,11 +2794,18 @@ class ControlPanel:
             return
         self.mode = m
         if m == VIEW_SLAM:
-            self._on_slam_toggle(True)
+            # SLAM mode IS the record->process->reveal experience (spec: "SLAM:
+            # map building = the former SLAM view AND Showcase flow, merged.
+            # Record -> process -> reveal is the Showcase pipeline under the
+            # hood"). The action cluster drives ShowcasePhase, so arm the
+            # showcase machine -- NOT the classic always-on SLAM view, which
+            # never transitions the phase and leaves REC/STOP/PROCESSING dead.
+            self._on_showcase_toggle(True)
         else:
             if self.showcase_enabled:
                 self._on_showcase_toggle(False)
-            self._on_slam_toggle(False)
+            if self.slam_enabled:
+                self._on_slam_toggle(False)
         self._apply_camera_mode()
         self.window.set_needs_layout()                   # ACTION_CLUSTER visibility changed
         self.bus.publish(f"mode -> {m}")
@@ -2747,16 +2831,31 @@ class ControlPanel:
                 self._remove_ir_overlay()                # drop the first-person IR billboard
         if real_time_first_person(self.mode, self.camera_mode):
             self._apply_real_time_first_person()
+        elif self.camera_mode == CAM_ORBIT:
+            # Entering ORBIT (either mode): reframe to fit ALL displayed content
+            # (owner request). Real-Time -> _reset_camera on the next cloud frame;
+            # SLAM -> _slam_camera_frame on the next mesh frame. Both no-op while
+            # _camera_set, so clearing it triggers a single fit-to-content.
+            self._camera_set = False
 
     def _apply_real_time_first_person(self):
-        """Real-Time first-person: a fixed sensor-origin camera looking along
-        the sensor +Z (the raw cloud is already in the sensor frame), per spec
-        §3. Eye slightly behind the origin; center one metre ahead."""
-        if self.scene_widget.frame.width <= 0 or self.scene_widget.frame.height <= 0:
+        """Aim the Real-Time first-person view: a fixed sensor-origin camera
+        looking along the sensor +Z (the raw cloud is already in the sensor
+        frame), per spec §3. Eye slightly behind the origin; center one metre
+        ahead. Only the VIEW is set here (via look_at) -- the projection is
+        owned by the cloud path's `_reset_camera` (setup_camera on the live
+        bounds), exactly like SLAM's follow camera rides on top of
+        `_slam_camera_frame`'s setup_camera. Called on mode/camera change, from
+        `_on_layout`, and every Real-Time first-person frame (render path), so
+        the view is correct from the first frame -- an earlier one-shot `pin`
+        blocked `_reset_camera` and left the camera projection-less until an
+        orbit->first-person round-trip primed it."""
+        sw = self.scene_widget
+        if sw.frame.width <= 0 or sw.frame.height <= 0:
             return
         eye = np.array([0.0, 0.0, -_FOLLOW_BACK_OFF_M], dtype=np.float32)
         center = np.array([0.0, 0.0, _FOLLOW_LOOK_AHEAD_M], dtype=np.float32)
-        self.scene_widget.look_at(center, eye, _WORLD_UP)
+        sw.look_at(center, eye, _WORLD_UP)
 
     def _hud_action_labels(self):
         phase = self.showcase_phase.name.lower() if (self.mode == VIEW_SLAM and self.showcase_phase) else "idle"
@@ -2847,6 +2946,12 @@ class ControlPanel:
         outputs = self._latest_outputs or {}
         refl = outputs.get("reflectance")
         if refl is None:
+            # Enabled but nothing to draw -> tell the user once (depth-only stream
+            # / transform DLL absent), else "no IR window" looks like a bug.
+            if not getattr(self, "_ir_no_refl_warned", False):
+                self.bus.publish("IR overlay on, but no reflectance in the stream "
+                                 "(depth-only / transform DLL absent) — nothing to show")
+                self._ir_no_refl_warned = True
             self._remove_ir_overlay()
             return
         auto = ir_range(refl)
@@ -2859,10 +2964,16 @@ class ControlPanel:
         m.vertices = o3d.utility.Vector3dVector(verts)
         m.triangles = o3d.utility.Vector3iVector(tris)
         m.triangle_uvs = o3d.utility.Vector2dVector(uvs[tris].reshape(-1, 2).astype(np.float64))
-        m.textures = [o3d.geometry.Image(np.ascontiguousarray(rgb))]
+        ir_img = o3d.geometry.Image(np.ascontiguousarray(rgb))
+        m.textures = [ir_img]
         m.triangle_material_ids = o3d.utility.IntVector(np.zeros(len(tris), np.int32))
         if hasattr(self.ir_overlay_material, "base_color"):   # real MaterialRecord
             self.ir_overlay_material.base_color = [1.0, 1.0, 1.0, float(self.ir_opacity)]
+            # Bind the IR frame as the material's albedo texture -- the reliable
+            # Filament texture slot. Without it the unlit shader falls back to
+            # the plain white base_color (billboard shows white, not the IR
+            # image); the mesh .textures path alone isn't honored here.
+            self.ir_overlay_material.albedo_img = ir_img
         sc = self.scene_widget.scene
         if sc.has_geometry(_IR_OVERLAY_GEOM):
             sc.remove_geometry(_IR_OVERLAY_GEOM)
@@ -2875,12 +2986,21 @@ class ControlPanel:
 
     def _toggle_ir_overlay(self):
         self.ir_overlay_enabled = not self.ir_overlay_enabled
+        if self.ir_overlay_enabled and self.ir_opacity < 0.05:
+            self.ir_opacity = 1.0        # toggling on at 0 opacity would still show nothing
         if not self.ir_overlay_enabled:
             self._remove_ir_overlay()
         self.bus.publish(f"IR overlay -> {'on' if self.ir_overlay_enabled else 'off'}")
 
     def _set_ir_opacity(self, fraction):
         self.ir_opacity = float(np.clip(fraction, 0.0, 1.0))
+        # The opacity slider doubles as the IR on/off control (owner: "slider to
+        # full -> see IR"): any non-trivial opacity shows the billboard, ~0 hides
+        # it. Otherwise dragging the slider does nothing until the label is also
+        # clicked, which isn't discoverable.
+        self.ir_overlay_enabled = self.ir_opacity > 0.02
+        if not self.ir_overlay_enabled:
+            self._remove_ir_overlay()
 
     def _pan(self, dx, dy):
         eye = _orbit_eye(self._cam_target, self._cam_az, self._cam_radius)
@@ -3008,17 +3128,31 @@ class ControlPanel:
         if status != self._last_fusion_status:
             self._last_fusion_status = status
             self.bus.publish(f"yaw-fusion -> {status}")
+        self.sensors_overlay.visible = self.sensors_panel
         if not self.sensors_panel:
             return
         env = self.sensor_state.latest_env()
+        heading, heading_valid = 0.0, False
         if env is not None and quat is not None:
             mag = env.mag_ut
             if self._mag_cal is not None:
                 mag = tuple(AXIS_CONVENTION @ self._mag_cal.apply(mag))
             heading = absolute_heading(quat, mag)
-            self.compass_widget.update_image(self._np_to_o3d(render_compass(heading)))
-        self.press_widget.update_image(self._np_to_o3d(render_sparkline(self.sensor_state.pressure_history())))
-        self.temp_widget.update_image(self._np_to_o3d(render_sparkline(self.sensor_state.temp_history())))
+            heading_valid = True
+            if hasattr(self, "compass_widget"):   # settings-dialog Sensors group (if built)
+                self.compass_widget.update_image(self._np_to_o3d(render_compass(heading)))
+        press_hist = self.sensor_state.pressure_history()
+        temp_hist = self.sensor_state.temp_history()
+        if hasattr(self, "press_widget"):
+            self.press_widget.update_image(self._np_to_o3d(render_sparkline(press_hist)))
+            self.temp_widget.update_image(self._np_to_o3d(render_sparkline(temp_hist)))
+        # Floating Sensors overlay (Overlays -> Sensors): one composite panel.
+        img = render_sensors_overlay(heading, press_hist, temp_hist, heading_valid=heading_valid)
+        h, w = img.shape[:2]
+        self.sensors_overlay.update_image(self._np_to_o3d(img))
+        if (w, h) != self._sensors_overlay_size:   # fixed-size render -> fires once
+            self._sensors_overlay_size = (w, h)
+            self.window.set_needs_layout()
 
     def _drain_log(self):
         new = self.bus.drain(self._log_sub)

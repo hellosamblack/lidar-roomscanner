@@ -4,7 +4,7 @@ from roomscan.config import ViewerConfig, config_path
 
 def test_new_fields_defaults():
     c = ViewerConfig()
-    assert c.mode == "slam"
+    assert c.mode == "real_time"       # owner: default to real-time first-person
     assert c.camera == "first_person"
     assert c.ir_overlay is False
     assert c.ir_opacity == 0.5

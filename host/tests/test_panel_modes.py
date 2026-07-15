@@ -25,8 +25,154 @@ def test_load_kind_by_suffix():
     assert p.load_kind("foo.txt") == "unknown"
 
 
+import types
+
 import numpy as np
 import roomscan.panel as panel_mod
+
+
+class _FakeSetModePanel:
+    """Stand-in exercising the real _set_mode wiring (which toggle it arms)."""
+    def __init__(self, mode):
+        self.mode = mode
+        self.showcase_enabled = False
+        self.slam_enabled = False
+        self.calls = []
+        self.window = types.SimpleNamespace(set_needs_layout=lambda: None)
+        self.bus = types.SimpleNamespace(publish=lambda m: None)
+
+    def _on_showcase_toggle(self, c): self.calls.append(("showcase", c)); self.showcase_enabled = c
+    def _on_slam_toggle(self, c): self.calls.append(("slam", c)); self.slam_enabled = c
+    def _apply_camera_mode(self): self.calls.append("camera_mode")
+
+
+def test_set_mode_slam_arms_showcase_not_classic_slam():
+    # Spec: SLAM mode IS the record->process->reveal (Showcase) pipeline; the
+    # action cluster drives ShowcasePhase, so SLAM must arm the showcase machine.
+    fake = _FakeSetModePanel(panel_mod.VIEW_REAL_TIME)
+    panel_mod.ControlPanel._set_mode(fake, panel_mod.VIEW_SLAM)
+    assert ("showcase", True) in fake.calls
+    assert ("slam", True) not in fake.calls
+    assert fake.mode == panel_mod.VIEW_SLAM
+
+
+def test_set_mode_real_time_disables_showcase():
+    fake = _FakeSetModePanel(panel_mod.VIEW_SLAM)
+    fake.showcase_enabled = True
+    panel_mod.ControlPanel._set_mode(fake, panel_mod.VIEW_REAL_TIME)
+    assert ("showcase", False) in fake.calls
+    assert fake.mode == panel_mod.VIEW_REAL_TIME
+
+
+class _FakeCam:
+    class FovType:
+        Vertical = "V"
+
+    def __init__(self):
+        self.proj = None
+
+    def set_projection(self, fov, aspect, near, far, ftype):
+        self.proj = (fov, aspect, near, far, ftype)
+
+
+def _fp_fake(width=800, height=600):
+    cam = _FakeCam()
+    look_at = []
+    fake = types.SimpleNamespace(
+        scene_widget=types.SimpleNamespace(
+            frame=types.SimpleNamespace(width=width, height=height),
+            scene=types.SimpleNamespace(camera=cam),
+            look_at=lambda c, e, u: look_at.append((c, e, u))),
+        _camera_set=False)
+    return fake, cam, look_at
+
+
+def test_real_time_first_person_aims_view_without_pinning():
+    # Only aims the fixed look_at view. It must NOT pin _camera_set nor set the
+    # projection: pinning blocked _reset_camera from establishing the projection,
+    # leaving first-person broken until an orbit->first-person round-trip primed
+    # it. Projection is owned by _reset_camera; the view is re-applied per frame.
+    fake, cam, look_at = _fp_fake()
+    fake._camera_set = False
+    panel_mod.ControlPanel._apply_real_time_first_person(fake)
+    assert len(look_at) == 1
+    assert fake._camera_set is False      # not pinned -> _reset_camera still runs
+    assert cam.proj is None               # projection left to _reset_camera
+
+
+def test_real_time_first_person_noop_without_viewport():
+    fake, cam, look_at = _fp_fake(width=0, height=0)
+    panel_mod.ControlPanel._apply_real_time_first_person(fake)
+    assert look_at == []
+
+
+def test_follow_alpha_stationary_smooths_motion_snaps():
+    from roomscan.panel import _follow_alpha, _FOLLOW_SMOOTH, _FOLLOW_SNAP_M
+    assert _follow_alpha(0.0) == _FOLLOW_SMOOTH               # ~stationary -> smoothed
+    assert _follow_alpha(_FOLLOW_SNAP_M) == 1.0               # real motion -> 1:1
+    assert _follow_alpha(10 * _FOLLOW_SNAP_M) == 1.0          # clamped
+    mid = _follow_alpha(_FOLLOW_SNAP_M / 2)
+    assert _FOLLOW_SMOOTH <= mid <= 1.0                       # monotone ramp
+
+
+def test_apply_camera_mode_orbit_clears_camera_set():
+    # Entering ORBIT (either mode) must clear _camera_set so the view refits to
+    # all content on the next frame (owner: auto-zoom to fit).
+    for mode in (panel_mod.VIEW_SLAM, panel_mod.VIEW_REAL_TIME):
+        fake = types.SimpleNamespace(
+            mode=mode, camera_mode=panel_mod.CAM_ORBIT,
+            follow_camera_enabled=False, _camera_set=True,
+            _follow_eye=None, _follow_center=None,
+            _apply_camera=lambda: None, _remove_ir_overlay=lambda: None)
+        panel_mod.ControlPanel._apply_camera_mode(fake)
+        assert fake._camera_set is False, mode
+
+
+def test_set_ir_opacity_slider_enables_overlay():
+    # Slider doubles as on/off: >0 opacity enables the overlay (owner: "slider to
+    # full -> see IR"); the render gate is `fp and ir_overlay_enabled`.
+    fake = types.SimpleNamespace(ir_opacity=0.0, ir_overlay_enabled=False,
+                                 _remove_ir_overlay=lambda: None)
+    panel_mod.ControlPanel._set_ir_opacity(fake, 1.0)
+    assert fake.ir_opacity == 1.0 and fake.ir_overlay_enabled is True
+
+
+def test_set_ir_opacity_zero_disables_overlay():
+    removed = []
+    fake = types.SimpleNamespace(ir_opacity=1.0, ir_overlay_enabled=True,
+                                 _remove_ir_overlay=lambda: removed.append(1))
+    panel_mod.ControlPanel._set_ir_opacity(fake, 0.0)
+    assert fake.ir_overlay_enabled is False and removed == [1]
+
+
+def test_toggle_ir_on_at_zero_opacity_bumps_it_visible():
+    fake = types.SimpleNamespace(ir_overlay_enabled=False, ir_opacity=0.0,
+                                 _remove_ir_overlay=lambda: None,
+                                 bus=types.SimpleNamespace(publish=lambda m: None))
+    panel_mod.ControlPanel._toggle_ir_overlay(fake)
+    assert fake.ir_overlay_enabled is True and fake.ir_opacity == 1.0
+
+
+def test_on_mouse_swallows_nav_in_real_time_first_person():
+    gui = __import__("pytest").importorskip("open3d").visualization.gui
+    fake = types.SimpleNamespace(
+        _gui=gui, mode=panel_mod.VIEW_REAL_TIME, camera_mode=panel_mod.CAM_FIRST_PERSON,
+        _cam_target=None, follow_camera_enabled=False)
+    ev = types.SimpleNamespace(type=gui.MouseEvent.Type.DRAG, x=10, y=10)
+    res = panel_mod.ControlPanel._on_mouse(fake, ev)
+    assert res == gui.SceneWidget.EventCallbackResult.CONSUMED   # fixed view, nav swallowed
+
+
+def test_remove_camera_gizmo_clears_geometry_and_flag():
+    removed = []
+    fake = types.SimpleNamespace(
+        _gizmo_added=True,
+        scene_widget=types.SimpleNamespace(scene=types.SimpleNamespace(
+            has_geometry=lambda n: True,
+            remove_geometry=lambda n: removed.append(n))))
+    panel_mod.ControlPanel._remove_camera_gizmo(fake)
+    assert removed == [panel_mod._GIZMO_GEOM]
+    assert fake._gizmo_added is False
 
 
 class _FakeGizmoScene:

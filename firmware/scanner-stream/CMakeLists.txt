@@ -92,6 +92,23 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ../vendor/tinyusb/src/portable/st/stm32_fsdev/fsdev_common.c
 )
 
+# Find LwIP sources
+file(GLOB_RECURSE LWIP_SRCS
+    "../vendor/lwip/src/core/*.c"
+    "../vendor/lwip/src/core/ipv4/*.c"
+    "../vendor/lwip/src/netif/ethernet.c"
+)
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    ${LWIP_SRCS}
+    ${PKG_ROOT}/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_eth.c
+    ${PKG_ROOT}/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_eth_ex.c
+    Src/ethernetif.c
+    Src/ethernetif.c
+    Src/ethernet_transport.c
+    Src/dhcpserver.c
+    Src/lan8742.c
+)
+
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     Inc
@@ -109,6 +126,9 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
     # TinyUSB (vendored, MIT)
     ../vendor/tinyusb/src
+
+    # lwIP
+    ../vendor/lwip/src/include
 )
 
 # Add project symbols (macros)

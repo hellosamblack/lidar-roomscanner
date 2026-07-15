@@ -18,6 +18,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+#include "ethernet_transport.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -321,7 +322,7 @@ static bool rs_cdc_send(const uint8_t *p, uint32_t n) {
             p += k;
             n -= k;
         }
-        tud_task();
+        tud_task(); ETH_Process();
         if ((HAL_GetTick() - t0) > 100u) {
             return false;
         }
@@ -336,9 +337,10 @@ static bool rs_cdc_send(const uint8_t *p, uint32_t n) {
  * the payload and whether the DROPPED-flag bookkeeping below applies. Stays OUTSIDE the
  * !CONF_TRANSFORM_ONBOARD guard (unlike rs_send_ack) because rs_send_frame_cdc, used by
  * both loop variants, is built on it. */
+
 static bool rs_send_generic_cdc(uint8_t frame_type, uint8_t stream_id, uint32_t seq, uint8_t flags,
                                 const uint8_t *payload, uint32_t len, uint16_t w, uint16_t h) {
-    if (!tud_cdc_connected()) {
+    if (!tud_cdc_connected() && !ETH_IsUp()) {
         return false;
     }
     uint8_t hdr[RS_HEADER_SIZE];
@@ -347,6 +349,11 @@ static bool rs_send_generic_cdc(uint8_t frame_type, uint8_t stream_id, uint32_t 
     uint32_t crc = rs_crc32(0u, hdr, RS_HEADER_SIZE);
     crc = rs_crc32(crc, payload, len);
     rs_put_u32(tail, crc);
+
+    if (ETH_SendFrame_Gather(hdr, RS_HEADER_SIZE, payload, len, tail, 4)) {
+        return true;
+    }
+    
     return rs_cdc_send(hdr, RS_HEADER_SIZE) && rs_cdc_send(payload, len) && rs_cdc_send(tail, 4);
 }
 
@@ -354,7 +361,7 @@ static void rs_send_frame_cdc(uint8_t stream_id, uint32_t seq, uint8_t flags, co
                               uint32_t len, uint16_t w, uint16_t h) {
     static uint8_t pending_dropped = 0;
 
-    if (!tud_cdc_connected()) {   /* no host: don't burn 100 ms per frame */
+    if (!tud_cdc_connected() && !ETH_IsUp()) {   /* no host: don't burn 100 ms per frame */
         pending_dropped = 1;
         return;
     }
@@ -421,7 +428,7 @@ static int rs_wait_event_usb(uint32_t evt, uint32_t timeout_ms) {
     uint32_t waited = 0;
     for (;;) {
         int ret = platform_wait_for_event(evt, 5);
-        tud_task();
+        tud_task(); ETH_Process();
         if (ret == 0) {
             return 0;
         }
@@ -1504,7 +1511,7 @@ void vl53l9_app() {
      * too; a headless/production build (no PC waiting on the far end) may want to revisit
      * blocking acquisition start on a host connection. */
     while (!tud_cdc_connected()) {
-        tud_task();
+        tud_task(); ETH_Process();
     }
     HAL_Delay(50); /* let the host's reader thread settle after opening the port */
 #endif
@@ -1516,7 +1523,7 @@ void vl53l9_app() {
 
         /* Keep USB serviced every iteration, including frames that skip the
          * send call below (first frame, or a stalled host). */
-        tud_task();
+        tud_task(); ETH_Process();
 
         /* Trigger the next frame, wait for data-ready, and start the raw readout.
          *
@@ -1732,7 +1739,7 @@ void vl53l9_app() {
     while (1) {
 
         /* Keep USB serviced every iteration, even when waits below return fast. */
-        tud_task();
+        tud_task(); ETH_Process();
 
         /* Wait for data-ready. Same bounded-retry disambiguation as the dual-stream
          * loop (Task 8): a timeout means either the trigger was lost (re-trigger, with

@@ -58,3 +58,40 @@ def render_sparkline(values: np.ndarray, width: int = 220, height: int = 60, *,
     for i in range(v.size - 1):
         _line(img, xs[i], ys[i], xs[i + 1], ys[i + 1], _ACCENT)
     return img
+
+
+def render_sensors_overlay(heading_deg, pressure_hist, temp_hist, *,
+                           heading_valid: bool = True) -> np.ndarray:
+    """Composite floating "sensors overlay" panel (the Overlays -> Sensors HUD):
+    a compass dial + tilt-compensated heading readout, then pressure and
+    temperature sparklines, stacked in one dark panel image -- the sensor analog
+    of `metrics_hud.render_hud`, fed to a single floating ImageWidget. Pure
+    (numpy + PIL text) -- unit-tested."""
+    from PIL import Image, ImageDraw
+    from . import instrument
+    W = 208
+    csz = 104
+    press = render_sparkline(np.asarray(pressure_hist), width=W - 16, height=44)
+    temp = render_sparkline(np.asarray(temp_hist), width=W - 16, height=44)
+    y_hdr = 4
+    y_compass = y_hdr + 16
+    y_press_lbl = y_compass + csz + 6
+    y_press = y_press_lbl + 14
+    y_temp_lbl = y_press + 44 + 6
+    y_temp = y_temp_lbl + 14
+    H = y_temp + 44 + 6
+    img = _blank(H, W, _BG)
+    compass = render_compass(heading_deg if heading_valid else 0.0, size=csz)
+    cx = (W - csz) // 2
+    img[y_compass:y_compass + csz, cx:cx + csz] = compass
+    img[y_press:y_press + 44, 8:8 + press.shape[1]] = press
+    img[y_temp:y_temp + 44, 8:8 + temp.shape[1]] = temp
+    pim = Image.fromarray(img)
+    d = ImageDraw.Draw(pim)
+    font = instrument.load_font(11, bold=True)
+    small = instrument.load_font(10)
+    hdg = f"{heading_deg:.0f}°" if heading_valid else "--"
+    d.text((8, y_hdr), f"HEADING  {hdg}", font=font, fill=_FG)
+    d.text((8, y_press_lbl), "PRESSURE (Pa)", font=small, fill=_FG)
+    d.text((8, y_temp_lbl), "TEMP (°C)", font=small, fill=_FG)
+    return np.asarray(pim)

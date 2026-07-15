@@ -37,6 +37,10 @@ class _FakeMouseSelf:
         self._drag = None
         self._showcase_ease = showcase_ease
         self.follow_camera_enabled = False   # camera-follow mode is off in these tests
+        # _on_mouse now short-circuits in Real-Time first-person; keep these
+        # SLAM/orbit so these ease tests exercise the free-orbit path as before.
+        self.mode = panel_mod.VIEW_SLAM
+        self.camera_mode = panel_mod.CAM_ORBIT
 
 
 def test_button_down_cancels_in_flight_showcase_ease():

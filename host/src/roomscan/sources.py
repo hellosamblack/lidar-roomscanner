@@ -1,8 +1,13 @@
 """Byte sources and the frame pump. All I/O lives here — decoder/deproject stay pure."""
 from __future__ import annotations
 
+import socket
+import struct
 import threading
+import time
 from typing import Iterator, Optional
+
+from zeroconf import ServiceBrowser, Zeroconf
 
 from .decoder import StreamDecoder
 from .protocol import Frame
@@ -66,6 +71,90 @@ class SerialSource:
 
     def close(self) -> None:
         self._ser.close()
+
+
+class UdpSource:
+    def __init__(self, port: int = 5000, timeout: float = 0.05):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.settimeout(timeout)
+        self.sock.bind(("", port))
+        
+        self.target_ip = None
+        self.target_port = 5000
+        
+        self._reassembly_buffer = bytearray()
+        self._current_seq = None
+        self._expected_frag = 0
+        self._total_frags = 0
+        
+        # Try to resolve roomscanner.local
+        self._resolve_target()
+
+    def _resolve_target(self):
+        try:
+            target = socket.gethostbyname("roomscanner.local")
+            self.target_ip = target
+        except socket.gaierror:
+            self.target_ip = "172.31.253.1"
+
+    def read(self) -> bytes:
+        try:
+            data, addr = self.sock.recvfrom(2048)
+            self.target_ip = addr[0]
+            
+            if len(data) < 6:
+                return b""
+            
+            seq_num, frag_idx, total_frags = struct.unpack("<IBB", data[:6])
+            payload = data[6:]
+            
+            if seq_num != self._current_seq:
+                self._current_seq = seq_num
+                self._reassembly_buffer = bytearray()
+                self._expected_frag = 0
+                self._total_frags = total_frags
+                
+            if frag_idx == self._expected_frag:
+                self._reassembly_buffer.extend(payload)
+                self._expected_frag += 1
+                if self._expected_frag == self._total_frags:
+                    res = bytes(self._reassembly_buffer)
+                    self._reassembly_buffer = bytearray()
+                    return res
+            return b""
+        except socket.timeout:
+            return b""
+        except BlockingIOError:
+            return b""
+
+    def write(self, data: bytes) -> None:
+        if self.target_ip:
+            try:
+                self.sock.sendto(data, (self.target_ip, self.target_port))
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        self.sock.close()
+
+
+def get_best_source(port: Optional[str] = None, baud: int = 921600, timeout: float = 0.05):
+    # Try UDP first
+    udp = UdpSource(timeout=timeout)
+    
+    # See if we receive any data within a short window
+    old_timeout = udp.sock.gettimeout()
+    udp.sock.settimeout(0.5)
+    t0 = time.time()
+    while time.time() - t0 < 0.5:
+        data = udp.read()
+        if data:
+            udp.sock.settimeout(old_timeout)
+            return udp
+            
+    # No data received, fallback to Serial
+    udp.close()
+    return SerialSource(port, baud, timeout)
 
 
 class Recorder:

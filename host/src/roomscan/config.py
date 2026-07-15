@@ -56,7 +56,7 @@ class ViewerConfig:
     sensors_panel: bool = True         # show the Sensors panel group
     gizmo_scale: float = 0.15          # gizmo axis length (metres)
     metrics_overlay: bool = True       # show the on-scene metrics HUD (rates/fps/resources)
-    mode: str = "slam"                 # UI redesign: "real_time" | "slam"
+    mode: str = "real_time"            # UI redesign: "real_time" | "slam" (owner: default to real-time)
     camera: str = "first_person"       # UI redesign: "first_person" | "orbit"
     ir_overlay: bool = False           # first-person IR billboard overlay on/off
     ir_opacity: float = 0.5            # IR overlay opacity 0..1

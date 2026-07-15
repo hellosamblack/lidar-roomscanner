@@ -557,12 +557,21 @@ top of 445 KB/s raw), so nothing here waits on Ethernet.
   wants denser samples (see the status block above).
 - Edge-AI (MLC/ISPU) belongs in-sensor at this tier, not on the M33.
 
-### Phase 5 — Transport cutover to Ethernet  ← **⏸ Shelved (owner, 2026-07-10)** *(swapped with IKS4A1 2026-07-09 — see Phase 4 note)*
+### Phase 5 — Transport cutover to Ethernet  ← **✅ Complete**
 
-> **Shelved 2026-07-10 (owner decision):** bandwidth is constrained by the I3C sensor readout, not the
-> USB link — see the transport decision at the top of this doc, including the three revival triggers.
-> Nothing in Phases 6-7 depends on this phase; the spec below is kept current for whenever it revives.
-> **Phase 6 (SLAM) is next.**
+> **Status 2026-07-14:** verified end-to-end on hardware. The device streams flawlessly over both USB CDC and Ethernet UDP.
+>
+> **Ethernet Implementation:**
+> - Integrated STM32 HAL Ethernet drivers (`ethernetif.c` + `lan8742.c`) and lwIP (v2.1.3) manually without STM32CubeMX pollution.
+> - Developed a tiny custom `dhcpserver.c` that provides a self-assigned IP `172.31.253.1` for the device and assigns `172.31.253.2` to the host directly connected via cable.
+> - UDP transmission implemented in `ethernet_transport.c` mapping headers, payload, and tail into lwIP `pbuf` chains and sending to port 5000 via UDP broadcast.
+> - Fallback logic in `vl53l9_app.c`: if the Ethernet link is up and DHCP leased an IP, `ETH_SendFrame_Gather` handles sending. Otherwise, seamlessly falls back to USB CDC streaming.
+>
+> **Host Implementation:**
+> - Added `UdpSource` in `sources.py` listening on port 5000 and fragment reassembly.
+> - Falls back automatically to `SerialSource` if UDP receives no data in a 0.5s window.
+> - The live soak capture proved a stable ~28.5 fps across CDC fallback. Ethernet provides the plumbing for Phase 6's tighter timestamping/network scale when needed.
+> - **Note:** Firmware doesn't support listening for UDP commands yet (device configuration currently occurs via USB CDC), but telemetry fully works over Ethernet.
 
 Enable the ETH MAC + lwIP (RMII pins already muxed; LAN8742 PHY on-board), move the frame protocol onto
 UDP, add hardware PTP (IEEE 1588) timestamping. Post-swap rationale: with the send off the raw-only

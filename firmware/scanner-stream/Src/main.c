@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include "stm32h5xx_nucleo.h"
 #include "tusb.h"
+#include "ethernet_transport.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -146,6 +147,8 @@ int main(void)
   {
     Error_Handler();
   }
+  
+  ETH_Init();
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */

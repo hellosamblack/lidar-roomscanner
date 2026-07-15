@@ -24,6 +24,9 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-010 | by-design | host/panel  | A Recorder capture started well into a session lacks CALIB and can't be post-processed |
 | BUG-011 | fixed   | host/panel    | Floating HUD toggles unclickable — control `ImageWidget`s swallow clicks before the SceneWidget's `set_on_mouse` |
 | BUG-012 | fixed   | host/panel    | Per-frame `srgbColor` Filament console spam from `defaultUnlitTransparency` material |
+| BUG-013 | fixed   | host/panel    | SLAM-mode Record never stops/processes — action cluster armed the classic SLAM view, not the Showcase pipeline |
+| BUG-014 | fixed   | host/panel    | First-person IR overlay renders edge-on (white/black) or not at all — first-person camera clobbered + texture not bound as albedo |
+| BUG-015 | fixed   | host/panel    | Overlays → Sensors toggle showed nothing — sensor widgets lived only in the settings dialog, no floating overlay |
 
 ---
 
@@ -245,3 +248,121 @@ Verified end-to-end: a UCRT-level write (the same runtime Filament links) of the
 while a sentinel survives (`host/tests/test_logfilter.py`). Opt out with `ROOMSCAN_KEEP_FILAMENT_LOGS=1`.
 
 **Fix:** Added checks in `_on_layout` to return early if the window width or height is `<= 0`, or if the resulting `scene_w` is `<= 0`. Constrained `panel_w` to be at least `0` so it doesn't become negative. Additionally, guarded camera operations in `_reset_camera` and `_apply_camera` to skip execution if `scene_widget.frame` width or height are `<= 0` (preventing setup of degenerate projection matrices).
+
+## BUG-013 — SLAM-mode Record never stops/processes (action cluster orphaned)
+
+- **Status:** **fixed** 2026-07-14 · **Reported:** 2026-07-14 (owner, on-rig) · **Area:** host/panel
+- **Where:** `host/src/roomscan/panel.py` `_set_mode` + `__init__` mode application
+
+The panel keeps two mutually-exclusive machines: `slam_enabled` (the classic always-on live SLAM
+view, `_render_slam_frame`) and `showcase_enabled` (the record→process→reveal state machine over
+`ShowcasePhase`, `_render_showcase_frame`). The two-mode redesign spec is explicit that SLAM mode IS
+the record→process→reveal flow: *"SLAM: map building = the former SLAM view AND Showcase flow, merged.
+Record → process → reveal is the Showcase pipeline under the hood."* But `_set_mode(VIEW_SLAM)` (and
+the `__init__` default-mode application) called `_on_slam_toggle(True)` — arming the classic view, not
+the showcase machine. So `showcase_phase` stayed `None`, `_hud_action_labels` was pinned at the IDLE
+`[REC, LOAD, CLR]` set forever, and `_on_record` (which only bridges into
+`_enter_showcase_recording`/`_enter_showcase_processing` `if self.showcase_enabled`) just wrote a raw
+`.bin` with no phase transition. Clicking REC therefore never became STOP and never kicked off
+processing — the action cluster was orphaned.
+
+**Fix:** `_set_mode(VIEW_SLAM)` and the `__init__` mode application now call `_on_showcase_toggle(True)`
+so SLAM mode drives the showcase machine (its RECORDING phase runs the same live SLAM preview = the
+"former SLAM view"). Leaving SLAM tears down showcase (and the now-unused classic view only if it was
+somehow on). Regression: `test_panel_modes.py::test_set_mode_slam_arms_showcase_not_classic_slam` /
+`test_set_mode_real_time_disables_showcase`. On-screen record→process→reveal flow still wants an owner
+eyeball (Filament can't render headless).
+
+## BUG-014 — First-person IR overlay renders edge-on (white/black) or not at all
+
+- **Status:** **fixed** 2026-07-14 · **Reported:** 2026-07-14 (owner, on-rig) · **Area:** host/panel
+- **Where:** `host/src/roomscan/panel.py` `_apply_real_time_first_person`, `_apply_camera_mode`,
+  `_update_ir_overlay`
+
+Two independent faults on the first-person IR billboard (`ir_overlay.camera_locked_quad` +
+`_update_ir_overlay`), which is a camera-locked quad built to face a +Z first-person camera:
+
+1. **Camera clobber (the "edge-on, white one side / black the other" in Real-Time).** Entering
+   Real-Time first-person, `_apply_real_time_first_person` set the fixed `look_at` camera but left
+   `_camera_set = False`. The very next cloud frame's `_show_geometries` sees `not _camera_set` and
+   calls `_reset_camera` → `setup_camera(bounds)`, replacing the first-person view with a bounds-framed
+   orbit camera. The +Z-facing billboard is then seen from the side (edge-on); its two triangles show
+   front (textured/white) vs back (unlit/black). **Fix:** `_apply_real_time_first_person` now sets
+   `_camera_set = True` to pin the view; `_apply_camera_mode` resets it to `False` when Real-Time
+   switches to ORBIT so the cloud reframes. (SLAM first-person was never clobbered — it rides
+   `_apply_follow_camera` every frame — but it *was* dead because of BUG-013, so IR "didn't show in
+   SLAM" until that fix routed SLAM through the showcase RECORDING path that updates the billboard.)
+2. **Texture not bound.** The mesh carried `.textures` + `triangle_uvs`, but the `MaterialRecord` had
+   no `albedo_img`, so the Filament unlit shader fell back to the plain white `base_color`. **Fix:**
+   `_update_ir_overlay` now sets `self.ir_overlay_material.albedo_img` to the IR image (the reliable
+   Filament albedo slot).
+
+Regression: `test_panel_modes.py::test_real_time_first_person_pins_camera_set` /
+`test_real_time_first_person_noop_without_viewport`; quad geometry stays covered by
+`test_ir_overlay.py`. On-screen render (texture + orientation) still wants an owner eyeball.
+
+**Follow-up (2026-07-14, owner on-rig round 2):** the `_camera_set` pin above then made the IR overlay
+render *nothing at all* — pinning stopped `_reset_camera` from ever running, so the camera **projection
+was never set** and the near cloud/billboard fell outside a stale/degenerate frustum. Together with the
+owner's other first-person feedback this became a first-person overhaul (confirmed design via a two-part
+question — first-person = look out through the sensor at the cloud fixed in front + IR overlay; cloud
+sensor-fixed in first-person, gravity-aligned in orbit):
+- **Projection:** `_apply_real_time_first_person` now sets an explicit perspective projection
+  (`camera.set_projection(60, aspect, 0.05, 50, Vertical)`) before `look_at`, and is also re-applied from
+  `_on_layout` (so a session opening straight into Real-Time first-person isn't left projection-less) and
+  self-heals in the render path if `_camera_set` is cleared.
+- **True first-person (not a camera model + orbiting image):** in Real-Time first-person the cloud is
+  kept in the raw **sensor frame** (no IMU rotation, so it stays dead ahead as you aim), the IMU "camera
+  model" gizmo is removed (`_remove_camera_gizmo` — it lingered from orbit), and mouse nav is swallowed so
+  a stray drag can't arcball out of the fixed view. Orbit keeps the gravity-aligned cloud + gizmo.
+- **Camera never decimated (#2):** the follow camera's flat `_FOLLOW_SMOOTH=0.12` EMA lagged real motion
+  ~0.3 s ("feels like the system didn't notice you moved"). `_follow_alpha` makes the weight
+  velocity-adaptive — sub-`_FOLLOW_SNAP_M` (3 cm/frame) jitter still smooths, genuine motion tracks 1:1.
+- **Orbit auto-zoom (#4):** entering ORBIT in either mode clears `_camera_set`, so `_reset_camera`
+  (Real-Time) / `_slam_camera_frame` (SLAM) refits the view to all content on the next frame.
+
+Regression: `test_panel_modes.py` (`test_real_time_first_person_aims_view_without_pinning`,
+`test_follow_alpha_*`, `test_apply_camera_mode_orbit_clears_camera_set`, `test_remove_camera_gizmo_*`,
+`test_on_mouse_swallows_nav_in_real_time_first_person`). All camera/render behavior still needs an owner
+on-rig eyeball (Filament can't render headless).
+
+**Follow-up (2026-07-14, owner on-rig round 3):** "first-person doesn't work right away — I have to go to
+orbit and back." Root cause: the projection-pin approach above (`_camera_set=True` in
+`_apply_real_time_first_person`) *blocked* `_reset_camera`, so at startup/mode-switch the projection was
+never established and first-person rendered wrong until an orbit round-trip ran `_reset_camera` to prime
+it. **Fix:** stop pinning and stop setting the projection in `_apply_real_time_first_person` — it now only
+aims the `look_at` view, and is re-applied **every Real-Time first-person frame** (after `_show_geometries`
+lets `_reset_camera` own the projection from the live cloud bounds), plus from `_on_layout`. This mirrors
+SLAM exactly (`_slam_camera_frame`'s `setup_camera` once + `_apply_follow_camera`'s per-frame `look_at`),
+so first-person is correct from the first frame with no orbit round-trip. (SLAM first-person already worked
+this way — it activates on the RECORDING follow.)
+
+**Follow-up (2026-07-14, owner on-rig round 4):** with first-person now rendering the cloud correctly, the
+IR billboard still didn't appear with the opacity slider at full. Cause: `_set_ir_opacity` only set the
+opacity — the draw gate is `fp and ir_overlay_enabled`, and nothing flipped `ir_overlay_enabled`, so the
+slider did nothing until the (non-obvious) "IR" label was also clicked. **Fix:** the slider now doubles as
+the on/off control (`_set_ir_opacity` enables the overlay for opacity > 0.02, hides it at ~0; toggling on
+at 0 opacity bumps it to 1.0). Verified the `defaultUnlitTransparency` shader *does* carry an `albedo`
+texture sampler, so the `albedo_img` binding renders the IR image (not the round-1 white base_color).
+Added a one-time `_update_ir_overlay` log when enabled but the stream has no reflectance (depth-only).
+
+## BUG-015 — Overlays → Sensors toggle showed nothing (no floating overlay)
+
+- **Status:** **fixed** 2026-07-14 · **Reported:** 2026-07-14 (owner, on-rig) · **Area:** host/panel
+- **Where:** `host/src/roomscan/panel.py` (`_build_overlay`, `_on_layout`, `_update_sensors`,
+  `_toggle_sensors_menu`), `host/src/roomscan/sensors_widgets.py` (`render_sensors_overlay`)
+
+The redesign's **Overlays → Sensors** menu item toggled `sensors_panel` and logged, but nothing appeared:
+the compass + pressure/temp widgets were only ever built into the **settings dialog**'s "Sensors" group
+(not a menu target), so the menu had no floating overlay to show — unlike **Overlays → Metrics**, which
+drives the top-left `metrics_hud` ImageWidget. Toggling Sensors therefore read as an empty overlay.
+
+**Fix:** added a floating **Sensors overlay** mirroring the metrics HUD — a new pure
+`sensors_widgets.render_sensors_overlay(heading, pressure_hist, temp_hist)` composites the compass dial +
+heading readout and the pressure/temp sparklines into one panel image, drawn into a top-right
+`gui.ImageWidget` (`_build_overlay`/`_on_layout`), refreshed on the ≤4 Hz UI tick (`_update_sensors`), and
+shown/hidden by `_toggle_sensors_menu`. The settings-dialog Sensors group is retained for the Reset
+Baseline control (its display-widget updates are now `hasattr`-guarded, closing a latent crash when Sensors
+was toggled on after being built-disabled). Also (owner request) the app now **defaults to Real-Time
+first-person** (`ViewerConfig.mode` "slam" → "real_time"). Tests: `render_sensors_overlay` shape/no-data/
+heading-change; config default. On-screen placement still wants an owner eyeball.
