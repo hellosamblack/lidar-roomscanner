@@ -2,9 +2,10 @@ cmake_minimum_required(VERSION 3.22)
 project(roomscan_transform C)
 
 # 53L9A1 reference package (read-only) providing the vl53l9-transform-c /
-# media-object sources. Compiled in place; never copied or edited.
-# host/transform -> host -> roomscanner -> lidar/, so ../../../53L9A1
-set(PKG_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../53L9A1)
+# media-object sources. Compiled in place; never edited.
+# Vendored in-repo at firmware/vendor/53L9A1.
+# host/transform -> host -> roomscanner -> firmware/vendor/53L9A1
+set(PKG_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../firmware/vendor/53L9A1)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)

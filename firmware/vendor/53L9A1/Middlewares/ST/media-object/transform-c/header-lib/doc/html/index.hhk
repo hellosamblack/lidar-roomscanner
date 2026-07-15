@@ -1,0 +1,121 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML><HEAD></HEAD><BODY>
+<OBJECT type="text/site properties">
+<param name="FrameName" value="right">
+</OBJECT>
+<UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="struct__transform.html"><param name="Name" value="_transform"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="struct__transform.html"><param name="Name" value="_transform"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="struct__transform.html#a44bbab8ff52bcf6eef5f7494e29ce606"><param name="Name" value="do_process_stream)(const struct _transform *self, const stream_buffers_t *stream_buffers)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="struct__transform.html"><param name="Name" value="_transform"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="struct__transform.html#afc034bf46eab44f2ec2dff502ba57f50"><param name="Name" value="media"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="struct__transform.html"><param name="Name" value="_transform"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="struct__transform.html#a14ff0c8ab2c7466c9cda8090b71d4859"><param name="Name" value="query_compatible_stream_caps)(const struct _transform *self, const char *name, const char *dependent_stream_name, const capabilities_t *dependent_stream_caps, capabilities_t **compatible_caps)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="struct__transform.html"><param name="Name" value="_transform"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="struct__transform.html#a30b5e38ed012c9eb0751397d9f764bc6"><param name="Name" value="query_stream_dependencies)(const struct _transform *self, const char *name, const strings_t **dependencies)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="struct__transform.html#a44bbab8ff52bcf6eef5f7494e29ce606"><param name="Name" value="do_process_stream)(const struct _transform *self, const stream_buffers_t *stream_buffers)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="struct__transform.html#afc034bf46eab44f2ec2dff502ba57f50"><param name="Name" value="media"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="struct__transform.html#a14ff0c8ab2c7466c9cda8090b71d4859"><param name="Name" value="query_compatible_stream_caps)(const struct _transform *self, const char *name, const char *dependent_stream_name, const capabilities_t *dependent_stream_caps, capabilities_t **compatible_caps)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="struct__transform.html#a30b5e38ed012c9eb0751397d9f764bc6"><param name="Name" value="query_stream_dependencies)(const struct _transform *self, const char *name, const strings_t **dependencies)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="index.html"><param name="Name" value="Transform C API Documentation"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#aa42630ff5fc03af8e33749207e74ac44"><param name="Name" value="transform_about(const transform_t *self, const properties_t **properties)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a0b201c5e4728e997f0284ce74a13592d"><param name="Name" value="transform_finalize(transform_t *self)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a3c434b05c98e48c1cd241f61af982c83"><param name="Name" value="transform_get_control(const transform_t *self, const char *const name, value_t *value)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a47814f5236c552a9cae00ce6f0b7bc30"><param name="Name" value="transform_get_controls(const transform_t *self, const controls_t **controls)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a52ed42c122a179f01438db852e2c8903"><param name="Name" value="transform_get_state(const transform_t *self, media_state_t *state)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a4cd89fbb4f2b0e43768258f81f6788f4"><param name="Name" value="transform_get_stream_capabilities(const transform_t *self, const char *const name, const capabilities_t **caps)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a0a3fc13127216b7d63ea2836f506c7b3"><param name="Name" value="transform_get_streams(const transform_t *self, const streams_t **streams)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a1a1f9e22f449eddc8a257f98584d9449"><param name="Name" value="transform_get_version(const transform_t *self, uint32_t *major, uint32_t *minor, uint32_t *patch)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#ac46dd2a4054da47a42e0ca71ec480991"><param name="Name" value="transform_initialize(transform_t *self)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a0ff6b46b6f2a1830e9c8609b2ee5fd23"><param name="Name" value="transform_inspect(const transform_t *self, int(*print_func)(const char *,...))"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#ac6996d4d765179a94a2754c7dfe8cb7a"><param name="Name" value="transform_prepare(transform_t *self)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a419f232e8db3eef1da1a8c4b1efb0500"><param name="Name" value="transform_process_stream(const transform_t *self, const stream_buffers_t *stream_buffers)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a6914ed4854ee90a1e077b2e58e2f35f6"><param name="Name" value="transform_query_compatible_stream_caps(const transform_t *self, const char *name, const char *dependent_stream_name, const capabilities_t *dependent_stream_caps, capabilities_t **compatible_caps)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a1bbbc63b6396c954e9a6a8bf00b0be0f"><param name="Name" value="transform_query_stream_dependencies(const transform_t *self, const char *name, const strings_t **dependencies)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#aac35a4093ef21d30c9408f8bb93bf6f5"><param name="Name" value="transform_release(transform_t *self)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a59437a479f1215f91fa2e017e3c27f2e"><param name="Name" value="transform_set_control(const transform_t *self, const char *name, const value_t value)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#ad4cb28b4e891496f4b76911029f2816e"><param name="Name" value="transform_set_stream_capabilities(const transform_t *self, const char *const name, const capabilities_t *caps)"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html"><param name="Name" value="transform.h"></OBJECT>
+  <UL>
+    <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#ad7c0efb7a970ea50a2917012ecefbe04"><param name="Name" value="transform_t"></OBJECT>
+  </UL>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#aa42630ff5fc03af8e33749207e74ac44"><param name="Name" value="transform_about(const transform_t *self, const properties_t **properties)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a0b201c5e4728e997f0284ce74a13592d"><param name="Name" value="transform_finalize(transform_t *self)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a3c434b05c98e48c1cd241f61af982c83"><param name="Name" value="transform_get_control(const transform_t *self, const char *const name, value_t *value)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a47814f5236c552a9cae00ce6f0b7bc30"><param name="Name" value="transform_get_controls(const transform_t *self, const controls_t **controls)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a52ed42c122a179f01438db852e2c8903"><param name="Name" value="transform_get_state(const transform_t *self, media_state_t *state)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a4cd89fbb4f2b0e43768258f81f6788f4"><param name="Name" value="transform_get_stream_capabilities(const transform_t *self, const char *const name, const capabilities_t **caps)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a0a3fc13127216b7d63ea2836f506c7b3"><param name="Name" value="transform_get_streams(const transform_t *self, const streams_t **streams)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a1a1f9e22f449eddc8a257f98584d9449"><param name="Name" value="transform_get_version(const transform_t *self, uint32_t *major, uint32_t *minor, uint32_t *patch)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#ac46dd2a4054da47a42e0ca71ec480991"><param name="Name" value="transform_initialize(transform_t *self)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a0ff6b46b6f2a1830e9c8609b2ee5fd23"><param name="Name" value="transform_inspect(const transform_t *self, int(*print_func)(const char *,...))"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#ac6996d4d765179a94a2754c7dfe8cb7a"><param name="Name" value="transform_prepare(transform_t *self)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a419f232e8db3eef1da1a8c4b1efb0500"><param name="Name" value="transform_process_stream(const transform_t *self, const stream_buffers_t *stream_buffers)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a6914ed4854ee90a1e077b2e58e2f35f6"><param name="Name" value="transform_query_compatible_stream_caps(const transform_t *self, const char *name, const char *dependent_stream_name, const capabilities_t *dependent_stream_caps, capabilities_t **compatible_caps)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a1bbbc63b6396c954e9a6a8bf00b0be0f"><param name="Name" value="transform_query_stream_dependencies(const transform_t *self, const char *name, const strings_t **dependencies)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#aac35a4093ef21d30c9408f8bb93bf6f5"><param name="Name" value="transform_release(transform_t *self)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#a59437a479f1215f91fa2e017e3c27f2e"><param name="Name" value="transform_set_control(const transform_t *self, const char *name, const value_t value)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#ad4cb28b4e891496f4b76911029f2816e"><param name="Name" value="transform_set_stream_capabilities(const transform_t *self, const char *const name, const capabilities_t *caps)"></OBJECT>
+  <LI><OBJECT type="text/sitemap"><param name="Local" value="transform_8h.html#ad7c0efb7a970ea50a2917012ecefbe04"><param name="Name" value="transform_t"></OBJECT>
+</UL>
+</BODY>
+</HTML>

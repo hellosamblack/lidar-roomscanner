@@ -4,9 +4,9 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
 
 ## Repository rules
 
-- `../53L9A1/` is **read-only reference**. Never edit it, even to fix known bugs (they're catalogued in
-  `ROADMAP.md` → "Reference-firmware bugs"). Our firmware fork lives in `firmware/` and references the
-  package's Drivers/Middlewares/Utilities in place via CMake paths.
+- `firmware/vendor/53L9A1/` is **read-only reference** (vendored ST package). Never edit it, even to fix known bugs (they're catalogued in
+  `ROADMAP.md` → "Reference-firmware bugs"). Our firmware fork lives in `firmware/scanner-stream/` and references the
+  package's Drivers/Middlewares/Utilities in place via CMake paths (`PKG_ROOT`).
 - Layout: `firmware/` (STM32 apps), `host/` (PC Python package `roomscan`), `docs/` (specs, plans,
   captures), `references/` (imported research, read-only), `.claude/skills/` (project skills).
 - Commit style: conventional-commit-ish prefixes (`feat:`, `fix:`, `docs:`, `test:`, `chore:`), small and

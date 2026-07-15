@@ -13,7 +13,7 @@ flash-and-observe.
 - Our fork: `firmware/scanner-stream/` — the app that actually ships (raw-only streaming over native
   USB CDC, command channel, EVENT emission, bounded recovery).
 - Reference (read-only, flash-ok, edit-never):
-  `../53L9A1/Projects/NUCLEO-H563ZI/Applications/53L9A1/53L9A1_PostprocessSingle/`
+  `firmware/vendor/53L9A1/Projects/NUCLEO-H563ZI/Applications/53L9A1/53L9A1_PostprocessSingle/`
 
 ## Build
 

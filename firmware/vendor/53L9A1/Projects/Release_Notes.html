@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Release Notes for Projects of X-CUBE-53L9A1 Package</title>
+  <style>
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="stylesheet" href="./_htmresc/mini-st_2020.css" />
+  <link rel="icon" type="image/x-icon" href="../_htmresc/favicon.png" />
+</head>
+<body>
+<div class="row">
+<div class="col-sm-12 col-lg-4">
+<center>
+<h1 id="release-notes-for-projects-of-x-cube-53l9a1-package">Release
+Notes for <mark>Projects of X-CUBE-53L9A1</mark> Package</h1>
+<p>Copyright © 2026 STMicroelectronics<br />
+</p>
+<a href="https://www.st.com" class="logo"><img
+src="../_htmresc/st_logo_2020.png" alt="ST logo" /></a>
+</center>
+<h1 id="purpose">Purpose</h1>
+<p>The X-CUBE-53L9A1 projects are a set of sample applications that aim
+to explain and provide use cases showcasing the features of the VL53L9CX
+sensor.</p>
+<p>They are delivered with preconfigured projects for the main supported
+toolchains. Projects include STM32CubeMX project file (.ioc) for the
+graphical visualization of the STM32 microcontroller pins, peripherals
+configuration.</p>
+<p>For further information regarding the supported products please refer
+to:</p>
+<ul>
+<li><a
+href="https://www.st.com/en/imaging-and-photonics-solutions/vl53l9cx.html">VL53L9CX
+on st.com</a></li>
+</ul>
+</div>
+<section id="update-history" class="col-sm-12 col-lg-8">
+<h1>Update history</h1>
+<div class="collapse">
+<input type="checkbox" id="collapse-section1" checked aria-hidden="true">
+<label for="collapse-section1" aria-hidden="true"><strong>V1.0.0 / April
+30th 2026</strong></label>
+<div>
+<h2 id="main-changes">Main changes</h2>
+<h3 id="first-release">First release</h3>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Headline</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">Add 53L9A1_PostprocessSingle application
+for NUCLEO-H563ZI</td>
+</tr>
+</tbody>
+</table>
+<h2 id="contents">Contents</h2>
+<p>Projects</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Board</th>
+<th style="text-align: left;">Name</th>
+<th style="text-align: left;">readme</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">NUCLEO-H563ZI</td>
+<td style="text-align: left;"><a
+href="./NUCLEO-H563ZI/Applications/53L9A1/53L9A1_PostprocessSingle">53L9A1_PostprocessSingle</a></td>
+<td style="text-align: left;"><a
+href="./NUCLEO-H563ZI/Applications/53L9A1/53L9A1_PostprocessSingle/README.md">README.md</a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="known-limitations">Known limitations</h2>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Headline</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">The 53L9A1_PostprocessSingle application
+doesn’t behave as expected with ARM Keil when CONF_PRINT_FRAME flag is
+enabled with Ofast compiler flag.</td>
+</tr>
+<tr>
+<td style="text-align: left;">A compilation warning is triggered when
+building projects with STM32Cube when -Ofast optimization flag set.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="development-toolchains-and-compilers">Development toolchains and
+compilers</h2>
+<ul>
+<li>IAR System Workbench V9.60.3</li>
+<li>ARM Keil V5.38</li>
+<li>STM32CubeIDE v2.0.0</li>
+</ul>
+<h2 id="supported-devices-and-boards">Supported devices and boards</h2>
+<ul>
+<li>NUCLEO-H563ZI rev. MB1404C</li>
+<li>X-NUCLEO-53L9A1 / VL53L9CX</li>
+</ul>
+<h2 id="backward-compatibility">Backward compatibility</h2>
+<p>N/A</p>
+<h2 id="dependencies">Dependencies</h2>
+<p>This projects release is compatible with:</p>
+<ul>
+<li>STM32CubeHAL H5 V1.5.0</li>
+</ul>
+</div>
+</div>
+</section>
+</div>
+<footer class="sticky">
+<div class="columns">
+<div class="column" style="width:95%;">
+<p>For complete documentation on <strong>STM32Cube Expansion
+Packages</strong> , visit: <a
+href="https://www.st.com/en/embedded-software/stm32cube-expansion-packages.html">STM32Cube
+Expansion Packages</a></p>
+</div><div class="column" style="width:5%;">
+<p><abbr title="Based on template cx626901 version 2.1">Info</abbr></p>
+</div>
+</div>
+</footer>
+</body>
+</html>

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `roomscanner/` is the **active development workspace** for a tethered handheld **3D room scanner**. The end goal: an STM32H563ZI board streams timestamped ToF (+ later IMU/env) frames to a PC that runs real-time SLAM (Open3D tensor ICP + TSDF), with an offline pass fusing 4K phone video into a ToF-seeded 3D Gaussian Splat.
 
-New work — the PC-side visualizer, the binary frame protocol, and any new firmware — happens **here**. The existing STM32 firmware lives in a separate **reference package** (`../53L9A1/`) that we treat as **read-only reference**, not something we edit in place.
+New work — the PC-side visualizer, the binary frame protocol, and any new firmware — happens **here**. The existing STM32 firmware lives in a **reference package**, vendored in-repo at `firmware/vendor/53L9A1/`, that we treat as **read-only reference**, not something we edit in place.
 
 ## Repository layout
 
@@ -21,18 +21,20 @@ F:\git\personal\lidar\
 │  │  ├─ engineering-practices.md            ← binding conventions (repo rules, protocol rules, firmware/host standards)
 │  │  ├─ protocol.md                         ← wire protocol spec (created by Phase 1 Task 1)
 │  │  └─ superpowers\plans\                  ← implementation plans (Phase 1 plan lives here)
-│  ├─ firmware\            ← our firmware forks (scanner-stream; created by Phase 1 Task 6)
+│  ├─ firmware\            ← our firmware forks (scanner-stream; created by Phase 1 Task 6) + vendored deps
+│  │  └─ vendor\
+│  │     ├─ tinyusb\  lwip\                   ← vendored USB CDC + TCP/IP stacks
+│  │     └─ 53L9A1\                           ← ST reference package (READ-ONLY reference), vendored in-repo
+│  │        ├─ Drivers\  Middlewares\ST\  Utilities\vl53l9-common\
+│  │        └─ Projects\NUCLEO-H563ZI\Applications\53L9A1\53L9A1_PostprocessSingle\  ← the firmware app
 │  ├─ host\                ← PC Python package `roomscan` (created by Phase 1 Task 1)
 │  └─ references\
 │     ├─ roadmapResearch.md                  ← architecture design + critical review
 │     └─ 3D Mapping Architecture Evaluation.md
-└─ 53L9A1\                 ← ST reference package (READ-ONLY reference)
-   ├─ Drivers\  Middlewares\ST\  Utilities\vl53l9-common\
-   └─ Projects\NUCLEO-H563ZI\Applications\53L9A1\53L9A1_PostprocessSingle\  ← the firmware app
 ```
 
 Follow `docs/engineering-practices.md` for all work here. Known bugs in the reference firmware (do not
-inherit them into forks) are catalogued in `ROADMAP.md` → "Reference-firmware bugs". Note the `53L9A1/`
+inherit them into forks) are catalogued in `ROADMAP.md` → "Reference-firmware bugs". Note the vendored `53L9A1/`
 package ships **no USB middleware** (`Middlewares/ST/` = media-object + vl53l9-transform-c only) — USB CDC
 work vendors TinyUSB (see the Phase 1 plan).
 
@@ -50,7 +52,7 @@ physical actions Claude cannot perform: moving IKS4A1/53L9A1 jumpers & solder br
 power-cycling (USB replug) to clear a warm-wedged I3C bus. Diagnose in firmware first; escalate to the
 human only for a genuinely physical cause, and name the exact physical action.
 
-Throughout this doc, **`<APP>`** = `../53L9A1/Projects/NUCLEO-H563ZI/Applications/53L9A1/53L9A1_PostprocessSingle/` (the reference firmware app dir). File references like `Src/vl53l9_app.c` are relative to `<APP>`.
+Throughout this doc, **`<APP>`** = `firmware/vendor/53L9A1/Projects/NUCLEO-H563ZI/Applications/53L9A1/53L9A1_PostprocessSingle/` (the reference firmware app dir). File references like `Src/vl53l9_app.c` are relative to `<APP>`.
 
 ## The reference firmware (`<APP>`)
 

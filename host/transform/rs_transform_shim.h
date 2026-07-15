@@ -9,8 +9,8 @@
  *
  * Not part of the read-only 53L9A1 reference package: this file (and its
  * .c counterpart) live in host/transform/ and only #include vendor headers
- * from ../../../53L9A1 (PKG_ROOT) -- the vendor tree itself is never
- * copied or edited.
+ * from firmware/vendor/53L9A1 (PKG_ROOT) -- the vendor tree itself is never
+ * edited.
  *
  * --- v2: multi-output ---------------------------------------------------
  *

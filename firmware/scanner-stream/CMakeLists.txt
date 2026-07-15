@@ -28,8 +28,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
-# 53L9A1 reference package (read-only) providing shared Utilities/Middlewares/BSP components
-set(PKG_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../53L9A1)
+# 53L9A1 reference package (read-only) providing shared Utilities/Middlewares/BSP components.
+# Vendored in-repo at firmware/vendor/53L9A1; scanner-stream -> firmware -> vendor/53L9A1.
+set(PKG_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/53L9A1)
 
 # Enable CMake support for ASM and C languages
 enable_language(C ASM)

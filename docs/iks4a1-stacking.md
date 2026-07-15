@@ -295,7 +295,7 @@ driver branch. The HUB1 native-I3C resolution above changed that — the fix DID
 only in our fork, never in the reference. Updated to match.)*
 
 The I3C dynamic-address assignment the reference ships (`platform_assign_dynamic_address()` in the
-read-only `../53L9A1/` platform layer) is single-device and hardcodes the ToF at `0x52`. Rather than
+read-only `firmware/vendor/53L9A1/` platform layer) is single-device and hardcodes the ToF at `0x52`. Rather than
 edit that reference (forbidden — see `CLAUDE.md`), the multi-device fix lives entirely in our fork:
 `rs_assign_dynamic_addresses()` in `firmware/scanner-stream/Src/vl53l9_app.c` (see "Resolved" above).
 The reference package is byte-for-byte untouched, and the single-ToF case still works — the new

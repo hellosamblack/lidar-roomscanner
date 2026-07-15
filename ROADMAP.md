@@ -6,8 +6,8 @@ video into a ToF-seeded 3D Gaussian Splat. Full design + critical review:
 [`references/roadmapResearch.md`](./references/roadmapResearch.md).
 
 Active development happens in this `roomscanner/` workspace. The existing STM32 firmware is **read-only
-reference** in the sibling `53L9A1/` package; firmware paths below (`Src/…`) are relative to
-`../53L9A1/Projects/NUCLEO-H563ZI/Applications/53L9A1/53L9A1_PostprocessSingle/` (aka `<APP>`).
+reference** in the vendored-in-repo `firmware/vendor/53L9A1/` package; firmware paths below (`Src/…`) are relative to
+`firmware/vendor/53L9A1/Projects/NUCLEO-H563ZI/Applications/53L9A1/53L9A1_PostprocessSingle/` (aka `<APP>`).
 Engineering conventions live in [`docs/engineering-practices.md`](./docs/engineering-practices.md).
 
 ## Overriding architecture decisions
