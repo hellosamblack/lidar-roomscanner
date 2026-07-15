@@ -7,6 +7,7 @@ import json
 import queue
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -66,7 +67,15 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             if state.fault:
-                print(f"\nreader stopped: {state.fault['error']!r}")
+                print(f"\nreader stopped: {state.fault['error']!r}", flush=True)
+                # Tell the page instead of leaving it silently blank: a text
+                # frame the frontend renders in the status line (binary frames
+                # are point data; this is the one text-typed message).
+                try:
+                    await websocket.send_text(json.dumps(
+                        {"type": "error", "message": str(state.fault["error"])}))
+                except Exception:
+                    pass
                 break
                 
             try:
@@ -118,6 +127,15 @@ def main(argv=None) -> int:
     args = resolve_args(argv)
     
     source = FileSource(args.replay) if args.replay else get_best_source(args.port, args.baud)
+    # Name the transport up front: the #1 "no data" question is whether we're
+    # on Ethernet, serial, or a dead serial fallback. Flushed so it shows even
+    # when stdout is block-buffered (not a tty).
+    if isinstance(source, UdpSource):
+        print(f"[source] Ethernet/UDP -> {source.target_ip}:{source.target_port}", flush=True)
+    elif isinstance(source, SerialSource):
+        print(f"[source] Serial CDC -> {getattr(source, 'port', '?')}", flush=True)
+    elif isinstance(source, FileSource):
+        print(f"[source] Replay -> {args.replay}", flush=True)
     client = CommandClient(source.write) if isinstance(source, (SerialSource, UdpSource)) else None
     cmd_state = CommandKeyState(client)
     decoder = StreamDecoder()
@@ -139,6 +157,18 @@ def main(argv=None) -> int:
     threading.Thread(target=_reader,
                      args=(source, decoder, slot, stats, args.record, fault, min_interval, stage, client),
                      daemon=True).start()
+
+    # Watchdog: the reader swallows exceptions into `fault` (so one bad frame
+    # can't kill the process); without this, a faulted reader just blanks the
+    # page with no clue why. Surface it loudly to stderr the moment it happens.
+    def _watch_fault():
+        while True:
+            if fault:
+                print(f"\n[FATAL] reader thread stopped: {fault['error']!r}",
+                      file=sys.stderr, flush=True)
+                return
+            time.sleep(0.5)
+    threading.Thread(target=_watch_fault, daemon=True).start()
                      
     port = 8000
     url = f"http://localhost:{port}/static/index.html"

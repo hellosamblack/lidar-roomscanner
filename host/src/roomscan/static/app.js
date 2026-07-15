@@ -79,6 +79,20 @@ function connect() {
     };
 
     ws.onmessage = (event) => {
+        // Text frames are status/error messages (JSON); binary frames are
+        // point data. Without this branch a server error string would be fed
+        // into Float32Array as garbage and silently render nothing.
+        if (typeof event.data === 'string') {
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'error') {
+                    connText.textContent = 'Error: ' + msg.message;
+                    connDot.classList.remove('connected');
+                    console.error('Server error:', msg.message);
+                }
+            } catch (e) { /* ignore non-JSON text */ }
+            return;
+        }
         // Payload is Float32Array: [x,y,z,x,y,z... r,g,b,r,g,b...]
         const data = new Float32Array(event.data);
         const numPoints = data.length / 6;

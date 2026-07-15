@@ -28,7 +28,17 @@ import numpy as np
 
 from .protocol import RAW_3DMD_SIZE_BIN2, CALIB_SIZE
 
-_DLL_NAME = "roomscan_transform.dll"
+import sys as _sys
+
+# Per-platform shared-library name produced by host/transform's CMake build.
+# Windows: MSVC multi-config -> roomscan_transform.dll under build/Release/.
+# Linux/macOS: single-config generators -> lib*.so / lib*.dylib under build/.
+if _sys.platform == "win32":
+    _DLL_NAME = "roomscan_transform.dll"
+elif _sys.platform == "darwin":
+    _DLL_NAME = "libroomscan_transform.dylib"
+else:
+    _DLL_NAME = "libroomscan_transform.so"
 
 _RAW_IN_WIDTH = RAW_3DMD_SIZE_BIN2
 _RAW_IN_HEIGHT = 1
@@ -49,12 +59,20 @@ _OUTPUT_MASKS = {
 # float32 planes (one value/zone); "zapc" is handled separately (4 values/zone).
 _FLOAT_PLANE_OUTPUTS = ("depth", "reflectance", "confidence", "ambient")
 
-_BUILD_HINT = (
-    "native transform DLL not found. Build it with:\n"
-    '  cmake -S host/transform -B host/transform/build -G "Visual Studio 18 2026" -A x64\n'
-    "  cmake --build host/transform/build --config Release\n"
-    "or point ROOMSCAN_TRANSFORM_DLL at an existing roomscan_transform.dll."
-)
+if _sys.platform == "win32":
+    _BUILD_HINT = (
+        "native transform library not found. Build it with:\n"
+        '  cmake -S host/transform -B host/transform/build -G "Visual Studio 18 2026" -A x64\n'
+        "  cmake --build host/transform/build --config Release\n"
+        "or point ROOMSCAN_TRANSFORM_DLL at an existing roomscan_transform.dll."
+    )
+else:
+    _BUILD_HINT = (
+        "native transform library not found. Build it with:\n"
+        "  cmake -S host/transform -B host/transform/build -DCMAKE_BUILD_TYPE=Release\n"
+        "  cmake --build host/transform/build\n"
+        f"or point ROOMSCAN_TRANSFORM_DLL at an existing {_DLL_NAME}."
+    )
 
 
 def _candidate_paths() -> list[Path]:
@@ -66,7 +84,11 @@ def _candidate_paths() -> list[Path]:
 
     package_dir = Path(__file__).resolve().parent
     host_dir = package_dir.parent.parent  # roomscan/ -> src/ -> host/
-    candidates.append(host_dir / "transform" / "build" / "Release" / _DLL_NAME)
+    build_dir = host_dir / "transform" / "build"
+    # MSVC multi-config emits into build/Release/; single-config generators
+    # (Ninja/Make on Linux/macOS) emit straight into build/. Search both.
+    candidates.append(build_dir / "Release" / _DLL_NAME)
+    candidates.append(build_dir / _DLL_NAME)
 
     candidates.append(package_dir / _DLL_NAME)
     return candidates

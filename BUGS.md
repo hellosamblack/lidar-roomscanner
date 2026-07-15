@@ -31,6 +31,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-017 | fixed   | host/panel    | Panel launch always fails "port in use" — its own ST-Link log-tail thread races the CDC-missing serial fallback for the same COM port |
 | BUG-018 | fixed   | host/panel    | Launch failures (missing/busy scanner port) never appeared in app.log — printed to console only |
 | BUG-019 | fixed   | host/sources  | Ethernet preference was fragile: `.local` resolution always failed on Windows, and the "retry" loop only ever sent one wake packet |
+| BUG-020 | fixed   | host/native   | Native transform loader was Windows-only (`.dll` name + `build/Release/` path) — blank viewer on the Linux headless host; reader fault never surfaced to the page |
 
 ---
 
@@ -522,3 +523,58 @@ itself falls back to USB CDC if it doesn't have a leased Ethernet IP at boot, so
 Ethernet" can also legitimately mean the device decided to stream over CDC instead.
 
 Tests: 581 host tests green.
+
+---
+
+## BUG-020 — Native transform loader was Windows-only → blank viewer on the Linux headless host
+
+- **Status:** **fixed** 2026-07-15 · **Reported:** 2026-07-15 (owner, post-migration: "migrated this
+  to a headless host... launching view-web.sh loads the page, but I see no data") · **Area:** host/native
+- **Where:** `host/src/roomscan/native.py` (`_DLL_NAME`, `_candidate_paths`, `_BUILD_HINT`);
+  observability side in `host/src/roomscan/web.py` + `host/src/roomscan/static/app.js`
+
+The project was developed on Windows; this was its first run on Linux (a headless Proxmox/LXC host
+streaming from the board over Ethernet). The board streams RAW `3DMD` frames and the PC runs the
+`vl53l9-transform-c` pipeline through a compiled native library (`host/transform/`, Phase 2). The
+loader that finds and `ctypes.CDLL()`s that library was hardcoded to Windows in two ways:
+
+1. **Library name.** `_DLL_NAME = "roomscan_transform.dll"` — but Linux CMake (single-config
+   Ninja/Make) emits `libroomscan_transform.so`, and macOS `libroomscan_transform.dylib`.
+2. **Search path.** `_candidate_paths()` only looked in `build/Release/` — the MSVC multi-config
+   layout. Single-config generators emit straight into `build/`.
+
+Net effect on Linux: `_find_dll()` returned `None`, `Transform.__init__` raised
+`RuntimeError(_BUILD_HINT)` on the first RAW frame, and — because `viewer._reader` deliberately
+swallows exceptions into `fault` so one bad frame can't kill the process — the web viewer sat
+**silently blank**. `get_best_source` had already succeeded (UDP probe reads raw bytes, needs no
+native lib), so the socket was connected and the page said "Live", masking the real failure. The
+build hint it *would* have shown was itself Windows-only (`-G "Visual Studio 18 2026"`).
+
+Prerequisite (done by owner, same session): the `53L9A1` reference package — previously an untracked
+sibling dir (`../53L9A1/`) that never migrated — was vendored in-repo at `firmware/vendor/53L9A1/`,
+and `host/transform/CMakeLists.txt`'s `PKG_ROOT` repointed there. That unblocked the build; this bug
+is the loader half.
+
+**Fix:**
+1. `_DLL_NAME` is now chosen per `sys.platform`: `.dll` (win32) / `.dylib` (darwin) / `.so` (else).
+2. `_candidate_paths()` searches both `build/Release/<name>` (MSVC) and `build/<name>`
+   (single-config), in addition to the `ROOMSCAN_TRANSFORM_DLL` env override and the alongside-package
+   location.
+3. `_BUILD_HINT` is platform-aware (Linux/macOS get `-DCMAKE_BUILD_TYPE=Release` + `cmake --build`,
+   and the correct library name).
+4. **Observability** (so the next silent-blank is a one-line answer, cf. BUG-018): `web.py` logs the
+   selected transport at startup (`[source] Ethernet/UDP -> ip:port` / `Serial CDC` / `Replay`,
+   flushed), a watchdog thread prints `[FATAL] reader thread stopped: ...` to stderr the instant
+   `fault` is set, and the WebSocket handler sends a JSON `{"type":"error"}` text frame to the page on
+   fault. `app.js` now distinguishes text frames (status/error → shown in the connection indicator)
+   from binary point frames instead of blindly feeding every message into `Float32Array`.
+
+Verified end-to-end against the live board on the Linux host: loader resolves
+`host/transform/build/libroomscan_transform.so`, UDP source connects to `172.17.2.58`, pipeline
+produces valid depth `(42×54)`, 100% valid, 564–12000 mm, at ~30.5 fps.
+
+**Note:** the full uvicorn server can't be exercised from inside the agent's sandbox (the TCP bind is
+killed, exit 144), so the end-to-end verification drives the identical source→pump→`TransformStage`
+data path directly rather than through `roomscan.web`. The server code paths themselves were
+import-checked only. A running instance started *before* the loader fix keeps the old module in
+memory (Python caches imports) — it must be **restarted** to pick up the fix.
