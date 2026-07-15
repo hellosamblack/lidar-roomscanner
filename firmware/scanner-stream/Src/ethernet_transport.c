@@ -17,6 +17,7 @@ struct netif gnetif;
 static struct udp_pcb *upcb = NULL;
 static bool eth_link_up = false;
 static uint32_t frame_seq_num = 0;
+static ip_addr_t target_ip;
 
 /* Static IP config in case DHCP fails or no link */
 #define IP_ADDR0 172
@@ -71,12 +72,22 @@ static void Netif_Config(void)
     }
 }
 
+static void udp_receive_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
+    if (p != NULL) {
+        target_ip = *addr;
+        pbuf_free(p);
+    }
+}
+
 void ETH_Init(void)
 {
     lwip_init();
     Netif_Config();
     mdns_resp_init();
+    IP4_ADDR(&target_ip, 0, 0, 0, 0);
     upcb = udp_new();
+    udp_bind(upcb, IP_ANY_TYPE, 5000);
+    udp_recv(upcb, udp_receive_callback, NULL);
 }
 
 void ETH_Process(void)
@@ -164,10 +175,8 @@ bool ETH_IsUp(void)
 bool ETH_SendFrame_Gather(const uint8_t *hdr, uint32_t hdr_len, const uint8_t *payload, uint32_t payload_len, const uint8_t *tail, uint32_t tail_len)
 {
     if (!eth_link_up || !upcb) return false;
-
-    ip_addr_t target_ip;
-    IP4_ADDR(&target_ip, 255, 255, 255, 255);
-
+    if (target_ip.addr == 0) return false; // Wait for host to send a packet first!
+     
     uint32_t total_len = hdr_len + payload_len + tail_len;
     uint32_t offset = 0;
     uint8_t frag_idx = 0;
