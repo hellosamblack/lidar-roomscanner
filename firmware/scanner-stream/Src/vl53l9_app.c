@@ -1513,11 +1513,11 @@ void vl53l9_app() {
 #if CONF_STREAM_RAW
     /* Golden-pair captures need frame 1: TNR state is per-pixel and cumulative, so the
      * host must witness the stream from the first processed frame. Hold acquisition
-     * until a host opens the CDC port (DTR). This gate is also what makes raw-only mode
+     * until a host opens the CDC port (DTR) OR sends a UDP packet to Ethernet. This gate is also what makes raw-only mode
      * (CONF_TRANSFORM_ONBOARD=0) golden-capture-compatible, so it stays on by default here
      * too; a headless/production build (no PC waiting on the far end) may want to revisit
      * blocking acquisition start on a host connection. */
-    while (!tud_cdc_connected()) {
+    while (!tud_cdc_connected() && !(ETH_IsUp() && ETH_HasTarget())) {
         tud_task(); ETH_Process();
     }
     HAL_Delay(50); /* let the host's reader thread settle after opening the port */

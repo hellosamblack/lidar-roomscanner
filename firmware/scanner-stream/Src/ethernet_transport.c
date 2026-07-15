@@ -75,6 +75,8 @@ static void Netif_Config(void)
 static void udp_receive_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
     if (p != NULL) {
         target_ip = *addr;
+        printf("[ETH] Received packet from %d.%d.%d.%d, target_ip updated!\n",
+            ip4_addr1(addr), ip4_addr2(addr), ip4_addr3(addr), ip4_addr4(addr));
         pbuf_free(p);
     }
 }
@@ -232,8 +234,10 @@ bool ETH_SendFrame_Gather(const uint8_t *hdr, uint32_t hdr_len, const uint8_t *p
             offset += copy_len;
         }
 
-        if (udp_sendto(upcb, p, &target_ip, 5000) != ERR_OK)
+        err_t err = udp_sendto(upcb, p, &target_ip, 5000);
+        if (err != ERR_OK)
         {
+            printf("[ETH] udp_sendto failed: %d (frag %d)\n", err, frag_idx);
             pbuf_free(p);
             return false;
         }
@@ -242,6 +246,12 @@ bool ETH_SendFrame_Gather(const uint8_t *hdr, uint32_t hdr_len, const uint8_t *p
         frag_idx++;
     }
     
+    // printf("[ETH] Sent frame %lu\n", frame_seq_num);
     frame_seq_num++;
     return true;
+}
+
+bool ETH_HasTarget(void)
+{
+    return target_ip.addr != 0;
 }

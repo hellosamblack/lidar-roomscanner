@@ -183,6 +183,7 @@
   * @brief This is the HAL system configuration section
   */
 
+#define  ETH_TX_DESC_CNT            8U     /*!< Number of Ethernet TX Descriptors */
 #define  VDD_VALUE                  3300UL /*!< Value of VDD in mv */
 #define  TICK_INT_PRIORITY          (15UL)  /*!< tick interrupt priority (lowest by default) */
 #define  USE_RTOS                   0U

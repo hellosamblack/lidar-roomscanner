@@ -58,7 +58,7 @@ from .sensors import (
 from .sensors_widgets import render_compass, render_sparkline, render_sensors_overlay
 from .shading import MODES as _NEAR_MODES
 from .shading import cloud_colors
-from .sources import FileSource, Recorder, SerialSource, get_best_source, pump
+from .sources import FileSource, Recorder, SerialSource, UdpSource, get_best_source, pump
 from .surface import grid_triangles, grid_triangles_3d
 from . import theme
 from .viewer import Stats, _build_arg_parser
@@ -3463,7 +3463,7 @@ def run(args, *, smoke_ticks: int = 0) -> int:
     source = _open_source(args)
     if source is None:
         return 1
-    client = CommandClient(source.write) if isinstance(source, SerialSource) else None
+    client = CommandClient(source.write) if isinstance(source, (SerialSource, UdpSource)) else None
     dll = Transform.available()
     outputs = ("depth", "reflectance", "confidence") if dll else ("depth",)
     stage = TransformStage(outputs=outputs)   # all three computed by one instance; ~zero marginal cost

@@ -141,12 +141,14 @@ class UdpSource:
 def get_best_source(port: Optional[str] = None, baud: int = 921600, timeout: float = 0.05):
     # Try UDP first
     udp = UdpSource(timeout=timeout)
+    # Send a dummy packet to wake up the board's unicast UDP stream
+    udp.write(b'\x00')
     
     # See if we receive any data within a short window
     old_timeout = udp.sock.gettimeout()
-    udp.sock.settimeout(0.5)
+    udp.sock.settimeout(5.0)
     t0 = time.time()
-    while time.time() - t0 < 0.5:
+    while time.time() - t0 < 5.0:
         data = udp.read()
         if data:
             udp.sock.settimeout(old_timeout)

@@ -14,6 +14,7 @@
 void ETH_Init(void);
 void ETH_Process(void);
 bool ETH_IsUp(void);
+bool ETH_HasTarget(void);
 bool ETH_SendFrame_Gather(const uint8_t *hdr, uint32_t hdr_len, const uint8_t *payload, uint32_t payload_len, const uint8_t *tail, uint32_t tail_len);
 
 #endif
