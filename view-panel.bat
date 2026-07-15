@@ -8,7 +8,7 @@ rem (needs Python 3.11 or 3.12).
 rem Extra args pass through, e.g.:  view-panel.bat --color reflectance
 rem                                 view-panel.bat --replay recordings\scan.bin
 rem ---------------------------------------------------------------------------
-setlocal
+setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
 set "VENV_PY=host\.venv\Scripts\python.exe"
@@ -29,6 +29,20 @@ if not exist "%VENV_PY%" (
         echo [error] Dependency installation failed.
         pause
         exit /b 1
+    )
+)
+
+"%VENV_PY%" -c "from roomscan.slam.config import SlamConfig; import sys; sys.exit(0 if SlamConfig.load().backend == 'remote' else 1)" 2>nul
+if %errorlevel% equ 0 (
+    wslc list 2>nul | findstr /i "roomscan-slam" >nul
+    if errorlevel 1 (
+        echo.
+        echo [slam] Remote SLAM backend configured but container is not running.
+        set /p START_CONTAINER="Do you want to start the GPU container now? [Y/n] "
+        if /i "!START_CONTAINER!" neq "N" (
+            pwsh tools\slam-container\start.ps1
+        )
+        echo.
     )
 )
 
