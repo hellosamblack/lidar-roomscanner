@@ -1,8 +1,15 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
+// If we reach here, the ES module + `three` import resolved. A silent failure
+// on either would mean this line never runs (see the inline diag trap in
+// index.html) -- so this is the "app.js is alive" heartbeat.
+const D = (m, l) => { try { window.__diag && window.__diag('app.js: ' + m, l); } catch (e) {} };
+D('module loaded; THREE r' + THREE.REVISION);
+
 // ---- Scene Setup ----
 const container = document.getElementById('canvas-container');
+if (!container) D('FATAL #canvas-container not found — scene cannot attach', 'error');
 const scene = new THREE.Scene();
 // Dark gradient background mimicking the native app
 scene.background = new THREE.Color(0x0a0a0f);
@@ -59,15 +66,27 @@ const connDot = document.getElementById('conn-dot');
 
 function connect() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    const url = `${protocol}//${window.location.host}/ws`;
+    D('ws connecting -> ' + url);
+    try {
+        ws = new WebSocket(url);
+    } catch (e) {
+        D('ws constructor threw: ' + e.message, 'error');
+        setTimeout(connect, 2000);
+        return;
+    }
     ws.binaryType = 'arraybuffer';
 
     ws.onopen = () => {
+        D('ws OPEN');
         connText.textContent = 'Live';
         connDot.classList.add('connected');
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
+        // code 1006 = abnormal (no close frame: refused/unreachable/blocked);
+        // 1000 = normal; 1015 = TLS failure. Logging the code is the whole game.
+        D('ws CLOSE code=' + ev.code + ' reason="' + (ev.reason || '') + '" wasClean=' + ev.wasClean, 'error');
         connText.textContent = 'Offline';
         connDot.classList.remove('connected');
         // Reconnect after 2s
@@ -75,13 +94,30 @@ function connect() {
     };
 
     ws.onerror = (err) => {
+        D('ws ERROR (see close code next)', 'error');
         console.error('WebSocket Error:', err);
     };
 
     ws.onmessage = (event) => {
+        // Text frames are status/error messages (JSON); binary frames are
+        // point data. Without this branch a server error string would be fed
+        // into Float32Array as garbage and silently render nothing.
+        if (typeof event.data === 'string') {
+            D('ws TEXT frame: ' + event.data.slice(0, 120), 'error');
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'error') {
+                    connText.textContent = 'Error: ' + msg.message;
+                    connDot.classList.remove('connected');
+                    console.error('Server error:', msg.message);
+                }
+            } catch (e) { /* ignore non-JSON text */ }
+            return;
+        }
         // Payload is Float32Array: [x,y,z,x,y,z... r,g,b,r,g,b...]
         const data = new Float32Array(event.data);
         const numPoints = data.length / 6;
+        if (!window.__gotFrame) { window.__gotFrame = true; D('first binary frame: ' + numPoints + ' pts'); }
         
         ptsEl.textContent = numPoints.toLocaleString();
 

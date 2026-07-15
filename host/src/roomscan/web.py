@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import queue
+import shutil
+import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -66,7 +70,15 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             if state.fault:
-                print(f"\nreader stopped: {state.fault['error']!r}")
+                print(f"\nreader stopped: {state.fault['error']!r}", flush=True)
+                # Tell the page instead of leaving it silently blank: a text
+                # frame the frontend renders in the status line (binary frames
+                # are point data; this is the one text-typed message).
+                try:
+                    await websocket.send_text(json.dumps(
+                        {"type": "error", "message": str(state.fault["error"])}))
+                except Exception:
+                    pass
                 break
                 
             try:
@@ -118,6 +130,15 @@ def main(argv=None) -> int:
     args = resolve_args(argv)
     
     source = FileSource(args.replay) if args.replay else get_best_source(args.port, args.baud)
+    # Name the transport up front: the #1 "no data" question is whether we're
+    # on Ethernet, serial, or a dead serial fallback. Flushed so it shows even
+    # when stdout is block-buffered (not a tty).
+    if isinstance(source, UdpSource):
+        print(f"[source] Ethernet/UDP -> {source.target_ip}:{source.target_port}", flush=True)
+    elif isinstance(source, SerialSource):
+        print(f"[source] Serial CDC -> {getattr(source, 'port', '?')}", flush=True)
+    elif isinstance(source, FileSource):
+        print(f"[source] Replay -> {args.replay}", flush=True)
     client = CommandClient(source.write) if isinstance(source, (SerialSource, UdpSource)) else None
     cmd_state = CommandKeyState(client)
     decoder = StreamDecoder()
@@ -139,18 +160,62 @@ def main(argv=None) -> int:
     threading.Thread(target=_reader,
                      args=(source, decoder, slot, stats, args.record, fault, min_interval, stage, client),
                      daemon=True).start()
+
+    # Watchdog: the reader swallows exceptions into `fault` (so one bad frame
+    # can't kill the process); without this, a faulted reader just blanks the
+    # page with no clue why. Surface it loudly to stderr the moment it happens.
+    def _watch_fault():
+        while True:
+            if fault:
+                print(f"\n[FATAL] reader thread stopped: {fault['error']!r}",
+                      file=sys.stderr, flush=True)
+                return
+            time.sleep(0.5)
+    threading.Thread(target=_watch_fault, daemon=True).start()
                      
     port = 8000
     url = f"http://localhost:{port}/static/index.html"
     print(f"\n=== roomscan web viewer ===")
     print(f"Starting server on {url}")
     print("Press Ctrl+C to stop.")
-    
+
     # Small delay to let the server start before opening the browser
-    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-    
+    threading.Timer(1.0, lambda: _open_browser(url)).start()
+
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
     return 0
+
+
+def _open_browser(url: str) -> None:
+    """Open the viewer, and on Linux launch Chrome/Chromium with software-WebGL
+    enabled. On a headless host (no GPU -- the whole point of this deployment)
+    Chrome refuses to create a WebGL context by default, so the Three.js viewer
+    dies with "Error creating WebGL context" and the page is stuck at "Offline"
+    (confirmed on-box 2026-07-15: baseline Chrome -> NO-WEBGL; with the flag ->
+    WEBGL-OK via SwiftShader/llvmpipe). `--enable-unsafe-swiftshader` only
+    *permits* the software fallback -- a machine with a real GPU still uses it,
+    so this is safe to pass unconditionally. Set ROOMSCAN_NO_BROWSER=1 to skip
+    the auto-open entirely (e.g. when viewing from another machine)."""
+    if os.environ.get("ROOMSCAN_NO_BROWSER"):
+        print(f"[browser] auto-open disabled; open {url} yourself.", flush=True)
+        return
+    if sys.platform.startswith("linux"):
+        for exe in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+            path = shutil.which(exe)
+            if path:
+                try:
+                    subprocess.Popen(
+                        [path, "--enable-unsafe-swiftshader", url],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    print(f"[browser] opened {exe} with software WebGL enabled.", flush=True)
+                    return
+                except Exception as exc:
+                    print(f"[browser] {exe} launch failed ({exc}); falling back.", flush=True)
+                    break
+        print("[browser] no Chrome/Chromium found. If the viewer shows 'Offline' "
+              "with a WebGL error, launch your browser with software WebGL "
+              "(Chrome: --enable-unsafe-swiftshader).", flush=True)
+    webbrowser.open(url)
 
 if __name__ == "__main__":
     sys.exit(main())

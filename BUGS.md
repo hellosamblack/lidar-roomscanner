@@ -31,6 +31,9 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-017 | fixed   | host/panel    | Panel launch always fails "port in use" — its own ST-Link log-tail thread races the CDC-missing serial fallback for the same COM port |
 | BUG-018 | fixed   | host/panel    | Launch failures (missing/busy scanner port) never appeared in app.log — printed to console only |
 | BUG-019 | fixed   | host/sources  | Ethernet preference was fragile: `.local` resolution always failed on Windows, and the "retry" loop only ever sent one wake packet |
+| BUG-020 | fixed   | host/native   | Native transform loader was Windows-only (`.dll` name + `build/Release/` path) — blank viewer on the Linux headless host; reader fault never surfaced to the page |
+| BUG-021 | fixed   | host/web      | Web viewer loaded Three.js from a CDN (unpkg) — headless/remote browser couldn't fetch it, `app.js` threw on the bare `three` import, page stuck at "Offline" |
+| BUG-022 | fixed   | host/web      | Headless-host browser has no WebGL — `new THREE.WebGLRenderer()` threw "Error creating WebGL context", viewer stuck "Offline"; auto-open now passes Chrome `--enable-unsafe-swiftshader` |
 
 ---
 
@@ -522,3 +525,134 @@ itself falls back to USB CDC if it doesn't have a leased Ethernet IP at boot, so
 Ethernet" can also legitimately mean the device decided to stream over CDC instead.
 
 Tests: 581 host tests green.
+
+---
+
+## BUG-020 — Native transform loader was Windows-only → blank viewer on the Linux headless host
+
+- **Status:** **fixed** 2026-07-15 · **Reported:** 2026-07-15 (owner, post-migration: "migrated this
+  to a headless host... launching view-web.sh loads the page, but I see no data") · **Area:** host/native
+- **Where:** `host/src/roomscan/native.py` (`_DLL_NAME`, `_candidate_paths`, `_BUILD_HINT`);
+  observability side in `host/src/roomscan/web.py` + `host/src/roomscan/static/app.js`
+
+The project was developed on Windows; this was its first run on Linux (a headless Proxmox/LXC host
+streaming from the board over Ethernet). The board streams RAW `3DMD` frames and the PC runs the
+`vl53l9-transform-c` pipeline through a compiled native library (`host/transform/`, Phase 2). The
+loader that finds and `ctypes.CDLL()`s that library was hardcoded to Windows in two ways:
+
+1. **Library name.** `_DLL_NAME = "roomscan_transform.dll"` — but Linux CMake (single-config
+   Ninja/Make) emits `libroomscan_transform.so`, and macOS `libroomscan_transform.dylib`.
+2. **Search path.** `_candidate_paths()` only looked in `build/Release/` — the MSVC multi-config
+   layout. Single-config generators emit straight into `build/`.
+
+Net effect on Linux: `_find_dll()` returned `None`, `Transform.__init__` raised
+`RuntimeError(_BUILD_HINT)` on the first RAW frame, and — because `viewer._reader` deliberately
+swallows exceptions into `fault` so one bad frame can't kill the process — the web viewer sat
+**silently blank**. `get_best_source` had already succeeded (UDP probe reads raw bytes, needs no
+native lib), so the socket was connected and the page said "Live", masking the real failure. The
+build hint it *would* have shown was itself Windows-only (`-G "Visual Studio 18 2026"`).
+
+Prerequisite (done by owner, same session): the `53L9A1` reference package — previously an untracked
+sibling dir (`../53L9A1/`) that never migrated — was vendored in-repo at `firmware/vendor/53L9A1/`,
+and `host/transform/CMakeLists.txt`'s `PKG_ROOT` repointed there. That unblocked the build; this bug
+is the loader half.
+
+**Fix:**
+1. `_DLL_NAME` is now chosen per `sys.platform`: `.dll` (win32) / `.dylib` (darwin) / `.so` (else).
+2. `_candidate_paths()` searches both `build/Release/<name>` (MSVC) and `build/<name>`
+   (single-config), in addition to the `ROOMSCAN_TRANSFORM_DLL` env override and the alongside-package
+   location.
+3. `_BUILD_HINT` is platform-aware (Linux/macOS get `-DCMAKE_BUILD_TYPE=Release` + `cmake --build`,
+   and the correct library name).
+4. **Observability** (so the next silent-blank is a one-line answer, cf. BUG-018): `web.py` logs the
+   selected transport at startup (`[source] Ethernet/UDP -> ip:port` / `Serial CDC` / `Replay`,
+   flushed), a watchdog thread prints `[FATAL] reader thread stopped: ...` to stderr the instant
+   `fault` is set, and the WebSocket handler sends a JSON `{"type":"error"}` text frame to the page on
+   fault. `app.js` now distinguishes text frames (status/error → shown in the connection indicator)
+   from binary point frames instead of blindly feeding every message into `Float32Array`.
+
+Verified end-to-end against the live board on the Linux host: loader resolves
+`host/transform/build/libroomscan_transform.so`, UDP source connects to `172.17.2.58`, pipeline
+produces valid depth `(42×54)`, 100% valid, 564–12000 mm, at ~30.5 fps.
+
+**Note:** the full uvicorn server can't be exercised from inside the agent's sandbox (the TCP bind is
+killed, exit 144), so the end-to-end verification drives the identical source→pump→`TransformStage`
+data path directly rather than through `roomscan.web`. The server code paths themselves were
+import-checked only. A running instance started *before* the loader fix keeps the old module in
+memory (Python caches imports) — it must be **restarted** to pick up the fix.
+
+**Follow-on robustness (same session):** `UdpSource` now re-sends a wake
+datagram every `keepalive_s` (default 1.0 s) from `read()`, not just during the
+startup probe. The board unicasts frames to whichever host last woke it and
+clears that target only on reboot, so a board reset / link flap / a second
+client claiming the stream previously silenced the viewer permanently (it never
+re-woke). Symptom seen live: a launched instance held UDP 5000 and picked
+Ethernet, then processed zero frames (flat CPU) while the board streamed
+elsewhere. Keepalive makes the app re-claim the target and self-heal. Verified:
+streaming intact with keepalive on (110 slots/5 s); 580 host tests pass.
+
+---
+
+## BUG-021 — Web viewer loaded Three.js from a CDN → "Offline", blank on headless host
+
+- **Status:** **fixed** 2026-07-15 · **Reported:** 2026-07-15 (owner, post-migration: "It says
+  offline") · **Area:** host/web
+- **Where:** `host/src/roomscan/static/index.html` (import map), `host/src/roomscan/static/app.js`
+
+The Three.js viewer front-end resolved its `import * as THREE from 'three'` and
+`three/addons/controls/OrbitControls.js` via an import map pointing at
+`https://unpkg.com/three@0.160.0/...`, and pulled Inter/JetBrains-Mono from Google Fonts. On the
+Windows dev box (with internet in the same browser) this worked. On the migrated headless host the
+rendering browser couldn't fetch the CDN module — a remote browser without a route to unpkg, a proxy,
+or a stale tab from a load that failed — so the bare `three` specifier failed to resolve, `app.js`
+threw at module-eval, `connect()` never ran, and no WebSocket was ever opened. Because
+`#conn-text`'s initial markup is literally `Offline`, the page just sat there: server serving live
+frames (verified: a WebSocket client and a fresh Chrome both pulled ~2160-pt frames), browser showing
+"Offline", no error the user could see. Note the host shell *could* `curl` unpkg fine — CDN
+reachability from the shell says nothing about the browser actually rendering the page.
+
+**Fix:** vendored `three.module.js` + `OrbitControls.js` into
+`host/src/roomscan/static/vendor/three/` and repointed the import map at `/static/vendor/three/...`,
+so the viewer is fully self-contained (same rationale as the Artifacts "no external hosts" rule and
+the firmware's vendored tinyusb/lwip). The Google-Fonts `<link>` is left as-is: it degrades to system
+fonts if unreachable and never blocks scripts. Verified end-to-end with headless Chrome against the
+live server: status **Live**, 2247 points, point cloud rendering, zero console errors.
+
+**Note:** this was the third distinct Windows→Linux migration gap in one session, after BUG-020
+(native loader) and the BUG-020 keepalive follow-on. All three shared a shape: something implicit on
+the dev box (a built DLL, a CDN, a still-awake board) that the fresh host didn't have.
+
+---
+
+## BUG-022 — Headless-host browser has no WebGL → viewer stuck "Offline"
+
+- **Status:** **fixed** 2026-07-15 · **Reported:** 2026-07-15 (owner, via the BUG-021 in-browser
+  diag trace: `Uncaught Error: Error creating WebGL context @ three.module.js`) · **Area:** host/web
+- **Where:** `host/src/roomscan/web.py` (`_open_browser`)
+
+After BUG-021 vendored three.js, the diag trace showed the real wall: three.js loaded (`THREE r160`),
+`app.js` ran, then `new THREE.WebGLRenderer()` (module top-level) threw **"Error creating WebGL
+context"** — so execution aborted *before* `connect()`, no WebSocket ever opened, page frozen at its
+initial "Offline". The host is a headless Proxmox/LXC box with no GPU; the VNC X server (`:1`) has
+software OpenGL (llvmpipe, GL 4.5, confirmed via `glxinfo`), but **Chrome 150 refuses software WebGL
+by default** (SwiftShader-for-WebGL is gated behind a flag since ~Chrome 137). Measured on-box:
+
+| Chrome launch | WebGL |
+|---|---|
+| no flags (what the auto-open used) | **NO-WEBGL** |
+| `--enable-unsafe-swiftshader` | OK (SwiftShader) |
+| `--use-gl=angle --use-angle=swiftshader` | OK (SwiftShader) |
+| `--use-gl=angle --use-angle=gl --ignore-gpu-blocklist` | OK (Mesa llvmpipe GL 4.5) |
+
+`webbrowser.open` (the viewer's auto-open) passes no flags — exactly the failing row.
+
+**Fix:** `_open_browser()` launches google-chrome/chromium with `--enable-unsafe-swiftshader` on
+Linux (only *permits* the software fallback; a real GPU still uses hardware, so it's unconditional-
+safe), falling back to `webbrowser.open`. `ROOMSCAN_NO_BROWSER=1` skips auto-open for remote viewing.
+Verified: with the flag, Chrome on `:1` reports `WEBGL-OK`; the viewer renders Live (headless-Chrome
+screenshot: status Live, ~2100 pts, point cloud). This was the 4th distinct headless-migration gap
+(after BUG-020 loader, BUG-020 keepalive, BUG-021 CDN) — all "implicit on the dev box, absent on the
+fresh host".
+
+**The in-browser diagnostic panel (added this session) is what cracked it** — it turned an opaque
+"Offline" into the exact throwing line. Keep it.

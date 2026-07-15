@@ -4,6 +4,47 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Roomscan Web UI</title>
+    <!-- Diagnostic trap: a plain (non-module) script installed BEFORE the
+         module below, so it captures failures a `<script type=module>` would
+         otherwise swallow silently (import-map miss, module 404/parse error,
+         `three` failing to load). Everything is mirrored to an on-page panel
+         (#diag-log) so it's readable over VNC / on a browser where devtools
+         aren't handy. window.__diag(msg, level) is the shared sink. -->
+    <script>
+    (function () {
+        var buf = [];
+        function render() {
+            var el = document.getElementById('diag-log');
+            if (el) { el.textContent = buf.slice(-60).join('\n'); el.scrollTop = el.scrollHeight; }
+        }
+        function stamp() {
+            try { return new Date().toISOString().substr(11, 12); } catch (e) { return '??'; }
+        }
+        window.__diag = function (msg, level) {
+            buf.push(stamp() + ' ' + (level || 'info').toUpperCase() + ' ' + msg);
+            try { (level === 'error' ? console.error : console.log)('[diag] ' + msg); } catch (e) {}
+            render();
+        };
+        window.addEventListener('error', function (e) {
+            var m = (e && (e.message || (e.error && e.error.message))) || 'unknown';
+            var where = e && e.filename ? (' @ ' + e.filename + ':' + (e.lineno || '?')) : '';
+            // Resource-load errors (failed module/script/img) arrive as an
+            // event on the element with no .message; note the target's src.
+            if (!e.message && e.target && (e.target.src || e.target.href)) {
+                m = 'resource failed to load: ' + (e.target.src || e.target.href);
+            }
+            window.__diag('window.error: ' + m + where, 'error');
+        }, true);
+        window.addEventListener('unhandledrejection', function (e) {
+            var r = e && e.reason; window.__diag('unhandledrejection: ' + ((r && (r.message || r)) || r), 'error');
+        });
+        document.addEventListener('DOMContentLoaded', function () {
+            render();
+            window.__diag('DOMContentLoaded; url=' + location.href, 'info');
+        });
+        window.__diag('inline diag installed; protocol=' + location.protocol + ' host=' + location.host, 'info');
+    })();
+    </script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -229,16 +270,27 @@
         </div>
     </div>
 
+    <!-- On-page diagnostic log (populated by window.__diag). Visible so a
+         failure is traceable without opening devtools. -->
+    <div id="diag-log" style="position:fixed;left:8px;bottom:8px;max-width:48vw;max-height:40vh;
+        overflow:auto;z-index:99999;background:rgba(0,0,0,0.82);color:#7fe0ff;
+        font:11px/1.45 'JetBrains Mono',ui-monospace,monospace;white-space:pre-wrap;
+        padding:8px 10px;border:1px solid rgba(255,255,255,0.18);border-radius:6px;">diag: waiting…</div>
+
     <!-- Import map: lets the browser resolve the bare "three" specifier that
          three's jsm addons (e.g. OrbitControls) import internally. Without this,
          OrbitControls fails with "Failed to resolve module specifier 'three'",
          which aborts app.js entirely (no WebSocket, no data). Must appear before
-         the module script below. -->
+         the module script below.
+         Vendored locally (host/src/roomscan/static/vendor/) so the viewer is
+         fully self-contained: a headless / air-gapped host has no route to
+         unpkg, and a failed CDN fetch here silently kills the whole page (the
+         status just sits at its initial "Offline"). -->
     <script type="importmap">
     {
         "imports": {
-            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            "three": "/static/vendor/three/three.module.js",
+            "three/addons/": "/static/vendor/three/addons/"
         }
     }
     </script>
