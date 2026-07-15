@@ -2766,26 +2766,31 @@ class ControlPanel:
         if the click was consumed (so _on_mouse doesn't also orbit the camera).
         _set_mode/_set_camera/_do_action/_toggle_ir_overlay/_set_ir_opacity are
         Task-9 stubs here; Tasks 10/11 wire the real mode/camera/action behavior."""
-        from . import hud as h    # module (not self._hud): headless-callable on a stand-in
-        if hit.control == h.MODE_SWITCH:
-            self._set_mode(VIEW_REAL_TIME if hit.segment == 0 else VIEW_SLAM)
-            return True
-        if hit.control == h.VIEW_TOGGLE:
-            self._set_camera(CAM_FIRST_PERSON if hit.segment == 0 else CAM_ORBIT)
-            return True
-        if hit.control == h.ACTION_CLUSTER:
-            labels = self._hud_action_labels()
-            idx = min(len(labels) - 1, max(0, int((hit.fraction or 0.0) * len(labels))))
-            self._do_action(idx)
-            return True
-        if hit.control == h.IR_CONTROL:
-            if hit.fraction is not None:
-                self._set_ir_opacity(hit.fraction)
-            else:
-                self._toggle_ir_overlay()
-            return True
-        if hit.control == h.STATUS_CHIP:
-            return True    # read-only, but consume so it doesn't orbit the camera
+        import traceback
+        try:
+            from . import hud as h    # module (not self._hud): headless-callable on a stand-in
+            if hit.control == h.MODE_SWITCH:
+                self._set_mode(VIEW_REAL_TIME if hit.segment == 0 else VIEW_SLAM)
+                return True
+            if hit.control == h.VIEW_TOGGLE:
+                self._set_camera(CAM_FIRST_PERSON if hit.segment == 0 else CAM_ORBIT)
+                return True
+            if hit.control == h.ACTION_CLUSTER:
+                labels = self._hud_action_labels()
+                idx = min(len(labels) - 1, max(0, int((hit.fraction or 0.0) * len(labels))))
+                self._do_action(idx)
+                return True
+            if hit.control == h.IR_CONTROL:
+                if hit.fraction is not None:
+                    self._set_ir_opacity(hit.fraction)
+                else:
+                    self._toggle_ir_overlay()
+                return True
+            if hit.control == h.STATUS_CHIP:
+                return True    # read-only, but consume so it doesn't orbit the camera
+        except Exception as exc:
+            print(f"CRASH in HUD click: {exc}")
+            traceback.print_exc()
         return False
 
     # ---- Mode / camera / action wiring (Task 10) ----------------------------
@@ -3462,8 +3467,75 @@ def _open_source(args):
         return None
 
 
+def _setup_app_logger():
+    from pathlib import Path
+    import logging
+    import sys
+    from logging.handlers import RotatingFileHandler
+    Path("logs").mkdir(exist_ok=True)
+    
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    app_handler = RotatingFileHandler("logs/app.log", maxBytes=1024*1024, backupCount=2)
+    app_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(app_handler)
+    
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        
+    sys.excepthook = handle_exception
+
+def _stlink_logger_thread():
+    from pathlib import Path
+    import logging
+    from logging.handlers import RotatingFileHandler
+    import time
+    
+    Path("logs").mkdir(exist_ok=True)
+    fw_logger = logging.getLogger("firmware")
+    fw_logger.setLevel(logging.INFO)
+    fw_handler = RotatingFileHandler("logs/firmware.log", maxBytes=1024*1024, backupCount=2)
+    fw_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    fw_logger.addHandler(fw_handler)
+    fw_logger.propagate = False
+    
+    try:
+        import serial
+        from serial.tools import list_ports
+    except ImportError:
+        return
+
+    ST_VID = 0x0483
+    while True:
+        port = None
+        for p in list_ports.comports():
+            if p.vid == ST_VID:
+                port = p.device
+                break
+        if port:
+            try:
+                with serial.Serial(port, 921600, timeout=1.0) as ser:
+                    fw_logger.info(f"--- Connected to ST-LINK on {port} ---")
+                    while True:
+                        line = ser.readline()
+                        if line:
+                            fw_logger.info(line.decode('utf-8', errors='replace').rstrip('\r\n'))
+            except Exception:
+                time.sleep(1.0)
+        else:
+            time.sleep(2.0)
+
+
 def run(args, *, smoke_ticks: int = 0) -> int:
+    import threading
     import open3d.visualization.gui as gui
+    
+    _setup_app_logger()
+    threading.Thread(target=_stlink_logger_thread, daemon=True).start()
 
     _fill_panel_fields(args)   # viewer-delegated args arrive without the panel-only fields
 

@@ -16,6 +16,6 @@ def make_slam_worker(width, height, cfg=None, **mapper_kwargs):
         rw = RemoteSlamWorker(width, height, addr=cfg.remote_addr, **mapper_kwargs)
         if rw.connect():
             return rw
-        print(f"[slam] remote backend at {cfg.remote_addr} unreachable; "
-              f"falling back to local CPU worker", file=sys.stderr)
+        import logging
+        logging.getLogger().warning(f"[slam] remote backend at {cfg.remote_addr} unreachable; falling back to local CPU worker")
     return SlamWorker(width, height, **mapper_kwargs)
