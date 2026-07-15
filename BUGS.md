@@ -33,6 +33,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-019 | fixed   | host/sources  | Ethernet preference was fragile: `.local` resolution always failed on Windows, and the "retry" loop only ever sent one wake packet |
 | BUG-020 | fixed   | host/native   | Native transform loader was Windows-only (`.dll` name + `build/Release/` path) — blank viewer on the Linux headless host; reader fault never surfaced to the page |
 | BUG-021 | fixed   | host/web      | Web viewer loaded Three.js from a CDN (unpkg) — headless/remote browser couldn't fetch it, `app.js` threw on the bare `three` import, page stuck at "Offline" |
+| BUG-022 | fixed   | host/web      | Headless-host browser has no WebGL — `new THREE.WebGLRenderer()` threw "Error creating WebGL context", viewer stuck "Offline"; auto-open now passes Chrome `--enable-unsafe-swiftshader` |
 
 ---
 
@@ -620,3 +621,38 @@ live server: status **Live**, 2247 points, point cloud rendering, zero console e
 **Note:** this was the third distinct Windows→Linux migration gap in one session, after BUG-020
 (native loader) and the BUG-020 keepalive follow-on. All three shared a shape: something implicit on
 the dev box (a built DLL, a CDN, a still-awake board) that the fresh host didn't have.
+
+---
+
+## BUG-022 — Headless-host browser has no WebGL → viewer stuck "Offline"
+
+- **Status:** **fixed** 2026-07-15 · **Reported:** 2026-07-15 (owner, via the BUG-021 in-browser
+  diag trace: `Uncaught Error: Error creating WebGL context @ three.module.js`) · **Area:** host/web
+- **Where:** `host/src/roomscan/web.py` (`_open_browser`)
+
+After BUG-021 vendored three.js, the diag trace showed the real wall: three.js loaded (`THREE r160`),
+`app.js` ran, then `new THREE.WebGLRenderer()` (module top-level) threw **"Error creating WebGL
+context"** — so execution aborted *before* `connect()`, no WebSocket ever opened, page frozen at its
+initial "Offline". The host is a headless Proxmox/LXC box with no GPU; the VNC X server (`:1`) has
+software OpenGL (llvmpipe, GL 4.5, confirmed via `glxinfo`), but **Chrome 150 refuses software WebGL
+by default** (SwiftShader-for-WebGL is gated behind a flag since ~Chrome 137). Measured on-box:
+
+| Chrome launch | WebGL |
+|---|---|
+| no flags (what the auto-open used) | **NO-WEBGL** |
+| `--enable-unsafe-swiftshader` | OK (SwiftShader) |
+| `--use-gl=angle --use-angle=swiftshader` | OK (SwiftShader) |
+| `--use-gl=angle --use-angle=gl --ignore-gpu-blocklist` | OK (Mesa llvmpipe GL 4.5) |
+
+`webbrowser.open` (the viewer's auto-open) passes no flags — exactly the failing row.
+
+**Fix:** `_open_browser()` launches google-chrome/chromium with `--enable-unsafe-swiftshader` on
+Linux (only *permits* the software fallback; a real GPU still uses hardware, so it's unconditional-
+safe), falling back to `webbrowser.open`. `ROOMSCAN_NO_BROWSER=1` skips auto-open for remote viewing.
+Verified: with the flag, Chrome on `:1` reports `WEBGL-OK`; the viewer renders Live (headless-Chrome
+screenshot: status Live, ~2100 pts, point cloud). This was the 4th distinct headless-migration gap
+(after BUG-020 loader, BUG-020 keepalive, BUG-021 CDN) — all "implicit on the dev box, absent on the
+fresh host".
+
+**The in-browser diagnostic panel (added this session) is what cracked it** — it turned an opaque
+"Offline" into the exact throwing line. Keep it.
