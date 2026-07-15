@@ -1,0 +1,23 @@
+# Memory Index
+
+- [Workspace and repo](workspace-and-repo.md) — dir layout (roomscanner dev + 53L9A1 read-only reference) and git remote
+- [Hardware stack](hardware-stack.md) — full sensor complement (53L9A1 ToF + IKS4A1 MEMS/env board) and each sensor's intended role
+- [Mapping pipeline plan](mapping-pipeline-plan.md) — two-phase 3D-mapping architecture + phase status; Ethernet SHELVED 2026-07-10 (I3C is the bandwidth wall, USB CDC is production link); next = Phase 6 SLAM
+- [Roadmap review notes](roadmap-review-notes.md) — issues found in roadmapResearch.md
+- [Edge AI tooling](edge-ai-tooling.md) — which ST Edge AI Suite tools to use; edge AI belongs at the MEMS sensor tier, not the M33
+- [Commit signing via 1Password](commit-signing-1password.md) — intermittent signing failures from agent shells; ask user to unlock or authorize unsigned
+- [Milestone self-improvement](milestone-self-improvement.md) — owner directive: run milestone-retro skill after every milestone; capture.py is the seeded top backlog item
+- [IKS4A1 I3C bus conflict](iks4a1-i3c-bus-conflict.md) — RESOLVED & pushed: HUB1 native-I3C + PartID-keyed multi-device ENTDAA (ToF 0x0102→0x52, LSM 0x0070→0x50), hardware-verified ~28fps 0crc
+- [HDR rejected — DSS](hdr-rejected-dss.md) — HDR exposure-bracketing considered and rejected; on-chip DSS already does per-zone hardware auto-exposure
+- [Firmware bring-up division of labor](firmware-bringup-division-of-labor.md) — AGENTIC (2026-07-10): Claude drives the whole build/flash/monitor/diagnose loop; human does physical-only actions (jumpers, scope, USB replug)
+- [Hardware diagnosis discipline](hardware-diagnosis-discipline.md) — read the stack-electrical netlist/debug-ref BEFORE theorizing bus hardware; never conclude "HW fault" with a non-streaming probe binary flashed
+- [LSM6DSV16X panel integration](lsm6dsv16x-panel-integration.md) — Phase 4 CLOSED 2026-07-10: SFLP quat (stream 9 @480Hz) + sensor-hub env (stream 10) + stacked ToF ENTDAA (slow-PP fix) all HW-verified, full stack 27.85fps 0 CRC; gotchas: no GLOBAL_RST, LSM state persists across MCU -rst
+- [Yaw-drift correction](yaw-drift-correction.md) — host-side mag 9-axis fusion MERGED (PR #2, 33b7796); ASC/MLC/temp-bias/dead-reckoning rejected; STILL OPEN: on-rig mag cal + AXIS_CONVENTION check (bench steps in docs/yaw-fusion.md)
+- [Status-sync guardrails](status-sync-guardrails.md) — MANDATORY status-sync skill at ship time (docs move with the code, never merge own PR); wrap-up skill rewritten off merge-to-main; GREEN-phase skill test still pending
+- [Worktree subagent gotchas](worktree-subagent-gotchas.md) — bg-job + worktree: spawned subagents default to MAIN cwd (mis-commit risk → controller commits); venv in main checkout; pyproject pythonpath fix; wrap-up skill's auto-merge conflicts with PR flow
+- [GPU CUDA build blocker](gpu-cuda-build-blocker.md) — RESOLVED: native Win Open3D CUDA is a dead end (CUDA 12.6 rejects Win11-26200); GPU runs via WSL container (`wslc --gpus all` + open3d Linux CUDA wheel), 2.0x speedup, backend="remote"
+- [SLAM stationary jitter](slam-stationary-jitter.md) — stationary "IMU jitter" is really ICP translation noise; fixed w/ display-only coherence+rotation stationarity hold (map accuracy byte-identical)
+- [CUDA at-scale validation](cuda-at-scale-validation.md) — GPU 2.1x compute + flat degradation vs CPU climbing; 4 latent CUDA bugs (3 fixed, GPU-memory OOM open); live-view fps is architecture-bound (transport/mesh), not compute-bound; 28fps sensor cap vs 120fps viewport goal
+- [Live-view fps rendering](live-view-fps-rendering.md) — SHIPPED (code-complete+reviewed, runtime fps UNVERIFIED): off-thread MeshPrep + pose/mesh transport split; on-rig blank-surface bug root-caused to stale-container wire skew + fixed via backward-compat client (c500b0d)
+- [Panel UI redesign](panel-ui-redesign.md) — two-mode/first-person/HUD panel (feature/phase6-slam); HUD mouse-passthrough CONFIRMED+FIXED (ImageWidget.set_on_mouse, not the Button-layer fallback) + srgbColor Filament spam fixed (fd-2 logfilter); 561 tests; rest of GUI runtime still needs on-rig eyeball
+- [ETH mDNS multicast filter](eth-mdns-multicast-filter.md) — FIXED/merged (PR #11): STM32H5 ETH MAC drops all multicast by default, so mDNS (roomscanner.local) needed PassAllMulticast in low_level_init; unicast worked but multicast queries were dropped in HW; also covers future PTP + how to test mDNS (pin IP_MULTICAST_IF to the board's NIC, not the 172.20.x virtual adapter)
