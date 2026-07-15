@@ -168,6 +168,31 @@ static void low_level_init(struct netif *netif)
   /* configure ethernet peripheral (GPIOs, clocks, MAC, DMA) */
   hal_eth_init_status = HAL_ETH_Init(&EthHandle);
 
+  /* Pass all multicast frames up to lwIP.
+   *
+   * HAL_ETH_Init leaves the MAC filter at its reset default: only the perfect
+   * (own-unicast) address and broadcast pass; all multicast is dropped in
+   * hardware. lwIP joins the mDNS group 224.0.0.251 (MAC 01:00:5E:00:00:FB)
+   * at the IP layer when the responder starts, but with no igmp_mac_filter
+   * callback wired to this driver the ETH peripheral never learns to accept
+   * that MAC -- so mDNS queries are silently discarded and roomscanner.local
+   * never resolves, even though unicast to the DHCP-assigned IP works.
+   *
+   * Enabling PassAllMulticast lets every multicast frame reach the stack;
+   * lwIP's IGMP/mDNS then filters in software. On a direct link or small LAN
+   * the extra multicast volume is negligible, and this avoids per-group
+   * hardware hash-table programming (which would need an igmp_mac_filter
+   * callback and CRC32 hashing to stay selective). */
+  if (hal_eth_init_status == HAL_OK)
+  {
+    ETH_MACFilterConfigTypeDef filter = {0};
+    if (HAL_ETH_GetMACFilterConfig(&EthHandle, &filter) == HAL_OK)
+    {
+      filter.PassAllMulticast = ENABLE;
+      HAL_ETH_SetMACFilterConfig(&EthHandle, &filter);
+    }
+  }
+
 #if LWIP_ARP || LWIP_ETHERNET
   /* set MAC hardware address length */
   netif->hwaddr_len = ETH_HWADDR_LEN;
@@ -240,7 +265,7 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
   memset(Txbuffer, 0 , ETH_TX_DESC_CNT*sizeof(ETH_BufferTypeDef));
 
   /* Set Tx packet config common parameters */
-  memset(&TxConfig, 0 , sizeof(ETH_TxPacketConfig));
+  memset(&TxConfig, 0 , sizeof(TxConfig));
   TxConfig.Attributes = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
   TxConfig.ChecksumCtrl = ETH_CHECKSUM_IPHDR_PAYLOAD_INSERT_PHDR_CALC;
   TxConfig.CRCPadCtrl = ETH_CRC_PAD_INSERT;

@@ -104,7 +104,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${PKG_ROOT}/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_eth.c
     ${PKG_ROOT}/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_eth_ex.c
     Src/ethernetif.c
-    Src/ethernetif.c
     Src/ethernet_transport.c
     Src/dhcpserver.c
     Src/lan8742.c

@@ -3051,7 +3051,7 @@ class ControlPanel:
         from dataclasses import replace
         snap = replace(snap, drops=self.stats.dropped_flags, gaps=self.stats.seq_gaps)
         
-        is_udp = type(self.source).__name__ == "UdpSource"
+        is_udp = isinstance(self.source, UdpSource)
         link_cap = 11_000_000.0 if is_udp else 1_200_000.0
         link_lbl = "ETH" if is_udp else "USB"
         

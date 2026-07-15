@@ -39,12 +39,25 @@ static struct udp_pcb *dhcps_pcb;
 
 static void dhcps_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port)
 {
-    if (p == NULL || p->len < sizeof(struct dhcp_msg) - 308) {
+    /* Fixed part of a BOOTP/DHCP message, up to and including the magic
+       cookie -- everything before options[]. */
+    const uint16_t DHCP_HEADER_LEN =
+        (uint16_t)(sizeof(struct dhcp_msg) - sizeof(((struct dhcp_msg *)0)->options));
+
+    if (p == NULL || p->tot_len < DHCP_HEADER_LEN || p->tot_len > sizeof(struct dhcp_msg)) {
         if (p) pbuf_free(p);
         return;
     }
 
-    struct dhcp_msg *msg = (struct dhcp_msg *)p->payload;
+    /* p may be a chain of pbufs, so p->payload is only guaranteed valid for
+       p->len (< tot_len) bytes. Linearise into a local buffer so option
+       parsing can be bounds-checked against the true datagram length without
+       reading past a segment boundary (or the pbuf) on a malformed packet. */
+    struct dhcp_msg msg_buf;
+    memset(&msg_buf, 0, sizeof(msg_buf));
+    pbuf_copy_partial(p, &msg_buf, p->tot_len, 0);
+
+    struct dhcp_msg *msg = &msg_buf;
     if (msg->op != 1) { // BOOTREQUEST
         pbuf_free(p);
         return;
@@ -52,13 +65,16 @@ static void dhcps_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_
 
     uint8_t msg_type = 0;
     uint8_t *opt = msg->options;
-    uint16_t opt_len = p->tot_len - (sizeof(struct dhcp_msg) - 308);
-    for (uint16_t i = 0; i < opt_len && opt[i] != DHCP_OPTION_END;) {
-        if (opt[i] == DHCP_OPTION_MSG_TYPE && opt[i+1] == 1) {
-            msg_type = opt[i+2];
-            break;
+    uint16_t opt_len = (uint16_t)(p->tot_len - DHCP_HEADER_LEN);
+    /* i + 1 < opt_len keeps opt[i+1] (the length byte) in bounds every step. */
+    for (uint16_t i = 0; i + 1 < opt_len && opt[i] != DHCP_OPTION_END;) {
+        if (opt[i] == DHCP_OPTION_MSG_TYPE) {
+            if (i + 2 < opt_len && opt[i + 1] == 1) {
+                msg_type = opt[i + 2];
+                break;
+            }
         }
-        i += 2 + opt[i+1];
+        i += 2 + opt[i + 1];
     }
 
     if (msg_type == DHCP_MSG_DISCOVER || msg_type == DHCP_MSG_REQUEST) {
