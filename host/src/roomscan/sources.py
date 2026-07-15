@@ -7,13 +7,12 @@ import threading
 import time
 from typing import Iterator, Optional
 
-from zeroconf import ServiceBrowser, Zeroconf
+from zeroconf import Zeroconf
 
 from .decoder import StreamDecoder
 from .protocol import Frame
 
 CDC_VID, CDC_PID = 0xCAFE, 0x4001   # milestone 1b TinyUSB descriptors (docs/protocol.md)
-ST_VID = 0x0483                     # ST-Link VCOM fallback (milestone 1a)
 
 
 class FileSource:
@@ -41,13 +40,16 @@ class SerialSource:
 
     @staticmethod
     def find_port() -> str:
+        """Find the sensor's native USB CDC port (CAFE:4001). No ST-Link VCOM
+        fallback: that port only ever carries plain-text firmware `printf`
+        debug output (`_stlink_logger_thread` in panel.py already owns it for
+        that), never roomscan protocol frames, and treating it as a candidate
+        scanner port put it in a losing race against that same logger thread
+        for the same COM handle (owner, 2026-07-15)."""
         from serial.tools import list_ports
         ports = list(list_ports.comports())
         for p in ports:
             if p.vid == CDC_VID and p.pid == CDC_PID:
-                return p.device
-        for p in ports:
-            if p.vid == ST_VID:
                 return p.device
         raise RuntimeError(f"no scanner serial port found among {[p.device for p in ports]}")
 
@@ -74,29 +76,53 @@ class SerialSource:
 
 
 class UdpSource:
-    def __init__(self, port: int = 5000, timeout: float = 0.05):
+    def __init__(self, port: int = 5000, timeout: float = 0.05, *,
+                 zeroconf_factory=Zeroconf, mdns_timeout_ms: float = 1500):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.settimeout(timeout)
         self.sock.bind(("", port))
-        
+
         self.target_ip = None
         self.target_port = 5000
-        
+
         self._reassembly_buffer = bytearray()
         self._current_seq = None
         self._expected_frag = 0
         self._total_frags = 0
-        
-        # Try to resolve roomscanner.local
-        self._resolve_target()
 
-    def _resolve_target(self):
+        # Try to resolve roomscanner.local
+        self._resolve_target(zeroconf_factory, mdns_timeout_ms)
+
+    def _resolve_target(self, zeroconf_factory=Zeroconf, mdns_timeout_ms: float = 1500):
+        """Resolve the board's IP for the initial "wake" datagram (see
+        `get_best_source`). `socket.gethostbyname("roomscanner.local")` can't
+        do this -- Windows has no native ".local"/mDNS resolution without
+        Bonjour installed, so it always raises `gaierror` there (confirmed
+        on-box, owner report 2026-07-15) and this class always fell through to
+        broadcast. Query mDNS properly instead, via zeroconf's
+        `get_service_info` (the same call `tools/query_mdns.py` already
+        proves works: `_roomscan._udp.local.` /
+        `roomscanner._roomscan._udp.local.`, per ROADMAP Phase 5's lwIP mdns
+        advertisement) -- a resolved unicast IP is more reliable than
+        broadcast (some networks/firewall profiles drop broadcast). Falls
+        back to subnet broadcast, unchanged, if mDNS finds nothing or errors."""
         try:
-            target = socket.gethostbyname("roomscanner.local")
-            self.target_ip = target
-        except socket.gaierror:
-            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            self.target_ip = "255.255.255.255"
+            zc = zeroconf_factory()
+            try:
+                info = zc.get_service_info(
+                    "_roomscan._udp.local.", "roomscanner._roomscan._udp.local.",
+                    timeout=mdns_timeout_ms)
+                if info:
+                    addrs = info.parsed_addresses()
+                    if addrs:
+                        self.target_ip = addrs[0]
+                        return
+            finally:
+                zc.close()
+        except Exception:
+            pass
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.target_ip = "255.255.255.255"
 
     def read(self) -> bytes:
         try:
@@ -139,22 +165,35 @@ class UdpSource:
         self.sock.close()
 
 
-def get_best_source(port: Optional[str] = None, baud: int = 921600, timeout: float = 0.05):
-    # Try UDP first
+def get_best_source(port: Optional[str] = None, baud: int = 921600, timeout: float = 0.05,
+                     probe_s: float = 5.0, resend_s: float = 0.5):
+    """Prefer Ethernet (Phase 5's production transport): probe UDP for
+    `probe_s`, falling back to the serial CDC/scanner port only if nothing
+    arrives. The board doesn't know the host's address up front, so a "wake"
+    datagram teaches it where to reply -- but UDP has no delivery guarantee,
+    and this used to send that packet exactly once. Setting the *socket's*
+    timeout to the full probe window before the loop meant the first
+    `udp.read()` call itself blocked for the whole window (returning early
+    only on data) -- so the "while" below never actually got a second
+    iteration to resend on. One dropped wake packet silently killed Ethernet
+    preference for the whole launch (owner, 2026-07-15: "we had comms over
+    ethernet working prior to this... it's supposed to prefer ethernet").
+    Fix: short per-read timeout, real polling loop, periodic resend."""
     udp = UdpSource(timeout=timeout)
-    # Send a dummy packet to wake up the board's unicast UDP stream
-    udp.write(b'\x00')
-    
-    # See if we receive any data within a short window
     old_timeout = udp.sock.gettimeout()
-    udp.sock.settimeout(5.0)
+    udp.sock.settimeout(0.2)
     t0 = time.time()
-    while time.time() - t0 < 5.0:
+    next_wake = 0.0
+    while time.time() - t0 < probe_s:
+        now = time.time()
+        if now >= next_wake:
+            udp.write(b'\x00')
+            next_wake = now + resend_s
         data = udp.read()
         if data:
             udp.sock.settimeout(old_timeout)
             return udp
-            
+
     # No data received, fallback to Serial
     udp.close()
     return SerialSource(port, baud, timeout)

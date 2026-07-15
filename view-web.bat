@@ -26,7 +26,7 @@ if not exist "%VENV_PY%" (
 "%VENV_PY%" -c "import fastapi, uvicorn, numpy, serial, roomscan" 2>nul || (
     echo [setup] Installing dependencies ^(first run takes a few minutes^)...
     "%VENV_PY%" -m pip install --quiet --upgrade pip
-    "%VENV_PY%" -m pip install --quiet -e host || (
+    "%VENV_PY%" -m pip install --quiet -e host[web] || (
         echo [error] Dependency installation failed.
         pause
         exit /b 1

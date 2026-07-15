@@ -349,3 +349,44 @@ def test_ir_overlay_builds_and_removes_geometry():
     assert len(mesh.triangles) == 4
     panel_mod.ControlPanel._remove_ir_overlay(fake)
     assert panel_mod._IR_OVERLAY_GEOM not in fake.scene_widget.scene.geoms
+
+
+def test_ir_overlay_sized_from_true_sensor_apex_not_the_offset_eye():
+    """Regression (owner, on-rig 2026-07-15: "look at the size of the person...
+    compared to that same person in the overlay"). Every caller passes the
+    *viewing* eye, which sits `_FOLLOW_BACK_OFF_M` behind the true sensor
+    origin (`follow_camera_target`'s "hair of context"). `camera_locked_quad`
+    sizes the quad as a true sensor-FOV footprint (matches
+    `capture_square_corners`'s apex convention), so building it straight from
+    the offset eye oversizes it (~43% at dist=1.0/back_off=0.3) -- the real
+    IR content ends up dwarfed inside an oversized billboard.
+    `_update_ir_overlay` must reconstruct the true apex first."""
+    __import__("pytest").importorskip("open3d")
+    import numpy as np
+    import open3d as o3d
+
+    class _Scene:
+        def __init__(self): self.geoms = {}
+        def has_geometry(self, n): return n in self.geoms
+        def add_geometry(self, n, g, m): self.geoms[n] = g
+        def remove_geometry(self, n): self.geoms.pop(n, None)
+
+    class _Fake:
+        def __init__(self):
+            self._o3d = o3d
+            self.scene_widget = type("SW", (), {"scene": _Scene()})()
+            self.args = type("A", (), {"fov_h": 55.0, "fov_v": 42.0})()
+            self.ir_opacity = 0.5
+            self._latest_outputs = {"reflectance": np.full((42, 54), 0.5, np.float32)}
+            self.ir_colormap = "gray"
+            self.ir_overlay_material = "M"
+
+    fake = _Fake()
+    eye = [0.0, 0.0, -panel_mod._FOLLOW_BACK_OFF_M]   # the offset viewing eye
+    forward = [0.0, 0.0, 1.0]
+    panel_mod.ControlPanel._update_ir_overlay(fake, eye, forward)
+    mesh = fake.scene_widget.scene.geoms[panel_mod._IR_OVERLAY_GEOM]
+    center = np.asarray(mesh.vertices).mean(axis=0)
+    # Quad center must be `dist` (1.0m) ahead of the TRUE sensor origin
+    # ([0, 0, 0], since eye = origin - back_off*forward here), not the eye.
+    np.testing.assert_allclose(center, [0.0, 0.0, 1.0], atol=1e-9)

@@ -27,6 +27,10 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-013 | fixed   | host/panel    | SLAM-mode Record never stops/processes — action cluster armed the classic SLAM view, not the Showcase pipeline |
 | BUG-014 | fixed   | host/panel    | First-person IR overlay renders edge-on (white/black) or not at all — first-person camera clobbered + texture not bound as albedo |
 | BUG-015 | fixed   | host/panel    | Overlays → Sensors toggle showed nothing — sensor widgets lived only in the settings dialog, no floating overlay |
+| BUG-016 | fixed   | host/panel    | First-person IR overlay: upside-down texture, hidden on a fresh launch, and oversized vs. the real point cloud |
+| BUG-017 | fixed   | host/panel    | Panel launch always fails "port in use" — its own ST-Link log-tail thread races the CDC-missing serial fallback for the same COM port |
+| BUG-018 | fixed   | host/panel    | Launch failures (missing/busy scanner port) never appeared in app.log — printed to console only |
+| BUG-019 | fixed   | host/sources  | Ethernet preference was fragile: `.local` resolution always failed on Windows, and the "retry" loop only ever sent one wake packet |
 
 ---
 
@@ -366,3 +370,155 @@ Baseline control (its display-widget updates are now `hasattr`-guarded, closing 
 was toggled on after being built-disabled). Also (owner request) the app now **defaults to Real-Time
 first-person** (`ViewerConfig.mode` "slam" → "real_time"). Tests: `render_sensors_overlay` shape/no-data/
 heading-change; config default. On-screen placement still wants an owner eyeball.
+
+## BUG-016 — First-person IR overlay: upside-down, hidden on launch, oversized
+
+- **Status:** **fixed** 2026-07-15 · **Reported:** 2026-07-15 (owner, on-rig) · **Area:** host/panel
+- **Where:** `host/src/roomscan/ir_overlay.py` (`camera_locked_quad`), `host/src/roomscan/config.py`
+  (`ViewerConfig.ir_overlay`), `host/src/roomscan/panel.py` (`_update_ir_overlay`)
+
+The on-rig eyeball that BUG-014/ROADMAP flagged as still outstanding ("IR billboard texture
+render/UV orientation + opacity") surfaced three independent faults:
+
+1. **Upside-down texture.** `camera_locked_quad`'s UVs mapped the top-left vertex to `v=0`, but
+   Open3D/Filament samples textures bottom-left-origin (OpenGL convention) while the reflectance
+   image (`reflectance_to_rgb`/`o3d.geometry.Image`) is row-major top-down like every other array
+   in this codebase — rendering the billboard upside down. **Fix:** flip `v` (TL/TR/BR/BL now map
+   to `v=1,1,0,0`).
+2. **Hidden on a fresh launch despite the opacity slider sitting at 50%.** `ViewerConfig.ir_overlay`
+   defaulted to `False` while `ir_opacity` defaults to `0.5` — inconsistent with the "opacity > 0.02
+   implies enabled" invariant `_set_ir_opacity`/`_toggle_ir_overlay` already enforce on every runtime
+   interaction (round 4 of BUG-014). A fresh install (no saved config yet) started in that
+   self-contradictory state. **Fix:** default `ir_overlay` to `True`.
+3. **Oversized relative to the real point cloud** (owner screenshots: "look at the size of the
+   person in the foreground, compared to that same person in the overlay" — the same content
+   filled far more of the billboard's real-terms footprint than its rectangle implied). Root cause:
+   `_update_ir_overlay` built the quad from the *viewing* eye that every caller passes — Real-Time's
+   fixed `[0,0,-_FOLLOW_BACK_OFF_M]`, SLAM/showcase's `follow_camera_target(pose)` result — which
+   sits `_FOLLOW_BACK_OFF_M` (0.3 m) *behind* the true sensor origin ("a hair of context", per
+   `follow_camera_target`'s own docstring). But `camera_locked_quad` sizes the quad as a true
+   sensor-FOV footprint anchored at the sensor's own origin (matches `capture_square_corners`'s apex
+   convention, verified by `test_quad_corners_match_capture_square_convention`) — building it from a
+   point 0.3 m further back than that origin inflates the quad by `dist/(dist-back_off)` ≈ 43% at
+   `dist=1.0`, dwarfing the real IR content drawn inside it. Verified numerically (no on-rig render
+   needed — Filament can't render headless on this box): projecting the Deprojector's true FOV-corner
+   rays and the billboard's corners through the same look-at + perspective transform showed the
+   un-fixed quad ~23% oversized in NDC space at a representative 1.5 m scan depth; reconstructing the
+   apex (`eye + _FOLLOW_BACK_OFF_M * forward`, the inverse of `follow_camera_target`'s
+   `eye = sensor_pos - back_off*forward`) closed the gap to ~6%, fully explained by the
+   Deprojector's zone-center (vs. edge) convention and the quad's fixed 1.0 m placement vs. the
+   test depth — not a further bug. **Fix:** `_update_ir_overlay` now reconstructs the true apex
+   before calling `camera_locked_quad`, fixing all three call sites (Real-Time, SLAM follow,
+   showcase RECORDING) at once. Regression: `test_ir_overlay_sized_from_true_sensor_apex_not_the_offset_eye`.
+
+Tests: 576 host tests green. On-screen render still wants an owner eyeball to confirm the fixes read
+correctly (this pass was code+numerics only — Filament can't render headless on this box).
+
+## BUG-017 — Panel launch always fails "port in use", every retry, no external process
+
+- **Status:** **fixed** 2026-07-15 · **Reported:** 2026-07-15 (owner) · **Area:** host/panel
+- **Where:** `host/src/roomscan/panel.py` (`_stlink_logger_thread`, `_open_source`),
+  `host/src/roomscan/sources.py` (`SerialSource.find_port`)
+
+`roomscan-panel` failed to launch with `error: the scanner port is in use: ... PermissionError`,
+offering to close the one roomscan process it found holding the port — which was **the process
+asking the question**. Killing it and relaunching reproduced identically every time.
+
+Root cause: two features raced for the same COM port, entirely within a single process, whichever
+port happened to be a Nucleo's ST-Link VID (`0x0483`) device. **(1)** Today's ST-Link log-tail
+addition, `_stlink_logger_thread`, starts as a daemon thread at the very top of `run()` — before the
+scanner port is even opened — and opens the first ST-Link-VID port it finds to tail firmware
+`printf` output. **(2)** `SerialSource.find_port()` had a "milestone 1a" fallback (from before native
+USB CDC existed): if the CAFE:4001 CDC device isn't enumerated, fall back to the first ST-Link-VID
+port and treat it as the scanner data port — but in the current architecture that port only ever
+carries plain-text debug printfs, never protocol frames, so this fallback couldn't actually have
+worked even had it won the race. `_open_source`'s scanner-open attempt (the fallback branch) only
+runs after `get_best_source`'s ~5 s UDP probe, so the logger thread — with zero delay — reliably won
+the race for that port every time, and `_open_source` saw its own process's PermissionError.
+
+**Fix (two parts):**
+1. **Removed the vestigial fallback.** `SerialSource.find_port()` now only matches the CDC device
+   (`CAFE:4001`); it no longer treats an ST-Link VCOM port as a candidate scanner port, so it no
+   longer competes with `_stlink_logger_thread` for it. (Flashing over SWD via
+   `STM32_Programmer_CLI` is on a separate USB interface from the VCOM UART bridge — holding the
+   VCOM open for logging never blocks a flash.)
+2. **A busy serial port is no longer a launch blocker.** Ethernet (Phase 5) is the production
+   transport now, so `_open_source` warns and falls back to a listening `UdpSource` instead of
+   aborting the app when the serial fallback is busy (still offers the interactive close-the-holder
+   prompt first, when useful). Regression: `test_open_source_busy_port_warns_and_falls_back_to_udp`
+   (`host/tests/test_panel.py`).
+
+Tests: 576 host tests green.
+
+## BUG-018 — Launch failures never appeared in app.log
+
+- **Status:** **fixed** 2026-07-15 · **Reported:** 2026-07-15 (owner) · **Area:** host/panel
+- **Where:** `host/src/roomscan/panel.py` (`_report`, `_open_source`)
+
+Surfaced immediately after BUG-017: a missing-scanner launch failure (`error: scanner not found: no
+scanner serial port found among [...]`) printed correctly to the console, but "None of these were
+logged in .../app.log". Two independent sources of console-only output turned out to be involved —
+the `[run]`/`[tip]`/`[hint]` lines are `echo`ed by `view-panel.bat` itself, entirely outside Python,
+so they can never reach a Python-managed log file — but the actual diagnostic (`_open_source`'s
+error/warning messages) *is* Python's own, and simply used `print(..., file=sys.stderr)` directly
+instead of going through the `logging` module, bypassing the `RotatingFileHandler` that
+`_setup_app_logger` (already called before `_open_source` in `run()`) attaches to the root logger.
+
+**Fix:** added `_report(msg, level="error"|"warning")`, which prints to stderr (unchanged
+console behavior) *and* logs at the matching level; `_open_source`'s four message sites now go
+through it. Verified end-to-end (not just via `caplog`): a forced missing-port failure now leaves the
+exact console text in `logs/app.log`. Regression: `test_open_source_messages_are_logged_not_just_printed`
+(`host/tests/test_panel.py`).
+
+Tests: 577 host tests green.
+
+## BUG-019 — Ethernet preference was fragile (two independent bugs)
+
+- **Status:** **fixed** 2026-07-15 · **Reported:** 2026-07-15 (owner: "we had comms over ethernet
+  working prior to this... it's supposed to prefer ethernet") · **Area:** host/sources
+- **Where:** `host/src/roomscan/sources.py` (`UdpSource._resolve_target`, `get_best_source`)
+
+`get_best_source` is supposed to prefer Ethernet (Phase 5's production transport), probing UDP for
+5 s before falling back to serial. Two independent bugs made that probe unreliable:
+
+1. **`.local` resolution always fails on Windows.** `_resolve_target` tried
+   `socket.gethostbyname("roomscanner.local")` first — but Windows has no native mDNS resolver
+   without Bonjour installed, so this always raises `gaierror` (confirmed on-box:
+   `gethostbyname('roomscanner.local')` → `gaierror(11001, 'getaddrinfo failed')`), meaning the
+   *every-time* path was the broadcast fallback, never the (more reliable, unicast) mDNS-resolved
+   address — despite `zeroconf` already being an installed dependency and `tools/query_mdns.py`
+   already proving the correct call (`Zeroconf().get_service_info("_roomscan._udp.local.",
+   "roomscanner._roomscan._udp.local.")`, matching the lwIP mdns advertisement from ROADMAP Phase 5)
+   works. That correct call was simply never wired into `UdpSource`.
+2. **The "retry" loop only ever sent one wake packet.** `get_best_source` set the *socket's own*
+   timeout to the full 5 s probe window *before* entering the retry loop — so the very first
+   `udp.read()` call itself blocked for up to the whole window internally (returning early only on
+   data), leaving the outer `while time.time() - t0 < 5.0` no real second iteration to resend on.
+   The board doesn't know the host's address up front (needs the "wake" datagram to learn where to
+   reply), and UDP has no delivery guarantee — one dropped packet silently killed Ethernet
+   preference for the entire launch, no retry, every time.
+
+**Fix:**
+1. `_resolve_target` now queries mDNS properly via zeroconf's `get_service_info` (injectable
+   `zeroconf_factory` for tests) and only falls back to subnet broadcast if that finds nothing or
+   errors.
+2. `get_best_source` now uses a short per-read socket timeout (0.2 s) with a real wall-clock polling
+   loop, resending the wake packet every `resend_s` (default 0.5 s) — both now parameters
+   (`probe_s`, `resend_s`) so tests don't need to wait out a real 5 s window.
+
+`UdpSource`/`get_best_source` had zero prior test coverage. Added: mDNS-success /
+mDNS-not-found-falls-back-to-broadcast / zeroconf-error-falls-back-to-broadcast
+(`test_resolve_target_*`), and a loopback-free regression proving the retry loop actually resends
+and returns promptly on data instead of blocking out the full probe window
+(`test_get_best_source_resends_wake_packet_and_returns_promptly_on_data`), all in
+`host/tests/test_sources.py`.
+
+**Still open:** at the time of this fix, neither `socket.gethostbyname` nor a live
+`tools/query_mdns.py` mDNS query found the device on this machine — i.e. this fix makes Ethernet
+discovery *robust*, but doesn't by itself prove the device is currently reachable over Ethernet from
+this PC. Worth an on-rig check: is the Ethernet cable actually connected right now (direct link,
+self-assigned `172.31.253.1`/`.2` per ROADMAP Phase 5, or a real DHCP-served LAN)? The firmware
+itself falls back to USB CDC if it doesn't have a leased Ethernet IP at boot, so "not found over
+Ethernet" can also legitimately mean the device decided to stream over CDC instead.
+
+Tests: 581 host tests green.

@@ -25,6 +25,7 @@ Threading model (hard rules, mirrors the classic viewer's hard-won contract):
 """
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import sys
@@ -2948,7 +2949,23 @@ class ControlPanel:
     def _update_ir_overlay(self, eye, forward):
         """Build/refresh the first-person IR billboard quad (spec §5.2) from the
         latest reflectance frame. Only meaningful in first-person; callers gate
-        on that. No-op (removes) when there's no IR frame."""
+        on that. No-op (removes) when there's no IR frame.
+
+        `eye` is the *viewing* eye passed by every caller (Real-Time's fixed
+        `[0,0,-_FOLLOW_BACK_OFF_M]`, SLAM/showcase's `follow_camera_target`
+        result) -- `_FOLLOW_BACK_OFF_M` metres BEHIND the true sensor origin
+        (a hair of context, per `follow_camera_target`'s docstring). But
+        `camera_locked_quad` sizes the quad as a true sensor-FOV footprint
+        (matches `capture_square_corners`'s apex convention -- see
+        `test_quad_corners_match_capture_square_convention`), so it must be
+        built from the sensor's own origin, not the offset viewing eye: doing
+        the latter (as this did before) sizes the quad ~1/(1-back_off/dist)
+        too large -- at dist=1.0m/back_off=0.3m that's a ~43% oversized quad,
+        dwarfing the real IR content inside it (owner, on-rig 2026-07-15:
+        "look at the size of the person... compared to that same person in
+        the overlay"). Reconstructing the apex (`eye + back_off*forward`,
+        the inverse of `follow_camera_target`'s `eye = sensor_pos -
+        back_off*forward`) fixes this for all three call sites at once."""
         from . import ir_overlay
         outputs = self._latest_outputs or {}
         refl = outputs.get("reflectance")
@@ -2964,8 +2981,9 @@ class ControlPanel:
         auto = ir_range(refl)
         rgb = reflectance_to_rgb(refl, colormap=self.ir_colormap, vmin=auto[0], vmax=auto[1],
                                  upscale=1)
+        apex = np.asarray(eye, dtype=np.float64) + _FOLLOW_BACK_OFF_M * np.asarray(forward, dtype=np.float64)
         verts, uvs, tris = ir_overlay.camera_locked_quad(
-            eye, forward, _WORLD_UP, self.args.fov_h, self.args.fov_v, dist=1.0)
+            apex, forward, _WORLD_UP, self.args.fov_h, self.args.fov_v, dist=1.0)
         # Double-sided: the quad is wound to face -Z (the sensor's own eye), so
         # from the first-person camera -- which looks +Z *out through* the sensor
         # -- it's back-facing and Filament culls it (the billboard renders
@@ -3439,36 +3457,56 @@ def _resolve(argv):
     return args
 
 
+def _report(msg: str, *, level: str = "error") -> None:
+    """Print a launch-time message to stderr AND persist it to app.log. The
+    console the batch launcher opens is often gone by the time anyone looks
+    (closed window, or just a `pause` prompt nobody screenshots) -- these
+    messages are otherwise invisible after the fact (owner, 2026-07-15: "None
+    of these were logged in .../app.log"). Only meaningful once
+    `_setup_app_logger` has attached app.log's handler to the root logger,
+    which `run()` does before calling `_open_source`."""
+    print(msg, file=sys.stderr)
+    getattr(logging.getLogger(), level)(msg)
+
+
 def _open_source(args):
     """Open the frame source, distinguishing a busy port (locked by another
     program -- offer to close it and retry) from a missing one (no scanner /
-    bad path). Returns the source, or None after printing a clean message."""
+    bad path). Returns the source (never None for a busy serial port --
+    Ethernet is the production transport since Phase 5, so that's a warning,
+    not a launch blocker); returns None only for a missing port/replay file,
+    after printing a clean message."""
     try:
         return FileSource(args.replay) if args.replay else get_best_source(args.port, args.baud)
     except Exception as exc:
         if args.replay:
-            print(f"error: could not open replay file {args.replay!r}: {exc}", file=sys.stderr)
+            _report(f"error: could not open replay file {args.replay!r}: {exc}")
             return None
         kind = portguard.classify_open_error(exc)
         if kind == "missing":
-            print(f"error: scanner not found: {exc}\n"
-                  "       Check the USER USB cable (CDC CAFE:4001) and press the board's RESET button.",
-                  file=sys.stderr)
+            _report(f"error: scanner not found: {exc}\n"
+                    "       Check the USER USB cable (CDC CAFE:4001) and press the board's RESET button.")
             return None
-        # busy (or unknown-but-permission): offer to close the holder, then retry once
-        print(f"error: the scanner port is in use: {exc}", file=sys.stderr)
+        # busy (or unknown-but-permission): still offer to close a stray holder
+        # interactively (useful when serial is the only transport in play),
+        # but a locked/busy serial port is no longer a reason to abort the
+        # whole app -- Ethernet (Phase 5) is the production transport now
+        # (owner, 2026-07-15: "since we get data over ethernet now this
+        # should be a warning only"). If the user declines, isn't asked (no
+        # tty), or closing didn't free it, warn and launch anyway on a UDP
+        # source that keeps listening for the device.
+        _report(f"warning: the scanner serial port is in use ({exc}); "
+                "continuing without it -- waiting for the Ethernet stream instead.", level="warning")
         if sys.stdin is not None and sys.stdin.isatty():
             if portguard.offer_to_close_holders(exclude_pid=os.getpid()):
                 time.sleep(0.6)   # let Windows release the handle
                 try:
                     return SerialSource(args.port, args.baud)
                 except Exception as exc2:
-                    print(f"error: port still in use after closing: {exc2}", file=sys.stderr)
-                    return None
-        else:
-            print("       Close any other roomscan viewer/panel window (only one can hold the "
-                  "port), then retry.", file=sys.stderr)
-        return None
+                    _report(f"warning: port still in use after closing ({exc2}); "
+                            "continuing without it -- waiting for the Ethernet stream instead.",
+                            level="warning")
+        return UdpSource()
 
 
 def _setup_app_logger():

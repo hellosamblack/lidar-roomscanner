@@ -165,7 +165,11 @@ def test_ir_range_frozen_from_config_persists_across_frames():
 
 # --- run(): graceful failure when the scanner port is busy -------------------
 
-def test_run_reports_busy_port_cleanly(monkeypatch, capsys, tmp_path):
+def test_open_source_busy_port_warns_and_falls_back_to_udp(monkeypatch, capsys, tmp_path):
+    """Regression (owner, 2026-07-15): a busy/locked serial port used to abort
+    the whole app. Ethernet (Phase 5) is the production transport now, so this
+    must be a warning, not a launch blocker -- `_open_source` falls back to a
+    UDP source (kept listening for the device) instead of returning None."""
     monkeypatch.setenv("APPDATA", str(tmp_path))
     import roomscan.panel as panel
 
@@ -173,14 +177,41 @@ def test_run_reports_busy_port_cleanly(monkeypatch, capsys, tmp_path):
         def __init__(self, *a, **k):
             raise Exception("could not open port 'COM99': PermissionError(13, 'Access is denied.')")
 
+    class _FakeUdp:
+        def __init__(self, *a, **k): pass
+
     monkeypatch.setattr(panel, "get_best_source", _BusyPort)
+    monkeypatch.setattr(panel, "UdpSource", _FakeUdp)
     args = panel._resolve([])          # no --replay -> live path -> get_best_source
     args.port = "COM99"
-    rc = panel.run(args)               # pytest stdin is not a tty -> no interactive prompt
-    assert rc == 1                     # clean exit, not an uncaught traceback
+    source = panel._open_source(args)  # pytest stdin is not a tty -> no interactive prompt
+    assert isinstance(source, _FakeUdp)   # launch continues -- never None for a busy port
     err = capsys.readouterr().err
-    assert "port is in use" in err
-    assert "Close any other roomscan" in err   # busy-port hint shown (non-interactive)
+    assert "warning" in err and "port is in use" in err
+    assert "waiting for the Ethernet stream" in err
+
+
+def test_open_source_messages_are_logged_not_just_printed(monkeypatch, caplog, tmp_path):
+    """Regression (owner, 2026-07-15): "None of these were logged in
+    .../app.log" -- a failed launch's messages (missing scanner, busy port)
+    only ever went to the console via `print`, invisible once that window is
+    gone. `_open_source` must route them through `_report`, which also logs
+    at the matching level, so they land in app.log (`_setup_app_logger`
+    attaches its handler to the root logger `_report` writes to)."""
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    import roomscan.panel as panel
+
+    class _NoPort:
+        def __init__(self, *a, **k):
+            raise FileNotFoundError(2, "The system cannot find the file specified.")
+
+    monkeypatch.setattr(panel, "get_best_source", _NoPort)
+    args = panel._resolve([])
+    args.port = "COM99"
+    with caplog.at_level("INFO"):
+        source = panel._open_source(args)
+    assert source is None
+    assert any(r.levelname == "ERROR" and "scanner not found" in r.message for r in caplog.records)
 
 
 def test_run_reports_missing_port_cleanly(monkeypatch, capsys, tmp_path):

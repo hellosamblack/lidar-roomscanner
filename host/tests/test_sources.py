@@ -1,11 +1,121 @@
+import socket
 import struct
+import time
 
 from roomscan.decoder import StreamDecoder
 from roomscan.protocol import FrameHeader, FrameType, StreamId, pack_frame
-from roomscan.sources import FileSource, Recorder, pump
+from roomscan.sources import FileSource, Recorder, UdpSource, get_best_source, pump
 
 HDR = FrameHeader(FrameType.DATA, StreamId.DEPTH_ZF32, 0, 1, 0, 2, 2, 16)
 FRAME = pack_frame(HDR, struct.pack("<4f", 1.0, 2.0, 3.0, 4.0))
+
+
+# --- UdpSource._resolve_target: mDNS-first, broadcast-fallback --------------
+
+class _FakeInfo:
+    def __init__(self, addrs): self._addrs = addrs
+    def parsed_addresses(self): return self._addrs
+
+
+class _FakeZeroconf:
+    """Injectable stand-in for zeroconf.Zeroconf -- no real network I/O."""
+    _answer = None   # class-level knob the test sets before constructing UdpSource
+
+    def get_service_info(self, service_type, name, timeout=1500):
+        return self._answer
+
+    def close(self): pass
+
+
+def test_resolve_target_uses_mdns_address_when_found():
+    _FakeZeroconf._answer = _FakeInfo(["10.1.2.3"])
+    try:
+        src = UdpSource(port=0, zeroconf_factory=_FakeZeroconf)
+        try:
+            assert src.target_ip == "10.1.2.3"
+        finally:
+            src.close()
+    finally:
+        _FakeZeroconf._answer = None
+
+
+def test_resolve_target_falls_back_to_broadcast_when_mdns_finds_nothing():
+    _FakeZeroconf._answer = None   # zeroconf found no matching service
+    src = UdpSource(port=0, zeroconf_factory=_FakeZeroconf)
+    try:
+        assert src.target_ip == "255.255.255.255"
+        # SO_BROADCAST must actually be enabled, or a broadcast sendto() would fail
+        assert src.sock.getsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST) != 0
+    finally:
+        src.close()
+
+
+def test_resolve_target_falls_back_to_broadcast_on_zeroconf_error():
+    class _BrokenZeroconf:
+        def __init__(self): raise OSError("no multicast interface")
+
+    src = UdpSource(port=0, zeroconf_factory=_BrokenZeroconf)
+    try:
+        assert src.target_ip == "255.255.255.255"
+    finally:
+        src.close()
+
+
+# --- get_best_source: real retry loop, not a single blocking read -----------
+
+def test_get_best_source_resends_wake_packet_and_returns_promptly_on_data(monkeypatch):
+    """Regression (owner, 2026-07-15): the old code set the *socket's* own
+    timeout to the full probe window before the retry loop, so the very
+    first `udp.read()` call blocked for the whole window internally -- the
+    outer `while` never got a real second iteration, so exactly one wake
+    packet was ever sent and a single dropped UDP packet silently killed
+    Ethernet preference for the whole launch ("we had comms over ethernet
+    working prior to this... it's supposed to prefer ethernet"). Now: short
+    per-read timeout, real polling, periodic resend, and an immediate return
+    the moment data arrives (no full-window wait)."""
+    import roomscan.sources as sources
+
+    class _FakeUdp:
+        def __init__(self, *a, **k):
+            self.sock = _FakeSock()
+            self.writes = 0
+            self.closed = False
+            self._t0 = time.time()
+
+        def write(self, data):
+            self.writes += 1
+
+        def read(self):
+            # "device" answers only once a couple of resend windows have
+            # genuinely elapsed -- proves the loop is really polling/resending,
+            # not just blocking once on the first call.
+            if time.time() - self._t0 >= 0.12 and self.writes >= 2:
+                return b"frame-data"
+            return b""
+
+        def close(self):
+            self.closed = True
+
+    class _FakeSock:
+        def gettimeout(self): return 0.05
+        def settimeout(self, v): pass
+
+    fake_holder = {}
+
+    def _make_fake(*a, **k):
+        fake_holder["fake"] = _FakeUdp()
+        return fake_holder["fake"]
+
+    monkeypatch.setattr(sources, "UdpSource", _make_fake)
+    t0 = time.time()
+    result = sources.get_best_source(probe_s=2.0, resend_s=0.05)
+    elapsed = time.time() - t0
+
+    fake = fake_holder["fake"]
+    assert result is fake
+    assert not fake.closed                # never fell back to Serial
+    assert fake.writes >= 2               # resent the wake packet, not just once
+    assert elapsed < 1.0                  # returned promptly, did not wait out probe_s
 
 
 def test_file_source_replays_all_frames(tmp_path):

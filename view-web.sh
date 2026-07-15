@@ -31,7 +31,7 @@ fi
 if ! "$VENV_PY" -c "import fastapi, uvicorn, numpy, serial, roomscan" >/dev/null 2>&1; then
     echo "[setup] Installing dependencies (first run takes a few minutes)..."
     "$VENV_PY" -m pip install --quiet --upgrade pip
-    "$VENV_PY" -m pip install --quiet -e host
+    "$VENV_PY" -m pip install --quiet -e "host[web]"
 fi
 
 echo "[run] Starting web viewer on http://localhost:8000/static/index.html"

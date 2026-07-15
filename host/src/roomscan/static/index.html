@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Roomscan Web UI</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0c10;
+            --panel-bg: rgba(22, 24, 30, 0.6);
+            --panel-border: rgba(255, 255, 255, 0.08);
+            --text-main: #e2e8f0;
+            --text-muted: #94a3b8;
+            --accent: #3b82f6;
+            --accent-hover: #60a5fa;
+            --danger: #ef4444;
+            --success: #10b981;
+        }
+
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            user-select: none;
+        }
+
+        #canvas-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 1;
+        }
+
+        /* Glassmorphism Sidebar */
+        #sidebar {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 320px;
+            z-index: 10;
+            background: var(--panel-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--panel-border);
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--panel-border);
+            padding-bottom: 16px;
+        }
+
+        .title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin: 0;
+            letter-spacing: -0.025em;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: var(--text-muted);
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--danger);
+            transition: background-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .dot.connected {
+            background-color: var(--success);
+            box-shadow: 0 0 12px var(--success);
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .group-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        button {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--panel-border);
+            color: var(--text-main);
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-family: inherit;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        button:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(255, 255, 255, 0.2);
+            transform: translateY(-1px);
+        }
+
+        button:active {
+            transform: translateY(1px);
+        }
+
+        button.primary {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: white;
+            box-shadow: 0 4px 14px rgba(59, 130, 246, 0.3);
+        }
+
+        button.primary:hover {
+            background: var(--accent-hover);
+            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4);
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        /* Overlay metrics */
+        #metrics-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            background: var(--panel-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--panel-border);
+            border-radius: 12px;
+            padding: 16px;
+            color: var(--text-muted);
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            gap: 24px;
+        }
+        
+        .metric-value {
+            color: var(--text-main);
+            font-weight: 700;
+        }
+
+    </style>
+</head>
+<body>
+    <div id="canvas-container"></div>
+    
+    <div id="metrics-overlay">
+        <div class="metric">
+            <span>Render FPS</span>
+            <span class="metric-value" id="fps-val">--</span>
+        </div>
+        <div class="metric">
+            <span>Points</span>
+            <span class="metric-value" id="pts-val">0</span>
+        </div>
+    </div>
+
+    <div id="sidebar">
+        <div class="header">
+            <h1 class="title">Roomscan</h1>
+            <div class="status-indicator">
+                <span id="conn-text">Offline</span>
+                <div class="dot" id="conn-dot"></div>
+            </div>
+        </div>
+
+        <div class="control-group">
+            <span class="group-label">Device Controls</span>
+            <button class="primary" id="btn-ping">Ping Device</button>
+            <div class="grid-2">
+                <button id="btn-calib">Calibrate</button>
+                <button id="btn-reinit">Reinit</button>
+            </div>
+        </div>
+
+        <div class="control-group">
+            <span class="group-label">Usecase Profile</span>
+            <div class="grid-2">
+                <button id="btn-uc0">AR Range</button>
+                <button id="btn-uc1">Precision</button>
+            </div>
+        </div>
+        
+        <div class="control-group">
+            <span class="group-label">View</span>
+            <button id="btn-reset-cam">Reset Camera</button>
+        </div>
+    </div>
+
+    <!-- Import map: lets the browser resolve the bare "three" specifier that
+         three's jsm addons (e.g. OrbitControls) import internally. Without this,
+         OrbitControls fails with "Failed to resolve module specifier 'three'",
+         which aborts app.js entirely (no WebSocket, no data). Must appear before
+         the module script below. -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <!-- Import App Logic -->
+    <script type="module" src="app.js"></script>
+</body>
+</html>
