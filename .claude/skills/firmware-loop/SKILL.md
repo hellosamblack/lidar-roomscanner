@@ -128,6 +128,9 @@ reporting one bare "fps" number (this exact ambiguity caused real confusion in t
 - Board dead-silent for the CDC port well past `--boot-timeout` → likely genuinely wedged (rare; the
   internal retry above handles the common case). Reset via SWD; if that doesn't recover it, attach a
   debugger rather than guessing.
+- **Always check the local logs** when debugging crashes or freezes:
+  - `logs/app.log` captures Python UI interactions (buttons, mode changes) and all uncaught Python exceptions.
+  - `logs/firmware.log` captures the raw serial `printf` output from the ST-Link VCOM port (1Hz heartbeat + probes).
 
 ## Gotchas
 

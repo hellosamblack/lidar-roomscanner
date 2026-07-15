@@ -2790,11 +2790,9 @@ class ControlPanel:
                 return True    # read-only, but consume so it doesn't orbit the camera
         except Exception as exc:
             print(f"CRASH in HUD click: {exc}")
-            traceback.print_exc()
-        return False
-
-    # ---- Mode / camera / action wiring (Task 10) ----------------------------
     def _set_mode(self, m):
+        import logging
+        logging.getLogger().info(f"UI Action: Mode changed to {m}")
         if m == self.mode:
             return
         self.mode = m
@@ -2816,6 +2814,8 @@ class ControlPanel:
         self.bus.publish(f"mode -> {m}")
 
     def _set_camera(self, c):
+        import logging
+        logging.getLogger().info(f"UI Action: Camera switched to {c}")
         if c == self.camera_mode:
             return
         self.camera_mode = c
@@ -2872,6 +2872,8 @@ class ControlPanel:
         }.get(phase, ["REC", "LOAD", "CLR"])
 
     def _do_action(self, segment):
+        import logging
+        logging.getLogger().info(f"UI Action: HUD cluster button {segment} clicked")
         labels = self._hud_action_labels()
         if segment is None or segment >= len(labels):
             return
@@ -3371,6 +3373,8 @@ class ControlPanel:
             self.bus.publish("IR range auto")
 
     def _on_record(self, *_):
+        import logging
+        logging.getLogger().info(f"UI Action: Record button toggled to {self.btn_record.is_on}")
         if self.btn_record.is_on:
             Path("captures").mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y%m%d_%H%M%S")

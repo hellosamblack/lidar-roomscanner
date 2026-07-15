@@ -72,8 +72,10 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
   consumes is tested.
 - Decoder and deprojection operate on `bytes`/`numpy` — no I/O in those modules. I/O lives in
   `sources.py` so tests never need hardware.
-- Every capture-format consumer must also accept file replay (`FileSource`) — hardware-free development
+- Every capture-format consumer must also accept file replay (`FileSource`) - hardware-free development
   and regression datasets come for free.
+- **Logging**: The app writes automatic rotating logs to `logs/app.log` (Python tracebacks, UI actions) and 
+  `logs/firmware.log` (ST-Link VCOM output). Always check these when diagnosing crashes or hangs.
 
 ## Verification discipline
 
