@@ -138,7 +138,7 @@ int main(void)
   /* USER CODE END 2 */
 
   /* Initialize COM1 port (115200, 8 bits (7-bit data + 1 stop bit), no parity */
-  BspCOMInit.BaudRate   = 921600;
+  BspCOMInit.BaudRate   = 115200;
   BspCOMInit.WordLength = COM_WORDLENGTH_8B;
   BspCOMInit.StopBits   = COM_STOPBITS_1;
   BspCOMInit.Parity     = COM_PARITY_NONE;
@@ -147,6 +147,7 @@ int main(void)
   {
     Error_Handler();
   }
+  setvbuf(stdout, NULL, _IOLBF, 0);
   
   ETH_Init();
 
