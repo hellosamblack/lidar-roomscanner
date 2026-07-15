@@ -140,7 +140,8 @@ int main(void)
   {
     Error_Handler();
   }
-  setvbuf(stdout, NULL, _IOLBF, 0);
+  static char stdout_buf[512];
+  setvbuf(stdout, stdout_buf, _IOLBF, sizeof(stdout_buf));
   
   ETH_Init();
 
