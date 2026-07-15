@@ -343,5 +343,9 @@ def test_ir_overlay_builds_and_removes_geometry():
     fake = _Fake()
     panel_mod.ControlPanel._update_ir_overlay(fake, [0, 0, 0], [0, 0, 1])
     assert panel_mod._IR_OVERLAY_GEOM in fake.scene_widget.scene.geoms
+    # Double-sided (4 triangles): the quad must render from the first-person eye,
+    # which sees its back face -- a single-sided quad is culled (invisible).
+    mesh = fake.scene_widget.scene.geoms[panel_mod._IR_OVERLAY_GEOM]
+    assert len(mesh.triangles) == 4
     panel_mod.ControlPanel._remove_ir_overlay(fake)
     assert panel_mod._IR_OVERLAY_GEOM not in fake.scene_widget.scene.geoms

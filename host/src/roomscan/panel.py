@@ -2959,6 +2959,12 @@ class ControlPanel:
                                  upscale=1)
         verts, uvs, tris = ir_overlay.camera_locked_quad(
             eye, forward, _WORLD_UP, self.args.fov_h, self.args.fov_v, dist=1.0)
+        # Double-sided: the quad is wound to face -Z (the sensor's own eye), so
+        # from the first-person camera -- which looks +Z *out through* the sensor
+        # -- it's back-facing and Filament culls it (the billboard renders
+        # nothing in first-person). Append reversed triangles so it draws from
+        # either side. Verified via render_to_image against a first-person camera.
+        tris = np.vstack([tris, tris[:, ::-1]])
         o3d = self._o3d
         m = o3d.geometry.TriangleMesh()
         m.vertices = o3d.utility.Vector3dVector(verts)

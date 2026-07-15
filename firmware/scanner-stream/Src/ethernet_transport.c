@@ -79,6 +79,12 @@ void ETH_Process(void)
 {
     ethernetif_input(&gnetif);
     sys_check_timeouts();
+    
+    static uint32_t last_link_check = 0;
+    if (HAL_GetTick() - last_link_check > 500) {
+        last_link_check = HAL_GetTick();
+        ethernet_link_check_state(&gnetif);
+    }
 
     if (netif_is_link_up(&gnetif) && !eth_link_up)
     {
