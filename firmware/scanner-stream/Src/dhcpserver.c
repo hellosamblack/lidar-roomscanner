@@ -13,6 +13,7 @@
 #define DHCP_MSG_REQUEST  3
 #define DHCP_MSG_ACK      5
 
+#define DHCP_OPTION_PAD        0
 #define DHCP_OPTION_MSG_TYPE   53
 #define DHCP_OPTION_SERVER_ID  54
 #define DHCP_OPTION_SUBNET_MASK 1
@@ -68,6 +69,12 @@ static void dhcps_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_
     uint16_t opt_len = (uint16_t)(p->tot_len - DHCP_HEADER_LEN);
     /* i + 1 < opt_len keeps opt[i+1] (the length byte) in bounds every step. */
     for (uint16_t i = 0; i + 1 < opt_len && opt[i] != DHCP_OPTION_END;) {
+        /* PAD is a single byte with no length/data field; skip it before
+           treating opt[i+1] as a length, or we'd misparse padded options. */
+        if (opt[i] == DHCP_OPTION_PAD) {
+            i++;
+            continue;
+        }
         if (opt[i] == DHCP_OPTION_MSG_TYPE) {
             if (i + 2 < opt_len && opt[i + 1] == 1) {
                 msg_type = opt[i + 2];
