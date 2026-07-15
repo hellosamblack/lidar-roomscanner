@@ -20,6 +20,7 @@ F:\git\personal\lidar\
 │  ├─ docs\
 │  │  ├─ engineering-practices.md            ← binding conventions (repo rules, protocol rules, firmware/host standards)
 │  │  ├─ protocol.md                         ← wire protocol spec (created by Phase 1 Task 1)
+│  │  ├─ headless-host-setup.md              ← 5-min bring-up for a GPU-less Linux host (web viewer); run host/tools/headless_doctor.py
 │  │  └─ superpowers\plans\                  ← implementation plans (Phase 1 plan lives here)
 │  ├─ firmware\            ← our firmware forks (scanner-stream; created by Phase 1 Task 6) + vendored deps
 │  │  └─ vendor\

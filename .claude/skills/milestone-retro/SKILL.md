@@ -51,6 +51,35 @@ major effort, before the next phase's plan executes.
   and a corrupted/malformed-input case exercised on hardware, not just a single well-formed sample
   (caught in Phase 3 Task 2's parse-while-draining rework).
 
+## Executed 2026-07-15 (headless-host bring-up retro)
+
+Not an SDD phase — a bug-fix session bringing the repo up on a fresh **headless
+Linux host** (Proxmox/LXC, no GPU, Ethernet-only). Four migration gaps, all the
+same shape (implicit on the Windows dev box, absent on the fresh host):
+BUG-020 (native transform loader Windows-only), UDP keepalive self-heal,
+BUG-021 (three.js vendored off the unpkg CDN), BUG-022 (software-WebGL Chrome
+flag) — all in `BUGS.md`, merged `71f145e`, pushed. Each gap cost a manual
+diagnosis dig, so the extraction is a **doctor script + reference doc** (like the
+07-10 host-side retro's coordinate-frames doc, not SDD tooling):
+
+- **`host/tools/headless_doctor.py`** — THE extraction. Runs the whole fresh-host
+  diagnosis in ~5 s: vendored 53L9A1 sources present → native `.so` built+loadable
+  (`--build` builds it) → board reachable + actually streaming (wake→frames) →
+  viewer assets self-contained (no unpkg) → browser+WebGL. Each failure prints the
+  exact fix; exit code = failures. Verified live (all pass on the current host).
+- **`docs/headless-host-setup.md`** — 5-minute checklist: the four gaps, the
+  doctor one-liner, and an "Offline"-diagnosis table keyed to the in-browser diag
+  panel added this session. Pointer wired into CLAUDE.md's docs list.
+- **Memories**: `headless-host-deployment` (host is GPU-less/Ethernet-only, the
+  four gaps + fixes) and `agent-sandbox-port-binding` (Bash sandbox kills
+  uvicorn/exit-144; use `dangerouslyDisableSandbox`, verify data path direct +
+  browser via headless-Chrome screenshot). Both indexed in MEMORY.md.
+- **Deliberately skipped**: no `firmware-loop`/`protocol-change` edits (no
+  firmware or wire change — host + browser only); the stale "USB CDC is production
+  link" line in the `mapping-pipeline-plan` memory is noted/superseded by the new
+  headless memory but not rewritten (predates the headless move; a bigger truing-up
+  best done when transport docs are next touched).
+
 ## Executed 2026-07-14 (Phase 5 Ethernet retro)
 
 - **ROADMAP.md / CLAUDE.md trued up**: Phase 5 marked complete (no longer shelved). The architecture decision was updated to reflect USB CDC OR Ethernet UDP as the transport links.
