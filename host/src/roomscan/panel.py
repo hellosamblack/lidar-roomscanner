@@ -3522,7 +3522,8 @@ def _stlink_logger_thread():
                 break
         if port:
             try:
-                with serial.Serial(port, 921600, timeout=1.0) as ser:
+                with serial.Serial(port, 115200, timeout=1.0) as ser:
+                    ser.reset_input_buffer()
                     fw_logger.info(f"--- Connected to ST-LINK on {port} ---")
                     while True:
                         line = ser.readline()
