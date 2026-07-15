@@ -77,7 +77,8 @@ class SerialSource:
 
 class UdpSource:
     def __init__(self, port: int = 5000, timeout: float = 0.05, *,
-                 zeroconf_factory=Zeroconf, mdns_timeout_ms: float = 1500):
+                 zeroconf_factory=Zeroconf, mdns_timeout_ms: float = 1500,
+                 keepalive_s: float = 1.0):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.settimeout(timeout)
         self.sock.bind(("", port))
@@ -89,6 +90,18 @@ class UdpSource:
         self._current_seq = None
         self._expected_frag = 0
         self._total_frags = 0
+
+        # Keepalive: the board unicasts frames to whichever host last sent it a
+        # datagram (`target_ip`, set in its udp_recv callback), and only clears
+        # that on reboot. get_best_source's wake teaches it our address once at
+        # startup -- but if the board reboots, its Ethernet link flaps, or
+        # another client (a second viewer, a diagnostic) claims the stream, we
+        # go silent forever with no re-wake. Re-send a tiny wake every
+        # keepalive_s so the app re-claims the target and self-heals. The board
+        # treats any inbound datagram as a wake (payload ignored), so this is
+        # harmless when already streaming. keepalive_s <= 0 disables it.
+        self.keepalive_s = keepalive_s
+        self._last_wake = 0.0
 
         # Try to resolve roomscanner.local
         self._resolve_target(zeroconf_factory, mdns_timeout_ms)
@@ -124,7 +137,22 @@ class UdpSource:
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self.target_ip = "255.255.255.255"
 
+    def _maybe_keepalive(self) -> None:
+        """Re-send the wake datagram every keepalive_s so the board keeps
+        streaming to us (see __init__). Called on every read() -- cheap, and
+        the only place in the steady-state loop that runs regularly."""
+        if self.keepalive_s <= 0 or not self.target_ip:
+            return
+        now = time.time()
+        if now - self._last_wake >= self.keepalive_s:
+            self._last_wake = now
+            try:
+                self.sock.sendto(b"\x00", (self.target_ip, self.target_port))
+            except Exception:
+                pass
+
     def read(self) -> bytes:
+        self._maybe_keepalive()
         try:
             data, addr = self.sock.recvfrom(2048)
             self.target_ip = addr[0]

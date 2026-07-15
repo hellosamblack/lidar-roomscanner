@@ -578,3 +578,13 @@ killed, exit 144), so the end-to-end verification drives the identical source→
 data path directly rather than through `roomscan.web`. The server code paths themselves were
 import-checked only. A running instance started *before* the loader fix keeps the old module in
 memory (Python caches imports) — it must be **restarted** to pick up the fix.
+
+**Follow-on robustness (same session):** `UdpSource` now re-sends a wake
+datagram every `keepalive_s` (default 1.0 s) from `read()`, not just during the
+startup probe. The board unicasts frames to whichever host last woke it and
+clears that target only on reboot, so a board reset / link flap / a second
+client claiming the stream previously silenced the viewer permanently (it never
+re-woke). Symptom seen live: a launched instance held UDP 5000 and picked
+Ethernet, then processed zero frames (flat CPU) while the board streamed
+elsewhere. Keepalive makes the app re-claim the target and self-heal. Verified:
+streaming intact with keepalive on (110 slots/5 s); 580 host tests pass.
