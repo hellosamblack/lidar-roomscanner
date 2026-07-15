@@ -12,17 +12,8 @@ Engineering conventions live in [`docs/engineering-practices.md`](./docs/enginee
 
 ## Overriding architecture decisions
 
-- **Transport: native USB CDC is the production link for now; Ethernet is shelved (owner, 2026-07-10).**
-  *(Revises the 2026-07 "Ethernet is the production link, not USB" decision.)* Measurement inverted the
-  original assumption: since Phase 2.5's trigger-early overlap, the CDC send is fully hidden inside the
-  sensor's ranging window — the bandwidth/latency wall is the **I3C sensor readout** (~60-80 Hz raw
-  ceiling at 12.5 MHz, estimate), not the USB link, so an Ethernet cutover buys no fps and no latency
-  today. The `roadmapResearch.md` USB-bandwidth and timestamp-drift concerns were already voided by the
-  raw-streaming architecture. Ethernet (Phase 5) stays fully specced but shelved; **revival triggers**:
-  (a) something lifts the I3C ceiling past what CDC FS carries (~60 Hz raw ≈ 890 KB/s), (b) multi-device
-  hardware time-sync (PTP) becomes a real requirement (e.g. Phase 6 SLAM needs tighter cross-sensor
-  ordering than USB timestamps give), or (c) the tether must outgrow USB cable lengths. The 10/100 MAC
-  is on-chip and the RMII pins stay muxed `AF11_ETH` — nothing is burned by waiting.
+- **Transport: native USB CDC OR Ethernet UDP (Phase 5).**
+  *(Revises the 2026-07-10 "Ethernet is shelved" decision.)* The device now streams flawlessly over either USB CDC or Ethernet (UDP unicast). If Ethernet is plugged in, the device acts as a DHCP client (or falls back to a self-assigned IP server) and streams via UDP to the host when a packet is received. This removes the USB cable length limit and prepares the plumbing for Phase 6's hardware time-sync (PTP) requirements. USB CDC is still supported and automatically falls back if Ethernet is not connected.
 - **Sensors: X-NUCLEO-IKS4A1** adds IMU (LSM6DSV16X, hardware SFLP orientation), magnetometer (yaw-drift
   correction), barometer (Z-drift constraint), temp/humidity (thermal comp). **Integrated as of Phase 4
   (2026-07-10)** — LSM6DSV16X as a native I3C target sharing I3C1 with the ToF (HUB1-only routing,
@@ -45,11 +36,11 @@ Engineering conventions live in [`docs/engineering-practices.md`](./docs/enginee
   see `docs/h563-optimization-notes.md`: the M33 has no vector FPU, CORDIC/FMAC don't fit this workload,
   and fidelity-neutral micro-optimizations buy only ~5-10%). The MCU becomes a thin bridge: raw `3DMD`
   frames (14,842 B at full res, per `docs/vl53l9cx-datasheet-notes.md` p.20) + the calibration blob once
-  at startup stream to the PC, which runs the same portable-C transform bit-exact at desktop speed. Raw
-  at 30 Hz ≈ 445 KB/s fits USB CDC today; ~100 Hz ≈ 1.5 MB/s would be the Ethernet (Phase 5, shelved)
-  trigger — but I3C readout at 12.5 MHz makes 100 Hz raw unreachable on this board anyway (realistic I3C
+  at startup stream to the PC, which runs the same portable-C transform bit-exact at desktop speed.
+  Raw at 30 Hz ≈ 445 KB/s fits USB CDC today; ~100 Hz ≈ 1.5 MB/s fits the Ethernet UDP link.
+  But I3C readout at 12.5 MHz makes 100 Hz raw unreachable on this board anyway (realistic I3C
   ceiling ~60-80 Hz, estimate; the sensor's CSI-2 output is its true 100 Hz path but the H5 has no CSI-2
-  receiver), which is exactly why Ethernet is shelved (see the transport decision above).
+  receiver). Ethernet was implemented in Phase 5 to remove cable limits and prep for PTP sync.
 - **Deferred on-device optimizations** (recorded in case the on-MCU transform path is ever revived):
   `powf(x, const)` → multiplies in `ratenorm.c`/`sharpener.c` shadowed copies (verified `powf` survives
   in the ELF; est. 0.3-2 ms/frame), `-flto` (est. low single-digit %), SRAM bank placement for
@@ -248,9 +239,7 @@ a live-rendered point cloud.
 >   before sending frame N over CDC, hiding the ~15 ms send inside the sensor's ranging window. Measured
 >   **27.76 fps** (up from 24.6), 2 ms settle (down from 5 ms; the one bounded experiment the task allowed),
 >   0 crc, 0 gaps, re-confirmed by this task's 60 s live soak (below). **Strategic implication**: the CDC
->   send is no longer on the critical path at all (fully hidden inside ranging) — so Phase 4's Ethernet
->   cutover will **not** by itself raise raw-only fps further; the sensor-serial chain (settle + ranging +
->   I3C DMA readout) is now the ceiling. Ethernet's value going forward is what the Phase 4 section already
+>   send is no longer on the critical path at all (fully hidden inside ranging). Ethernet's value going forward is what the Phase 4 section already
 >   says: 100 Hz-class rates, hardware PTP timestamping, and zero-config direct-link — not a fps lift for
 >   this loop.
 > - ✅ **ZAPC Deprojector validation** — done Phase 2.5 Task 3: ZAPC's z is bit-identical to ZF32 depth
@@ -319,9 +308,7 @@ for free; multi-stream firmware plumbing is no longer needed.
   `docs/deprojector-validation.md`'s confidence-channel section; see also the Phase 2.5 deferred-list
   entry above).~~ **Fixed**: The uninitialized `conf_scaling` divisor has been set to `1.0f` in the library; the confidence channel now varies dynamically.
 - Bandwidth: only the raw stream crosses the wire (14,842 B/frame — 1.63× the old depth payload,
-  regardless of how many output streams the PC computes). 30 Hz ≈ 445 KB/s fits CDC FS; beyond ~60 Hz
-  wants Phase 4's Ethernet (and I3C readout itself tops out ~60-80 Hz, estimate — see the architecture
-  decision above).
+  regardless of how many output streams the PC computes). 30 Hz ≈ 445 KB/s fits CDC FS.
 
 ### Phase 2.5 (interlude) — Multi-stream color, calibrated FoV, 30 fps overlap ← **✅ Complete**
 
@@ -565,12 +552,15 @@ top of 445 KB/s raw), so nothing here waits on Ethernet.
 > - Integrated STM32 HAL Ethernet drivers (`ethernetif.c` + `lan8742.c`) and lwIP (v2.1.3) manually without STM32CubeMX pollution.
 > - Developed a tiny custom `dhcpserver.c` that provides a self-assigned IP `172.31.253.1` for the device and assigns `172.31.253.2` to the host directly connected via cable.
 > - UDP transmission implemented in `ethernet_transport.c` mapping headers, payload, and tail into lwIP `pbuf` chains and sending to port 5000 via UDP broadcast.
+> - Fixed a hardware descriptor exhaustion issue that dropped the final UDP fragment (increased `ETH_TX_DESC_CNT` from 4 to 8).
+> - Fixed an initialization hang where the sensor blocked indefinitely waiting for a USB CDC connection instead of accepting an Ethernet client.
 > - Fallback logic in `vl53l9_app.c`: if the Ethernet link is up and DHCP leased an IP, `ETH_SendFrame_Gather` handles sending. Otherwise, seamlessly falls back to USB CDC streaming.
 >
 > **Host Implementation:**
 > - Added `UdpSource` in `sources.py` listening on port 5000 and fragment reassembly.
 > - Falls back automatically to `SerialSource` if UDP receives no data in a 0.5s window.
 > - The live soak capture proved a stable ~28.5 fps across CDC fallback. Ethernet provides the plumbing for Phase 6's tighter timestamping/network scale when needed.
+> - Metrics HUD (`metrics_hud.py`) updated to show a 11.0 MB/s limit ETH capacity bar, per-stream jitter tracking, and network frame gap/drop counts.
 > - **Note:** Firmware doesn't support listening for UDP commands yet (device configuration currently occurs via USB CDC), but telemetry fully works over Ethernet.
 
 Enable the ETH MAC + lwIP (RMII pins already muxed; LAN8742 PHY on-board), move the frame protocol onto
