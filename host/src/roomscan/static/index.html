@@ -233,12 +233,16 @@
          three's jsm addons (e.g. OrbitControls) import internally. Without this,
          OrbitControls fails with "Failed to resolve module specifier 'three'",
          which aborts app.js entirely (no WebSocket, no data). Must appear before
-         the module script below. -->
+         the module script below.
+         Vendored locally (host/src/roomscan/static/vendor/) so the viewer is
+         fully self-contained: a headless / air-gapped host has no route to
+         unpkg, and a failed CDN fetch here silently kills the whole page (the
+         status just sits at its initial "Offline"). -->
     <script type="importmap">
     {
         "imports": {
-            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            "three": "/static/vendor/three/three.module.js",
+            "three/addons/": "/static/vendor/three/addons/"
         }
     }
     </script>

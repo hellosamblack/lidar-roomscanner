@@ -32,6 +32,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-018 | fixed   | host/panel    | Launch failures (missing/busy scanner port) never appeared in app.log — printed to console only |
 | BUG-019 | fixed   | host/sources  | Ethernet preference was fragile: `.local` resolution always failed on Windows, and the "retry" loop only ever sent one wake packet |
 | BUG-020 | fixed   | host/native   | Native transform loader was Windows-only (`.dll` name + `build/Release/` path) — blank viewer on the Linux headless host; reader fault never surfaced to the page |
+| BUG-021 | fixed   | host/web      | Web viewer loaded Three.js from a CDN (unpkg) — headless/remote browser couldn't fetch it, `app.js` threw on the bare `three` import, page stuck at "Offline" |
 
 ---
 
@@ -588,3 +589,34 @@ re-woke). Symptom seen live: a launched instance held UDP 5000 and picked
 Ethernet, then processed zero frames (flat CPU) while the board streamed
 elsewhere. Keepalive makes the app re-claim the target and self-heal. Verified:
 streaming intact with keepalive on (110 slots/5 s); 580 host tests pass.
+
+---
+
+## BUG-021 — Web viewer loaded Three.js from a CDN → "Offline", blank on headless host
+
+- **Status:** **fixed** 2026-07-15 · **Reported:** 2026-07-15 (owner, post-migration: "It says
+  offline") · **Area:** host/web
+- **Where:** `host/src/roomscan/static/index.html` (import map), `host/src/roomscan/static/app.js`
+
+The Three.js viewer front-end resolved its `import * as THREE from 'three'` and
+`three/addons/controls/OrbitControls.js` via an import map pointing at
+`https://unpkg.com/three@0.160.0/...`, and pulled Inter/JetBrains-Mono from Google Fonts. On the
+Windows dev box (with internet in the same browser) this worked. On the migrated headless host the
+rendering browser couldn't fetch the CDN module — a remote browser without a route to unpkg, a proxy,
+or a stale tab from a load that failed — so the bare `three` specifier failed to resolve, `app.js`
+threw at module-eval, `connect()` never ran, and no WebSocket was ever opened. Because
+`#conn-text`'s initial markup is literally `Offline`, the page just sat there: server serving live
+frames (verified: a WebSocket client and a fresh Chrome both pulled ~2160-pt frames), browser showing
+"Offline", no error the user could see. Note the host shell *could* `curl` unpkg fine — CDN
+reachability from the shell says nothing about the browser actually rendering the page.
+
+**Fix:** vendored `three.module.js` + `OrbitControls.js` into
+`host/src/roomscan/static/vendor/three/` and repointed the import map at `/static/vendor/three/...`,
+so the viewer is fully self-contained (same rationale as the Artifacts "no external hosts" rule and
+the firmware's vendored tinyusb/lwip). The Google-Fonts `<link>` is left as-is: it degrades to system
+fonts if unreachable and never blocks scripts. Verified end-to-end with headless Chrome against the
+live server: status **Live**, 2247 points, point cloud rendering, zero console errors.
+
+**Note:** this was the third distinct Windows→Linux migration gap in one session, after BUG-020
+(native loader) and the BUG-020 keepalive follow-on. All three shared a shape: something implicit on
+the dev box (a built DLL, a CDN, a still-awake board) that the fresh host didn't have.
