@@ -17,7 +17,7 @@ from .decoder import StreamDecoder
 from .deproject import Deprojector
 from .pipeline import TransformStage
 from .protocol import CommandCode, FLAG_DROPPED, FrameType, ProtocolError, parse_event
-from .sources import FileSource, SerialSource, pump
+from .sources import FileSource, SerialSource, get_best_source, pump
 
 
 class Stats:
@@ -162,7 +162,7 @@ def main(argv=None) -> int:
 
     import open3d as o3d   # deferred: heavy import
 
-    source = FileSource(args.replay) if args.replay else SerialSource(args.port, args.baud)
+    source = FileSource(args.replay) if args.replay else get_best_source(args.port, args.baud)
     # Command channel rides the SAME open port: only meaningful for a live
     # SerialSource (replay has no device to command, so client stays None
     # and CommandKeyState prints "not available in replay" for every key).

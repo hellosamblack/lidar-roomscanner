@@ -58,7 +58,7 @@ from .sensors import (
 from .sensors_widgets import render_compass, render_sparkline, render_sensors_overlay
 from .shading import MODES as _NEAR_MODES
 from .shading import cloud_colors
-from .sources import FileSource, Recorder, SerialSource, pump
+from .sources import FileSource, Recorder, SerialSource, get_best_source, pump
 from .surface import grid_triangles, grid_triangles_3d
 from . import theme
 from .viewer import Stats, _build_arg_parser
@@ -3422,7 +3422,7 @@ def _open_source(args):
     program -- offer to close it and retry) from a missing one (no scanner /
     bad path). Returns the source, or None after printing a clean message."""
     try:
-        return FileSource(args.replay) if args.replay else SerialSource(args.port, args.baud)
+        return FileSource(args.replay) if args.replay else get_best_source(args.port, args.baud)
     except Exception as exc:
         if args.replay:
             print(f"error: could not open replay file {args.replay!r}: {exc}", file=sys.stderr)
