@@ -173,8 +173,8 @@ def test_run_reports_busy_port_cleanly(monkeypatch, capsys, tmp_path):
         def __init__(self, *a, **k):
             raise Exception("could not open port 'COM99': PermissionError(13, 'Access is denied.')")
 
-    monkeypatch.setattr(panel, "SerialSource", _BusyPort)
-    args = panel._resolve([])          # no --replay -> live path -> SerialSource
+    monkeypatch.setattr(panel, "get_best_source", _BusyPort)
+    args = panel._resolve([])          # no --replay -> live path -> get_best_source
     args.port = "COM99"
     rc = panel.run(args)               # pytest stdin is not a tty -> no interactive prompt
     assert rc == 1                     # clean exit, not an uncaught traceback
@@ -191,7 +191,7 @@ def test_run_reports_missing_port_cleanly(monkeypatch, capsys, tmp_path):
         def __init__(self, *a, **k):
             raise FileNotFoundError(2, "The system cannot find the file specified.")
 
-    monkeypatch.setattr(panel, "SerialSource", _NoPort)
+    monkeypatch.setattr(panel, "get_best_source", _NoPort)
     args = panel._resolve([])
     args.port = "COM99"
     rc = panel.run(args)

@@ -58,7 +58,11 @@ class ViewerConfig:
     metrics_overlay: bool = True       # show the on-scene metrics HUD (rates/fps/resources)
     mode: str = "real_time"            # UI redesign: "real_time" | "slam" (owner: default to real-time)
     camera: str = "first_person"       # UI redesign: "first_person" | "orbit"
-    ir_overlay: bool = False           # first-person IR billboard overlay on/off
+    ir_overlay: bool = True             # first-person IR billboard overlay on/off (matches
+                                        # ir_opacity's non-zero default -- see _set_ir_opacity's
+                                        # "opacity > 0.02 implies enabled" invariant; a fresh
+                                        # install shouldn't start with the slider and the
+                                        # visibility gate disagreeing)
     ir_opacity: float = 0.5            # IR overlay opacity 0..1
     yaw_fusion: bool = True                 # graft mag heading onto SFLP yaw
     yaw_fusion_tau: float = 20.0            # complementary-filter time constant (s)

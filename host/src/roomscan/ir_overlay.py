@@ -28,6 +28,11 @@ def camera_locked_quad(eye, forward, up, fov_h_deg, fov_v_deg, dist):
     br = center + half_w * right - half_v * quad_up
     bl = center - half_w * right - half_v * quad_up
     verts = np.vstack([tl, tr, br, bl]).astype(np.float64)
-    uvs = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32)
+    # v is flipped (row 0 of the source image -> v=1) because Open3D/Filament
+    # samples textures with a bottom-left origin (OpenGL convention) while the
+    # reflectance image (reflectance_to_rgb / o3d.geometry.Image) is row-major
+    # top-down like every other array in this codebase. Mapping TL -> v=0
+    # verbatim rendered the billboard upside down (owner, on-rig 2026-07-15).
+    uvs = np.array([[0, 1], [1, 1], [1, 0], [0, 0]], dtype=np.float32)
     tris = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
     return verts, uvs, tris

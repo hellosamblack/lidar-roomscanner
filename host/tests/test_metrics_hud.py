@@ -23,7 +23,7 @@ def _res(**over):
 
 def _snap(streams=None, link=400_000.0, fps=27.0, resources="default"):
     if streams is None:
-        streams = [StreamRate(7, "ToF", 28.0, 28.0, 400_000.0)]
+        streams = [StreamRate(7, "ToF", 28.0, 28.0, 400_000.0, 0.0)]
     if resources == "default":
         resources = _res()
     return MetricsSnapshot(fps, streams, link, resources)
@@ -41,8 +41,8 @@ def test_render_hud_width_fixed_height_grows_with_rows():
     # width is fixed; height scales with the number of rows (more sensors / more
     # CPU-core bars -> taller). The overlay frame tracks this each render.
     few = render_hud(_snap(streams=[], resources=None), width=320)
-    many = render_hud(_snap(streams=[StreamRate(7, "ToF", 28.0, 28.0, 4e5),
-                                     StreamRate(9, "IMU", 480.0, 476.0, 8000.0)]),
+    many = render_hud(_snap(streams=[StreamRate(7, "ToF", 28.0, 28.0, 4e5, 0.0),
+                                     StreamRate(9, "IMU", 480.0, 476.0, 8000.0, 0.0)]),
                       width=320)
     assert few.shape[1] == many.shape[1] == 320
     assert many.shape[0] > few.shape[0]
@@ -69,7 +69,7 @@ def test_render_hud_handles_missing_resources():
 
 def test_render_hud_handles_device_hz_none():
     # no usable t_us -> host-only row, no ratio bar; must not raise
-    img = render_hud(_snap(streams=[StreamRate(9, "IMU", None, 476.0, 8000.0)]))
+    img = render_hud(_snap(streams=[StreamRate(9, "IMU", None, 476.0, 8000.0, 0.0)]))
     assert img.shape[2] == 3
 
 

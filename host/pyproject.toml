@@ -12,12 +12,15 @@ dev = ["pytest>=8", "ruff>=0.4"]
 monitor = ["nvidia-ml-py>=12"]
 # Optional KISS-ICP offline odometry benchmark (roomscan.slam.metrics.compare_kiss).
 slam = ["kiss-icp>=1.0"]
+# Web UI dependencies
+web = ["fastapi", "uvicorn", "websockets"]
 
 [project.scripts]
 roomscan-view = "roomscan.viewer:main"
 roomscan-panel = "roomscan.panel:main"
 roomscan-ctl = "roomscan.control:main"
 roomscan-slam = "roomscan.slam.cli:main"
+roomscan-web = "roomscan.web:main"
 
 [tool.pytest.ini_options]
 # Resolve `roomscan` from ./src and `tools` from ./ without relying on an

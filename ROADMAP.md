@@ -484,6 +484,15 @@ are all reused unchanged (no wire change; `docs/protocol.md` untouched).
   branch). Known cosmetic: an Open3D filament-teardown "Fatal Python error" can print at interpreter
   exit (post-functional).
 
+### Phase 3.6 (interlude) — Web UI Migration (FastAPI + Three.js) ← **✅ Complete**
+
+Plan: `web_app_migration_plan.md`. Owner elected to deploy the visualizer to a headless server accessed remotely via Tailscale. The native Open3D UI fails in a locked/headless environment without a display.
+
+- **Architecture (Option A: True Single Codebase):** `roomscan-web` entry point spins up a FastAPI/Uvicorn server running the exact same `TransformStage` reader thread as the desktop viewer. The server exposes a `/ws` WebSocket endpoint that streams the transformed point cloud and color data to the browser as a packed `Float32Array`. 
+- **Frontend:** A premium glassmorphic web UI (`index.html`, `app.js`) running Three.js handles the point cloud rendering on the local browser's GPU. Control elements (Ping, Reinit, Usecase selection) send JSON commands back through the WebSocket to the `CommandKeyState` dispatcher. 
+- **Bandwidth:** The WebSocket streams processed points rather than RAW data. With decimation running, bandwidth sits comfortably below Tailscale's limits.
+- **Verified:** Dependencies added to `[web]` optional group. Ran headless test successfully against `synthetic.bin`; the server boots on port 8000 and serves the static Three.js payload.
+
 ### Phase 4 — Integrate X-NUCLEO-IKS4A1  ← **✅ Complete** *(swapped with Ethernet 2026-07-09, owner decision — sensors next)*
 
 > **Status 2026-07-10:** verified on hardware — the full stack (ToF depth + SFLP orientation +
