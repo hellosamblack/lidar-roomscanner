@@ -12,13 +12,15 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
 - Commit style: conventional-commit-ish prefixes (`feat:`, `fix:`, `docs:`, `test:`, `chore:`), small and
   frequent. Never commit `build/` output or captured binary streams >1 MB (put large captures in
   `captures/` — gitignored — and check in only the small golden fixtures under `host/tests/fixtures/`).
-- **Docs move with the code (status-sync rule).** Any commit/PR that completes a phase, clears a
+- **Docs move with the code (status-sync rule).** Any commit that completes a phase, clears a
   deferred item, changes a measured number, or invalidates a prediction updates `ROADMAP.md` (and
-  `CLAUDE.md`/memory when phase status changes) **in the same PR** — follow the `status-sync` skill
+  `CLAUDE.md`/memory when phase status changes) **in the same commit** — follow the `status-sync` skill
   checklist. "Docs later" is how the 2026-07-10 drift happened.
-- **Branch discipline.** Work rides worktree branches → draft PRs. Never commit to local `main`, never
-  merge locally, never merge your own PR — merging is the owner's decision. Subagents don't commit;
-  the controlling session does.
+- **Branch discipline (owner workflow, 2026-07-16).** Land work by **committing straight to `main`
+  and closing any feature/worktree branch without a PR** (the PR flow is retired — no `gh pr create`,
+  no `gh pr merge`). A short-lived branch/worktree for isolation is fine; finish by getting the commit
+  onto `main` and deleting the branch. Pushing to `origin` is a separate, owner-triggered step.
+  Subagents don't commit; the controlling session does.
 - **Path lengths.** Repo-relative paths stay ≤150 characters (longer breaks `git worktree add` and
   fresh clones on default Windows git).
 
@@ -83,6 +85,9 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
   tool, observe fps + zero CRC failures + zero seq gaps). State actual numbers, not "works".
 - When debugging link problems, capture raw bytes first (`--record`), then debug offline against the
   file — don't iterate on live hardware.
+- **Web UI work is verified visually, not just by tests.** On this headless host use
+  `host/tools/web_ui_shot.py` to screenshot *and* drive the page (headless Chrome over CDP) against a
+  replay server — the full recipe (sandbox/detach caveats, replay selection) is in `docs/web-ui-testing.md`.
 
 ## Self-improvement after milestones
 

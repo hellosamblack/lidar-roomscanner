@@ -12,16 +12,17 @@ consolidated report at the end.
 
 ## Phase 1: Ship It
 
-**Commit & land (PR flow — never merge locally):**
+**Commit & land (commit-to-`main`, no PR — owner workflow 2026-07-16):**
 1. Run `git status` and `git branch` to see current state
 2. Run the `status-sync` skill checklist — the commit must include the doc
    deltas the work implies (ROADMAP.md status, superseded annotations, memory)
 3. If uncommitted changes exist, stage and commit all changed files with a
    descriptive message
-4. If on a feature/worktree branch: push it and open a **draft PR**
-   (`gh pr create --draft`). Do NOT merge into local `main`, do NOT
-   `gh pr merge`, do NOT delete the branch — merging is the owner's call.
-   If somehow on `main` with local commits: STOP and report; never push main.
+4. Land the commit on local `main` and **close any feature/worktree branch
+   without a PR**: either commit directly on `main`, or fast-forward/merge the
+   branch into `main` and `git branch -d` it. No `gh pr create`, no
+   `gh pr merge`. Do NOT push — pushing to `origin` is a separate step the
+   owner asks for explicitly (they may want to review the local commit first).
 
 **File placement check:**
 5. If any files were created or saved during this session:
