@@ -56,9 +56,11 @@ log = logging.getLogger("roomscan.web")
 TAG_POINT_CLOUD = 1
 TAG_IR_IMAGE = 2
 
-# Broadcast cadences (seconds). Point cloud paces the outer loop (~28 Hz);
+# Broadcast cadences (seconds). Point cloud paces the outer loop at a 30 Hz
+# target (owner, 2026-07-16) -- the cap must sit at or above the source rate so
+# it never down-samples the stream; a slower source just re-sends the last frame.
 # IR and metrics run on their own slower elapsed-time gates off the same task.
-POINT_INTERVAL = 1.0 / 28.0
+POINT_INTERVAL = 1.0 / 30.0
 IR_INTERVAL = 1.0 / 15.0
 METRICS_INTERVAL = 1.0 / 4.0
 MISSING_PLANE_LOG_INTERVAL = 3.0   # debounce for missing-plane bus lines
@@ -308,10 +310,18 @@ async def _broadcaster() -> None:
     last_pc_bytes = None
     last_ir = 0.0
     last_metrics = 0.0
+    next_pc = time.monotonic()   # deadline-based pacing: sleep to the next tick,
 
     while True:
-        await asyncio.sleep(POINT_INTERVAL)
+        # not for a fixed interval AFTER the work -- otherwise the true period is
+        # POINT_INTERVAL + work_time and the stream never reaches the target rate.
+        delay = next_pc - time.monotonic()
+        if delay > 0:
+            await asyncio.sleep(delay)
         now = time.monotonic()
+        next_pc += POINT_INTERVAL
+        if next_pc <= now:       # a slow tick overran the interval: resync, don't burst-catch-up
+            next_pc = now + POINT_INTERVAL
 
         # Latest-wins pull; a fresh frame ticks the device-fps render counter.
         try:

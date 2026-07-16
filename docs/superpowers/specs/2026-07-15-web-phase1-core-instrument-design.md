@@ -144,7 +144,9 @@ a **single background asyncio task**, started in a FastAPI `startup` event
 handler, that:
 
 1. Maintains `app.state.clients: set[WebSocket]`.
-2. Each tick (paced to the point-cloud rate, ~1000/28 ≈ 36 ms):
+2. Each tick (paced to the point-cloud rate, ~~~1000/28 ≈ 36 ms~~ **30 Hz ≈ 33 ms as shipped**,
+   owner 2026-07-16 — and via deadline-based pacing, not `sleep(interval)`-then-work, so the target
+   rate is actually reached):
    - Pull the latest `(header, outputs)` from `slot` (non-blocking; skip if
      empty).
    - Build the POINT_CLOUD binary payload from the current `ui_state.color_mode`
