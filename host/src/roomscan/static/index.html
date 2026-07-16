@@ -348,7 +348,13 @@
     <!-- Top bar (§8.1): title · reserved mode-switch slot · connection status -->
     <div id="topbar" class="card">
         <span class="app-title">Roomscan</span>
-        <div id="mode-switch-slot"></div>
+        <div id="mode-switch-slot">
+            <!-- Real-Time ↔ SLAM (web Phase 4); active state driven from `state`. -->
+            <div class="segmented" id="seg-mode">
+                <button data-mode="realtime" class="active">Real-Time</button>
+                <button data-mode="slam">SLAM</button>
+            </div>
+        </div>
         <div class="status-indicator">
             <span id="conn-text">Offline</span>
             <div class="dot" id="conn-dot"></div>
@@ -384,6 +390,17 @@
         <canvas id="sensor-press-spark" class="sensor-spark" width="1" height="1"></canvas>
         <div class="hud-row"><span>Temp</span><span class="hud-val" id="sensor-temp-val">—</span></div>
         <canvas id="sensor-temp-spark" class="sensor-spark" width="1" height="1"></canvas>
+
+        <!-- SLAM HUD (web Phase 4): shown only in SLAM mode (slam.js toggles). -->
+        <div id="slam-hud" class="hidden">
+            <div class="hud-section-label">SLAM</div>
+            <div class="hud-row"><span>Tracking</span><span class="hud-val" id="slam-track">—</span></div>
+            <div class="hud-row"><span>Fitness</span><span class="hud-val" id="slam-fitness">—</span></div>
+            <div class="hud-row"><span>RMSE</span><span class="hud-val" id="slam-rmse">—</span></div>
+            <div class="hud-row"><span>Frames</span><span class="hud-val" id="slam-frames">0</span></div>
+            <div class="hud-row"><span>Vertices</span><span class="hud-val" id="slam-verts">0</span></div>
+            <div class="hud-row"><span>SLAM</span><span class="hud-val" id="slam-ms">—</span></div>
+        </div>
     </div>
 
     <!-- Right rail (§8.1): interactive control panel, collapsible groups. -->
@@ -459,6 +476,24 @@
                     <input type="range" id="seek" min="0" max="1000" value="0">
                     <div class="cap-status" id="pos-status">&mdash;</div>
                 </div>
+            </div>
+        </div>
+
+        <!-- SLAM (web Phase 4): mesh display options + save. Shown only in SLAM
+             mode; all state driven from the server `state`/`saved` echo. -->
+        <div class="control-group hidden" id="slam-group">
+            <button class="control-group__header"><span>SLAM</span><span class="chevron">&#9662;</span></button>
+            <div class="control-group__body">
+                <label class="toggle"><input type="checkbox" id="chk-slam-traj" checked><span>Trajectory trail</span></label>
+                <label class="toggle"><input type="checkbox" id="chk-slam-follow" checked><span>Follow camera</span></label>
+                <div class="field-label">Walls</div>
+                <div class="segmented segmented--sm" id="seg-walls">
+                    <button data-walls="split">Split</button>
+                    <button data-walls="solid">Solid</button>
+                </div>
+                <button class="primary" id="btn-save" disabled>&#128190; Save map</button>
+                <div class="field-label">Saved maps</div>
+                <div class="cap-list" id="saved-list"></div>
             </div>
         </div>
     </div>

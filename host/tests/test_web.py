@@ -909,3 +909,218 @@ def test_controller_seek_sets_offset_and_resumes(tmp_path):
         assert _drain_depth_mean(slot, 3.0) is not None
     finally:
         ctrl.close()
+
+
+# --- Web Phase 4: SLAM mode ---------------------------------------------------
+# The protocol/plumbing is exercised with fake worker/meshprep (no Open3D/GPU);
+# save uses a real tiny Open3D mesh so the write path is genuinely covered.
+from roomscan.slam.meshprep import MeshPacket as _MeshPacket
+from roomscan.slam.mapper import FrameStep as _FrameStep
+
+
+def _synthetic_mesh_packet(*, mesh_seq=3, walls="split", decimated=False):
+    nw_v = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], np.float64)
+    nw_c = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], np.float64)
+    nw_t = np.array([[0, 1, 2]], np.int32)
+    w_v = np.array([[0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]], np.float64)
+    w_c = np.full((4, 3), 0.5)
+    w_t = np.array([[0, 1, 2], [1, 2, 3]], np.int32)
+    f_p = np.array([[0, 0, 0], [1, 0, 0], [0, 0, 1]], np.float64)
+    f_l = np.array([[0, 1], [1, 2]], np.int64)
+    return _MeshPacket(
+        non_wall_verts=nw_v, non_wall_colors=nw_c, non_wall_tris=nw_t,
+        wall_verts=w_v, wall_colors=w_c, wall_tris=w_t,
+        floor_pts=f_p, floor_lines=f_l, mesh_seq=mesh_seq,
+        source_vertex_count=7, decimated=decimated, wall_mode=walls)
+
+
+def test_pack_mesh_roundtrip():
+    pkt = _synthetic_mesh_packet(mesh_seq=5, walls="split", decimated=True)
+    buf = web.pack_mesh(pkt)
+    (tag, seq, flags, nnwv, nnwt, nwv, nwt, nfp, nfl) = struct.unpack_from("<IIIIIIIII", buf, 0)
+    assert tag == web.TAG_MESH and seq == 5
+    assert flags == (1 | 2)                    # decimated + walls_split
+    assert (nnwv, nnwt) == (3, 1)
+    assert (nwv, nwt) == (4, 2)
+    assert (nfp, nfl) == (3, 2)
+    off = 36                                   # 9 * u32
+    nw_pos = np.frombuffer(buf, "<f4", 3 * nnwv, off); off += 4 * 3 * nnwv
+    nw_col = np.frombuffer(buf, "<f4", 3 * nnwv, off); off += 4 * 3 * nnwv
+    nw_idx = np.frombuffer(buf, "<u4", 3 * nnwt, off); off += 4 * 3 * nnwt
+    np.testing.assert_allclose(nw_pos.reshape(-1, 3), pkt.non_wall_verts, atol=1e-6)
+    np.testing.assert_allclose(nw_col.reshape(-1, 3), pkt.non_wall_colors, atol=1e-6)
+    np.testing.assert_array_equal(nw_idx.reshape(-1, 3), pkt.non_wall_tris)
+    # total size accounts for every declared array
+    expect = 36 + 4 * (3*nnwv + 3*nnwv + 3*nnwt + 3*nwv + 3*nwv + 3*nwt + 3*nfp + 2*nfl)
+    assert len(buf) == expect
+
+
+def test_pack_mesh_empty_packet_is_header_only():
+    empty = _MeshPacket(
+        non_wall_verts=np.zeros((0, 3)), non_wall_colors=np.zeros((0, 3)),
+        non_wall_tris=np.zeros((0, 3), np.int32), wall_verts=np.zeros((0, 3)),
+        wall_colors=np.zeros((0, 3)), wall_tris=np.zeros((0, 3), np.int32),
+        floor_pts=np.zeros((0, 3)), floor_lines=np.zeros((0, 2), np.int64),
+        mesh_seq=1, source_vertex_count=0, decimated=False, wall_mode="solid")
+    buf = web.pack_mesh(empty)
+    assert len(buf) == 36                       # nothing but the 9-u32 header
+    tag, seq, flags = struct.unpack_from("<III", buf, 0)
+    assert tag == web.TAG_MESH and seq == 1 and flags == 0
+
+
+def test_build_slam_message_shape_and_traj_bound():
+    poses = [np.eye(4) for _ in range(1000)]
+    for i, p in enumerate(poses):
+        p[0, 3] = float(i)                      # x = frame index, so we can spot-check
+    step = _FrameStep(pose=poses[-1], fitness=0.87, rmse=0.012,
+                      tracking_lost=False, slam_ms=6.3)
+    msg = web.build_slam_message(step, poses, frames_integrated=990,
+                                 mesh_seq=4, source_vertex_count=51788)
+    assert msg["type"] == "slam"
+    assert len(msg["pose"]) == 16
+    assert set(msg["follow"]) == {"eye", "center", "up"}
+    assert len(msg["traj_tail"]) == web._TRAJ_TAIL_MAX      # downsampled, not 1000
+    assert msg["traj_len"] == 1000
+    assert msg["traj_tail"][0] == [0.0, 0.0, 0.0]
+    assert msg["traj_tail"][-1][0] == 999.0                 # last real position kept
+    assert msg["frames_integrated"] == 990 and msg["mesh_verts"] == 51788
+    assert msg["tracking_lost"] is False
+
+
+def test_state_message_carries_mode_and_slam_opts():
+    ui = web.UiState()
+    m = web._state_message(ui)
+    assert m["mode"] == "realtime"
+    assert m["slam_trajectory"] is True and m["slam_walls"] == "split" and m["slam_follow"] is True
+
+
+def test_sanitize_result_name(tmp_path):
+    (tmp_path / "web_x.ply").write_bytes(b"ply")
+    (tmp_path / "web_x.tum").write_text("t")
+    assert web.sanitize_result_name("web_x.ply", tmp_path) == tmp_path / "web_x.ply"
+    assert web.sanitize_result_name("web_x.tum", tmp_path) == tmp_path / "web_x.tum"
+    assert web.sanitize_result_name("../etc/passwd", tmp_path) is None      # traversal
+    assert web.sanitize_result_name("web_x.exe", tmp_path) is None          # wrong ext
+    assert web.sanitize_result_name("missing.ply", tmp_path) is None        # must exist
+    assert web.sanitize_result_name("", tmp_path) is None
+
+
+def test_list_results_newest_first(tmp_path):
+    a = tmp_path / "a.ply"; a.write_bytes(b"1"); _os.utime(a, (1000, 1000))
+    b = tmp_path / "b.ply"; b.write_bytes(b"22"); _os.utime(b, (2000, 2000))
+    (tmp_path / "notes.txt").write_text("ignored")
+    items = web.list_results(tmp_path)
+    assert [it["name"] for it in items] == ["b.ply", "a.ply"]
+    assert items[0]["bytes"] == 2
+
+
+# ---- SlamRunner plumbing (fake worker/meshprep, no GPU) ----------------------
+
+class _FakeWorker:
+    def __init__(self, *a, **k):
+        self.started = self.stopped = False
+        self.submitted = []
+        self.tracking_lost_count = 2
+        self._traj = [np.eye(4) for _ in range(10)]
+        self._mesh = object()               # opaque, identity-compared by SlamRunner
+    def start(self): self.started = True
+    def stop(self): self.stopped = True
+    def submit(self, *a, **k): self.submitted.append((a, k))
+    def latest(self):
+        step = _FrameStep(pose=np.eye(4), fitness=0.5, rmse=0.02,
+                          tracking_lost=False, slam_ms=5.0)
+        return (self._mesh, self._traj, step)
+
+
+class _FakeMeshPrep:
+    def __init__(self, *a, **k): self.started = self.stopped = False; self.subs = []
+    def start(self): self.started = True
+    def stop(self): self.stopped = True
+    def submit(self, mesh, *, mesh_seq, glow_origin, wall_mode):
+        self.subs.append((mesh_seq, wall_mode))
+    def latest(self): return _synthetic_mesh_packet(mesh_seq=len(self.subs))
+
+
+@pytest.fixture
+def _fake_slam(monkeypatch):
+    import roomscan.slam.backend as backend
+    import roomscan.slam.meshprep as meshprep
+    made = {}
+    def _mk(w, h, **k):
+        made["worker"] = _FakeWorker(); made["wh"] = (w, h); return made["worker"]
+    monkeypatch.setattr(backend, "make_slam_worker", _mk)
+    monkeypatch.setattr(meshprep, "MeshPrep", lambda *a, **k: made.setdefault("mp", _FakeMeshPrep()))
+    return made
+
+
+def test_slamrunner_inactive_submit_builds_nothing(_fake_slam):
+    r = web.SlamRunner(bus=LogBus())
+    r.submit(np.zeros((6, 8), np.float32), (1, 0, 0, 0), None)
+    assert "worker" not in _fake_slam        # no worker built while inactive
+
+
+def test_slamrunner_no_quat_is_noop(_fake_slam):
+    r = web.SlamRunner(bus=LogBus())
+    r.set_active(True)
+    r.submit(np.zeros((6, 8), np.float32), None, None)   # SLAM needs the orientation prior
+    assert "worker" not in _fake_slam
+
+
+def test_slamrunner_lazy_build_and_poll(_fake_slam):
+    r = web.SlamRunner(bus=LogBus())
+    r.set_active(True)
+    depth = np.zeros((6, 8), np.float32)
+    r.submit(depth, (1, 0, 0, 0), 101325.0)
+    assert _fake_slam["wh"] == (8, 6)                    # width, height from depth shape
+    assert _fake_slam["worker"].started and _fake_slam["mp"].started
+    assert len(_fake_slam["worker"].submitted) == 1
+    msg, mesh_bytes = r.poll("split")
+    assert msg is not None and msg["type"] == "slam"
+    assert msg["frames_integrated"] == 10 - 2            # traj_len - tracking_lost_count
+    assert mesh_bytes is not None
+    tag, seq = struct.unpack_from("<II", mesh_bytes, 0)
+    assert tag == web.TAG_MESH and seq == 1              # first new mesh -> seq 1
+
+
+def test_slamrunner_set_active_false_tears_down(_fake_slam):
+    r = web.SlamRunner(bus=LogBus())
+    r.set_active(True)
+    r.submit(np.zeros((6, 8), np.float32), (1, 0, 0, 0), None)
+    w, mp = _fake_slam["worker"], _fake_slam["mp"]
+    r.set_active(False)
+    assert w.stopped and mp.stopped
+    # poll after teardown is silent
+    assert r.poll("split") == (None, None)
+
+
+def test_slamrunner_save_writes_ply_and_tum(tmp_path, monkeypatch):
+    import open3d as o3d
+    # A real (tiny) tensor mesh so the save write path is genuinely exercised.
+    tm = o3d.t.geometry.TriangleMesh()
+    tm.vertex.positions = o3d.core.Tensor([[0, 0, 0], [1, 0, 0], [0, 1, 0]], o3d.core.float32)
+    tm.triangle.indices = o3d.core.Tensor([[0, 1, 2]], o3d.core.int32)
+
+    class _SaveWorker(_FakeWorker):
+        def latest(self):
+            step = _FrameStep(pose=np.eye(4), fitness=0.5, rmse=0.02,
+                              tracking_lost=False, slam_ms=5.0)
+            return (tm, [np.eye(4) for _ in range(4)], step)
+
+    r = web.SlamRunner(bus=LogBus())
+    with r._lock:
+        r._worker = _SaveWorker()
+    ply, tum = tmp_path / "m.ply", tmp_path / "m.tum"
+    n = r.save(ply, tum)
+    assert n == 3
+    assert ply.is_file() and ply.stat().st_size > 0
+    assert tum.is_file() and len(tum.read_text().splitlines()) == 4
+
+
+def test_slamrunner_save_empty_map_raises(tmp_path):
+    class _EmptyWorker(_FakeWorker):
+        def latest(self): return None
+    r = web.SlamRunner(bus=LogBus())
+    with r._lock:
+        r._worker = _EmptyWorker()
+    with pytest.raises(ValueError):
+        r.save(tmp_path / "m.ply", tmp_path / "m.tum")

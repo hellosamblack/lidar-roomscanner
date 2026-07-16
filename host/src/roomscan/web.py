@@ -74,6 +74,7 @@ log = logging.getLogger("roomscan.web")
 # Binary message type tags (first 4 bytes, little-endian uint32).
 TAG_POINT_CLOUD = 1
 TAG_IR_IMAGE = 2
+TAG_MESH = 3               # SLAM reconstruction mesh (web Phase 4)
 
 # Broadcast cadences (seconds). Point cloud paces the outer loop at a 30 Hz
 # target (owner, 2026-07-16) -- the cap must sit at or above the source rate so
@@ -90,6 +91,11 @@ MISSING_PLANE_LOG_INTERVAL = 3.0   # debounce for missing-plane bus lines
 
 # Recording & playback (web Phase 3).
 CAPTURES_DIR = "captures"          # where Record writes + the library browses
+# SLAM mode (web Phase 4).
+RESULTS_DIR = "results"            # where Save writes the full-res map + trajectory
+_TRAJ_TAIL_MAX = 256               # trajectory positions shipped in each `slam` message
+_VALID_MODES = ("realtime", "slam")
+_VALID_WALL_MODES = ("solid", "split")
 # The playback speed segmented control maps ×0.5/×1/×2/Max onto these fps; a
 # capture's own cadence is ~28 Hz, so ×1 (30 fps) plays it near-native and Max
 # (0 -> interval 0) drains as fast as it decodes.
@@ -116,6 +122,14 @@ class UiState:
     ir_colormap: str = "gray"
     ir_freeze: bool = False
     ir_freeze_range: tuple[float, float] | None = None
+    # SLAM mode (web Phase 4). `mode` gates the whole SLAM pipeline: the worker
+    # is only fed (and only constructed) while mode == "slam", so real-time mode
+    # burns no GPU. The three display toggles ride the same one-way `state` echo
+    # as color/IR, so a late-joining tab is brought current on connect.
+    mode: str = "realtime"
+    slam_trajectory: bool = True
+    slam_walls: str = "split"          # "solid" | "split" -> MeshPrep wall_mode
+    slam_follow: bool = True
 
 
 # --- pure helpers (no socket, no async) -------------------------------------
@@ -218,6 +232,103 @@ def pack_ir_image(rgb: np.ndarray) -> bytes:
     return struct.pack("<IHH", TAG_IR_IMAGE, width, height) + arr.tobytes()
 
 
+def pack_mesh(packet) -> bytes:
+    """MESH binary (tag 3): a SLAM `MeshPacket` (slam/meshprep.py) flattened to
+    one self-describing little-endian frame (web Phase 4, docs/web-protocol.md).
+
+    Counts up front so the client allocates once; then non-wall (verts f32·3,
+    colors f32·3, tris u32·3), wall (same), floor (verts f32·3, lines u32·2).
+    Positions/colors cast f64->f32; indices to u32. `flags` bit0=decimated,
+    bit1=walls_split (a split packet carries a non-empty wall submesh)."""
+    nw_v = np.ascontiguousarray(packet.non_wall_verts, dtype="<f4").ravel()
+    nw_c = np.ascontiguousarray(packet.non_wall_colors, dtype="<f4").ravel()
+    nw_t = np.ascontiguousarray(packet.non_wall_tris, dtype="<u4").ravel()
+    w_v = np.ascontiguousarray(packet.wall_verts, dtype="<f4").ravel()
+    w_c = np.ascontiguousarray(packet.wall_colors, dtype="<f4").ravel()
+    w_t = np.ascontiguousarray(packet.wall_tris, dtype="<u4").ravel()
+    f_v = np.ascontiguousarray(packet.floor_pts, dtype="<f4").ravel()
+    f_l = np.ascontiguousarray(packet.floor_lines, dtype="<u4").ravel()
+
+    flags = (1 if packet.decimated else 0) | (2 if packet.wall_mode == "split" else 0)
+    header = struct.pack(
+        "<IIIIIIIII", TAG_MESH, int(packet.mesh_seq), flags,
+        len(packet.non_wall_verts), len(packet.non_wall_tris),
+        len(packet.wall_verts), len(packet.wall_tris),
+        len(packet.floor_pts), len(packet.floor_lines))
+    return (header + nw_v.tobytes() + nw_c.tobytes() + nw_t.tobytes()
+            + w_v.tobytes() + w_c.tobytes() + w_t.tobytes()
+            + f_v.tobytes() + f_l.tobytes())
+
+
+def build_slam_message(step, trajectory, *, frames_integrated: int, mesh_seq: int,
+                       source_vertex_count: int) -> dict:
+    """FrameStep + trajectory -> `slam` JSON (web Phase 4). Follow-camera
+    eye/center/up are computed server-side (panel.follow_camera_target) per the
+    web-protocol "server-side math stays server-side" rule -- the browser just
+    places its camera. `traj_tail` is downsampled to <=_TRAJ_TAIL_MAX positions
+    so the JSON stays small on a long scan; `traj_len` carries the true length."""
+    pose = np.asarray(step.pose, dtype=np.float64)
+    eye, center, up = panel.follow_camera_target(pose)
+    n = len(trajectory)
+    if n > _TRAJ_TAIL_MAX:
+        idx = np.linspace(0, n - 1, _TRAJ_TAIL_MAX).astype(int)
+        tail = [trajectory[i] for i in idx]
+    else:
+        tail = trajectory
+    traj_tail = [[round(float(p[0, 3]), 4), round(float(p[1, 3]), 4), round(float(p[2, 3]), 4)]
+                 for p in tail]
+    return {
+        "type": "slam",
+        "pose": [round(float(v), 5) for v in pose.reshape(-1)],   # row-major 16
+        "follow": {"eye": [round(float(v), 4) for v in eye],
+                   "center": [round(float(v), 4) for v in center],
+                   "up": [round(float(v), 4) for v in up]},
+        "traj_tail": traj_tail,
+        "traj_len": n,
+        "fitness": round(float(step.fitness), 4),
+        "rmse": round(float(step.rmse), 5),
+        "tracking_lost": bool(step.tracking_lost),
+        "slam_ms": round(float(step.slam_ms), 2),
+        "frames_integrated": int(frames_integrated),
+        "mesh_seq": int(mesh_seq),
+        "mesh_verts": int(source_vertex_count),
+    }
+
+
+def sanitize_result_name(name, results_dir) -> Path | None:
+    """A results filename from the client -> a safe existing path, or None.
+    Basename only, `.ply`/`.tum` allow-list, must exist under results_dir
+    (same discipline as sanitize_capture_name)."""
+    if not name or not isinstance(name, str):
+        return None
+    base = Path(name).name
+    if base != name or Path(name).suffix not in (".ply", ".tum"):
+        return None
+    p = Path(results_dir) / base
+    return p if p.is_file() else None
+
+
+def list_results(results_dir) -> list[dict]:
+    """`results/*.ply` as {name, bytes, mtime}, newest first (the saved-maps
+    library; mirrors list_captures)."""
+    d = Path(results_dir)
+    if not d.is_dir():
+        return []
+    items = []
+    for p in sorted(d.glob("*.ply")):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        items.append({"name": p.name, "bytes": st.st_size, "mtime": round(st.st_mtime, 1)})
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return items
+
+
+def build_saved_message(results_dir) -> dict:
+    return {"type": "saved", "items": list_results(results_dir)}
+
+
 def build_metrics_message(snapshot: MetricsSnapshot) -> dict:
     """MetricsSnapshot -> `metrics` JSON dict (§6.2). `resources` is null in
     Phase 1 (no ResourceSampler wired); numeric fields go raw over the wire,
@@ -311,7 +422,9 @@ def resolve_command(name: str, param) -> tuple[CommandCode, int, str] | None:
 
 def _state_message(ui: UiState) -> dict:
     return {"type": "state", "color_mode": ui.color_mode,
-            "ir_colormap": ui.ir_colormap, "ir_freeze": ui.ir_freeze}
+            "ir_colormap": ui.ir_colormap, "ir_freeze": ui.ir_freeze,
+            "mode": ui.mode, "slam_trajectory": ui.slam_trajectory,
+            "slam_walls": ui.slam_walls, "slam_follow": ui.slam_follow}
 
 
 # --- recording & playback pure helpers (no socket, no thread) ---------------
@@ -470,6 +583,166 @@ class _PrefixSource:
 
     def close(self) -> None:
         self._inner.close()
+
+
+class SlamRunner:
+    """Owns the SLAM compute for the web app (web Phase 4). Wraps the reused
+    `make_slam_worker` (local CUDA:0 worker here; remote SlamService if
+    configured) + `MeshPrep`, both off-thread, and turns their output into the
+    `slam` JSON + MESH binary the broadcaster ships. Feeds/polls run on the
+    async broadcaster; enter/leave/reset/save run off the event loop (to_thread)
+    under a lock so they never race a poll.
+
+    Lifecycle: `set_active(True)` arms it; the worker+meshprep are built lazily
+    on the first `submit()` (which is when the frame width/height are known) so
+    real-time mode constructs no Open3D/GPU state. `set_active(False)` and
+    `reset()` tear the pipeline down; `reset()` is called on a source-swap so a
+    new capture / Go Live starts a fresh map."""
+
+    def __init__(self, *, bus: LogBus, fov_h: float = 55.0, fov_v: float = 42.0):
+        self._bus = bus
+        self._fov_h = float(fov_h)
+        self._fov_v = float(fov_v)
+        self._lock = threading.Lock()
+        self._active = False
+        self._worker = None
+        self._meshprep = None
+        self._wh = None                 # (width, height) once known
+        self._mesh_seq = 0
+        self._last_mesh = object()      # identity sentinel; never == a real mesh
+        self._last_source_verts = 0
+
+    # ---- lifecycle (inbound thread, via to_thread) --------------------------
+    def set_active(self, on: bool) -> None:
+        with self._lock:
+            if on == self._active:
+                return
+            self._active = on
+            if not on:
+                self._teardown_locked()
+
+    def reset(self) -> None:
+        """Drop the current map (fresh worker on the next frame). Called on a
+        source-swap; safe whether or not SLAM is active."""
+        with self._lock:
+            self._teardown_locked()
+
+    def _teardown_locked(self) -> None:
+        for obj in (self._worker, self._meshprep):
+            if obj is not None:
+                try:
+                    obj.stop()
+                except Exception:
+                    pass
+        self._worker = None
+        self._meshprep = None
+        self._wh = None
+        self._mesh_seq = 0
+        self._last_mesh = object()
+        self._last_source_verts = 0
+
+    def _build_locked(self, width: int, height: int) -> None:
+        # Mirror panel._maybe_start_slam (panel.py:1539): fov from args, device
+        # auto (CUDA:0 here), backend picked by make_slam_worker from [slam].
+        # MeshPrep budgets from the [slam] view config, same as the desktop.
+        from .slam.backend import make_slam_worker
+        from .slam.config import SlamConfig, preferred_device
+        from .slam.meshprep import MeshPrep
+        cfg = SlamConfig.load()
+        device = preferred_device()
+        worker = make_slam_worker(width, height, fov_h=self._fov_h,
+                                  fov_v=self._fov_v, device=device)
+        worker.start()
+        meshprep = MeshPrep(vertex_budget=cfg.live_vertex_budget,
+                            fps_budget_ms=cfg.fps_budget_ms)
+        meshprep.start()
+        self._worker, self._meshprep, self._wh = worker, meshprep, (width, height)
+        self._bus.publish(f"[slam] worker started on {device} ({width}x{height})")
+
+    # ---- feed + poll (broadcaster / async task) -----------------------------
+    def submit(self, depth, quat, pressure, reflectance=None, confidence=None) -> None:
+        """Forward the newest frame to the worker (latest-wins drop). No-op when
+        inactive or when there is no orientation prior yet (SLAM needs the quat;
+        without it the mapper loses tracking immediately -- see the 07-08
+        no-stream-9 capture note in docs/…web-phase4…)."""
+        if quat is None:
+            return
+        with self._lock:
+            if not self._active:
+                return
+            if self._worker is None:
+                h, w = np.asarray(depth).shape
+                self._build_locked(w, h)
+            worker = self._worker
+        worker.submit(depth, quat, pressure, reflectance=reflectance, confidence=confidence)
+
+    def poll(self, wall_mode: str) -> tuple[dict | None, bytes | None]:
+        """Latest (`slam` message, MESH bytes-or-None). MESH is emitted only when
+        the worker published a new mesh (identity check) and MeshPrep has a
+        packet ready; the `slam` message ticks every processed frame."""
+        with self._lock:
+            worker, meshprep = self._worker, self._meshprep
+        if worker is None or meshprep is None:
+            return None, None
+        res = worker.latest()
+        if res is None:
+            return None, None
+        mesh, trajectory, step = res
+        if mesh is not None and mesh is not self._last_mesh:
+            self._mesh_seq += 1
+            meshprep.submit(mesh, mesh_seq=self._mesh_seq, glow_origin=None,
+                            wall_mode=wall_mode)
+            self._last_mesh = mesh
+        mesh_bytes = None
+        pkt = meshprep.latest()
+        if pkt is not None:
+            self._last_source_verts = pkt.source_vertex_count
+            mesh_bytes = pack_mesh(pkt)
+        frames_integrated = max(0, len(trajectory) - worker.tracking_lost_count)
+        msg = build_slam_message(
+            step, trajectory, frames_integrated=frames_integrated,
+            mesh_seq=self._mesh_seq, source_vertex_count=self._last_source_verts)
+        return msg, mesh_bytes
+
+    @property
+    def has_map(self) -> bool:
+        with self._lock:
+            worker = self._worker
+        if worker is None:
+            return False
+        res = worker.latest()
+        return bool(res is not None and res[0] is not None)
+
+    # ---- save (inbound thread, via to_thread) -------------------------------
+    def save(self, ply_path, tum_path) -> int:
+        """Write the full-res map + trajectory. Returns the mesh vertex count;
+        raises ValueError on an empty map. Uses the worker's latest published
+        mesh (full-res -- MeshPrep decimation is display-only and never touches
+        it), so it works identically for the local and remote workers."""
+        import open3d as o3d
+        from .slam.metrics import write_tum
+        with self._lock:
+            worker = self._worker
+        if worker is None:
+            raise ValueError("SLAM is not running")
+        res = worker.latest()
+        if res is None or res[0] is None:
+            raise ValueError("map is empty (no frames integrated yet)")
+        mesh, trajectory, _step = res
+        legacy = mesh.cpu().to_legacy() if hasattr(mesh, "to_legacy") else mesh
+        if len(legacy.vertices) == 0:
+            raise ValueError("map is empty (no vertices)")
+        Path(ply_path).parent.mkdir(parents=True, exist_ok=True)
+        o3d.io.write_triangle_mesh(str(ply_path), legacy)
+        # Synthetic monotonic timestamps at the ~28 Hz frame cadence, matching
+        # the roomscan-slam CLI's --out-traj.
+        ts = [i / 28.0 for i in range(len(trajectory))]
+        write_tum(str(tum_path), ts, trajectory)
+        return len(legacy.vertices)
+
+    def close(self) -> None:
+        with self._lock:
+            self._teardown_locked()
 
 
 class SessionController:
@@ -755,6 +1028,13 @@ static_dir = Path(__file__).parent / "static"
 static_dir.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(static_dir), html=True), name="static")
 
+# Saved SLAM maps (web Phase 4): served for download from the browser. Created
+# lazily so a first Save has somewhere to land; the dir is process-cwd-relative,
+# same as CAPTURES_DIR.
+_results_dir = Path(RESULTS_DIR)
+_results_dir.mkdir(exist_ok=True)
+app.mount("/results", StaticFiles(directory=str(_results_dir)), name="results")
+
 
 async def _drop_client(clients: set, ws: WebSocket) -> None:
     """Remove a client and best-effort close it; never raises."""
@@ -788,6 +1068,14 @@ async def _broadcast_session(state) -> None:
     ctrl = getattr(state, "controller", None)
     if ctrl is not None:
         await _broadcast_text(state.clients, json.dumps(ctrl.session_message(None, time.time())))
+
+
+async def _reset_slam(state) -> None:
+    """Drop the SLAM map (off the event loop) after a source-swap, so a new
+    capture / Go Live rebuilds a fresh map. No-op if SLAM was never armed."""
+    slam = getattr(state, "slam_runner", None)
+    if slam is not None:
+        await asyncio.to_thread(slam.reset)
 
 
 def _log_debounced(state, bus: LogBus, key: str, message: str) -> None:
@@ -852,19 +1140,39 @@ async def _broadcaster() -> None:
             if state.deproj is None:
                 state.deproj = Deprojector(w, h, state.args.fov_h, state.args.fov_v)
 
-            # POINT_CLOUD every tick (so late joiners see data within ~36ms).
+            # POINT_CLOUD every tick (so late joiners see data within ~36ms),
+            # but only in real-time mode -- SLAM mode replaces the cloud with the
+            # reconstructed mesh, so skip the deproject+send entirely there.
             # Cache the packed bytes; rebuild only when the frame or color mode
             # changed, so a stalled feed doesn't re-deproject 28x/s for nothing.
-            key = (header.seq, ui.color_mode)
-            if key != last_pc_key:
-                pts, colors, fell_back = select_colors(outputs, state.deproj, ui.color_mode)
-                if fell_back:
-                    _log_debounced(state, bus, f"color-miss:{ui.color_mode}",
-                                   f"color mode {ui.color_mode!r} unavailable this frame, showing depth")
-                last_pc_bytes = pack_point_cloud(pts, colors)
-                last_pc_key = key
-            if last_pc_bytes is not None:
-                await _broadcast_bytes(clients, last_pc_bytes)
+            if ui.mode == "realtime":
+                key = (header.seq, ui.color_mode)
+                if key != last_pc_key:
+                    pts, colors, fell_back = select_colors(outputs, state.deproj, ui.color_mode)
+                    if fell_back:
+                        _log_debounced(state, bus, f"color-miss:{ui.color_mode}",
+                                       f"color mode {ui.color_mode!r} unavailable this frame, showing depth")
+                    last_pc_bytes = pack_point_cloud(pts, colors)
+                    last_pc_key = key
+                if last_pc_bytes is not None:
+                    await _broadcast_bytes(clients, last_pc_bytes)
+
+            # SLAM mode (web Phase 4): feed the newest frame to the worker and
+            # ship the latest `slam` message + (throttled) MESH. The feed/poll
+            # touch off-thread workers; nothing blocks the event loop here.
+            slam = getattr(state, "slam_runner", None)
+            if ui.mode == "slam" and slam is not None:
+                quat = state.sensor_state.fused_quat()
+                env = state.sensor_state.latest_env()
+                pressure = env.pressure_pa if env is not None else None
+                slam.submit(depth, quat, pressure,
+                            reflectance=outputs.get("reflectance"),
+                            confidence=outputs.get("confidence"))
+                smsg, mesh_bytes = slam.poll(ui.slam_walls)
+                if mesh_bytes is not None:
+                    await _broadcast_bytes(clients, mesh_bytes)
+                if smsg is not None:
+                    await _broadcast_text(clients, json.dumps(smsg))
 
             # IR_IMAGE on its own slower cadence.
             if now - last_ir >= IR_INTERVAL:
@@ -920,6 +1228,7 @@ async def websocket_endpoint(websocket: WebSocket):
         if ctrl is not None:
             await websocket.send_text(json.dumps(ctrl.session_message(None, time.time())))
             await websocket.send_text(json.dumps(build_captures_message(ctrl.captures_dir)))
+        await websocket.send_text(json.dumps(build_saved_message(RESULTS_DIR)))
     except Exception:
         await _drop_client(clients, websocket)
         return
@@ -977,10 +1286,12 @@ async def _handle_inbound(state, msg: dict) -> None:
             log.warning("load_capture: unknown/invalid name %r", msg.get("name"))
             return
         await asyncio.to_thread(ctrl.switch_to_replay, path)
+        await _reset_slam(state)          # fresh map for the new source
         await _broadcast_session(state)
 
     elif mtype == "go_live" and ctrl is not None:
         await asyncio.to_thread(ctrl.switch_to_live)
+        await _reset_slam(state)
         await _broadcast_session(state)
 
     elif mtype == "transport" and ctrl is not None:
@@ -1024,6 +1335,47 @@ async def _handle_inbound(state, msg: dict) -> None:
             ui.ir_freeze_range = None
         ui.ir_freeze = freeze
         await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+
+    elif mtype == "set_mode":
+        mode = msg.get("mode")
+        if mode not in _VALID_MODES:
+            log.warning("invalid set_mode: %r", mode)
+            return
+        ui.mode = mode
+        slam = getattr(state, "slam_runner", None)
+        if slam is not None:
+            # Arming is a cheap flag; disarming stops+joins the worker threads,
+            # so do it off the event loop.
+            await asyncio.to_thread(slam.set_active, mode == "slam")
+        await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+
+    elif mtype == "slam_opt":
+        if "trajectory" in msg:
+            ui.slam_trajectory = bool(msg["trajectory"])
+        if "walls" in msg:
+            if msg["walls"] not in _VALID_WALL_MODES:
+                log.warning("invalid slam_opt walls: %r", msg.get("walls"))
+                return
+            ui.slam_walls = msg["walls"]
+        if "follow" in msg:
+            ui.slam_follow = bool(msg["follow"])
+        await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+
+    elif mtype == "save":
+        slam = getattr(state, "slam_runner", None)
+        if slam is None or ui.mode != "slam":
+            state.bus.publish("save -> not available (enter SLAM mode first)")
+            return
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        ply = Path(RESULTS_DIR) / f"web_{stamp}.ply"
+        tum = Path(RESULTS_DIR) / f"web_{stamp}.tum"
+        try:
+            n = await asyncio.to_thread(slam.save, ply, tum)
+        except Exception as exc:
+            state.bus.publish(f"save -> ERROR {exc}")
+            return
+        state.bus.publish(f"saved {ply.name} ({n} verts)")
+        await _broadcast_text(state.clients, json.dumps(build_saved_message(RESULTS_DIR)))
 
     else:
         log.warning("unknown inbound message type: %r", mtype)
@@ -1096,6 +1448,10 @@ def main(argv=None) -> int:
         sensor_state=sensor_state, metrics=metrics, captures_dir=CAPTURES_DIR,
         initial_replay_path=args.replay, initial_speed_fps=initial_speed_fps)
 
+    # SLAM mode (web Phase 4): armed lazily on the first `set_mode slam`; builds
+    # no Open3D/GPU state until then, so real-time launches are unaffected.
+    slam_runner = SlamRunner(bus=bus, fov_h=args.fov_h, fov_v=args.fov_v)
+
     # Shared app state, built once (§5.1).
     app.state.args = args
     app.state.source = live_source
@@ -1114,6 +1470,7 @@ def main(argv=None) -> int:
     app.state.ui_state = UiState()
     app.state.sensor_state = sensor_state
     app.state.mag_cal = mag_cal
+    app.state.slam_runner = slam_runner
     app.state.deproj = None
     app.state.clients = set()
     app.state.command_labels = set()

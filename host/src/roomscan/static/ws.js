@@ -20,9 +20,10 @@
 
 const D = (m, l) => { try { window.__diag && window.__diag('ws.js: ' + m, l); } catch (e) {} };
 
-// Binary message type tags — mirror web.py TAG_POINT_CLOUD / TAG_IR_IMAGE.
+// Binary message type tags — mirror web.py TAG_POINT_CLOUD / TAG_IR_IMAGE / TAG_MESH.
 const TAG_POINT_CLOUD = 1;
 const TAG_IR_IMAGE = 2;
+const TAG_MESH = 3;
 
 const RECONNECT_MS = 2000;
 
@@ -100,6 +101,7 @@ export function createHub() {
             const tag = new DataView(buffer).getUint32(0, true);
             if (tag === TAG_POINT_CLOUD) emit('point_cloud', buffer);
             else if (tag === TAG_IR_IMAGE) emit('ir_image', buffer);
+            else if (tag === TAG_MESH) emit('mesh', buffer);
             else console.warn('[ws] unrecognized binary tag ' + tag + ', dropped');
         };
     }

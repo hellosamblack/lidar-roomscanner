@@ -52,9 +52,23 @@ Each step is `{"js": <expr, awaited>, "wait": <seconds>, "out": <png path>}`.
 Because control is just JS in the page, you click real bindings (`element.click()`),
 so this exercises `controls.js` → `ws.send` → server, not a synthetic shortcut.
 Useful element ids live in `host/src/roomscan/static/index.html` (e.g. `btn-ping`,
-`seg-color button[data-mode=…]`, `chk-ir-freeze`, `log-toggle`, and the Web-Phase-3
+`seg-color button[data-mode=…]`, `chk-ir-freeze`, `log-toggle`, the Web-Phase-3
 capture controls `btn-record`, `btn-refresh-caps`, `#cap-list .cap-row`,
-`btn-playpause`, `seg-speed button[data-fps=…]`, `chk-loop`, `seek`).
+`btn-playpause`, `seg-speed button[data-fps=…]`, `chk-loop`, `seek`, and the
+Web-Phase-4 SLAM controls `#seg-mode button[data-mode=realtime|slam]`,
+`chk-slam-traj`, `chk-slam-follow`, `#seg-walls button[data-walls=split|solid]`,
+`btn-save`, `#saved-list .cap-row a`).
+
+**SLAM verification needs a stream-9 capture.** SLAM builds nothing from a capture
+with no IMU_QUAT (stream 9) — the mapper gets no rotation prior and loses tracking
+(`recordings/2026-07-08-room-scan.bin` predates IMU → empty map). Use
+`captures/verify_slam.bin` (has 9/10) or record a fresh one from the live board. To
+build the map, launch with `--replay <stream9.bin> --replay-fps 30`, click
+`#seg-mode button[data-mode=slam]`, and enable Loop (`chk-loop`) so frames keep
+feeding — SLAM is fed from the 30 Hz broadcaster only while in SLAM mode, so ~330
+frames take ~11 s to integrate. `window.__gotMesh` and the diag line
+`slam.js: first mesh: N non-wall verts` confirm the mesh path (the *first* emit is
+an empty packet — N=0 — by design; later ones carry geometry).
 
 Driving gotchas (cost time in Web Phase 3):
 - **Wait for server-rendered lists before clicking them.** Rows built from a

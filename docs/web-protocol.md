@@ -37,6 +37,7 @@ for display (units, precision).
 |-----|------|--------|----------|
 | 1 | `POINT_CLOUD` | `u32 tag · f32[3N] positions · f32[3N] colors` (positions then colors, concatenated) | `pack_point_cloud` `web.py:204` |
 | 2 | `IR_IMAGE` | `u32 tag · u16 width · u16 height · u8[w*h*3] RGB` | `pack_ir_image` `web.py:212` |
+| 3 | `MESH` | `9×u32 header (tag, mesh_seq, flags, then 6 counts) · per-submesh f32 pos·f32 col·u32 idx · floor f32 pos·u32 line-idx` | `pack_mesh` (web Phase 4) — a SLAM `MeshPacket`; flags bit0=decimated, bit1=walls_split; emitted on the mesh-throttle cadence only |
 
 `POINT_CLOUD` goes out every broadcast tick (so late joiners see data within ~36 ms);
 `IR_IMAGE` rides a slower cadence (`web.py:855`, `:869`).
@@ -50,6 +51,8 @@ for display (units, precision).
 | `state` | `color_mode`, `ir_colormap`, `ir_freeze` | `_state_message` `web.py:312` | echoed after every `set_color`/`set_ir` (one-way flow) |
 | `session` | `mode`(live\|replay), `source_label`, `has_live`, `recording{active,path,elapsed_s,bytes}`, `playback{is_replay,capture_name,paused,speed_fps,loop,position,total_frames}` | `build_session_message` `web.py:400` | broadcast on change **and** on the metrics cadence (so timer/position tick) |
 | `captures` | `items[]{name,bytes,mtime}` (newest first) | `build_captures_message` `web.py:354` | on connect, on `list_captures`, after a recording stops |
+| `slam` | `pose`[16], `follow{eye,center,up}`, `traj_tail[][3]`, `traj_len`, `fitness`, `rmse`, `tracking_lost`, `slam_ms`, `frames_integrated`, `mesh_seq`, `mesh_verts` | `build_slam_message` (web Phase 4) | every processed frame in SLAM mode; follow eye/center/up computed server-side; traj downsampled to ≤256 |
+| `saved` | `items[]{name,bytes,mtime}` (newest first) | `build_saved_message` (web Phase 4) | `results/*.ply`; on connect and after a Save completes |
 | `event` | `code`, `detail`, `msg` | `classify_bus_line` `web.py:142` | from a device EVENT bus line |
 | `cmd` | `label`, `status`(ok\|busy\|timeout\|error), `detail` | `classify_bus_line` `web.py:151` | command-result echo; `status` via `_cmd_status` `web.py:156` |
 | `log` | `line` | `classify_bus_line` `web.py:145,153` | catch-all bus line |
@@ -74,6 +77,9 @@ a `SessionController` (`ctrl is not None`) — absent in a `--replay`-launched p
 | `load_capture` | `name` | swap reader → replay (`sanitize_capture_name` → basename-only, `.bin`, must-exist; off-loop via `to_thread`) → echo `session` | `web.py:974` |
 | `go_live` | — | swap reader → live proxy → echo `session` | `web.py:982` |
 | `transport` | `action`(pause\|resume\|speed\|loop\|restart\|seek), `value` | playback control; `seek`/`restart` run off-loop via `to_thread` → echo `session` | `web.py:986` |
+| `set_mode` | `mode`(realtime\|slam) | switch top-bar mode; arms/disarms the `SlamRunner` off-loop (lazy worker build) → echo `state` | web Phase 4 |
+| `slam_opt` | `trajectory?`, `walls?`(solid\|split), `follow?` | SLAM display toggles → echo `state` | web Phase 4 |
+| `save` | — | write full-res `mapper.mesh()` + trajectory → `results/web_<ts>.ply`/`.tum` (off-loop); toast + `saved` echo. Disabled in real-time / empty map | web Phase 4 |
 
 ## Invariants (hold when adding a message)
 
@@ -96,7 +102,9 @@ a `SessionController` (`ctrl is not None`) — absent in a `--replay`-launched p
 
 ## Frontend consumers
 
-8 vanilla ES modules under `host/src/roomscan/static/`, wired through a hub in `app.js` (no build step,
-no framework). Binary tags are demuxed in `app.js`; each JSON `type` is routed to its module
-(`metrics.js`, `sensors.js`, `capture.js`, `controls.js`, `ir.js`, …). Element ids for driving the UI
-headlessly are catalogued in `docs/web-ui-testing.md`.
+9 vanilla ES modules under `host/src/roomscan/static/`, wired through a hub in `app.js` (no build step,
+no framework). Binary tags are demuxed in `ws.js`; each JSON `type` is routed to its module
+(`metrics.js`, `sensors.js`, `capture.js`, `controls.js`, `ir.js`, `slam.js`, …). `slam.js` (web Phase 4)
+renders the SLAM mesh/trajectory into `scene.js`'s single Three.js context (via a handle `app.js` passes
+it) and drives the follow camera — no second WebGL context. Saved maps download from a `/results/<name>`
+static mount. Element ids for driving the UI headlessly are catalogued in `docs/web-ui-testing.md`.

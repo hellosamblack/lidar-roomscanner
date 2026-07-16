@@ -8,7 +8,12 @@
 // distinct from the device fps the server reports.
 //
 // Public surface:
-//   createScene(hub) -> { resetCamera() }
+//   createScene(hub) -> { resetCamera, THREE, scene, camera,
+//                         setPointsVisible(bool), setFollow(bool),
+//                         setFollowTarget(eye, center, up) }
+// slam.js (web Phase 4) uses the returned handle to add its mesh/trajectory
+// group to the same scene and to drive the follow camera (which must coordinate
+// with OrbitControls — only one may own the camera per frame).
 // Hub events:  subscribes "point_cloud", "reset_camera";  emits "view_fps" (~1/s)
 
 import * as THREE from 'three';
@@ -55,7 +60,30 @@ export function createScene(hub) {
     geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(MAX_POINTS * 3), 3));
     geometry.setDrawRange(0, 0);
     const material = new THREE.PointsMaterial({ size: 0.025, vertexColors: true, sizeAttenuation: true });
-    scene.add(new THREE.Points(geometry, material));
+    const points = new THREE.Points(geometry, material);
+    scene.add(points);
+
+    // --- SLAM follow camera (web Phase 4) ---------------------------------
+    // When follow is on, slam.js pushes an eye/center/up each frame and this
+    // loop lerps the camera to it with OrbitControls disabled; when off,
+    // OrbitControls owns the camera again. Smoothing mirrors the desktop's
+    // _apply_follow_camera (steady when near-stationary, snappy under motion).
+    let followOn = false;
+    const followEye = new THREE.Vector3();
+    const followCenter = new THREE.Vector3();
+    const followUp = new THREE.Vector3(0, -1, 0);
+    let haveFollowTarget = false;
+    function setPointsVisible(v) { points.visible = v; }
+    function setFollow(on) {
+        followOn = !!on;
+        if (!followOn) { controls.enabled = true; }
+    }
+    function setFollowTarget(eye, center, up) {
+        followEye.set(eye[0], eye[1], eye[2]);
+        followCenter.set(center[0], center[1], center[2]);
+        if (up) followUp.set(up[0], up[1], up[2]);
+        haveFollowTarget = true;
+    }
 
     // --- point cloud ingest (§6.1: u32 tag · f32[3N] positions · f32[3N] colors) ---
     hub.on('point_cloud', (buffer) => {
@@ -96,7 +124,18 @@ export function createScene(hub) {
     let lastFpsTime = performance.now();
     function animate() {
         requestAnimationFrame(animate);
-        controls.update();
+        if (followOn && haveFollowTarget) {
+            controls.enabled = false;
+            // Velocity-adaptive lerp: fast when the sensor moves, steady when still.
+            const d = camera.position.distanceTo(followEye);
+            const alpha = Math.min(1, Math.max(0.12, d / 0.03));
+            camera.position.lerp(followEye, alpha);
+            controls.target.lerp(followCenter, alpha);
+            camera.up.copy(followUp);
+            camera.lookAt(controls.target);
+        } else {
+            controls.update();
+        }
         renderer.render(scene, camera);
 
         framesRendered++;
@@ -109,5 +148,5 @@ export function createScene(hub) {
     }
     animate();
 
-    return { resetCamera };
+    return { resetCamera, THREE, scene, camera, setPointsVisible, setFollow, setFollowTarget };
 }

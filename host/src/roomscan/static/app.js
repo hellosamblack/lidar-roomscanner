@@ -14,6 +14,7 @@ import { createLog } from './log.js';
 import { createControls } from './controls.js';
 import { createSensors } from './sensors.js';
 import { createCapture } from './capture.js';
+import { createSlam } from './slam.js';
 
 const D = (m, l) => { try { window.__diag && window.__diag('app.js: ' + m, l); } catch (e) {} };
 D('composition root loaded');
@@ -28,7 +29,10 @@ createControls(hub);
 createSensors(hub);
 createCapture(hub);
 createIr(hub);
-createScene(hub);
+// scene.js returns a handle (Three.js context + follow-camera hooks); slam.js
+// renders the SLAM mesh/trajectory into that same scene (web Phase 4).
+const sceneApi = createScene(hub);
+createSlam(hub, sceneApi);
 
 hub.connect();
 D('all modules instantiated; socket connecting');

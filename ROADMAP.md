@@ -585,6 +585,41 @@ desktop-parity: the app runs remotely on the headless box, so the operator brows
   is now indexed in `docs/web-protocol.md` — Phase 4's trajectory/mesh messages hook in there (it also lists the
   invariants: one-way echo, validate untrusted inbound, server-side math, off-loop blocking work).
 
+#### Web Phase 4 — SLAM mode  ← **✅ Complete (2026-07-16)**
+
+Spec: `docs/superpowers/specs/2026-07-16-web-phase4-slam-design.md`. Host-side only — no wire-protocol or
+firmware change, **and no edits to `slam/`**. Confined to `web.py` + `static/` (new `slam.js`, extended
+`scene.js`/`app.js`/`index.html`) + `test_web.py`. Owner decisions: **GPU-accelerated** and **include a web
+Save button**.
+
+- **Reuse, don't reimplement:** a new `SlamRunner` in `web.py` wraps the desktop's own off-thread pipeline —
+  `make_slam_worker` (local **CUDA:0** worker; remote `SlamService` if `[slam] backend=remote`) + `MeshPrep` —
+  **unchanged**. Fed from the broadcaster only while `mode == "slam"` (no GPU burned in real-time), latest-wins
+  so a slow frame never backs up the loop; all enter/leave/reset/save run off the event loop.
+- **Compute is the LOCAL GPU** (discovered this session): the Proxmox host passes an **RTX 2000 Ada** through
+  to the container, Open3D 0.19 reports CUDA, SLAM runs in-process at **~7 ms/frame** — no remote container
+  needed. (The `headless-host-deployment` "no GPU" note is superseded for compute; X/VNC GL + the test-Chrome
+  WebGL are still software.)
+- **Protocol:** new binary **MESH (tag 3)** — a flattened `MeshPacket` (wall/non-wall verts+colors+tris + floor
+  grid, throttled) — plus a `slam` JSON per frame (pose, server-computed follow eye/center/up, downsampled
+  trajectory tail, fitness/rmse/tracking/frames) and a `saved` list; inbound `set_mode`/`slam_opt`/`save`.
+  Save writes the **full-res** `mapper.mesh()` + TUM trajectory to `results/web_<ts>.ply`/`.tum`, downloadable
+  from a `/results` mount. All in `docs/web-protocol.md`.
+- **Frontend:** new `slam.js` (9th module) renders the mesh (unlit vertex-colored — shading is baked
+  server-side by `MeshPrep`) + trajectory + head marker into `scene.js`'s **single** Three.js context, and
+  drives a follow camera; top-bar Real-Time↔SLAM switch, SLAM control group (trajectory/walls/follow + Save +
+  saved-maps list), and a SLAM HUD row. All state driven from the server `state`/`slam`/`saved` echo.
+- **Verified:** 12 new backend tests (`pack_mesh` round-trip, `slam` shape + traj bound, `sanitize_result_name`,
+  `list_results`, `SlamRunner` lifecycle with fake worker/meshprep, save + empty-map raise); full host suite
+  **637 passed, 1 skipped**. SLAM pipeline de-risked on GPU (`roomscan-slam --device CUDA:0`, 329-frame stream-9
+  capture → lost=0, ~30k-vertex map) and driven end-to-end in headless Chrome against `captures/verify_slam.bin`:
+  mode switch, live mesh build (Tracking OK, Fitness 0.85, RMSE ~11 mm, frames climbing), follow camera, walls
+  Split/Solid, and Save → a downloadable `.ply`/`.tum` — all confirmed on screen.
+- **Verification-data note:** SLAM needs a **stream-9 (IMU quat) capture** — the older
+  `recordings/2026-07-08-room-scan.bin` predates IMU and loses tracking (empty map). `captures/verify_slam.bin`
+  (recorded live this session, gitignored) is the fixture.
+- **Deferred (Web Phases 5–6):** Showcase mode, settings persistence + retiring `panel.py`. No loop closure.
+
 ### Phase 4 — Integrate X-NUCLEO-IKS4A1  ← **✅ Complete** *(swapped with Ethernet 2026-07-09, owner decision — sensors next)*
 
 > **Status 2026-07-10:** verified on hardware — the full stack (ToF depth + SFLP orientation +
