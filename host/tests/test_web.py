@@ -31,10 +31,17 @@ from roomscan.metrics import MetricsRegistry, MetricsSnapshot, StreamRate
 from roomscan.pipeline import TransformStage
 from roomscan.protocol import (
     CommandCode,
+    Frame,
     FrameHeader,
     FrameType,
     StreamId,
     pack_frame,
+)
+from roomscan.sensors import (
+    SensorState,
+    T_CV_TO_BODY,
+    T_WORLD_TO_CV,
+    quat_to_matrix,
 )
 from roomscan.sources import FileSource
 from roomscan.viewer import Stats
@@ -342,6 +349,98 @@ def test_resolve_command_ping_and_unknown():
 # 6. Broadcaster fan-out, no frame-stealing (LIVE socket, §5.3 regression)
 # =============================================================================
 
+# =============================================================================
+# Sensors (streams 9/10) -- build_sensor_message + reader integration (Phase 2)
+# =============================================================================
+
+def _sframe(sid, payload: bytes) -> Frame:
+    return Frame(FrameHeader(FrameType.DATA, sid, 0, 1, 1000, 0, 0, len(payload)), payload)
+
+
+def test_build_sensor_message_none_when_empty():
+    # A ToF-only session (no 9/10 frames ever) must produce no sensor traffic.
+    assert web.build_sensor_message(SensorState(), None) is None
+
+
+def test_build_sensor_message_rot_is_display_transform():
+    ss = SensorState()
+    q = (0.92388, 0.38268, 0.0, 0.0)   # ~45 deg about x
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *q)))
+    msg = web.build_sensor_message(ss, None)
+    assert msg is not None and msg["type"] == "sensor" and msg["have_quat"] is True
+    # rot is exactly the gizmo_pose display rotation, row-major (sensors.py:183-192).
+    expect = (T_WORLD_TO_CV @ quat_to_matrix(*q) @ T_CV_TO_BODY).reshape(-1)
+    assert len(msg["rot"]) == 9
+    assert np.allclose(np.array(msg["rot"], dtype=float), expect, atol=1e-4)
+    # env-derived fields stay null with no ENV frame yet.
+    assert msg["heading"] is None
+    assert msg["pressure_pa"] is None and msg["temp_c"] is None and msg["mag_ut"] is None
+    json.dumps(msg)   # fully JSON-serialisable
+
+
+def test_build_sensor_message_env_fields_and_history():
+    ss = SensorState()
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", 1.0, 0.0, 0.0, 0.0)))
+    for i in range(3):
+        ss.feed(_sframe(StreamId.ENV, struct.pack("<5f", 101000.0 + i, 1.0, 2.0, 3.0, 22.0 + i)))
+    msg = web.build_sensor_message(ss, None)
+    assert msg is not None
+    assert msg["pressure_pa"] == pytest.approx(101002.0, abs=0.5)   # latest wins
+    assert msg["temp_c"] == pytest.approx(24.0, abs=0.05)
+    assert msg["mag_ut"] == [1.0, 2.0, 3.0]                          # raw (no mag_cal)
+    assert msg["heading"] is not None                               # quat+env present
+    assert len(msg["pressure_hist"]) == 3 and len(msg["temp_hist"]) == 3
+    assert msg["pressure_hist"][0] == pytest.approx(101000.0, abs=0.5)
+    json.dumps(msg)
+
+
+def _make_sensor_capture(path: Path, n: int = 6) -> None:
+    """A capture of interleaved IMU_QUAT + ENV frames (no DEPTH), so the reader
+    drives SensorState without ever filling the render slot."""
+    out = bytearray()
+    for i in range(n):
+        q = struct.pack("<4f", 1.0, 0.01 * i, 0.0, 0.0)
+        out += pack_frame(FrameHeader(FrameType.DATA, StreamId.IMU_QUAT, 0, i + 1,
+                                      i * 35000, 0, 0, len(q)), q)
+        env = struct.pack("<5f", 101000.0 + i, 20.0, -5.0, 40.0, 22.0 + 0.1 * i)
+        out += pack_frame(FrameHeader(FrameType.DATA, StreamId.ENV, 0, i + 1,
+                                      i * 35000, 0, 0, len(env)), env)
+    path.write_bytes(bytes(out))
+
+
+def test_sensor_state_populated_via_run_reader(tmp_path):
+    import queue
+
+    from roomscan.decoder import StreamDecoder
+
+    cap = tmp_path / "sensors.bin"
+    _make_sensor_capture(cap, n=6)
+
+    ss = SensorState()
+    stop = {"v": False}
+    thread = threading.Thread(
+        target=panel._run_reader,
+        args=(FileSource(str(cap)), StreamDecoder(), TransformStage(outputs=("depth",)),
+              Stats(), queue.Queue(maxsize=1), {}, LogBus(), None, None,
+              panel._Pacer(interval=0.0), lambda: stop["v"]),
+        kwargs={"state": ss},
+        daemon=True,
+    )
+    thread.start()
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline and (ss.latest_quat() is None or ss.pressure_history().size < 3):
+        time.sleep(0.02)
+    stop["v"] = True
+    thread.join(timeout=5.0)
+
+    # streams 9 + 10 both reached the SensorState through the shared reader.
+    assert ss.latest_quat() is not None
+    env = ss.latest_env()
+    assert env is not None and env.temp_c == pytest.approx(22.0, abs=0.6)
+    assert ss.pressure_history().size >= 3
+
+
 def _make_depth_capture(path: Path, n_frames: int = 10, w: int = 8, h: int = 6) -> None:
     """Write a tiny DEPTH_ZF32 capture with n_frames DISTINCT frames.
 
@@ -406,6 +505,9 @@ def _build_app_state(replay_path: Path, replay_fps: float = 20.0):
     web.app.state.stats = stats
     web.app.state.pacer = pacer
     web.app.state.ui_state = web.UiState()
+    sensor_state = SensorState()
+    web.app.state.sensor_state = sensor_state
+    web.app.state.mag_cal = None
     web.app.state.deproj = None
     web.app.state.clients = set()
     web.app.state.command_labels = set()
@@ -416,7 +518,7 @@ def _build_app_state(replay_path: Path, replay_fps: float = 20.0):
         target=panel._run_reader,
         args=(source, decoder, stage, stats, slot, fault, bus, None, None,
               pacer, lambda: False),
-        kwargs={"state": None, "metrics": metrics},
+        kwargs={"state": sensor_state, "metrics": metrics},
         daemon=True,
     ).start()
     return pacer

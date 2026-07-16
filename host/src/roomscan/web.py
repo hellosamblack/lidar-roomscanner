@@ -44,9 +44,19 @@ from .decoder import StreamDecoder
 from .deproject import Deprojector
 from .ir_image import ir_range, reflectance_to_rgb
 from .logbus import LogBus
+from .magcal import MagCalibration
 from .metrics import MetricsRegistry, MetricsSnapshot
 from .pipeline import TransformStage
 from .protocol import CommandCode
+from .sensors import (
+    AXIS_CONVENTION,
+    SensorState,
+    T_CV_TO_BODY,
+    T_WORLD_TO_CV,
+    YawFusion,
+    absolute_heading,
+    quat_to_matrix,
+)
 from .sources import FileSource, SerialSource, UdpSource, get_best_source
 from .viewer import Stats, resolve_args
 
@@ -63,6 +73,10 @@ TAG_IR_IMAGE = 2
 POINT_INTERVAL = 1.0 / 30.0
 IR_INTERVAL = 1.0 / 15.0
 METRICS_INTERVAL = 1.0 / 4.0
+# Sensor (streams 9/10) broadcast cadence: 15 Hz is smooth for a handheld gizmo
+# and well above the ~4 Hz sparkline need. History rides every message so a
+# late-joining tab's sparklines are instantly full (Phase-1 late-joiner rule).
+SENSOR_INTERVAL = 1.0 / 15.0
 MISSING_PLANE_LOG_INTERVAL = 3.0   # debounce for missing-plane bus lines
 
 _VALID_COLOR_MODES = ("depth", "reflectance", "confidence")
@@ -213,6 +227,53 @@ def build_metrics_message(snapshot: MetricsSnapshot) -> dict:
     }
 
 
+def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | None) -> dict | None:
+    """SensorState -> `sensor` JSON dict (streams 9/10), or None when there is no
+    sensor data at all (so the broadcaster stays silent on a ToF-only session).
+
+    The load-bearing math is reused verbatim from the desktop panel: the gizmo
+    `rot` is the same display rotation `gizmo_pose` builds
+    (T_WORLD_TO_CV @ R @ T_CV_TO_BODY, sensors.py:183-192), and `heading` is
+    `absolute_heading` over the calibrated mag (panel.py:3172-3178). Computing
+    them here keeps the sign/permutation matrices in exactly one place (Python),
+    so the frontend never re-derives them.
+    """
+    quat = sensor_state.fused_quat()
+    env = sensor_state.latest_env()
+    press_hist = sensor_state.pressure_history()
+    temp_hist = sensor_state.temp_history()
+    if quat is None and env is None and press_hist.size == 0:
+        return None
+
+    rot = None
+    if quat is not None:
+        r = T_WORLD_TO_CV @ quat_to_matrix(*quat) @ T_CV_TO_BODY
+        rot = [round(float(v), 5) for v in r.reshape(-1)]   # row-major 9
+
+    heading = None
+    mag_out = None
+    if env is not None:
+        mag = env.mag_ut
+        if mag_cal is not None:
+            mag = tuple(float(v) for v in AXIS_CONVENTION @ mag_cal.apply(mag))
+        mag_out = [round(float(v), 2) for v in mag]
+        if quat is not None:
+            heading = round(absolute_heading(quat, tuple(mag)), 1)
+
+    return {
+        "type": "sensor",
+        "have_quat": quat is not None,
+        "rot": rot,
+        "heading": heading,
+        "pressure_pa": round(float(env.pressure_pa), 1) if env is not None else None,
+        "temp_c": round(float(env.temp_c), 2) if env is not None else None,
+        "mag_ut": mag_out,
+        "fusion": sensor_state.fusion_status(),
+        "pressure_hist": [round(float(v), 1) for v in press_hist.tolist()],
+        "temp_hist": [round(float(v), 2) for v in temp_hist.tolist()],
+    }
+
+
 def resolve_command(name: str, param) -> tuple[CommandCode, int, str] | None:
     """Inbound `cmd` request -> (CommandCode, param, label), or None for an
     unknown name. usecase carries the id as both param and label suffix."""
@@ -310,6 +371,7 @@ async def _broadcaster() -> None:
     last_pc_bytes = None
     last_ir = 0.0
     last_metrics = 0.0
+    last_sensor = 0.0
     next_pc = time.monotonic()   # deadline-based pacing: sleep to the next tick,
 
     while True:
@@ -376,6 +438,13 @@ async def _broadcaster() -> None:
                 else:
                     _log_debounced(state, bus, "ir-miss",
                                    "reflectance unavailable this frame, holding IR pane")
+
+        # Sensor (streams 9/10) on its own cadence; silent until 9/10 arrives.
+        if now - last_sensor >= SENSOR_INTERVAL:
+            last_sensor = now
+            smsg = build_sensor_message(state.sensor_state, state.mag_cal)
+            if smsg is not None:
+                await _broadcast_text(clients, json.dumps(smsg))
 
         # Metrics + bus drain on the slowest cadence.
         if now - last_metrics >= METRICS_INTERVAL:
@@ -487,6 +556,25 @@ def main(argv=None) -> int:
     stage = TransformStage(outputs=("depth", "reflectance", "confidence"))
     slot: queue.Queue = queue.Queue(maxsize=1)
     fault: dict = {}
+
+    # Sensor state (streams 9/10) -- built exactly like the desktop panel
+    # (panel.py:525-541), reusing SensorState + YawFusion + MagCalibration.
+    # getattr defaults cover viewer.resolve_args not defining the panel's sensor
+    # flags; a missing mag_cal.json just leaves fusion in gated:no-cal.
+    mag_cal = None
+    fusion = None
+    if getattr(args, "yaw_fusion", True):
+        mag_cal = MagCalibration.load(
+            getattr(args, "mag_cal_path", "mag_cal.json") or "mag_cal.json")
+        fusion = YawFusion(
+            tau_s=float(getattr(args, "yaw_fusion_tau", 20.0) or 20.0),
+            calibration=mag_cal,
+            anomaly_frac=float(getattr(args, "yaw_anomaly_frac", 0.3) or 0.3),
+            motion_rate_dps=float(getattr(args, "yaw_motion_rate_dps", 40.0) or 40.0),
+            gimbal_margin_deg=float(getattr(args, "yaw_gimbal_margin_deg", 15.0) or 15.0),
+        )
+    sensor_state = SensorState(fusion=fusion)
+
     pacer = panel._Pacer(interval=(1.0 / args.replay_fps
                                    if (args.replay and args.replay_fps and args.replay_fps > 0) else 0.0))
 
@@ -504,6 +592,8 @@ def main(argv=None) -> int:
     app.state.stats = stats
     app.state.pacer = pacer
     app.state.ui_state = UiState()
+    app.state.sensor_state = sensor_state
+    app.state.mag_cal = mag_cal
     app.state.deproj = None
     app.state.clients = set()
     app.state.command_labels = set()
@@ -511,14 +601,14 @@ def main(argv=None) -> int:
     app.state.ready = True
 
     # Reuse the panel's reader body -- it already routes EVENT->bus, ACK->client,
-    # feeds metrics per DATA frame, and honors the pacer (§5.2). recorder=None
-    # (Phase 3), is_stopped always False (no stop affordance yet), state=None
-    # (Phase 2 sensors).
+    # feeds metrics per DATA frame, feeds the SensorState (streams 9/10), and
+    # honors the pacer (§5.2). recorder=None (Phase 3), is_stopped always False
+    # (no stop affordance yet).
     threading.Thread(
         target=panel._run_reader,
         args=(source, decoder, stage, stats, slot, fault, bus, client, None,
               pacer, lambda: False),
-        kwargs={"state": None, "metrics": metrics},
+        kwargs={"state": sensor_state, "metrics": metrics},
         daemon=True,
     ).start()
 

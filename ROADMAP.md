@@ -520,9 +520,36 @@ or firmware change. Confined to `host/src/roomscan/web.py` + `host/src/roomscan/
 - **Caveat (data, not code):** dual-stream recordings (RAW_3DMD + redundant DEPTH_ZF32 passthrough) intermittently
   fall the IR pane / reflectance colour back to depth, because the DEPTH frame lands last in the latest-wins slot.
   Live production streams are RAW-only, so unaffected; a "prefer-richest-frame" tweak is a future option.
-- **Deferred to Web Phases 2–6:** sensors/compass/gizmo/sparklines, recording/playback UI, SLAM trajectory+mesh
+- **Deferred to Web Phases ~~2~~ 3–6:** recording/playback UI, SLAM trajectory+mesh
   (adds a MESH binary type + a top-bar mode switch, placeholder reserved), showcase mode, settings persistence,
   and retiring `panel.py`. Also not yet carried over: exposure slider, rotate-90 / near-contrast view options.
+
+#### Web Phase 2 — Sensors (IMU/env streams 9/10)  ← **✅ Complete (2026-07-16)**
+
+Spec: `docs/superpowers/specs/2026-07-16-web-phase2-sensors-design.md`. Host-side only — no wire-protocol
+or firmware change. Confined to `web.py` + `static/` (new `sensors.js`, extended `app.js`/`index.html`) +
+`test_web.py`.
+
+- **Reuse, don't reimplement:** `web.py` now builds the same `SensorState` + `YawFusion` + `MagCalibration`
+  the desktop panel does (`panel.py:525-541`) and feeds it through the shared reader by filling the
+  `_run_reader(state=…)` slot Web Phase 1 left as `None`. The message builder calls the existing `sensors.py`
+  math (`quat_to_matrix`, `T_WORLD_TO_CV`, `T_CV_TO_BODY`, `absolute_heading`, `AXIS_CONVENTION`) — nothing in
+  `sensors.py`/`magcal.py`/`protocol.py`/`panel.py` was edited.
+- **Protocol:** one new JSON message `{"type":"sensor", …}` on the existing `/ws` (no new binary tag — the
+  payload is tiny): server-computed display-rotation `rot` (9-float row-major `T_WORLD_TO_CV @ R @ T_CV_TO_BODY`),
+  `heading` (drift-free `absolute_heading`, calibrated mag when `mag_cal.json` present), pressure/temp/mag,
+  `fusion` status, and 256-sample pressure/temp history. Broadcast at 15 Hz from the single broadcaster task;
+  **silent until a 9/10 frame arrives** (`build_sensor_message` returns `None`), so ToF-only sessions add no traffic.
+- **Frontend:** new `sensors.js` module (2D-canvas — no second WebGL context, keeps the headless SwiftShader box
+  cheap) draws an orientation gizmo, a tilt-compensated compass (0=N clockwise), and pressure/temp sparklines,
+  appended to the left rail per the Phase-1 layout plan. Streams 9/10 also light up the metrics HUD's IMU/Env
+  rows for free (`metrics.py` already labels them).
+- **Verified:** 4 new backend tests (`build_sensor_message` shape/units + display-transform equivalence + reader
+  integration); full host suite **610 passed, 1 skipped**. Driven end-to-end in headless Chrome against a
+  synthetic depth+IMU+ENV replay — gizmo, compass (heading tracked frame-exact), and sparklines all confirmed on
+  screen; server log clean.
+- **Not carried over (deferred):** world-frame point accumulation + baseline-yaw reset (revisit with SLAM,
+  Web Phase 4), SHT40 humidity (unstreamed), on-rig mag-recalibration UI.
 
 ### Phase 4 — Integrate X-NUCLEO-IKS4A1  ← **✅ Complete** *(swapped with Ethernet 2026-07-09, owner decision — sensors next)*
 
