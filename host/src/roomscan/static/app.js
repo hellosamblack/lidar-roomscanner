@@ -13,6 +13,7 @@ import { createHud } from './hud.js';
 import { createLog } from './log.js';
 import { createControls } from './controls.js';
 import { createSensors } from './sensors.js';
+import { createCapture } from './capture.js';
 
 const D = (m, l) => { try { window.__diag && window.__diag('app.js: ' + m, l); } catch (e) {} };
 D('composition root loaded');
@@ -25,6 +26,7 @@ createHud(hub);
 createLog(hub);
 createControls(hub);
 createSensors(hub);
+createCapture(hub);
 createIr(hub);
 createScene(hub);
 

@@ -551,6 +551,37 @@ or firmware change. Confined to `web.py` + `static/` (new `sensors.js`, extended
 - **Not carried over (deferred):** world-frame point accumulation + baseline-yaw reset (revisit with SLAM,
   Web Phase 4), SHT40 humidity (unstreamed), on-rig mag-recalibration UI.
 
+#### Web Phase 3 — Recording & Playback (full-remote)  ← **✅ Complete (2026-07-16)**
+
+Spec: `docs/superpowers/specs/2026-07-16-web-phase3-recording-playback-design.md`. Host-side only — no
+wire-protocol or firmware change. Confined to `web.py` + `static/` (new `capture.js`) + one additive
+`FileSource(start=)` param in `sources.py` + `test_web.py`. Owner picked **Full remote** over
+desktop-parity: the app runs remotely on the headless box, so the operator browses and loads captures
+**from the browser**, not by relaunching with `--replay`.
+
+- **Runtime source-swap (the hard part):** a new `SessionController` owns the reader-thread lifecycle so
+  the source can be swapped **live↔replay at runtime** without disturbing the single broadcaster or the
+  shared slot. The live device is opened once and kept behind a `_NoCloseSource` proxy (pump's
+  `finally: close()` can't kill it), so **Go Live re-uses it instantly** (no 5 s UDP re-probe). Swaps run
+  off the event loop via `asyncio.to_thread`, serialized by a lock; the reader body is the **unchanged**
+  `panel._run_reader`.
+- **Four capabilities:** (1) **Record** a live session → `captures/web_<ts>.bin` with live elapsed/bytes
+  status (disabled in replay); (2) **capture library** — server lists `captures/*.bin`, browser picks;
+  (3) **load at runtime** → reader swaps to replay, `Go Live` returns; (4) **transport** — Pause/Resume,
+  speed ×0.5/×1/×2/Max, Loop, and a **seekable progress bar**. Seek re-injects the governing CALIB (from a
+  CRC-verified capture index of frame offsets/seqs/calib-spans) so scrubbing into a RAW capture isn't blank.
+- **Protocol:** two new `/ws` JSON messages — `session` (mode/source/recording/playback, broadcast on change
+  + metrics cadence) and `captures` (library list) — plus inbound `record`/`list_captures`/`load_capture`/
+  `go_live`/`transport`. No new binary tag. Commands in replay report "not available in replay" (no device
+  round-trip). Frontend: new `capture.js` (8th ES module), all state driven from the server echo (one-way
+  flow), no build step.
+- **Verified:** 20 new backend tests (index/sanitize/list/session helpers + `SessionController` swap, record
+  gating, live-record tee, seek); full host suite **625 passed, 1 skipped**. Driven end-to-end in headless
+  Chrome against a synthetic capture library — record-disabled-in-replay, library listing, runtime load/swap,
+  pause (position frozen), speed (Device FPS tracked the ×-setting), loop, and seek all confirmed on screen.
+- **Deferred (Web Phases 4–6):** SLAM trajectory+mesh, showcase, settings persistence + retiring `panel.py`.
+  Serial-staleness on Go Live is mitigated by a best-effort `reset_input_buffer`; UDP self-heals via keepalive.
+
 ### Phase 4 — Integrate X-NUCLEO-IKS4A1  ← **✅ Complete** *(swapped with Ethernet 2026-07-09, owner decision — sensors next)*
 
 > **Status 2026-07-10:** verified on hardware — the full stack (ToF depth + SFLP orientation +

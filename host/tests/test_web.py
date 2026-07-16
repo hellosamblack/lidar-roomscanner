@@ -590,3 +590,322 @@ def test_broadcaster_fanout_two_clients_same_frames(tmp_path):
     # And it was not a single frozen frame -- multiple distinct frames flowed,
     # so an interleaving/stealing bug would have split them across clients.
     assert len(set(a)) >= 2
+
+
+# =============================================================================
+# 9. Recording & playback (Web Phase 3)
+# =============================================================================
+import os as _os
+
+from roomscan.sources import Recorder
+from roomscan.decoder import StreamDecoder as _StreamDecoder
+from roomscan.metrics import MetricsRegistry as _MetricsRegistry
+from roomscan.logbus import LogBus as _LogBus
+
+
+def _make_depth_capture_flat(path: Path, n_frames: int, base: float,
+                             w: int = 8, h: int = 6) -> None:
+    """DEPTH_ZF32 capture whose frame i is a flat plane at `base + i` mm, so two
+    captures with disjoint bases are distinguishable by depth.mean() from the
+    render slot (no native DLL, passthrough)."""
+    out = bytearray()
+    for i in range(n_frames):
+        depth = np.full((h, w), base + i, dtype=np.float32)
+        payload = depth.astype("<f4").tobytes()
+        out += pack_frame(FrameHeader(FrameType.DATA, StreamId.DEPTH_ZF32, 0, i + 1,
+                                      i * 35000, w, h, len(payload)), payload)
+    path.write_bytes(bytes(out))
+
+
+def _make_raw_calib_capture(path: Path, n_raw: int = 5) -> tuple[bytes, int]:
+    """One CALIB frame then n_raw RAW_3DMD frames (arbitrary payloads -- the index
+    only scans headers/CRC, never runs the transform). Returns (calib_wire_bytes,
+    byte_offset_of_first_raw)."""
+    out = bytearray()
+    calib_payload = bytes(range(200)) * 2
+    calib_wire = pack_frame(FrameHeader(FrameType.DATA, StreamId.CALIB, 0, 0, 0, 0, 0,
+                                        len(calib_payload)), calib_payload)
+    out += calib_wire
+    first_raw_off = len(out)
+    for i in range(n_raw):
+        payload = struct.pack("<H", i) * 64
+        out += pack_frame(FrameHeader(FrameType.DATA, StreamId.RAW_3DMD, 0, i + 1,
+                                      i * 35000, 54, 42, len(payload)), payload)
+    path.write_bytes(bytes(out))
+    return calib_wire, first_raw_off
+
+
+# ---- pure helpers ----
+
+def test_speed_to_interval():
+    assert web.speed_to_interval(0) == 0.0
+    assert web.speed_to_interval(-5) == 0.0
+    assert web.speed_to_interval(30) == pytest.approx(1.0 / 30.0)
+
+
+def test_sanitize_capture_name(tmp_path):
+    (tmp_path / "good.bin").write_bytes(b"x")
+    assert web.sanitize_capture_name("good.bin", tmp_path) == tmp_path / "good.bin"
+    assert web.sanitize_capture_name("missing.bin", tmp_path) is None
+    assert web.sanitize_capture_name("good.txt", tmp_path) is None       # wrong suffix
+    assert web.sanitize_capture_name("../good.bin", tmp_path) is None    # traversal
+    assert web.sanitize_capture_name("sub/good.bin", tmp_path) is None   # separator
+    assert web.sanitize_capture_name("", tmp_path) is None
+    assert web.sanitize_capture_name(None, tmp_path) is None
+
+
+def test_list_captures_newest_first(tmp_path):
+    (tmp_path / "a.bin").write_bytes(b"aa")
+    (tmp_path / "b.bin").write_bytes(b"bbbb")
+    _os.utime(tmp_path / "a.bin", (1000, 1000))
+    _os.utime(tmp_path / "b.bin", (2000, 2000))
+    (tmp_path / "notacapture.txt").write_bytes(b"z")
+    items = web.list_captures(tmp_path)
+    assert [it["name"] for it in items] == ["b.bin", "a.bin"]   # newest (b) first
+    assert items[0]["bytes"] == 4
+    assert web.list_captures(tmp_path / "does-not-exist") == []
+
+
+def test_build_capture_index_depth_offsets_are_frame_boundaries(tmp_path):
+    cap = tmp_path / "depth.bin"
+    _make_depth_capture_flat(cap, n_frames=10, base=1000.0)
+    idx = web.build_capture_index(cap)
+    assert idx["n_frames"] == 10
+    assert idx["calib_spans"] == []
+    assert idx["seqs"] == list(range(1, 11))
+    # Every offset is a real frame boundary: FileSource(start=off) + decoder
+    # yields that exact frame first.
+    data = cap.read_bytes()
+    for k, off in enumerate(idx["offsets"]):
+        dec = _StreamDecoder()
+        frames = dec.feed(data[off:])
+        assert frames and frames[0].header.seq == idx["seqs"][k]
+
+
+def test_build_capture_index_raw_records_calib_span(tmp_path):
+    cap = tmp_path / "raw.bin"
+    calib_wire, first_raw_off = _make_raw_calib_capture(cap, n_raw=5)
+    idx = web.build_capture_index(cap)
+    assert idx["n_frames"] == 5                       # RAW frames only
+    assert len(idx["calib_spans"]) == 1
+    s, e = idx["calib_spans"][0]
+    assert (s, e) == (0, len(calib_wire))
+    assert idx["offsets"][0] == first_raw_off
+
+
+def test_build_capture_index_rejects_false_magic(tmp_path):
+    """A MAGIC sequence inside a payload must not be mistaken for a frame start
+    (CRC check rejects it)."""
+    from roomscan.protocol import MAGIC
+    cap = tmp_path / "trap.bin"
+    payload = MAGIC + b"\x00" * 60           # embed MAGIC in a DEPTH payload
+    out = pack_frame(FrameHeader(FrameType.DATA, StreamId.DEPTH_ZF32, 0, 1, 0, 4, 4,
+                                 len(payload)), payload)
+    cap.write_bytes(out)
+    idx = web.build_capture_index(cap)
+    assert idx["n_frames"] == 1              # the embedded MAGIC did NOT split it
+
+
+def test_prefix_source_yields_calib_then_file(tmp_path):
+    """Scrub-seek's calib re-injection: _PrefixSource emits the CALIB frame first,
+    then the file from the seek offset, so the decoder sees CALIB before RAW."""
+    cap = tmp_path / "raw.bin"
+    calib_wire, first_raw_off = _make_raw_calib_capture(cap, n_raw=5)
+    idx = web.build_capture_index(cap)
+    seek_off = idx["offsets"][2]             # jump to the 3rd RAW frame
+    src = web._PrefixSource(calib_wire, FileSource(str(cap), start=seek_off))
+    dec = _StreamDecoder()
+    seen = []
+    for _ in range(20):
+        data = src.read()
+        if not data:
+            break
+        seen.extend(dec.feed(data))
+    src.close()
+    assert seen[0].header.stream_id == StreamId.CALIB          # calib first
+    assert seen[1].header.stream_id == StreamId.RAW_3DMD
+    assert seen[1].header.seq == idx["seqs"][2]                # resumed at the seek
+
+
+def test_filesource_start_offset_reads_from_boundary(tmp_path):
+    cap = tmp_path / "depth.bin"
+    _make_depth_capture_flat(cap, n_frames=8, base=2000.0)
+    idx = web.build_capture_index(cap)
+    fs = FileSource(str(cap), start=idx["offsets"][5])
+    dec = _StreamDecoder()
+    frames = dec.feed(fs.read())
+    fs.close()
+    assert frames[0].header.seq == idx["seqs"][5]
+
+
+def test_build_session_message_shape():
+    m = web.build_session_message(
+        "replay", "Replay · x.bin", False, rec_active=False, rec_path=None,
+        rec_elapsed_s=0.0, rec_bytes=0, is_replay=True, capture_name="x.bin",
+        paused=True, speed_fps=30.0, loop=True, position=0.5, total_frames=42)
+    assert m["type"] == "session" and m["mode"] == "replay"
+    assert m["playback"]["is_replay"] and m["playback"]["position"] == 0.5
+    assert m["playback"]["total_frames"] == 42 and m["playback"]["loop"] is True
+    assert json.loads(json.dumps(m)) == m                     # JSON-round-trips
+
+
+# ---- SessionController ----
+
+def _make_controller(tmp_path, *, live_source=None, live_label="test",
+                     replay_path=None, captures_dir=None, speed_fps=0.0):
+    stage = TransformStage(outputs=("depth", "reflectance", "confidence"))
+    import queue
+    slot = queue.Queue(maxsize=1)
+    return web.SessionController(
+        live_source=live_source, live_label=live_label, stage=stage, stats=Stats(),
+        slot=slot, fault={}, bus=_LogBus(), client=None, recorder=Recorder(),
+        pacer=panel._Pacer(interval=web.speed_to_interval(speed_fps)),
+        sensor_state=SensorState(), metrics=_MetricsRegistry(window_s=2.0),
+        captures_dir=str(captures_dir or tmp_path), initial_replay_path=replay_path,
+        initial_speed_fps=speed_fps), slot
+
+
+def _drain_depth_mean(slot, timeout):
+    import queue
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            _, outputs = slot.get(timeout=0.1)
+            return float(outputs["depth"].mean())
+        except queue.Empty:
+            continue
+    return None
+
+
+def test_controller_switch_to_replay_changes_stream(tmp_path):
+    capA = tmp_path / "a.bin"
+    capB = tmp_path / "b.bin"
+    _make_depth_capture_flat(capA, n_frames=40, base=1000.0)
+    _make_depth_capture_flat(capB, n_frames=40, base=9000.0)
+
+    ctrl, slot = _make_controller(tmp_path, replay_path=str(capA))
+    ctrl.loop = True                          # keep A streaming until we swap
+    ctrl.start()
+    try:
+        assert _drain_depth_mean(slot, 3.0) < 5000.0          # playing A
+        ctrl.switch_to_replay(str(capB))
+        import queue
+        found_b = False
+        deadline = time.time() + 4.0
+        while time.time() < deadline:
+            try:
+                _, outputs = slot.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if float(outputs["depth"].mean()) > 5000.0:
+                found_b = True
+                break
+        assert found_b, "did not observe capB stream after switch_to_replay"
+        assert ctrl.mode == "replay" and ctrl.index["n_frames"] == 40
+    finally:
+        ctrl.close()
+
+
+def test_controller_record_gated_in_replay(tmp_path):
+    cap = tmp_path / "a.bin"
+    _make_depth_capture_flat(cap, n_frames=5, base=1000.0)
+    ctrl, _ = _make_controller(tmp_path, replay_path=str(cap))
+    ctrl.start_record()                       # replay mode -> refused
+    assert not ctrl.recorder.active
+    ctrl.close()
+
+
+def test_controller_records_live_bytes(tmp_path):
+    payload_cap = tmp_path / "src.bin"
+    _make_depth_capture_flat(payload_cap, n_frames=3, base=1000.0)
+    raw = payload_cap.read_bytes()
+
+    class FakeLive:
+        def read(self):
+            time.sleep(0.02)
+            return raw
+        def write(self, d):
+            pass
+        def close(self):
+            pass
+
+    outdir = tmp_path / "caps"
+    ctrl, _ = _make_controller(tmp_path, live_source=FakeLive(), captures_dir=outdir)
+    ctrl.start()
+    try:
+        assert ctrl.mode == "live" and ctrl.has_live
+        ctrl.start_record()
+        assert ctrl.recorder.active
+        # Let the reader tee at least one full chunk.
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            p = ctrl.recorder.path
+            if p and _os.path.getsize(p) >= len(raw):
+                break
+            time.sleep(0.02)
+        path = ctrl.recorder.path
+        ctrl.stop_record()
+        assert not ctrl.recorder.active
+        rec = Path(path).read_bytes()
+        assert len(rec) >= len(raw) and rec.startswith(raw)   # verbatim tee
+    finally:
+        ctrl.close()
+
+
+def test_controller_session_message_live_vs_replay(tmp_path):
+    cap = tmp_path / "a.bin"
+    _make_depth_capture_flat(cap, n_frames=7, base=1000.0)
+
+    ctrl_r, _ = _make_controller(tmp_path, replay_path=str(cap))
+    m = ctrl_r.session_message(0.25, time.time())
+    assert m["mode"] == "replay" and m["playback"]["is_replay"]
+    assert m["playback"]["capture_name"] == "a.bin"
+    assert m["playback"]["total_frames"] == 7
+    assert m["has_live"] is False
+
+    class FakeLive:
+        def read(self): return b""
+        def write(self, d): pass
+        def close(self): pass
+
+    ctrl_l, _ = _make_controller(tmp_path, live_source=FakeLive(), live_label="Serial CDC · COM7")
+    m2 = ctrl_l.session_message(None, time.time())
+    assert m2["mode"] == "live" and m2["has_live"] is True
+    assert m2["playback"]["is_replay"] is False
+    assert m2["source_label"] == "Serial CDC · COM7"
+
+
+def test_controller_transport_speed_and_loop(tmp_path):
+    cap = tmp_path / "a.bin"
+    _make_depth_capture_flat(cap, n_frames=5, base=1000.0)
+    ctrl, _ = _make_controller(tmp_path, replay_path=str(cap))
+    ctrl.set_speed(15.0)
+    assert ctrl.pacer.interval == pytest.approx(1.0 / 15.0)
+    ctrl.set_speed(0.0)
+    assert ctrl.pacer.interval == 0.0
+    ctrl.set_loop(True)
+    assert ctrl.loop is True
+    ctrl.pause()
+    assert ctrl.pacer.paused.is_set()
+    ctrl.resume()
+    assert not ctrl.pacer.paused.is_set()
+    ctrl.close()
+
+
+def test_controller_seek_sets_offset_and_resumes(tmp_path):
+    cap = tmp_path / "d.bin"
+    _make_depth_capture_flat(cap, n_frames=100, base=1000.0)
+    ctrl, slot = _make_controller(tmp_path, replay_path=str(cap), speed_fps=20.0)
+    ctrl.loop = True                          # keep streaming so a frame arrives post-seek
+    ctrl.start()
+    try:
+        assert _drain_depth_mean(slot, 3.0) is not None    # producing
+        ctrl.seek(0.5)
+        idx = ctrl.index
+        i = round(0.5 * (idx["n_frames"] - 1))
+        assert ctrl._seek_offset == idx["offsets"][i]      # exact frame boundary
+        assert ctrl._seek_prefix == b""                    # no calib in a DEPTH capture
+        # A DEPTH capture reads correctly at the seek offset -> a frame still flows.
+        assert _drain_depth_mean(slot, 3.0) is not None
+    finally:
+        ctrl.close()

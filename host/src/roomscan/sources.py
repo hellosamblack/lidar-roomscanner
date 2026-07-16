@@ -16,9 +16,16 @@ CDC_VID, CDC_PID = 0xCAFE, 0x4001   # milestone 1b TinyUSB descriptors (docs/pro
 
 
 class FileSource:
-    def __init__(self, path, chunk: int = 4096):
+    def __init__(self, path, chunk: int = 4096, start: int = 0):
         self._f = open(path, "rb")
         self._chunk = chunk
+        if start:
+            # Seek to a frame boundary for replay scrubbing (web Phase 3). The
+            # caller (SessionController.seek) computes `start` from a capture
+            # index so it always lands on a frame boundary; even if it didn't,
+            # StreamDecoder resyncs on MAGIC + CRC, so a mid-frame start is
+            # merely lossy, never corrupt.
+            self._f.seek(start)
 
     def read(self) -> bytes:
         return self._f.read(self._chunk)
@@ -309,7 +316,11 @@ def pump(source, decoder: StreamDecoder, record_path=None, recorder: Optional[Re
         while True:
             data = source.read()
             if not data:
-                if isinstance(source, FileSource):
+                # A source signals "replay reached EOF, stop the pump" either by
+                # being a FileSource or by exposing a truthy `eof_on_empty`
+                # attribute (web Phase 3 wraps a FileSource behind a prefix
+                # source for scrub-seek, and needs the same EOF semantics).
+                if getattr(source, "eof_on_empty", False) or isinstance(source, FileSource):
                     return          # EOF on replay; live sources just idle
                 continue
             if rec:

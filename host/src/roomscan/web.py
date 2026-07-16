@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 import webbrowser
+import zlib
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,7 +48,15 @@ from .logbus import LogBus
 from .magcal import MagCalibration
 from .metrics import MetricsRegistry, MetricsSnapshot
 from .pipeline import TransformStage
-from .protocol import CommandCode
+from .protocol import (
+    HEADER_SIZE,
+    MAGIC,
+    CommandCode,
+    FrameHeader,
+    FrameType,
+    ProtocolError,
+    StreamId,
+)
 from .sensors import (
     AXIS_CONVENTION,
     SensorState,
@@ -57,7 +66,7 @@ from .sensors import (
     absolute_heading,
     quat_to_matrix,
 )
-from .sources import FileSource, SerialSource, UdpSource, get_best_source
+from .sources import FileSource, Recorder, SerialSource, UdpSource, get_best_source
 from .viewer import Stats, resolve_args
 
 log = logging.getLogger("roomscan.web")
@@ -78,6 +87,13 @@ METRICS_INTERVAL = 1.0 / 4.0
 # late-joining tab's sparklines are instantly full (Phase-1 late-joiner rule).
 SENSOR_INTERVAL = 1.0 / 15.0
 MISSING_PLANE_LOG_INTERVAL = 3.0   # debounce for missing-plane bus lines
+
+# Recording & playback (web Phase 3).
+CAPTURES_DIR = "captures"          # where Record writes + the library browses
+# The playback speed segmented control maps ×0.5/×1/×2/Max onto these fps; a
+# capture's own cadence is ~28 Hz, so ×1 (30 fps) plays it near-native and Max
+# (0 -> interval 0) drains as fast as it decodes.
+_SPEED_BASE_FPS = 30.0
 
 _VALID_COLOR_MODES = ("depth", "reflectance", "confidence")
 _VALID_IR_COLORMAPS = ("gray", "turbo")
@@ -298,6 +314,426 @@ def _state_message(ui: UiState) -> dict:
             "ir_colormap": ui.ir_colormap, "ir_freeze": ui.ir_freeze}
 
 
+# --- recording & playback pure helpers (no socket, no thread) ---------------
+
+def speed_to_interval(speed_fps: float) -> float:
+    """Playback fps -> per-frame pacer interval; 0 (or <=0) means as-fast-as-decoded."""
+    return 1.0 / speed_fps if speed_fps and speed_fps > 0 else 0.0
+
+
+def sanitize_capture_name(name, captures_dir) -> Path | None:
+    """Resolve an inbound capture name to a real file under `captures_dir`, or
+    None. Basename-only (no path separators / traversal), must end in `.bin`,
+    must exist. The frontend only ever sends names we handed it, but a WS peer
+    is untrusted, so this is the load path's whole security surface."""
+    if not name or not isinstance(name, str):
+        return None
+    base = os.path.basename(name)
+    if base != name or not base.endswith(".bin"):
+        return None
+    p = Path(captures_dir) / base
+    return p if p.is_file() else None
+
+
+def list_captures(captures_dir) -> list[dict]:
+    """`captures/*.bin` as [{name, bytes, mtime}], newest first. Missing dir -> []."""
+    d = Path(captures_dir)
+    if not d.is_dir():
+        return []
+    items = []
+    for p in sorted(d.glob("*.bin")):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        items.append({"name": p.name, "bytes": st.st_size, "mtime": round(st.st_mtime, 1)})
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return items
+
+
+def build_captures_message(captures_dir) -> dict:
+    return {"type": "captures", "items": list_captures(captures_dir)}
+
+
+def build_capture_index(path) -> dict:
+    """Linear, CRC-verified scan of a capture's frame boundaries (§3).
+
+    Returns {n_frames, offsets, seqs, calib_spans}: byte offsets + device seqs of
+    each DATA depth frame (RAW_3DMD / DEPTH_ZF32), and the byte spans of CALIB
+    frames in file order (a seek pre-feeds the governing CALIB so the transform
+    stage has calibration). Frames are self-delimiting; the CRC check rejects a
+    MAGIC that happens to fall inside a payload."""
+    offsets: list[int] = []
+    seqs: list[int] = []
+    calib_spans: list[tuple[int, int]] = []
+    with open(path, "rb") as f:
+        data = f.read()
+    n = len(data)
+    i = 0
+    while True:
+        j = data.find(MAGIC, i)
+        if j < 0 or j + HEADER_SIZE > n:
+            break
+        try:
+            hdr = FrameHeader.unpack(data[j:j + HEADER_SIZE])
+        except ProtocolError:
+            i = j + 1
+            continue
+        total = HEADER_SIZE + hdr.payload_len + 4
+        if j + total > n:
+            break                                   # truncated tail frame
+        (crc,) = struct.unpack_from("<I", data, j + total - 4)
+        if zlib.crc32(data[j:j + total - 4]) != crc:
+            i = j + 1                                # false magic inside a payload
+            continue
+        if hdr.frame_type == FrameType.DATA:
+            if hdr.stream_id == StreamId.CALIB:
+                calib_spans.append((j, j + total))
+            elif hdr.stream_id in (StreamId.RAW_3DMD, StreamId.DEPTH_ZF32):
+                offsets.append(j)
+                seqs.append(hdr.seq)
+        i = j + total
+    return {"n_frames": len(offsets), "offsets": offsets, "seqs": seqs,
+            "calib_spans": calib_spans}
+
+
+def build_session_message(mode, source_label, has_live, *, rec_active, rec_path,
+                          rec_elapsed_s, rec_bytes, is_replay, capture_name,
+                          paused, speed_fps, loop, position, total_frames) -> dict:
+    """Assemble the `session` message (§4) from primitives (pure, unit-tested)."""
+    return {
+        "type": "session",
+        "mode": mode,
+        "source_label": source_label,
+        "has_live": has_live,
+        "recording": {
+            "active": rec_active,
+            "path": rec_path,
+            "elapsed_s": rec_elapsed_s,
+            "bytes": rec_bytes,
+        },
+        "playback": {
+            "is_replay": is_replay,
+            "capture_name": capture_name,
+            "paused": paused,
+            "speed_fps": speed_fps,
+            "loop": loop,
+            "position": position,
+            "total_frames": total_frames,
+        },
+    }
+
+
+# --- runtime source-swap + session controller (§2) --------------------------
+
+class _NoCloseSource:
+    """Delegating proxy whose `close()` is a no-op, so `pump()`'s
+    `finally: source.close()` never closes the persistent live device when the
+    reader is swapped to replay. Go Live re-uses the same open source (no UDP
+    re-probe / serial re-open). Real teardown calls the underlying close."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def read(self) -> bytes:
+        return self._inner.read()
+
+    def write(self, data: bytes) -> None:
+        self._inner.write(data)
+
+    def close(self) -> None:
+        pass
+
+
+class _PrefixSource:
+    """Yields `prefix` bytes once, then delegates to an inner FileSource. Used
+    for scrub-seek: the prefix is the governing CALIB frame(s) so the transform
+    stage has calibration before the first RAW frame at the seek offset. Carries
+    `eof_on_empty` so `pump()` stops at the inner file's EOF (it is not itself a
+    FileSource)."""
+
+    eof_on_empty = True
+
+    def __init__(self, prefix: bytes, inner):
+        self._prefix = prefix
+        self._inner = inner
+
+    def read(self) -> bytes:
+        if self._prefix:
+            p = self._prefix
+            self._prefix = b""
+            return p
+        return self._inner.read()
+
+    def write(self, data: bytes) -> None:
+        pass
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class SessionController:
+    """Owns the reader-thread lifecycle so the source can be swapped live<->replay
+    at runtime without disturbing the single broadcaster or the shared `slot`
+    (§2). One reader thread runs at a time; swaps stop it, retarget, and respawn
+    under a lock. The broadcaster reads `.mode`/`.index` for the `session`
+    message; everything mutating runs off the event loop via `asyncio.to_thread`.
+    """
+
+    def __init__(self, *, live_source, live_label, stage, stats, slot, fault, bus,
+                 client, recorder, pacer, sensor_state, metrics,
+                 captures_dir=CAPTURES_DIR, initial_replay_path=None,
+                 initial_speed_fps=0.0):
+        self._live_underlying = live_source
+        self._live_proxy = _NoCloseSource(live_source) if live_source is not None else None
+        self.live_label = live_label
+        self.has_live = live_source is not None
+        self.stage = stage
+        self.stats = stats
+        self.slot = slot
+        self.fault = fault
+        self.bus = bus
+        self.client = client
+        self.recorder = recorder
+        self.pacer = pacer
+        self.sensor_state = sensor_state
+        self.metrics = metrics
+        self.captures_dir = str(captures_dir)
+
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._record_started = 0.0
+        self._seek_prefix = b""
+        self._seek_offset = 0
+        self.loop = False
+
+        if initial_replay_path is not None:
+            self.mode = "replay"
+            self.replay_path = str(initial_replay_path)
+            self.index = build_capture_index(self.replay_path)
+            self.speed_fps = float(initial_speed_fps or 0.0)
+        else:
+            self.mode = "live"
+            self.replay_path = None
+            self.index = None
+            self.speed_fps = 0.0
+
+    # ---- lifecycle ----
+
+    @property
+    def source_label(self) -> str:
+        if self.mode == "replay" and self.replay_path:
+            return f"Replay · {os.path.basename(self.replay_path)}"
+        return self.live_label
+
+    def start(self) -> None:
+        self.pacer.interval = speed_to_interval(self.speed_fps) if self.mode == "replay" else 0.0
+        self._spawn()
+
+    def _spawn(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _open_source(self):
+        if self.mode == "live":
+            return self._live_proxy
+        if self._seek_prefix:
+            return _PrefixSource(self._seek_prefix,
+                                 FileSource(self.replay_path, start=self._seek_offset))
+        return FileSource(self.replay_path, start=self._seek_offset)
+
+    def _run(self) -> None:
+        """Reader loop: (re)build decoder+source, run the shared reader body, then
+        loop on natural replay EOF or exit on manual stop (§2)."""
+        while True:
+            decoder = StreamDecoder()
+            source = self._open_source()
+            client = self.client if self.mode == "live" else None
+            panel._run_reader(
+                source, decoder, self.stage, self.stats, self.slot, self.fault,
+                self.bus, client, self.recorder, self.pacer, self._stop.is_set,
+                state=self.sensor_state, metrics=self.metrics)
+            if self._stop.is_set():
+                return                                    # manual stop / swap
+            if self.mode == "replay" and self.loop:
+                self._seek_prefix = b""
+                self._seek_offset = 0
+                self.bus.publish("replay looping")
+                continue
+            if self.mode == "replay":
+                self.bus.publish("replay finished")
+            return                                        # park at EOF
+
+    def _stop_reader(self) -> None:
+        self._stop.set()
+        self.pacer.paused.clear()                         # unblock a paused reader
+        t = self._thread
+        if t is not None:
+            t.join(timeout=2.0)
+        self._thread = None
+
+    # ---- swaps (run under _lock, off the event loop) ----
+
+    def switch_to_replay(self, path) -> None:
+        with self._lock:
+            self._stop_reader()
+            if self.recorder.active:
+                self.recorder.stop()                      # never record a replay
+            self.mode = "replay"
+            self.replay_path = str(path)
+            self.index = build_capture_index(self.replay_path)
+            self._seek_prefix = b""
+            self._seek_offset = 0
+            self.pacer.interval = speed_to_interval(self.speed_fps)
+            self.pacer.paused.clear()
+            self._spawn()
+            self.bus.publish(f"loaded capture {os.path.basename(self.replay_path)}")
+
+    def switch_to_live(self) -> None:
+        with self._lock:
+            if not self.has_live:
+                self.bus.publish("go live -> no device source available")
+                return
+            self._stop_reader()
+            try:                                          # drop stale serial RX bytes
+                ser = getattr(self._live_underlying, "_ser", None)
+                if ser is not None:
+                    ser.reset_input_buffer()
+            except Exception:
+                pass
+            self.mode = "live"
+            self.replay_path = None
+            self.index = None
+            self._seek_prefix = b""
+            self._seek_offset = 0
+            self.pacer.interval = 0.0
+            self.pacer.paused.clear()
+            self._spawn()
+            self.bus.publish("switched to live device")
+
+    def seek(self, frac: float) -> None:
+        with self._lock:
+            if self.mode != "replay" or not self.index or self.index["n_frames"] == 0:
+                return
+            self._stop_reader()
+            n = self.index["n_frames"]
+            i = max(0, min(n - 1, int(round(frac * (n - 1)))))
+            off = self.index["offsets"][i]
+            prefix = b""
+            spans = [s for s in self.index["calib_spans"] if s[0] <= off]
+            if spans:
+                # Read only the governing CALIB span bytes (not the whole file):
+                # a long recording can be hundreds of MB, and we just need the
+                # ~2 KB calib blob to seed the transform stage.
+                with open(self.replay_path, "rb") as f:
+                    parts = []
+                    for (s, e) in spans:
+                        f.seek(s)
+                        parts.append(f.read(e - s))
+                prefix = b"".join(parts)
+            self._seek_offset = off
+            self._seek_prefix = prefix
+            self.pacer.paused.clear()
+            self._spawn()
+
+    def restart(self) -> None:
+        with self._lock:
+            if self.mode != "replay":
+                return
+            self._stop_reader()
+            self._seek_prefix = b""
+            self._seek_offset = 0
+            self.pacer.paused.clear()
+            self._spawn()
+
+    # ---- lightweight transport (no reader restart) ----
+
+    def pause(self) -> None:
+        self.pacer.paused.set()
+
+    def resume(self) -> None:
+        self.pacer.paused.clear()
+
+    def set_speed(self, fps: float) -> None:
+        self.speed_fps = float(fps)
+        self.pacer.interval = speed_to_interval(self.speed_fps)
+
+    def set_loop(self, on: bool) -> None:
+        self.loop = bool(on)
+
+    # ---- recording ----
+
+    def start_record(self) -> None:
+        if self.mode != "live":
+            self.bus.publish("record -> not available in replay")
+            return
+        Path(self.captures_dir).mkdir(parents=True, exist_ok=True)
+        path = str(Path(self.captures_dir) / f"web_{time.strftime('%Y%m%d_%H%M%S')}.bin")
+        self.recorder.start(path)
+        self._record_started = time.monotonic()
+        self.bus.publish(f"recording -> {path}")
+
+    def stop_record(self) -> None:
+        if not self.recorder.active:
+            return
+        path = self.recorder.path
+        self.recorder.stop()
+        self.bus.publish(f"recording stopped -> {path}")
+
+    def close(self) -> None:
+        self._stop_reader()
+        try:
+            self.recorder.close()
+        except Exception:
+            pass
+        if self._live_underlying is not None:
+            try:
+                self._live_underlying.close()
+            except Exception:
+                pass
+
+    # ---- session snapshot ----
+
+    def session_message(self, position, now) -> dict:
+        rec_active = self.recorder.active
+        rec_path = self.recorder.path
+        rec_bytes = 0
+        rec_elapsed = 0.0
+        if rec_active:
+            rec_elapsed = max(0.0, now - self._record_started)
+            try:
+                rec_bytes = os.path.getsize(rec_path) if rec_path else 0
+            except OSError:
+                rec_bytes = 0
+        is_replay = self.mode == "replay"
+        total = self.index["n_frames"] if (is_replay and self.index) else 0
+        return build_session_message(
+            self.mode, self.source_label, self.has_live,
+            rec_active=rec_active, rec_path=rec_path,
+            rec_elapsed_s=round(rec_elapsed, 1), rec_bytes=rec_bytes,
+            is_replay=is_replay,
+            capture_name=(os.path.basename(self.replay_path) if self.replay_path else None),
+            paused=self.pacer.paused.is_set(), speed_fps=self.speed_fps, loop=self.loop,
+            position=position, total_frames=total)
+
+
+def _replay_position(ctrl: SessionController, last_item) -> float | None:
+    """Current replay progress in [0,1] from the latest frame's seq vs the
+    capture index's seq range, or None when not applicable (§3)."""
+    if ctrl is None or ctrl.mode != "replay" or not ctrl.index or last_item is None:
+        return None
+    seqs = ctrl.index["seqs"]
+    if not seqs:
+        return None
+    lo, hi = seqs[0], seqs[-1]
+    if hi <= lo:
+        return 0.0
+    seq = last_item[0].seq
+    return max(0.0, min(1.0, (seq - lo) / (hi - lo)))
+
+
 # --- FastAPI app + broadcast hub --------------------------------------------
 
 @asynccontextmanager
@@ -343,6 +779,15 @@ async def _broadcast_text(clients: set, text: str) -> None:
             await ws.send_text(text)
         except Exception:
             await _drop_client(clients, ws)
+
+
+async def _broadcast_session(state) -> None:
+    """Push a fresh `session` immediately after a state-changing control so every
+    tab updates now rather than waiting for the ~4 Hz broadcaster tick. Position
+    is left None here (the next tick fills it from the latest frame)."""
+    ctrl = getattr(state, "controller", None)
+    if ctrl is not None:
+        await _broadcast_text(state.clients, json.dumps(ctrl.session_message(None, time.time())))
 
 
 def _log_debounced(state, bus: LogBus, key: str, message: str) -> None:
@@ -446,11 +891,15 @@ async def _broadcaster() -> None:
             if smsg is not None:
                 await _broadcast_text(clients, json.dumps(smsg))
 
-        # Metrics + bus drain on the slowest cadence.
+        # Metrics + session + bus drain on the slowest cadence.
         if now - last_metrics >= METRICS_INTERVAL:
             last_metrics = now
             snap = metrics.snapshot(now)
             await _broadcast_text(clients, json.dumps(build_metrics_message(snap)))
+            ctrl = getattr(state, "controller", None)
+            if ctrl is not None:
+                pos = _replay_position(ctrl, last_item)
+                await _broadcast_text(clients, json.dumps(ctrl.session_message(pos, time.time())))
             for line in bus.drain(bus_handle):
                 msg = classify_bus_line(line, state.command_labels)
                 if msg is not None:
@@ -467,6 +916,10 @@ async def websocket_endpoint(websocket: WebSocket):
     # Bring the new tab current immediately.
     try:
         await websocket.send_text(json.dumps(_state_message(state.ui_state)))
+        ctrl = getattr(state, "controller", None)
+        if ctrl is not None:
+            await websocket.send_text(json.dumps(ctrl.session_message(None, time.time())))
+            await websocket.send_text(json.dumps(build_captures_message(ctrl.captures_dir)))
     except Exception:
         await _drop_client(clients, websocket)
         return
@@ -491,6 +944,8 @@ async def _handle_inbound(state, msg: dict) -> None:
     mtype = msg.get("type")
     ui: UiState = state.ui_state
 
+    ctrl = getattr(state, "controller", None)
+
     if mtype == "cmd":
         resolved = resolve_command(msg.get("name"), msg.get("param", 0))
         if resolved is None:
@@ -498,7 +953,55 @@ async def _handle_inbound(state, msg: dict) -> None:
             return
         code, param, label = resolved
         state.command_labels.add(label)
+        # In replay there is no device; report it the same way the dispatcher
+        # would (classified `error` -> toast) instead of a real round-trip.
+        if ctrl is not None and ctrl.mode == "replay":
+            state.bus.publish(f"{label} -> not available in replay")
+            return
         state.dispatcher.dispatch(code, param, label)   # result lands on the bus -> broadcast
+
+    elif mtype == "record" and ctrl is not None:
+        if bool(msg.get("on")):
+            ctrl.start_record()
+        else:
+            ctrl.stop_record()
+        await _broadcast_session(state)
+        await _broadcast_text(state.clients, json.dumps(build_captures_message(ctrl.captures_dir)))
+
+    elif mtype == "list_captures" and ctrl is not None:
+        await _broadcast_text(state.clients, json.dumps(build_captures_message(ctrl.captures_dir)))
+
+    elif mtype == "load_capture" and ctrl is not None:
+        path = sanitize_capture_name(msg.get("name"), ctrl.captures_dir)
+        if path is None:
+            log.warning("load_capture: unknown/invalid name %r", msg.get("name"))
+            return
+        await asyncio.to_thread(ctrl.switch_to_replay, path)
+        await _broadcast_session(state)
+
+    elif mtype == "go_live" and ctrl is not None:
+        await asyncio.to_thread(ctrl.switch_to_live)
+        await _broadcast_session(state)
+
+    elif mtype == "transport" and ctrl is not None:
+        action = msg.get("action")
+        value = msg.get("value", 0)
+        if action == "pause":
+            ctrl.pause()
+        elif action == "resume":
+            ctrl.resume()
+        elif action == "speed":
+            ctrl.set_speed(float(value))
+        elif action == "loop":
+            ctrl.set_loop(bool(value))
+        elif action == "restart":
+            await asyncio.to_thread(ctrl.restart)
+        elif action == "seek":
+            await asyncio.to_thread(ctrl.seek, float(value))
+        else:
+            log.warning("unknown transport action: %r", action)
+            return
+        await _broadcast_session(state)
 
     elif mtype == "set_color":
         mode = msg.get("mode")
@@ -531,21 +1034,29 @@ async def _handle_inbound(state, msg: dict) -> None:
 def main(argv=None) -> int:
     args = resolve_args(argv)
 
-    source = FileSource(args.replay) if args.replay else get_best_source(args.port, args.baud)
+    # Web Phase 3: the reader lifecycle is owned by a SessionController so the
+    # source can be swapped live<->replay at runtime. Launched with --replay we
+    # start with NO live device (has_live False, Go Live disabled); otherwise we
+    # open the live source once and keep it for the whole process, reused across
+    # replay excursions via the _NoCloseSource proxy.
+    live_source = None if args.replay else get_best_source(args.port, args.baud)
     # Name the transport up front: the #1 "no data" question is whether we're on
     # Ethernet, serial, or a dead serial fallback. Flushed so it shows even when
     # stdout is block-buffered (not a tty).
-    if isinstance(source, UdpSource):
-        print(f"[source] Ethernet/UDP -> {source.target_ip}:{source.target_port}", flush=True)
-    elif isinstance(source, SerialSource):
-        print(f"[source] Serial CDC -> {getattr(source, 'port', '?')}", flush=True)
-    elif isinstance(source, FileSource):
+    if isinstance(live_source, UdpSource):
+        live_label = f"Ethernet/UDP · {live_source.target_ip}:{live_source.target_port}"
+    elif isinstance(live_source, SerialSource):
+        live_label = f"Serial CDC · {getattr(live_source, 'port', '?')}"
+    else:
+        live_label = "no device"
+    if live_source is not None:
+        print(f"[source] {live_label}", flush=True)
+    else:
         print(f"[source] Replay -> {args.replay}", flush=True)
 
-    # client is None in replay (no device to command); CommandDispatcher then
-    # reports "not available in replay" for every dispatch.
-    client = CommandClient(source.write) if isinstance(source, (SerialSource, UdpSource)) else None
-    decoder = StreamDecoder()
+    # client is None in replay (no device to command); the reader passes it only
+    # in live mode, and the cmd handler reports "not available in replay" itself.
+    client = CommandClient(live_source.write) if isinstance(live_source, (SerialSource, UdpSource)) else None
     stats = Stats()
     bus = LogBus()
     metrics = MetricsRegistry(window_s=2.0)
@@ -575,12 +1086,21 @@ def main(argv=None) -> int:
         )
     sensor_state = SensorState(fusion=fusion)
 
-    pacer = panel._Pacer(interval=(1.0 / args.replay_fps
-                                   if (args.replay and args.replay_fps and args.replay_fps > 0) else 0.0))
+    initial_speed_fps = float(args.replay_fps) if (args.replay and args.replay_fps and args.replay_fps > 0) else 0.0
+    pacer = panel._Pacer(interval=speed_to_interval(initial_speed_fps) if args.replay else 0.0)
+    recorder = Recorder()
+
+    controller = SessionController(
+        live_source=live_source, live_label=live_label, stage=stage, stats=stats,
+        slot=slot, fault=fault, bus=bus, client=client, recorder=recorder, pacer=pacer,
+        sensor_state=sensor_state, metrics=metrics, captures_dir=CAPTURES_DIR,
+        initial_replay_path=args.replay, initial_speed_fps=initial_speed_fps)
 
     # Shared app state, built once (§5.1).
     app.state.args = args
-    app.state.source = source
+    app.state.source = live_source
+    app.state.controller = controller
+    app.state.recorder = recorder
     app.state.client = client
     app.state.stage = stage
     app.state.slot = slot
@@ -600,17 +1120,10 @@ def main(argv=None) -> int:
     app.state.debounce = {}
     app.state.ready = True
 
-    # Reuse the panel's reader body -- it already routes EVENT->bus, ACK->client,
-    # feeds metrics per DATA frame, feeds the SensorState (streams 9/10), and
-    # honors the pacer (§5.2). recorder=None (Phase 3), is_stopped always False
-    # (no stop affordance yet).
-    threading.Thread(
-        target=panel._run_reader,
-        args=(source, decoder, stage, stats, slot, fault, bus, client, None,
-              pacer, lambda: False),
-        kwargs={"state": sensor_state, "metrics": metrics},
-        daemon=True,
-    ).start()
+    # The controller owns the reader thread now (Web Phase 3): it runs the same
+    # panel._run_reader body, but can stop+respawn it against a new source for
+    # capture load / Go Live / seek, and tees raw bytes into the Recorder.
+    controller.start()
 
     port = 8000
     url = f"http://localhost:{port}/static/index.html"

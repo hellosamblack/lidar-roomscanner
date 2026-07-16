@@ -229,6 +229,29 @@
         .segmented button.active:hover { background: var(--accent-hover); }
         .segmented--sm button { padding: 4px 8px; font-size: 0.7rem; }
 
+        /* generic hide utility (shared by the transport block + IR card) */
+        .hidden { display: none !important; }
+
+        /* ---- Capture & Playback (Web Phase 3) ---- */
+        #btn-record.recording { background: var(--danger); border-color: var(--danger); color: white; }
+        #btn-record.recording:hover { background: #f87171; }
+        #btn-record:disabled { opacity: 0.4; cursor: not-allowed; }
+        .cap-status { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--text-muted); min-height: 1em; }
+        .cap-status.rec { color: var(--danger); }
+        .cap-list { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow-y: auto; }
+        .cap-row {
+            display: flex; justify-content: space-between; gap: 8px; align-items: baseline;
+            padding: 6px 8px; border-radius: 6px; cursor: pointer;
+            background: rgba(255,255,255,0.03); border: 1px solid transparent;
+            font-size: 0.76rem; color: var(--text-main);
+        }
+        .cap-row:hover { background: rgba(255,255,255,0.08); }
+        .cap-row.active { border-color: var(--accent); background: rgba(59,130,246,0.14); }
+        .cap-row__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .cap-row__meta { color: var(--text-muted); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; flex: none; }
+        .transport { display: flex; flex-direction: column; gap: 10px; padding-top: 4px; border-top: 1px solid var(--panel-border); }
+        #seek { width: 100%; accent-color: var(--accent); cursor: pointer; }
+
         /* ---- component: toggle / checkbox ---- */
         .toggle { display: flex; align-items: center; gap: 8px; font-size: 0.82rem; color: var(--text-muted); cursor: pointer; }
         .toggle input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
@@ -404,6 +427,38 @@
                     <button data-colormap="turbo">Turbo</button>
                 </div>
                 <label class="toggle"><input type="checkbox" id="chk-ir-freeze"><span>Freeze range</span></label>
+            </div>
+        </div>
+
+        <!-- Capture & Playback (Web Phase 3): record live, browse + load captures,
+             transport controls in replay. Active/disabled state is driven from the
+             server's session/captures echo (one-way flow), never local clicks. -->
+        <div class="control-group">
+            <button class="control-group__header"><span>Capture &amp; Playback</span><span class="chevron">&#9662;</span></button>
+            <div class="control-group__body">
+                <button id="btn-record">&#9679; Record</button>
+                <div class="cap-status" id="record-status"></div>
+
+                <div class="field-label">Source</div>
+                <div class="cap-list" id="cap-list"></div>
+                <button id="btn-refresh-caps">&#8635; Refresh list</button>
+
+                <div class="transport hidden" id="transport">
+                    <div class="btn-row">
+                        <button id="btn-playpause">Pause</button>
+                        <button id="btn-restart">&#8676; Restart</button>
+                    </div>
+                    <div class="field-label">Speed</div>
+                    <div class="segmented segmented--sm" id="seg-speed">
+                        <button data-fps="15">0.5&times;</button>
+                        <button data-fps="30">1&times;</button>
+                        <button data-fps="60">2&times;</button>
+                        <button data-fps="0">Max</button>
+                    </div>
+                    <label class="toggle toggle--sm"><input type="checkbox" id="chk-loop"><span>Loop at end</span></label>
+                    <input type="range" id="seek" min="0" max="1000" value="0">
+                    <div class="cap-status" id="pos-status">&mdash;</div>
+                </div>
             </div>
         </div>
     </div>
