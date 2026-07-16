@@ -489,9 +489,40 @@ are all reused unchanged (no wire change; `docs/protocol.md` untouched).
 Plan: `web_app_migration_plan.md`. Owner elected to deploy the visualizer to a headless server accessed remotely via Tailscale. The native Open3D UI fails in a locked/headless environment without a display.
 
 - **Architecture (Option A: True Single Codebase):** `roomscan-web` entry point spins up a FastAPI/Uvicorn server running the exact same `TransformStage` reader thread as the desktop viewer. The server exposes a `/ws` WebSocket endpoint that streams the transformed point cloud and color data to the browser as a packed `Float32Array`. 
-- **Frontend:** A premium glassmorphic web UI (`index.html`, `app.js`) running Three.js handles the point cloud rendering on the local browser's GPU. Control elements (Ping, Reinit, Usecase selection) send JSON commands back through the WebSocket to the `CommandKeyState` dispatcher. 
+- **Frontend:** ~~A premium glassmorphic web UI (`index.html`, `app.js`) running Three.js handles the point cloud rendering on the local browser's GPU. Control elements (Ping, Reinit, Usecase selection) send JSON commands back through the WebSocket to the `CommandKeyState` dispatcher.~~ **Superseded by Web Phase 1 (below, 2026-07-16):** the monolithic `app.js` is retired in favour of 7 vanilla ES modules, and the single binary point-cloud message is now a multiplexed, tagged protocol. The single-`app.js` / single-message shape described here was the minimal first cut.
 - **Bandwidth:** The WebSocket streams processed points rather than RAW data. With decimation running, bandwidth sits comfortably below Tailscale's limits.
 - **Verified:** Dependencies added to `[web]` optional group. Ran headless test successfully against `synthetic.bin`; the server boots on port 8000 and serves the static Three.js payload.
+
+### Web replacement of `panel.py` — a 6-phase program (Three.js web app supplants the Open3D desktop panel)
+
+Owner direction (2026-07-15): the web app **fully replaces** the ~3600-line Open3D `panel.py`, delivered in
+six phases — (1) core real-time instrument, (2) sensors (IMU/env streams 9/10), (3) recording & playback,
+(4) SLAM mode, (5) showcase mode, (6) settings persistence + retire `panel.py`. `panel.py` stays as the
+fallback/reference until Phase 6.
+
+#### Web Phase 1 — Core Real-Time Web Instrument  ← **✅ Complete (2026-07-16)**
+
+Spec: `docs/superpowers/specs/2026-07-15-web-phase1-core-instrument-design.md`. Host-side only — no wire-protocol
+or firmware change. Confined to `host/src/roomscan/web.py` + `host/src/roomscan/static/` + `host/tests/test_web.py`.
+
+- **Frame-stealing bug fixed:** the old per-connection `slot.get_nowait()` loops (two tabs stole each other's
+  frames) are replaced by a **single asyncio broadcast task** fanning identical frames to all clients; reuses
+  `panel._run_reader` (no forked reader). Regression-tested with two concurrent `websockets` clients.
+- **Multiplexed `/ws` protocol:** tagged little-endian binary — POINT_CLOUD (tag 1), IR_IMAGE (tag 2) — plus
+  `metrics`/`event`/`log`/`cmd`/`state` JSON, split client-side by `typeof event.data`.
+- **Four user-facing features:** working device controls with visible feedback (toast + event-log console),
+  runtime color modes (depth/reflectance/confidence — `stage` computes all three, switch is pure server state),
+  live IR monitor pane, metrics HUD (VIEW fps client-side + Device fps + per-stream rate/jitter + link bandwidth).
+- **Frontend:** 7 vanilla ES modules (`ws`/`scene`/`ir`/`hud`/`log`/`controls`/`app`), no build step, importmap +
+  vendored three.js; one-way state flow through the `ws.js` pub/sub hub keeps multi-tab state in sync.
+- **Verified:** 26 backend tests (`test_web.py`); full host suite **606 passed, 1 skipped**. Driven end-to-end in
+  headless Chrome (SwiftShader) against a room-scan replay — all four features confirmed on screen.
+- **Caveat (data, not code):** dual-stream recordings (RAW_3DMD + redundant DEPTH_ZF32 passthrough) intermittently
+  fall the IR pane / reflectance colour back to depth, because the DEPTH frame lands last in the latest-wins slot.
+  Live production streams are RAW-only, so unaffected; a "prefer-richest-frame" tweak is a future option.
+- **Deferred to Web Phases 2–6:** sensors/compass/gizmo/sparklines, recording/playback UI, SLAM trajectory+mesh
+  (adds a MESH binary type + a top-bar mode switch, placeholder reserved), showcase mode, settings persistence,
+  and retiring `panel.py`. Also not yet carried over: exposure slider, rotate-90 / near-contrast view options.
 
 ### Phase 4 — Integrate X-NUCLEO-IKS4A1  ← **✅ Complete** *(swapped with Ethernet 2026-07-09, owner decision — sensors next)*
 
