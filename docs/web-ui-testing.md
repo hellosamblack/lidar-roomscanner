@@ -52,7 +52,26 @@ Each step is `{"js": <expr, awaited>, "wait": <seconds>, "out": <png path>}`.
 Because control is just JS in the page, you click real bindings (`element.click()`),
 so this exercises `controls.js` → `ws.send` → server, not a synthetic shortcut.
 Useful element ids live in `host/src/roomscan/static/index.html` (e.g. `btn-ping`,
-`seg-color button[data-mode=…]`, `chk-ir-freeze`, `log-toggle`).
+`seg-color button[data-mode=…]`, `chk-ir-freeze`, `log-toggle`, and the Web-Phase-3
+capture controls `btn-record`, `btn-refresh-caps`, `#cap-list .cap-row`,
+`btn-playpause`, `seg-speed button[data-fps=…]`, `chk-loop`, `seek`).
+
+Driving gotchas (cost time in Web Phase 3):
+- **Wait for server-rendered lists before clicking them.** Rows built from a
+  `captures`/`session` message (the capture library, any server-driven list) don't
+  exist until that message arrives (~0.5–1.5 s after `list_captures`/connect). A step
+  that does `[...cap-row].find(r=>r.dataset.name===X).click()` too soon calls `.click()`
+  on `undefined` and the step throws — the action never fires and you debug a phantom.
+  Give the prior step ≥1.5 s `wait`, or first emit the rendered rows via
+  `window.__diag(...)` and confirm the target is present.
+- **Don't interleave exploratory clicks across `web_ui_shot.py` runs.** Each run is a
+  fresh browser but the **server state persists** (current source, pacer paused/loop).
+  Ad-hoc clicking across runs leaves the server in a confusing mid-state that reads like
+  a bug; drive a **clean, disciplined step sequence in one run**, and restart the server
+  (`pkill -9 -f roomscan.web`) before a fresh scenario.
+- **Closures hide module state.** To inspect what a module actually received (e.g. the
+  last `session`), temporarily stash it on `window` inside the hub handler and read it via
+  `__diag`; remove the hook before committing.
 
 ## Picking a replay capture
 
