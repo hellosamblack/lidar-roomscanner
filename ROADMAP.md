@@ -581,6 +581,9 @@ desktop-parity: the app runs remotely on the headless box, so the operator brows
   pause (position frozen), speed (Device FPS tracked the ×-setting), loop, and seek all confirmed on screen.
 - **Deferred (Web Phases 4–6):** SLAM trajectory+mesh, showcase, settings persistence + retiring `panel.py`.
   Serial-staleness on Go Live is mitigated by a best-effort `reset_input_buffer`; UDP self-heals via keepalive.
+- **`/ws` protocol reference:** the full app protocol (binary tags + JSON messages, in/out) across Web Phases 1–3
+  is now indexed in `docs/web-protocol.md` — Phase 4's trajectory/mesh messages hook in there (it also lists the
+  invariants: one-way echo, validate untrusted inbound, server-side math, off-loop blocking work).
 
 ### Phase 4 — Integrate X-NUCLEO-IKS4A1  ← **✅ Complete** *(swapped with Ethernet 2026-07-09, owner decision — sensors next)*
 

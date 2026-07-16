@@ -51,6 +51,31 @@ major effort, before the next phase's plan executes.
   and a corrupted/malformed-input case exercised on hardware, not just a single well-formed sample
   (caught in Phase 3 Task 2's parse-while-draining rework).
 
+## Executed 2026-07-16 (Web Phase 3 — recording & playback retro)
+
+Not an SDD subagent phase — a single-session milestone committed straight to `main` (`e935063`),
+host-only (no firmware, **no binary-wire change**), verified end-to-end in headless Chrome. Two of the
+usual friction sources were already **converted during the push**: the `web_ui_shot.py` driving gotchas
+landed in `docs/web-ui-testing.md` (`81d1963` — wait for server-rendered lists before clicking; don't
+interleave exploratory clicks across runs since server state persists; the window-stash trick for
+closure-held state), and status was synced in the feature commit (ROADMAP/CLAUDE/`web-panel-replacement`
+memory all current — backstop re-checked, no drift).
+
+- **`docs/web-protocol.md` created** — THE extraction. The `/ws` *app* protocol (browser ↔ FastAPI,
+  distinct from the device wire protocol) has grown one message at a time across Web Phases 1–3 and lives
+  only in scattered `web.py` builder functions + the inbound dispatcher — there is **no enum registry**
+  the way the binary wire has `docs/protocol.md`. Web Phase 4 (SLAM) adds trajectory+mesh messages onto
+  this same socket, so it would have had to reverse-engineer the whole contract from three specs + code.
+  The new doc indexes every binary tag + JSON message (in/out) with `file:line` citations, plus the four
+  invariants a new message must hold (one-way echo, validate untrusted inbound, server-side math stays
+  server-side, off-loop blocking work). Pointers wired into CLAUDE.md's docs list + ROADMAP Web Phase 3.
+- **Deliberately skipped**: no `firmware-loop`/`protocol-change`/`capture.py` edits (host-only, no wire or
+  HW ritual — the retro's [HW]/parser-burst checklist lines don't apply; the new inbound handlers *are*
+  parsers of untrusted client JSON, but each already validates + drops, covered by the 45 backend tests);
+  no new script (`web_ui_shot.py` already covers the headless-drive ritual); no new memory (the
+  `web-panel-replacement` memory already tracks the phase-by-phase state — `docs/web-protocol.md` is the
+  durable form, not an index line).
+
 ## Executed 2026-07-15 (headless-host bring-up retro)
 
 Not an SDD phase — a bug-fix session bringing the repo up on a fresh **headless
