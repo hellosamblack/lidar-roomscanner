@@ -58,6 +58,9 @@ class ViewerConfig:
     metrics_overlay: bool = True       # show the on-scene metrics HUD (rates/fps/resources)
     mode: str = "real_time"            # UI redesign: "real_time" | "slam" (owner: default to real-time)
     camera: str = "first_person"       # UI redesign: "first_person" | "orbit"
+    slam_trajectory: bool = True       # web SLAM display toggle: draw the trajectory tail
+    slam_walls: str = "split"          # web SLAM wall render: "solid" | "split" (MeshPrep wall_mode)
+    slam_follow: bool = True           # web SLAM display toggle: follow-camera on/off
     ir_overlay: bool = True             # first-person IR billboard overlay on/off (matches
                                         # ir_opacity's non-zero default -- see _set_ir_opacity's
                                         # "opacity > 0.02 implies enabled" invariant; a fresh

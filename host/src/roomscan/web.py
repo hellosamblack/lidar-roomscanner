@@ -1,5 +1,5 @@
-"""Web-based real-time instrument. One reader thread (shared with the desktop
-panel via `panel._run_reader`) feeds a latest-wins slot; a SINGLE asyncio
+"""Web-based real-time instrument. One reader thread (the neutral
+`reader._run_reader`, shared with the desktop panel) feeds a latest-wins slot; a SINGLE asyncio
 broadcast task fans every transformed frame out to all connected WebSocket
 clients. This replaces the old per-connection `slot.get_nowait()` loop, whose
 competing gets stole frames from one another when two tabs were open (§5.3).
@@ -38,8 +38,8 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
-from . import panel
 from .colors import turbo
+from .config import ViewerConfig
 from .control import CommandClient, CommandDispatcher
 from .decoder import StreamDecoder
 from .deproject import Deprojector
@@ -48,6 +48,7 @@ from .logbus import LogBus
 from .magcal import MagCalibration
 from .metrics import MetricsRegistry, MetricsSnapshot
 from .pipeline import TransformStage
+from .reader import _Pacer, _run_reader, follow_camera_target
 from .protocol import (
     HEADER_SIZE,
     MAGIC,
@@ -263,12 +264,12 @@ def pack_mesh(packet) -> bytes:
 def build_slam_message(step, trajectory, *, frames_integrated: int, mesh_seq: int,
                        source_vertex_count: int) -> dict:
     """FrameStep + trajectory -> `slam` JSON (web Phase 4). Follow-camera
-    eye/center/up are computed server-side (panel.follow_camera_target) per the
+    eye/center/up are computed server-side (reader.follow_camera_target) per the
     web-protocol "server-side math stays server-side" rule -- the browser just
     places its camera. `traj_tail` is downsampled to <=_TRAJ_TAIL_MAX positions
     so the JSON stays small on a long scan; `traj_len` carries the true length."""
     pose = np.asarray(step.pose, dtype=np.float64)
-    eye, center, up = panel.follow_camera_target(pose)
+    eye, center, up = follow_camera_target(pose)
     n = len(trajectory)
     if n > _TRAJ_TAIL_MAX:
         idx = np.linspace(0, n - 1, _TRAJ_TAIL_MAX).astype(int)
@@ -425,6 +426,71 @@ def _state_message(ui: UiState) -> dict:
             "ir_colormap": ui.ir_colormap, "ir_freeze": ui.ir_freeze,
             "mode": ui.mode, "slam_trajectory": ui.slam_trajectory,
             "slam_walls": ui.slam_walls, "slam_follow": ui.slam_follow}
+
+
+# --- settings persistence (Web Phase 5) -------------------------------------
+#
+# The web UI's display preferences live in the SAME `roomscan.toml` [viewer]
+# table the desktop viewer/panel uses, so a single config follows the user
+# across both frontends. Only the six display prefs below are web-owned; every
+# other [viewer] field (fov/port/near-mode/yaw-fusion/...) is preserved
+# verbatim because we mutate and re-save the whole loaded `ViewerConfig`.
+#
+# `mode` is deliberately NOT persisted/restored: the SLAM worker is armed lazily
+# on the first `set_mode slam` (no GPU burned until then), so a server restart
+# always comes up in real-time regardless of the last session -- restoring into
+# SLAM would silently spin up the GPU on launch. The desktop panel keeps its own
+# `mode` in the file; the web app leaves that field untouched.
+
+def ui_from_config(cfg: ViewerConfig) -> UiState:
+    """Seed a fresh `UiState` from a loaded `ViewerConfig`, validating each
+    field against the web app's allowed values and falling back to the UiState
+    default on anything unrecognized. `mode` is not restored (see note above)."""
+    ui = UiState()
+    if cfg.color in _VALID_COLOR_MODES:
+        ui.color_mode = cfg.color
+    if cfg.ir_colormap in _VALID_IR_COLORMAPS:
+        ui.ir_colormap = cfg.ir_colormap
+    ui.ir_freeze = bool(cfg.ir_freeze_range)
+    ui.slam_trajectory = bool(cfg.slam_trajectory)
+    if cfg.slam_walls in _VALID_WALL_MODES:
+        ui.slam_walls = cfg.slam_walls
+    ui.slam_follow = bool(cfg.slam_follow)
+    return ui
+
+
+def apply_ui_to_config(ui: UiState, cfg: ViewerConfig) -> None:
+    """Copy the six web-owned display prefs from `ui` into `cfg` in place
+    (leaving `mode` and every non-web field alone), ready to `cfg.save()`."""
+    cfg.color = ui.color_mode
+    cfg.ir_colormap = ui.ir_colormap
+    cfg.ir_freeze_range = bool(ui.ir_freeze)
+    cfg.slam_trajectory = bool(ui.slam_trajectory)
+    cfg.slam_walls = ui.slam_walls
+    cfg.slam_follow = bool(ui.slam_follow)
+
+
+def _persist_ui(state) -> None:
+    """Best-effort write of the current UiState display prefs to roomscan.toml.
+    A no-op when no `ViewerConfig` is attached (tests build state directly), and
+    a swallowed-with-a-warning failure on any write error (read-only fs, etc.) --
+    a viewer must never crash a color click because the config dir is unwritable.
+
+    Re-loads the file first so any non-web field a concurrent editor changed is
+    preserved (we only ever own the six display prefs); `ViewerConfig.load`
+    tolerates a missing/corrupt file by returning defaults, so this never raises
+    on the read side."""
+    cfg = getattr(state, "config", None)
+    if cfg is None:
+        return
+    cfg = ViewerConfig.load()
+    apply_ui_to_config(state.ui_state, cfg)
+    try:
+        cfg.save()
+    except OSError as exc:
+        log.warning("could not persist settings to roomscan.toml: %s", exc)
+        return
+    state.config = cfg
 
 
 # --- recording & playback pure helpers (no socket, no thread) ---------------
@@ -824,7 +890,7 @@ class SessionController:
             decoder = StreamDecoder()
             source = self._open_source()
             client = self.client if self.mode == "live" else None
-            panel._run_reader(
+            _run_reader(
                 source, decoder, self.stage, self.stats, self.slot, self.fault,
                 self.bus, client, self.recorder, self.pacer, self._stop.is_set,
                 state=self.sensor_state, metrics=self.metrics)
@@ -1320,6 +1386,7 @@ async def _handle_inbound(state, msg: dict) -> None:
             log.warning("invalid set_color mode: %r", mode)
             return
         ui.color_mode = mode
+        _persist_ui(state)
         await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
 
     elif mtype == "set_ir":
@@ -1334,6 +1401,7 @@ async def _handle_inbound(state, msg: dict) -> None:
         elif not freeze:
             ui.ir_freeze_range = None
         ui.ir_freeze = freeze
+        _persist_ui(state)
         await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
 
     elif mtype == "set_mode":
@@ -1359,6 +1427,7 @@ async def _handle_inbound(state, msg: dict) -> None:
             ui.slam_walls = msg["walls"]
         if "follow" in msg:
             ui.slam_follow = bool(msg["follow"])
+        _persist_ui(state)
         await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
 
     elif mtype == "save":
@@ -1439,7 +1508,7 @@ def main(argv=None) -> int:
     sensor_state = SensorState(fusion=fusion)
 
     initial_speed_fps = float(args.replay_fps) if (args.replay and args.replay_fps and args.replay_fps > 0) else 0.0
-    pacer = panel._Pacer(interval=speed_to_interval(initial_speed_fps) if args.replay else 0.0)
+    pacer = _Pacer(interval=speed_to_interval(initial_speed_fps) if args.replay else 0.0)
     recorder = Recorder()
 
     controller = SessionController(
@@ -1467,7 +1536,13 @@ def main(argv=None) -> int:
     app.state.fault_reported = False
     app.state.stats = stats
     app.state.pacer = pacer
-    app.state.ui_state = UiState()
+    # Settings persistence (Web Phase 5): seed the UI from the shared
+    # roomscan.toml [viewer] table and keep the loaded config around so runtime
+    # display-pref changes write straight back to it. `mode` is not restored --
+    # SLAM is armed lazily, so a restart always comes up in real-time.
+    config = ViewerConfig.load()
+    app.state.config = config
+    app.state.ui_state = ui_from_config(config)
     app.state.sensor_state = sensor_state
     app.state.mag_cal = mag_cal
     app.state.slam_runner = slam_runner
@@ -1478,7 +1553,7 @@ def main(argv=None) -> int:
     app.state.ready = True
 
     # The controller owns the reader thread now (Web Phase 3): it runs the same
-    # panel._run_reader body, but can stop+respawn it against a new source for
+    # reader._run_reader body, but can stop+respawn it against a new source for
     # capture load / Go Live / seek, and tees raw bytes into the Recorder.
     controller.start()
 

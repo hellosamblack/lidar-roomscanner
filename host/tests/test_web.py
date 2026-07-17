@@ -1124,3 +1124,123 @@ def test_slamrunner_save_empty_map_raises(tmp_path):
         r._worker = _EmptyWorker()
     with pytest.raises(ValueError):
         r.save(tmp_path / "m.ply", tmp_path / "m.tum")
+
+
+# --- Web Phase 5: settings persistence -------------------------------------
+
+from roomscan.config import ViewerConfig  # noqa: E402
+
+
+def test_config_has_slam_display_fields_with_defaults():
+    """The three web-owned SLAM display prefs were added to ViewerConfig with
+    defaults matching the UiState defaults (so a fresh install agrees)."""
+    cfg = ViewerConfig()
+    ui = web.UiState()
+    assert cfg.slam_trajectory is ui.slam_trajectory
+    assert cfg.slam_walls == ui.slam_walls
+    assert cfg.slam_follow is ui.slam_follow
+
+
+def test_config_slam_fields_round_trip_toml(tmp_path):
+    """The new fields survive the flat-TOML writer/reader round trip."""
+    p = tmp_path / "roomscan.toml"
+    ViewerConfig(slam_trajectory=False, slam_walls="solid", slam_follow=False).save(p)
+    back = ViewerConfig.load(p)
+    assert back.slam_trajectory is False
+    assert back.slam_walls == "solid"
+    assert back.slam_follow is False
+
+
+def test_ui_from_config_maps_valid_fields():
+    cfg = ViewerConfig(color="reflectance", ir_colormap="turbo",
+                       ir_freeze_range=True, slam_trajectory=False,
+                       slam_walls="solid", slam_follow=False)
+    ui = web.ui_from_config(cfg)
+    assert ui.color_mode == "reflectance"
+    assert ui.ir_colormap == "turbo"
+    assert ui.ir_freeze is True
+    assert ui.slam_trajectory is False
+    assert ui.slam_walls == "solid"
+    assert ui.slam_follow is False
+
+
+def test_ui_from_config_rejects_bad_values_falls_back_to_defaults():
+    """A corrupt/unknown color or colormap or wall mode falls back to the
+    UiState default rather than propagating a bad value into the running UI."""
+    cfg = ViewerConfig(color="mauve", ir_colormap="plasma", slam_walls="wavy")
+    ui = web.ui_from_config(cfg)
+    default = web.UiState()
+    assert ui.color_mode == default.color_mode
+    assert ui.ir_colormap == default.ir_colormap
+    assert ui.slam_walls == default.slam_walls
+
+
+def test_ui_from_config_does_not_restore_mode():
+    """`mode` is intentionally never restored -- SLAM arms lazily, so a restart
+    always comes up in real-time even if the file says 'slam'."""
+    cfg = ViewerConfig(mode="slam")
+    assert web.ui_from_config(cfg).mode == "realtime"
+
+
+def test_apply_ui_to_config_preserves_non_web_fields():
+    """Writing web prefs back must leave every desktop-only field (fov, mode,
+    yaw fusion, ...) untouched, so the two frontends share one file cleanly."""
+    cfg = ViewerConfig(fov_h=60.0, mode="slam", yaw_fusion_tau=33.0, port="COM7")
+    ui = web.UiState(color_mode="confidence", ir_colormap="turbo",
+                     ir_freeze=True, slam_trajectory=False,
+                     slam_walls="solid", slam_follow=False)
+    web.apply_ui_to_config(ui, cfg)
+    # web-owned fields updated
+    assert cfg.color == "confidence"
+    assert cfg.ir_colormap == "turbo"
+    assert cfg.ir_freeze_range is True
+    assert cfg.slam_trajectory is False and cfg.slam_walls == "solid" and cfg.slam_follow is False
+    # desktop-only fields preserved verbatim
+    assert cfg.fov_h == 60.0
+    assert cfg.mode == "slam"
+    assert cfg.yaw_fusion_tau == 33.0
+    assert cfg.port == "COM7"
+
+
+def test_persist_ui_writes_and_is_noop_without_config(tmp_path):
+    import types
+    p = tmp_path / "roomscan.toml"
+    cfg = ViewerConfig()
+    cfg.save(p)  # establishes the on-disk file at an explicit path
+
+    # _persist_ui uses cfg.save() with no arg -> config_path(); redirect it here.
+    ui = web.UiState(color_mode="confidence", slam_walls="solid")
+    state = types.SimpleNamespace(config=cfg, ui_state=ui)
+    # Patch the config module's path resolver so cfg.save() lands in tmp_path.
+    import roomscan.config as config_mod
+    orig = config_mod.config_path
+    config_mod.config_path = lambda: p
+    try:
+        web._persist_ui(state)
+    finally:
+        config_mod.config_path = orig
+    back = ViewerConfig.load(p)
+    assert back.color == "confidence"
+    assert back.slam_walls == "solid"
+
+    # No config attached -> silently does nothing (the shape tests build).
+    web._persist_ui(types.SimpleNamespace(config=None, ui_state=web.UiState()))
+
+
+def test_set_color_handler_persists(tmp_path):
+    """Driving the real inbound handler with a config attached writes the new
+    color straight to roomscan.toml (end-to-end of the persistence path)."""
+    import types
+    import roomscan.config as config_mod
+    p = tmp_path / "roomscan.toml"
+    cfg = ViewerConfig()
+    state = types.SimpleNamespace(config=cfg, ui_state=web.UiState(),
+                                  clients=set(), controller=None)
+    orig = config_mod.config_path
+    config_mod.config_path = lambda: p
+    try:
+        asyncio.run(web._handle_inbound(state, {"type": "set_color", "mode": "confidence"}))
+    finally:
+        config_mod.config_path = orig
+    assert state.ui_state.color_mode == "confidence"
+    assert ViewerConfig.load(p).color == "confidence"

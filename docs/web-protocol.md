@@ -48,7 +48,7 @@ for display (units, precision).
 |------|-----------|----------|-------|
 | `metrics` | `render_fps`, `streams[]{stream_id,label,device_hz,host_hz,bytes_per_s,jitter_ms}`, `link_bytes_per_s`, `resources`(null), `drops`, `gaps` | `build_metrics_message` `web.py:221` | metrics cadence; `device_hz`/`jitter_ms` may be null |
 | `sensor` | `have_quat`, `rot`[9 row-major], `heading`, `pressure_pa`, `temp_c`, `mag_ut`[3], `fusion`, `pressure_hist[]`, `temp_hist[]` | `build_sensor_message` `web.py:246` | **None (silent) on a ToF-only session**; `rot`/`heading` computed server-side so the frontend never re-derives sign/permutation matrices — see `docs/coordinate-frames.md` |
-| `state` | `color_mode`, `ir_colormap`, `ir_freeze` | `_state_message` `web.py:312` | echoed after every `set_color`/`set_ir` (one-way flow) |
+| `state` | `color_mode`, `ir_colormap`, `ir_freeze`, `mode`(realtime\|slam), `slam_trajectory`, `slam_walls`, `slam_follow` | `_state_message` | echoed after every `set_color`/`set_ir`/`set_mode`/`slam_opt` (one-way flow) **and** sent first on connect. Web Phase 5: the six display prefs (all but `mode`) are seeded from + persisted to the shared `roomscan.toml` [viewer]` table (`web.ui_from_config`/`_persist_ui`), so a reconnect **and** a server restart bring a tab current; `mode` is not persisted (SLAM arms lazily → restart is always real-time) |
 | `session` | `mode`(live\|replay), `source_label`, `has_live`, `recording{active,path,elapsed_s,bytes}`, `playback{is_replay,capture_name,paused,speed_fps,loop,position,total_frames}` | `build_session_message` `web.py:400` | broadcast on change **and** on the metrics cadence (so timer/position tick) |
 | `captures` | `items[]{name,bytes,mtime}` (newest first) | `build_captures_message` `web.py:354` | on connect, on `list_captures`, after a recording stops |
 | `slam` | `pose`[16], `follow{eye,center,up}`, `traj_tail[][3]`, `traj_len`, `fitness`, `rmse`, `tracking_lost`, `slam_ms`, `frames_integrated`, `mesh_seq`, `mesh_verts` | `build_slam_message` (web Phase 4) | every processed frame in SLAM mode; follow eye/center/up computed server-side; traj downsampled to ≤256 |
@@ -99,6 +99,11 @@ a `SessionController` (`ctrl is not None`) — absent in a `--replay`-launched p
 - **Off-loop for blocking work.** Anything that scans a file or joins a thread (`load_capture`, `seek`,
   `restart`) is dispatched via `asyncio.to_thread` so the single broadcaster/event-loop never stalls.
   A SLAM integrate/raycast that blocks belongs off-loop the same way.
+- **Persisted display state seeds the same `state` echo.** Web Phase 5: durable UI prefs live in
+  `roomscan.toml` [viewer]`, seed `UiState` at boot (`web.ui_from_config`) and are written back on change
+  (`web._persist_ui`, best-effort, reload-then-save). A new *durable* toggle adds a `ViewerConfig` field +
+  the map on both sides; a purely *ephemeral* one stays out of the file. Persistence never adds a message —
+  it rides the existing connect-time `state` echo, so the one-way-flow invariant is untouched.
 
 ## Frontend consumers
 

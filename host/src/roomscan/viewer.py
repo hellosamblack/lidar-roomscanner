@@ -133,7 +133,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--save-config", action="store_true",
                     help="persist the effective color/fov/replay-fps/port settings to roomscan.toml")
     ap.add_argument("--panel", action="store_true",
-                    help="use the Open3D gui control panel instead of the classic keyboard-only window")
+                    help="[deprecated] use the legacy Open3D gui control panel instead of the "
+                         "classic keyboard-only window; the supported UI is now roomscan-web")
     return ap
 
 

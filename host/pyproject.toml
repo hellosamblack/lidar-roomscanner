@@ -17,10 +17,10 @@ web = ["fastapi", "uvicorn", "websockets"]
 
 [project.scripts]
 roomscan-view = "roomscan.viewer:main"
-roomscan-panel = "roomscan.panel:main"
+roomscan-panel = "roomscan.panel:main"   # DEPRECATED (Web Phase 5): legacy Open3D desktop panel; use roomscan-web
 roomscan-ctl = "roomscan.control:main"
 roomscan-slam = "roomscan.slam.cli:main"
-roomscan-web = "roomscan.web:main"
+roomscan-web = "roomscan.web:main"        # primary UI: browser instrument, headless-capable
 
 [tool.pytest.ini_options]
 # Resolve `roomscan` from ./src and `tools` from ./ without relying on an

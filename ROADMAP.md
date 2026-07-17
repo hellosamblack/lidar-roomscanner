@@ -497,8 +497,10 @@ Plan: `web_app_migration_plan.md`. Owner elected to deploy the visualizer to a h
 
 Owner direction (2026-07-15): the web app **fully replaces** the ~3600-line Open3D `panel.py`, delivered in
 phases — (1) core real-time instrument, (2) sensors (IMU/env streams 9/10), (3) recording & playback,
-(4) SLAM mode, (5) settings persistence + retire `panel.py`. `panel.py` stays as the fallback/reference
-until Phase 5.
+(4) SLAM mode, (5) settings persistence + retire `panel.py`. **All five phases are done (2026-07-16):**
+`roomscan-web` is now the primary, supported UI and `panel.py` is **deprecated in place** — kept only as
+legacy for a local-display box (it can't run on the GPU-less headless host), no longer imported by the web
+server, and it prints a deprecation notice on launch.
 
 **"Showcase" is not a separate phase (owner clarification, 2026-07-16):** the earlier plan listed a 6th
 "showcase mode" phase, but Showcase was only ever **another name for SLAM mapping** — the record → build →
@@ -631,9 +633,41 @@ Save button**.
 - **Verification-data note:** SLAM needs a **stream-9 (IMU quat) capture** — the older
   `recordings/2026-07-08-room-scan.bin` predates IMU and loses tracking (empty map). `captures/verify_slam.bin`
   (recorded live this session, gitignored) is the fixture.
-- **Remaining web work (Web Phase 5, final):** settings persistence + retiring `panel.py`. No loop closure.
-  (Showcase is **not** a separate phase — it was a misnomer for SLAM mapping, already delivered by Phases 3–4;
-  see the plan header.)
+- **Remaining web work (Web Phase 5, final):** ✅ **done** — see below. (Showcase is **not** a separate phase — it
+  was a misnomer for SLAM mapping, already delivered by Phases 3–4; see the plan header.)
+
+#### Web Phase 5 — settings persistence + retire `panel.py`  ← **✅ Complete (2026-07-16)**
+
+Host-side only — no wire-protocol, firmware, or `/ws`-message change. Owner decisions (2026-07-16):
+**deprecate `panel.py` in place** (don't delete) and **persist to the shared `roomscan.toml` [viewer]` table**
+(one config across web + desktop).
+
+- **Settings persistence.** The web UI's six display prefs — `color`, `ir_colormap`, IR `freeze`, and the three
+  SLAM display toggles (`trajectory`/`walls`/`follow`) — now live in the same `roomscan.toml` [viewer]` table the
+  desktop viewer/panel already used. Three new flat fields were added to `ViewerConfig` (`slam_trajectory`,
+  `slam_walls`, `slam_follow`); `web.ui_from_config` seeds `UiState` on boot (validating each value, falling back
+  to the UiState default on anything unrecognized), and `web._persist_ui` writes each runtime change straight back
+  — it **re-loads the file first** so a concurrent editor's non-web fields survive, and swallows write errors with
+  a warning (a color click must never crash on an unwritable config dir). Persistence is a no-op when no config is
+  attached, so the socket-free unit tests are unaffected.
+- **`mode` is deliberately NOT restored.** The SLAM worker arms lazily on the first `set_mode slam` (no GPU burned
+  until then), so a server restart always comes up in real-time regardless of the last session — restoring into
+  SLAM would silently spin up the GPU on launch. The web app never writes the [viewer]` `mode` field; the desktop
+  panel keeps owning it.
+- **Behaviour note:** a fresh web install (no config file) now adopts the shared `color` **default**, which is
+  `reflectance` (the desktop default, falls back to depth when the plane is absent) — not the old web-only `depth`.
+- **`panel.py` deprecated in place.** The three GUI-free helpers the web server borrowed from the panel
+  (`_run_reader`, `_Pacer`, `follow_camera_target`) plus their follow-camera constants moved to a new neutral
+  **`reader.py`**; `panel.py` re-imports them (so `panel._run_reader` and its tests still resolve) and `web.py`
+  now imports from `reader.py` and no longer imports the panel module at all. `roomscan-panel` and
+  `roomscan-view --panel` print a one-line deprecation notice on launch; the panel is kept only for a
+  local-display box (it can't run on the GPU-less headless host). `roomscan-web` is the primary, supported UI.
+- **Verified:** 8 new backend tests (config field defaults + TOML round-trip, `ui_from_config` valid/invalid/mode
+  mapping, `apply_ui_to_config` preserves desktop-only fields, `_persist_ui` write + no-op, `set_color` handler
+  end-to-end); full host suite **645 passed, 1 skipped**. Driven end-to-end against two real `uvicorn` servers: a
+  `/ws` `set_color` wrote `roomscan.toml`, and a **restarted** server seeded a fresh client's very first `state`
+  message from it. No frontend change — the existing `state` echo already drives the UI, so persisted values reach
+  the browser through the unchanged connect handshake.
 
 ### Phase 4 — Integrate X-NUCLEO-IKS4A1  ← **✅ Complete** *(swapped with Ethernet 2026-07-09, owner decision — sensors next)*
 
