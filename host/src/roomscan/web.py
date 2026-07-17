@@ -47,6 +47,7 @@ from .ir_image import ir_range, reflectance_to_rgb
 from .logbus import LogBus
 from .magcal import MagCalibration
 from .metrics import MetricsRegistry, MetricsSnapshot
+from .flatfield import FlatField
 from .pipeline import TransformStage
 from .reader import _Pacer, _run_reader, follow_camera_target
 from .protocol import (
@@ -1485,7 +1486,8 @@ def main(argv=None) -> int:
 
     # Always compute all three planes: marginal cost per plane is ~zero and it
     # makes color mode a pure runtime choice (no reader restart) -- §5.1/§7.2.
-    stage = TransformStage(outputs=("depth", "reflectance", "confidence"))
+    stage = TransformStage(outputs=("depth", "reflectance", "confidence"),
+                           flatfield=FlatField.load_configured())
     slot: queue.Queue = queue.Queue(maxsize=1)
     fault: dict = {}
 

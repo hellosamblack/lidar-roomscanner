@@ -68,6 +68,9 @@ class ViewerConfig:
                                         # visibility gate disagreeing)
     ir_opacity: float = 0.5            # IR overlay opacity 0..1
     yaw_fusion: bool = True                 # graft mag heading onto SFLP yaw
+    flatfield_path: Optional[str] = None    # path to a per-zone reflectance FPN
+                                            # correction (.npz from tools/build_flatfield.py);
+                                            # None disables correction (see flatfield.py)
     yaw_fusion_tau: float = 20.0            # complementary-filter time constant (s)
     mag_cal_path: str = "mag_cal.json"      # hard/soft-iron calibration JSON
     yaw_anomaly_frac: float = 0.3           # |mag| deviation from field to reject
@@ -94,8 +97,9 @@ class ViewerConfig:
             return cls()
         known = {f.name for f in fields(cls)}
         kwargs = {k: v for k, v in viewer.items() if k in known}
-        if kwargs.get("port") == "":
-            kwargs["port"] = None  # TOML has no null; empty string round-trips "unset"
+        for _optkey in ("port", "flatfield_path"):
+            if kwargs.get(_optkey) == "":
+                kwargs[_optkey] = None  # TOML has no null; empty string round-trips "unset"
         try:
             return cls(**kwargs)
         except TypeError:

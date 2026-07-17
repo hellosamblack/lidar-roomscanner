@@ -8,6 +8,7 @@ import sys
 import numpy as np
 
 from ..decoder import StreamDecoder
+from ..flatfield import FlatField
 from ..pipeline import TransformStage
 from ..protocol import StreamId, FrameType, decode_imu_quat, decode_env
 from .config import SlamConfig
@@ -23,7 +24,8 @@ def _load_frames(path, max_frames=None):
     reflectance/confidence are None for sources that don't provide them (the
     on-device DEPTH_ZF32 passthrough path only ever returns "depth")."""
     dec = StreamDecoder()
-    stage = TransformStage(outputs=("depth", "reflectance", "confidence"))
+    stage = TransformStage(outputs=("depth", "reflectance", "confidence"),
+                           flatfield=FlatField.load_configured())
     with open(path, "rb") as f:
         data = f.read()
     frames = []

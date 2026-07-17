@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from .flatfield import FlatField
 from .native import Transform
 from .protocol import Frame, FrameHeader, FrameType, StreamId
 
@@ -35,10 +36,12 @@ class TransformStage:
     constructor (DLL not built) propagates out of feed() at that point.
     """
 
-    def __init__(self, outputs: tuple[str, ...] = ("depth",)):
+    def __init__(self, outputs: tuple[str, ...] = ("depth",),
+                 flatfield: "FlatField | None" = None):
         self._outputs = tuple(outputs)
         self._transform: Transform | None = None
         self._calib_payload: bytes | None = None
+        self._flatfield = flatfield          # per-zone reflectance FPN correction, or None
         self.raw_skipped_awaiting_calib = 0
         self.raw_transformed = 0
 
@@ -61,6 +64,8 @@ class TransformStage:
                 self.raw_skipped_awaiting_calib += 1
                 return None
             outputs = self._transform.process(frame.payload)
+            if self._flatfield is not None and "reflectance" in outputs:
+                outputs["reflectance"] = self._flatfield.apply(outputs["reflectance"])
             self.raw_transformed += 1
             return header, outputs
 

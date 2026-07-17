@@ -53,6 +53,7 @@ from .metrics import MetricsRegistry, ResourceSampler
 from .metrics_hud import render_hud
 from .native import Transform
 from . import portguard
+from .flatfield import FlatField
 from .pipeline import TransformStage
 from .protocol import HEADER_SIZE, CommandCode, FrameType, ProtocolError, parse_event
 from .reader import (  # neutral reader loop + follow-camera math (Web Phase 5 hoist)
@@ -3503,7 +3504,7 @@ def run(args, *, smoke_ticks: int = 0) -> int:
     client = CommandClient(source.write) if isinstance(source, (SerialSource, UdpSource)) else None
     dll = Transform.available()
     outputs = ("depth", "reflectance", "confidence") if dll else ("depth",)
-    stage = TransformStage(outputs=outputs)   # all three computed by one instance; ~zero marginal cost
+    stage = TransformStage(outputs=outputs, flatfield=FlatField.load_configured())  # one instance; ~zero marginal cost
     bus = LogBus()
     recorder = Recorder()
     interval = 1.0 / args.replay_fps if (args.replay and args.replay_fps and args.replay_fps > 0) else 0.0

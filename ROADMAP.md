@@ -329,6 +329,21 @@ planned. Left open at the time: the connect-time transient and CALIB-on-DTR-conn
 carried forward unchanged from Phase 2 — the connect-time transient was later root-caused and resolved
 in Phase 3 Task 6 (see the updated bullet above).
 
+**Data-quality follow-up — reflectance fixed-pattern (FPN) + flat-field correction (2026-07-16).**
+Characterized a real, sensor-locked per-zone response non-uniformity in the reflectance plane: on a
+flat wall it measures **~18% of signal**, rock-stable frame-to-frame (SNR ~9), aligned to the sensor
+row/column axes — not display moiré, not scene texture (per-zone SPAD sensitivity / DSS). It
+contaminates the IR view, reflectance SLAM coloring, and would be *amplified* by any reflectance-based
+enhancement (multi-frame super-res / relief shading). **Host correction built + shipped-disabled:**
+`roomscan.flatfield` (multiplicative unit-mean per-zone gain map) applied to the reflectance plane in
+`pipeline.TransformStage` (so web/panel/viewer/SLAM all get it), gated by `[viewer] flatfield_path`,
+off by default; builder `tools/build_flatfield.py`; 11 tests (656 suite green); doc
+`docs/flatfield-calibration.md`. **STILL OPEN — needs on-rig action:** capture a real flat-field
+reference by *slowly panning* the sensor across a uniform matte wall (panning is mandatory — it
+averages out scene texture; a static capture is invalid: `verify_slam.bin` → 44%-residual garbage
+map), then `build_flatfield` → set `flatfield_path` → verify the grid collapses. Prerequisite for the
+reflectance super-resolution / sensor-fusion-overlay work (both scoped, not yet built).
+
 ### Phase 3 — UI & runtime configuration ← **✅ Complete** (plan: `docs/superpowers/plans/2026-07-08-phase3-runtime-config-robustness.md`)
 
 > **Status 2026-07-08:** verified end-to-end on hardware, branch `phase3-runtime-config`, 7 tasks.

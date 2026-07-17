@@ -15,6 +15,7 @@ from .config import ViewerConfig, apply_config_defaults
 from .control import CommandClient, CommandDispatcher
 from .decoder import StreamDecoder
 from .deproject import Deprojector
+from .flatfield import FlatField
 from .pipeline import TransformStage
 from .protocol import CommandCode, FLAG_DROPPED, FrameType, ProtocolError, parse_event
 from .sources import FileSource, SerialSource, get_best_source, pump
@@ -66,7 +67,7 @@ def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dic
             min_interval: float = 0.0, stage: TransformStage | None = None,
             client: CommandClient | None = None):
     if stage is None:
-        stage = TransformStage()
+        stage = TransformStage(flatfield=FlatField.load_configured())
     last = 0.0
     last_paced_seq = None
     try:
