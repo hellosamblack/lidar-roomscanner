@@ -153,6 +153,46 @@ def acquire(initial_port: str | None, seconds: float, out_path: Path, boot_timeo
                 f"(no decoded frames within {boot_timeout}s on each attempt)")
 
 
+def acquire_udp(seconds: float, out_path: Path, boot_timeout: float) -> tuple[str, float]:
+    """Timed raw capture over Ethernet/UDP (the headless host has no USB — the
+    board streams via UDP; see the headless-host-deployment memory). No SWD
+    reset / port cycling: `get_best_source()` opens the UDP source (whose
+    `read()` self-heals with a keepalive wake), we dump every datagram, and
+    stop after `seconds`. Returns (source label, measured wall-clock seconds).
+
+    Raises RuntimeError on a boot hang (no decoded frames within boot_timeout) —
+    for UDP that means the board isn't reachable/streaming (check
+    `roomscanner.local`), not a boot flake, so there is no reset-retry here."""
+    from roomscan.sources import get_best_source, UdpSource
+    source = get_best_source()
+    if isinstance(source, UdpSource):
+        label = f"Ethernet/UDP {source.target_ip}:{source.target_port}"
+    else:
+        label = type(source).__name__
+    print(f"opening {label} ...")
+    decoder = StreamDecoder()
+    first_frame_at: float | None = None
+    t_start = time.monotonic()
+    try:
+        with open(out_path, "wb") as out_f:
+            while True:
+                elapsed = time.monotonic() - t_start
+                if elapsed >= seconds:
+                    break
+                data = source.read()
+                if data:
+                    out_f.write(data)
+                    if decoder.feed(data) and first_frame_at is None:
+                        first_frame_at = elapsed
+                if first_frame_at is None and elapsed > boot_timeout:
+                    raise RuntimeError(
+                        f"no decoded frames within {boot_timeout}s over UDP — is the board "
+                        f"reachable and streaming? (check roomscanner.local / headless_doctor.py)")
+    finally:
+        source.close()
+    return label, time.monotonic() - t_start
+
+
 def decode_file(path: Path):
     """Position-aware decode pass over a recorded capture. Returns:
 
@@ -329,7 +369,11 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="capture",
         description="Consolidated [HW] capture ritual: optional SWD reset, port discovery, "
-                     "boot-hang retry, timed raw capture, decode-and-report.")
+                     "boot-hang retry, timed raw capture, decode-and-report. Serial CDC by "
+                     "default; --udp captures over Ethernet (the headless host has no USB).")
+    ap.add_argument("--udp", action="store_true",
+                     help="capture over Ethernet/UDP via get_best_source() instead of serial CDC "
+                          "(no SWD reset / port cycling); use on the headless host, which has no USB")
     ap.add_argument("--port", help="serial port override (default: auto-detect CDC CAFE:4001)")
     ap.add_argument("--reset", action="store_true",
                      help="SWD-reset the board before capturing (STM32_Programmer_CLI)")
@@ -349,6 +393,19 @@ def main(argv=None) -> int:
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.udp:
+        if args.reset:
+            print("note: --reset is ignored with --udp (no SWD over Ethernet)", file=sys.stderr)
+        try:
+            label, wall_elapsed = acquire_udp(args.seconds, out_path, args.boot_timeout)
+        except (RuntimeError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"captured {out_path.stat().st_size} bytes over {wall_elapsed:.2f}s from "
+              f"{label} -> {out_path}")
+        return report(out_path, wall_elapsed, args.seconds)
+
     programmer = args.programmer or programmer_path()
 
     port = args.port

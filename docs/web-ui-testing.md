@@ -62,7 +62,10 @@ Web-Phase-4 SLAM controls `#seg-mode button[data-mode=realtime|slam]`,
 **SLAM verification needs a stream-9 capture.** SLAM builds nothing from a capture
 with no IMU_QUAT (stream 9) — the mapper gets no rotation prior and loses tracking
 (`recordings/2026-07-08-room-scan.bin` predates IMU → empty map). Use
-`captures/verify_slam.bin` (has 9/10) or record a fresh one from the live board. To
+`captures/verify_slam.bin` (has 9/10) or record a fresh one with
+**`host/tools/capture.py --udp --seconds 12 --out captures/verify_slam.bin`** (the
+headless host has no USB, so `--udp` grabs the Ethernet stream — streams 9/10 in the
+decode-report confirm it's SLAM-capable). To
 build the map, launch with `--replay <stream9.bin> --replay-fps 30`, click
 `#seg-mode button[data-mode=slam]`, and enable Loop (`chk-loop`) so frames keep
 feeding — SLAM is fed from the 30 Hz broadcaster only while in SLAM mode, so ~330

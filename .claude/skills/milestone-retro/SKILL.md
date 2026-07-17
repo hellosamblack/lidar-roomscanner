@@ -51,6 +51,33 @@ major effort, before the next phase's plan executes.
   and a corrupted/malformed-input case exercised on hardware, not just a single well-formed sample
   (caught in Phase 3 Task 2's parse-while-draining rework).
 
+## Executed 2026-07-16 (Web Phase 4 — SLAM mode retro)
+
+Single-session milestone committed straight to `main` (`a0314e4`), host-only (no firmware, no
+device-wire change — MESH is app-protocol), verified end-to-end in headless Chrome on the local **CUDA:0**
+GPU. Most friction was converted *during* the push (design spec, `docs/web-protocol.md` updated with tag 3
++ the new messages, memories + ROADMAP/CLAUDE synced in the feature commit). This retro's two extractions:
+
+- **Status-currency correction — "Showcase" collapsed (owner clarification).** The web plan carried a stale
+  6th "Showcase mode" phase, but Showcase was only ever **another name for SLAM mapping** (record→build→save)
+  — and the desktop panel redesign had *already* dissolved it ("SLAM absorbs the former Showcase flow — no
+  separate Showcase concept in the UI", ROADMAP Phase 6). The web app already delivers it via Web Phases 3
+  (record + load/replay) + 4 (SLAM build + **Save** full-res). Trued up: the plan is now **5 phases, not 6**
+  (`ROADMAP.md` header + the Phase-1/3/4 deferred lines, `CLAUDE.md` bullet, `web-panel-replacement` +
+  MEMORY.md). Only **Web Phase 5 (settings + retire `panel.py`)** remains; the desktop `slam/showcase.py`
+  engine (offline full-quality re-run + reveal) is retired with `panel.py` then — its one edge over web SLAM
+  (guaranteed-every-frame offline) is at most a small SLAM-mode option, not a phase.
+- **`host/tools/capture.py --udp` — THE tool extraction.** The headless host has no USB (board streams over
+  UDP), so `capture.py`'s serial-CDC + SWD path didn't apply; recording the Phase-4 SLAM fixture meant
+  hand-rolling a UDP dump inline. Added an `acquire_udp()` path (via `get_best_source()`, no SWD/port-cycle,
+  keepalive self-heal) reusing the exact same decode-and-report. **Verified live** (`--udp --seconds 8`:
+  3.6 MB, streams 9/10/RAW/CALIB, 30.3 fps, 0 CRC, 0 gaps). Closes the `milestone-self-improvement` seeded
+  backlog item.
+- **Deliberately skipped**: no `firmware-loop`/`protocol-change` edits (host-only, no device-wire change);
+  no new checklist line (the new inbound handlers `set_mode`/`slam_opt`/`save` validate untrusted input and
+  are test-covered; `pack_mesh`/`build_slam_message` have round-trip tests — no repeated-finding gap); no
+  edit to `slam/` (reuse-only, as designed). `verify_slam.bin` stays gitignored (regenerate via `--udp`).
+
 ## Executed 2026-07-16 (Web Phase 3 — recording & playback retro)
 
 Not an SDD subagent phase — a single-session milestone committed straight to `main` (`e935063`),

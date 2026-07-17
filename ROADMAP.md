@@ -493,12 +493,23 @@ Plan: `web_app_migration_plan.md`. Owner elected to deploy the visualizer to a h
 - **Bandwidth:** The WebSocket streams processed points rather than RAW data. With decimation running, bandwidth sits comfortably below Tailscale's limits.
 - **Verified:** Dependencies added to `[web]` optional group. Ran headless test successfully against `synthetic.bin`; the server boots on port 8000 and serves the static Three.js payload.
 
-### Web replacement of `panel.py` — a 6-phase program (Three.js web app supplants the Open3D desktop panel)
+### Web replacement of `panel.py` — a 5-phase program (Three.js web app supplants the Open3D desktop panel)
 
 Owner direction (2026-07-15): the web app **fully replaces** the ~3600-line Open3D `panel.py`, delivered in
-six phases — (1) core real-time instrument, (2) sensors (IMU/env streams 9/10), (3) recording & playback,
-(4) SLAM mode, (5) showcase mode, (6) settings persistence + retire `panel.py`. `panel.py` stays as the
-fallback/reference until Phase 6.
+phases — (1) core real-time instrument, (2) sensors (IMU/env streams 9/10), (3) recording & playback,
+(4) SLAM mode, (5) settings persistence + retire `panel.py`. `panel.py` stays as the fallback/reference
+until Phase 5.
+
+**"Showcase" is not a separate phase (owner clarification, 2026-07-16):** the earlier plan listed a 6th
+"showcase mode" phase, but Showcase was only ever **another name for SLAM mapping** — the record → build →
+save flow — a naming artifact from earlier in the project. The desktop panel already dissolved it ("SLAM
+absorbs the former Showcase record→process→reveal flow — no separate Showcase concept in the UI", Phase 6
+below), and the web app **already delivers it** across Web Phases 3 (record + load/replay a capture) and 4
+(SLAM builds the full map + **Save** the full-res mesh/trajectory). So the web plan is **5 phases, not 6**;
+the only remaining work is settings persistence + retiring `panel.py`. (The lone desktop-Showcase nicety
+not yet in the web app is a *guaranteed-every-frame* offline post-process with a sharpening "reveal";
+Web Phase 4's replay-fed SLAM already processes every frame when a capture is replayed at ≤30 fps, so this
+is at most a small option inside SLAM mode, not a phase — fold it into Phase 5 only if the owner wants it.)
 
 #### Web Phase 1 — Core Real-Time Web Instrument  ← **✅ Complete (2026-07-16)**
 
@@ -520,9 +531,10 @@ or firmware change. Confined to `host/src/roomscan/web.py` + `host/src/roomscan/
 - **Caveat (data, not code):** dual-stream recordings (RAW_3DMD + redundant DEPTH_ZF32 passthrough) intermittently
   fall the IR pane / reflectance colour back to depth, because the DEPTH frame lands last in the latest-wins slot.
   Live production streams are RAW-only, so unaffected; a "prefer-richest-frame" tweak is a future option.
-- **Deferred to Web Phases ~~2~~ 3–6:** recording/playback UI, SLAM trajectory+mesh
-  (adds a MESH binary type + a top-bar mode switch, placeholder reserved), showcase mode, settings persistence,
-  and retiring `panel.py`. Also not yet carried over: exposure slider, rotate-90 / near-contrast view options.
+- **Deferred to Web Phases ~~2~~ 3–5:** recording/playback UI, SLAM trajectory+mesh
+  (adds a MESH binary type + a top-bar mode switch, placeholder reserved), settings persistence, and retiring
+  `panel.py`. Also not yet carried over: exposure slider, rotate-90 / near-contrast view options. *(Showcase,
+  once listed here, was a misnomer for SLAM mapping — see the plan header; delivered by Phases 3–4.)*
 
 #### Web Phase 2 — Sensors (IMU/env streams 9/10)  ← **✅ Complete (2026-07-16)**
 
@@ -579,8 +591,9 @@ desktop-parity: the app runs remotely on the headless box, so the operator brows
   gating, live-record tee, seek); full host suite **625 passed, 1 skipped**. Driven end-to-end in headless
   Chrome against a synthetic capture library — record-disabled-in-replay, library listing, runtime load/swap,
   pause (position frozen), speed (Device FPS tracked the ×-setting), loop, and seek all confirmed on screen.
-- **Deferred (Web Phases 4–6):** SLAM trajectory+mesh, showcase, settings persistence + retiring `panel.py`.
-  Serial-staleness on Go Live is mitigated by a best-effort `reset_input_buffer`; UDP self-heals via keepalive.
+- **Deferred (at the time — Web Phases 4–5):** SLAM trajectory+mesh (**done, Phase 4**), then settings
+  persistence + retiring `panel.py` (Phase 5, final). Serial-staleness on Go Live is mitigated by a
+  best-effort `reset_input_buffer`; UDP self-heals via keepalive.
 - **`/ws` protocol reference:** the full app protocol (binary tags + JSON messages, in/out) across Web Phases 1–3
   is now indexed in `docs/web-protocol.md` — Phase 4's trajectory/mesh messages hook in there (it also lists the
   invariants: one-way echo, validate untrusted inbound, server-side math, off-loop blocking work).
@@ -618,7 +631,9 @@ Save button**.
 - **Verification-data note:** SLAM needs a **stream-9 (IMU quat) capture** — the older
   `recordings/2026-07-08-room-scan.bin` predates IMU and loses tracking (empty map). `captures/verify_slam.bin`
   (recorded live this session, gitignored) is the fixture.
-- **Deferred (Web Phases 5–6):** Showcase mode, settings persistence + retiring `panel.py`. No loop closure.
+- **Remaining web work (Web Phase 5, final):** settings persistence + retiring `panel.py`. No loop closure.
+  (Showcase is **not** a separate phase — it was a misnomer for SLAM mapping, already delivered by Phases 3–4;
+  see the plan header.)
 
 ### Phase 4 — Integrate X-NUCLEO-IKS4A1  ← **✅ Complete** *(swapped with Ethernet 2026-07-09, owner decision — sensors next)*
 
