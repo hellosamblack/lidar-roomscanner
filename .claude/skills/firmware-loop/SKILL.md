@@ -156,4 +156,8 @@ reporting one bare "fps" number (this exact ambiguity caused real confusion in t
   about hardware. ENV dead but quat alive → jumpers J4/J5 must be **5-6 only**, and the LPS22DF
   barometer is at `0x5D` on this board.
 - For a GUI surface with device buttons, IR monitor, and the sensors group (gizmo/compass/sparklines),
-  prefer `roomscan-panel` (`roomscan-view --panel`) over the classic keyboard-only viewer.
+  use `roomscan-web` — the browser instrument is the primary, supported UI (real-time + sensors +
+  record/playback + SLAM + save; runs on the GPU-less headless host). To SEE/drive it on this box see
+  `docs/web-ui-testing.md`. `roomscan-panel` (`roomscan-view --panel`, the Open3D desktop panel) is
+  **deprecated legacy** as of Web Phase 5 — it needs a local display + Open3D GUI stack and prints a
+  deprecation notice on launch; reach for it only on a box that has a display.

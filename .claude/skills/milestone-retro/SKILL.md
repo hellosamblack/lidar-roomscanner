@@ -51,6 +51,48 @@ major effort, before the next phase's plan executes.
   and a corrupted/malformed-input case exercised on hardware, not just a single well-formed sample
   (caught in Phase 3 Task 2's parse-while-draining rework).
 
+## Executed 2026-07-16 (Web Phase 5 — settings persistence + retire panel.py retro)
+
+The **final web phase**, closing the 5-phase `panel.py` replacement. Single-session, host-only (no
+firmware, no wire/`/ws`-message change), committed straight to `main` (`db4fc65`). As with the Phase 3/4
+retros, most friction was converted *during* the push — the design decisions were confirmed with the
+owner up front (`AskUserQuestion`: deprecate-in-place + shared-config, both recommended), and
+ROADMAP/CLAUDE/`web-protocol`/both memories were synced in the feature commit. This retro's extractions
+are a **stale-guidance prune** and a **reusable verification technique** — the two the milestone actually
+produced:
+
+- **Prune — `firmware-loop` skill no longer lies about the live GUI.** The 2026-07-10 retro had added
+  "`roomscan-panel` noted as the preferred live surface" (SKILL.md:159). Phase 5 deprecated the panel, so
+  that line now pointed at legacy. Corrected to name `roomscan-web` as the primary/supported UI (with the
+  `docs/web-ui-testing.md` pointer) and mark `roomscan-panel` deprecated-legacy (local-display box only).
+  A skill that lies is worse than none — this is exactly the prune step. (Left alone: the dated
+  `docs/superpowers/specs/*` + `plans/*` snapshots that say "panel.py is the fallback/reference" — those
+  are point-in-time design artifacts, not living guidance.)
+- **Technique — restart-survival verification (`docs/web-ui-testing.md`).** A persisted setting is only
+  proven if it survives a *server restart*, which a screenshot can't show. Documented the two-real-servers
+  pattern: drive a `/ws` `set_color` on server A → assert the temp `roomscan.toml` got the write → stop A →
+  boot server B seeded from the same file → assert the **first** `state` message a fresh client receives
+  already carries the value. Included the load-bearing gotcha (monkeypatch `config.config_path`, resolved
+  at call time, not an already-imported name). This is the durable form of the Phase-5 verify script and
+  reusable for every future persisted toggle.
+- **Latent-coupling note (no action needed, recorded for the next reader):** the fix that let the web
+  server stop importing the panel module was hoisting three GUI-free helpers (`_run_reader`/`_Pacer`/
+  `follow_camera_target`) into a neutral `reader.py`. Lesson worth keeping: transport/plumbing that a
+  headless consumer needs must not live in a GUI module — if a second frontend borrows `panel._foo`, that
+  `_foo` wants a neutral home. Captured here rather than as a new skill (one instance, not a recurring
+  ritual).
+- **Behaviour-change flag:** unifying the web + desktop config means a fresh web install now inherits the
+  shared `color` default (`reflectance`), not the old web-only `depth` — caught during runtime verify
+  (my first assertion assumed `depth`). Documented in ROADMAP/CLAUDE/memory. General lesson: when two
+  components with *different* defaults for the "same" knob start sharing one config, the merge silently
+  adopts one side's default — verify the fresh-install path, don't assume.
+- **Deliberately skipped**: no `firmware-loop` capture/flash edits beyond the prune (host-only, no HW
+  ritual); no `protocol-change`/`docs/protocol.md` edits (no device-wire change; the `/ws` `state` message
+  grew no fields — persistence rides the existing echo); no new script under `host/tools/` (the verify
+  runner is a one-off, its *pattern* is the durable form in `web-ui-testing.md`, not a committed tool); no
+  new memory file (`web-panel-replacement` already tracks the phase-by-phase state and was updated to
+  ALL-DONE).
+
 ## Executed 2026-07-16 (Web Phase 4 — SLAM mode retro)
 
 Single-session milestone committed straight to `main` (`a0314e4`), host-only (no firmware, no

@@ -115,6 +115,32 @@ Driving gotchas (cost time in Web Phase 3):
 
   Live production streams are RAW-only, so this quirk is replay-data only.
 
+## Verifying persisted settings (survives a restart)
+
+A durable setting (Web Phase 5: color / IR colormap+freeze / SLAM toggles, in
+`roomscan.toml` [viewer]`) is only proven if it survives a **server restart**,
+not just a reconnect. A screenshot can't show that — the reusable pattern is two
+real servers against the same config, checking the *first* `state` message:
+
+1. Point `roomscan.config.config_path` at a temp file (so you don't stomp the
+   real `~/roomscan/roomscan.toml`), and seed the app the way `main()` does:
+   `cfg = ViewerConfig.load(); app.state.config = cfg; app.state.ui_state = web.ui_from_config(cfg)`.
+2. Boot server A on a free port, connect a `websockets` client, send e.g.
+   `{"type":"set_color","mode":"confidence"}`, await the echoed `state`.
+3. Assert the temp `roomscan.toml` now has `color = "confidence"` (the
+   `_persist_ui` write). Stop server A (`server.should_exit = True`).
+4. Boot server B (fresh `app.state` seeded from the same file) and assert the
+   **first** `state` message a new client receives already carries
+   `color_mode == "confidence"` — that's the connect-time `_state_message`
+   seeded from the file, i.e. a real restart survived.
+
+A worked runner (paused reader, hermetic DEPTH capture, two servers) is the
+Phase-5 verify script — grep the Web-Phase-5 commit (`db4fc65`) message for the
+shape, or reuse `tests/test_web.py::_make_depth_capture` + `_free_port`. Key
+gotcha: `_persist_ui`/`ViewerConfig.load()` resolve the path through
+`config.config_path()` at call time, so monkeypatch that (not an already-imported
+name) to redirect the write.
+
 ## Teardown
 
 `pkill -9 -f roomscan.web` (and `-f remote-debugging-port` if you reused a Chrome).
