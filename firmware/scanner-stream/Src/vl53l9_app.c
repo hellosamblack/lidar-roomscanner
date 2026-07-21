@@ -552,6 +552,15 @@ typedef struct {
 
 static rs_pending_cmd_t rs_pending = { 0 };
 
+/* Standby shadow state (RS_CMD_SET_STANDBY): RS_STANDBY_ACTIVE while streaming,
+ * RS_STANDBY_SOFT once vl53l9_stop() has parked the sensor in FSM STANDBY (VCSEL idle),
+ * RS_STANDBY_HARD once platform_power_disable() has additionally cut XSHUT. Written and
+ * read only from the single main-loop thread (rs_apply_pending_config + the loop-top idle
+ * check below), never from an ISR, so no volatile needed -- same discipline as rs_pending.
+ * The default of ACTIVE means a device that is never commanded to idle behaves exactly as
+ * before this feature: it streams continuously, no behavior change. */
+static uint8_t rs_standby_level = RS_STANDBY_ACTIVE;
+
 /* Active profile, persists across reconfig commands so SET_FRAME_PERIOD_US /
  * SET_EXPOSURE_MS compose (each edits a copy of the currently-active profile, never the
  * shared g_ranging_profiles[] table -- vl53l9_utils.h:152). Seeded from
@@ -983,6 +992,22 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
         }
         rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = 0u, .token = token };
         break;
+    case RS_CMD_SET_STANDBY:
+        /* Validate the level without touching the sensor (same precedence as the SET_*
+         * cases: a bad param acks BAD_PARAM even while another command is pending). The
+         * actual stop()/power-down/wake runs from rs_apply_pending_config at the safe
+         * point -- vl53l9_stop() must never race an in-flight trigger (see rs_pending's
+         * safe-point block comment). */
+        if (param > RS_STANDBY_HARD) {
+            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, param);
+            break;
+        }
+        if (rs_pending.pending) {
+            rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u);
+            break;
+        }
+        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token };
+        break;
     default:
         rs_send_ack(token, cmd, RS_RESULT_UNKNOWN_CMD, 0u);
         break;
@@ -1037,6 +1062,109 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
         rs_send_frame_cdc(RS_STREAM_CALIB, seq_for_calib, 0u, calib_data, VL53L9_CALIB_DATA_SIZE, out_width,
                           out_height);
         rs_send_ack(token, cmd, RS_RESULT_OK, 0u);
+        return false;
+    }
+
+    if (cmd == RS_CMD_SET_STANDBY) {
+        /* Laser-wear idle. Applied here at the safe point (frame N read out, nothing
+         * triggered) so every vl53l9_stop() below is race-free -- the same requirement
+         * the profile-reconfig path relies on. rs_standby_level is the shadow of the FSM
+         * power state; keep it and the hardware in lockstep on every arm.
+         *
+         * A wake sets rs_standby_level = ACTIVE *before* the hardware calls, on purpose:
+         * the post-condition of any wake attempt that RETURNS (rather than spinning) is
+         * "sensor streaming with frame 1 triggered" -- either the clean path here or, on
+         * fault, handle_error()'s recovery via rs_sensor_reinit(). Flipping the shadow
+         * first keeps it truthful even when a fault forces `return true`, so the loop-top
+         * idle check does not strand a now-streaming sensor in the idle branch. */
+        uint8_t from = rs_standby_level;
+        uint8_t to = (uint8_t)param; /* handler validated 0..RS_STANDBY_HARD */
+
+        if (to == from) {
+            rs_send_ack(token, cmd, RS_RESULT_OK, to); /* idempotent no-op, no HW touched */
+            return false;
+        }
+
+        if (to == RS_STANDBY_ACTIVE) {
+            rs_standby_level = RS_STANDBY_ACTIVE; /* optimistic -- see block comment */
+            if (from == RS_STANDBY_SOFT) {
+                /* Sensor stayed configured, just parked in STANDBY: restart + seed frame 1.
+                 * Post-restart settle + stale-event clear mirror the reconfig path's tail
+                 * (cheap insurance even though a clean stop() left no reset edges). */
+                if (vl53l9_start(p_dev)) {
+                    handle_error();
+                    return true;
+                }
+                HAL_Delay(50);
+                platform_acknowledge_event(PLATFORM_GPIO_IT_EVT);
+                platform_acknowledge_event(PLATFORM_I3C_DMA_RX_EVT);
+                if (rs_trigger_next(p_dev)) {
+                    handle_error();
+                    return true;
+                }
+            } else {
+                /* from HARD: XSHUT was low, so a full re-bring-up is required (reset ->
+                 * re-address -> init -> calib -> start -> seed frame 1, all inside
+                 * rs_sensor_reinit's safety envelope). calib may have changed across the
+                 * physical reset -- retransmit it, same as the REINIT path above. */
+                if (rs_sensor_reinit(p_dev, calib_data)) {
+                    handle_error();
+                    return true;
+                }
+                rs_send_frame_cdc(RS_STREAM_CALIB, seq_for_calib, 0u, calib_data,
+                                  VL53L9_CALIB_DATA_SIZE, out_width, out_height);
+            }
+            rs_send_ack(token, cmd, RS_RESULT_OK, RS_STANDBY_ACTIVE);
+            return false;
+        }
+
+        /* to == SOFT or HARD: reach a clean, configured FSM-STANDBY baseline (VCSEL
+         * already idle) first, then apply whatever power state the target wants. */
+        if (from == RS_STANDBY_ACTIVE) {
+            /* Streaming -> STANDBY. Safe point guarantees nothing is triggered. */
+            if (vl53l9_stop(p_dev)) {
+                /* stop() only fails if the sensor already left STREAMING (or the stop
+                 * timed out) -- it is not healthily streaming, so a plain return would
+                 * dead-end at the next trigger. Best-effort reinit back to a known-good
+                 * STREAMING state and REPORT the standby request as failed: we cannot
+                 * then stop() (rs_sensor_reinit left frame 1 triggered -- stopping with a
+                 * trigger in flight is the exact corruption we forbid), so the device
+                 * stays ACTIVE. Mirrors the profile path's identical stop-failure arm. */
+                vl53l9_status_t status = { 0 };
+                vl53l9_get_status(p_dev, &status);
+                rs_send_ack(token, cmd, RS_RESULT_SENSOR_ERROR, rs_pack_status(&status));
+                if (rs_sensor_reinit(p_dev, calib_data)) {
+                    handle_error();
+                    return true;
+                }
+                rs_send_frame_cdc(RS_STREAM_CALIB, seq_for_calib, 0u, calib_data,
+                                  VL53L9_CALIB_DATA_SIZE, out_width, out_height);
+                rs_standby_level = RS_STANDBY_ACTIVE;
+                return false;
+            }
+        } else if (from == RS_STANDBY_HARD) {
+            /* HARD -> SOFT: power back up and reconfigure to a *parked* STANDBY.
+             * rs_boot_bringup (NOT rs_sensor_reinit) is used deliberately: it ends
+             * STREAMING with NO trigger in flight, so the vl53l9_stop() immediately below
+             * is safe. calib re-read across the reset -> retransmit. */
+            if (rs_boot_bringup(p_dev, calib_data, &g_active_profile)) {
+                handle_error();
+                return true;
+            }
+            if (vl53l9_stop(p_dev)) {
+                handle_error();
+                return true;
+            }
+            rs_send_frame_cdc(RS_STREAM_CALIB, seq_for_calib, 0u, calib_data,
+                              VL53L9_CALIB_DATA_SIZE, out_width, out_height);
+        }
+        /* from == SOFT falls straight through: already parked in STANDBY. */
+
+        if (to == RS_STANDBY_HARD) {
+            platform_power_disable(CONF_DEVICE_ID); /* XSHUT low: fully unpower the VCSEL */
+        }
+        rs_standby_level = to;
+        rs_send_ack(token, cmd, RS_RESULT_OK, to);
         return false;
     }
 
@@ -1156,14 +1284,28 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
     return false;
 }
 
-static void rs_poll_commands(const uint8_t *calib_data, uint16_t out_width, uint16_t out_height,
-                             uint32_t seq_for_calib) {
-    static uint8_t rx_buf[RS_CMD_RX_BUFSIZE];
-    static uint32_t rx_len = 0;
+/* Transport-agnostic byte source for the command poll: fill up to `max` bytes at `dst`,
+ * return the count (0 if none) -- the tud_cdc_read contract, so either transport plugs in. */
+typedef uint32_t (*rs_cmd_read_fn)(uint8_t *dst, uint32_t max);
 
+static uint32_t rs_cdc_read_cmd(uint8_t *dst, uint32_t max) {
+    return tud_cdc_read(dst, max);
+}
+static uint32_t rs_eth_read_cmd(uint8_t *dst, uint32_t max) {
+    return ETH_ReadCommands(dst, max);
+}
+
+/* The command parse-drain loop, factored out so USB CDC and Ethernet UDP run the EXACT
+ * same wire parser (one copy of rs_parse_command handling -- a second, divergent copy of
+ * the command decoder is exactly the bug the protocol-change discipline guards against).
+ * Each transport owns its persistent accumulation buffer + length (passed in), so a
+ * partial frame straddling two polls survives; `read_fn` is the only per-transport part. */
+static void rs_poll_commands_from(rs_cmd_read_fn read_fn, uint8_t *rx_buf, uint32_t *p_rx_len,
+                                  const uint8_t *calib_data, uint16_t out_width,
+                                  uint16_t out_height, uint32_t seq_for_calib) {
     uint32_t dispatched = 0;
 
-    /* Parse-while-draining: after every chunk read from TinyUSB, the parse loop runs
+    /* Parse-while-draining: after every chunk read from the source, the parse loop runs
      * to consume completed commands out of the buffer front BEFORE reading more, so a
      * burst larger than the buffer flows through it command-by-command instead of
      * overflowing (the Task 2 review's critical fix -- the old drain-everything-first
@@ -1173,30 +1315,30 @@ static void rs_poll_commands(const uint8_t *calib_data, uint16_t out_width, uint
     for (;;) {
         bool progressed = false;
 
-        uint32_t space = RS_CMD_RX_BUFSIZE - rx_len;
+        uint32_t space = RS_CMD_RX_BUFSIZE - *p_rx_len;
         if (space > 0) {
-            uint32_t got = tud_cdc_read(rx_buf + rx_len, space); /* 0 if FIFO empty */
+            uint32_t got = read_fn(rx_buf + *p_rx_len, space); /* 0 if source empty */
             if (got > 0) {
-                rx_len += got;
+                *p_rx_len += got;
                 progressed = true;
             }
         }
 
         /* Consume everything parseable right now; rs_parse_command reports exactly how
          * many front bytes to drop each step (full contract in rs_protocol.h). */
-        while (rx_len > 0 && dispatched < RS_CMD_MAX_DISPATCH_PER_POLL) {
+        while (*p_rx_len > 0 && dispatched < RS_CMD_MAX_DISPATCH_PER_POLL) {
             uint32_t cmd, param, token;
-            int32_t r = rs_parse_command(rx_buf, rx_len, &cmd, &param, &token);
+            int32_t r = rs_parse_command(rx_buf, *p_rx_len, &cmd, &param, &token);
             if (r == 0) {
                 break; /* candidate pending: wait for more RX bytes */
             }
             uint32_t consume = (uint32_t)((r > 0) ? r : -r);
-            if (consume > rx_len) {
-                consume = rx_len; /* defensive; rs_parse_command never over-reports */
+            if (consume > *p_rx_len) {
+                consume = *p_rx_len; /* defensive; rs_parse_command never over-reports */
             }
             if (consume > 0) {
-                memmove(rx_buf, rx_buf + consume, rx_len - consume);
-                rx_len -= consume;
+                memmove(rx_buf, rx_buf + consume, *p_rx_len - consume);
+                *p_rx_len -= consume;
                 progressed = true;
             }
             if (r > 0) {
@@ -1214,21 +1356,41 @@ static void rs_poll_commands(const uint8_t *calib_data, uint16_t out_width, uint
             return; /* cap reached: the rest stays buffered for the next poll */
         }
         if (!progressed) {
-            if (rx_len == RS_CMD_RX_BUFSIZE) {
+            if (*p_rx_len == RS_CMD_RX_BUFSIZE) {
                 /* Full buffer the parser cannot advance. Theoretically unreachable: a
                  * full 128 B buffer always yields parser progress (any complete-frame,
                  * false-magic, or no-magic outcome consumes bytes; the only 0-consume
                  * outcome needs len < RS_CMD_FRAME_SIZE at a front magic). Kept as a
                  * defensive escape: drop ONE byte past the front (preserving any later
                  * magic candidate, unlike a whole-buffer wipe) and count it. */
-                memmove(rx_buf, rx_buf + 1, rx_len - 1u);
-                rx_len -= 1u;
+                memmove(rx_buf, rx_buf + 1, *p_rx_len - 1u);
+                *p_rx_len -= 1u;
                 rs_malformed_cmd_count++;
                 continue;
             }
-            return; /* FIFO drained, nothing parseable left pending */
+            return; /* source drained, nothing parseable left pending */
         }
     }
+}
+
+/* USB CDC command poll: drains the TinyUSB RX FIFO. */
+static void rs_poll_commands(const uint8_t *calib_data, uint16_t out_width, uint16_t out_height,
+                             uint32_t seq_for_calib) {
+    static uint8_t rx_buf[RS_CMD_RX_BUFSIZE];
+    static uint32_t rx_len = 0;
+    rs_poll_commands_from(rs_cdc_read_cmd, rx_buf, &rx_len, calib_data, out_width, out_height,
+                          seq_for_calib);
+}
+
+/* Ethernet UDP command poll: drains the eth_cmd_buf the udp_recv callback fills. A
+ * separate persistent buffer from the CDC path so the two transports never interleave a
+ * half-received frame. Called at the same safe points as rs_poll_commands. */
+static void rs_poll_eth_commands(const uint8_t *calib_data, uint16_t out_width, uint16_t out_height,
+                                 uint32_t seq_for_calib) {
+    static uint8_t rx_buf[RS_CMD_RX_BUFSIZE];
+    static uint32_t rx_len = 0;
+    rs_poll_commands_from(rs_eth_read_cmd, rx_buf, &rx_len, calib_data, out_width, out_height,
+                          seq_for_calib);
 }
 #endif /* !CONF_TRANSFORM_ONBOARD */
 
@@ -1748,6 +1910,29 @@ void vl53l9_app() {
         /* Keep USB serviced every iteration, even when waits below return fast. */
         tud_task(); ETH_Process();
 
+        /* Laser-wear idle (RS_CMD_SET_STANDBY). While parked in standby the sensor is not
+         * ranging, so there is no frame-ready edge coming -- entering the wait cycle below
+         * would just block on rs_wait_event_usb's 1000 ms timeout every iteration and emit
+         * spurious TRIGGER_TIMEOUT events. Instead keep the transport + command channel
+         * alive and re-loop; the wake command arrives here, and rs_apply_pending_config's
+         * wake arm restarts ranging (start/reinit + trigger) and flips rs_standby_level
+         * back to ACTIVE, at which point the next iteration falls through to the normal
+         * cycle. seq_for_calib = g_last_seq (last captured counter) per the EVENT-frame /
+         * recovery convention -- no new frame exists while idled. */
+        if (rs_standby_level != RS_STANDBY_ACTIVE) {
+            rs_poll_commands(calib_data, out_width, out_height, g_last_seq);
+            rs_poll_eth_commands(calib_data, out_width, out_height, g_last_seq); /* UDP wake path */
+            if (rs_pending.pending) {
+                (void)rs_apply_pending_config(p_dev, calib_data, out_width, out_height, g_last_seq);
+                /* Return value ignored on purpose: a fault mid-wake already ran
+                 * handle_error()'s recovery (sensor streaming, frame 1 triggered) and the
+                 * wake arm set rs_standby_level = ACTIVE up front, so the next iteration
+                 * simply takes the normal path -- no fault-resume bookkeeping needed here. */
+            }
+            HAL_Delay(2); /* gentle idle cadence: keep CPU/USB calm while the laser rests */
+            continue;
+        }
+
         /* Wait for data-ready. Same bounded-retry disambiguation as the dual-stream
          * loop (Task 8): a timeout means either the trigger was lost (re-trigger, with
          * settle, via rs_trigger_next) or the edge landed after the timeout (poll
@@ -1869,6 +2054,7 @@ void vl53l9_app() {
          * reproduce after this change (see the task report for the before/after
          * hardware traces). */
         rs_poll_commands(calib_data, out_width, out_height, rs_counter);
+        rs_poll_eth_commands(calib_data, out_width, out_height, rs_counter); /* UDP command channel */
 
         if (rs_pending.pending) {
             /* rs_apply_pending_config() triggers its own first frame under whichever

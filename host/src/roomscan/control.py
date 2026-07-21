@@ -167,6 +167,7 @@ _ACTION_COMMANDS_WITH_VALUE = {
     "usecase": CommandCode.SET_USECASE,
     "period": CommandCode.SET_FRAME_PERIOD_US,
     "exposure": CommandCode.SET_EXPOSURE_MS,
+    "standby": CommandCode.SET_STANDBY,
 }
 
 
@@ -184,6 +185,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_period.add_argument("value", type=int)
     p_exposure = sub.add_parser("exposure", help="SET_EXPOSURE_MS <milliseconds>")
     p_exposure.add_argument("value", type=int)
+    p_standby = sub.add_parser("standby", help="SET_STANDBY <0=wake|1=soft|2=hard> — idle the ToF laser")
+    p_standby.add_argument("value", type=int, choices=[0, 1, 2])
     sub.add_parser("reinit", help="full sensor re-init cycle")
     return ap
 

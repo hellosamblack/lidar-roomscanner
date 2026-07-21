@@ -51,6 +51,15 @@ class CommandCode(IntEnum):
     SET_FRAME_PERIOD_US = 4
     SET_EXPOSURE_MS = 5
     REINIT = 6
+    SET_STANDBY = 7
+
+
+class StandbyLevel(IntEnum):
+    """SET_STANDBY param / ACK applied. ACTIVE = streaming, SOFT = FSM standby
+    (VCSEL idle, instant resume), HARD = XSHUT power-down (full re-bring-up to wake)."""
+    ACTIVE = 0
+    SOFT = 1
+    HARD = 2
 
 
 class ResultCode(IntEnum):

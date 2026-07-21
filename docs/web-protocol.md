@@ -48,7 +48,7 @@ for display (units, precision).
 |------|-----------|----------|-------|
 | `metrics` | `render_fps`, `streams[]{stream_id,label,device_hz,host_hz,bytes_per_s,jitter_ms}`, `link_bytes_per_s`, `resources`(null), `drops`, `gaps` | `build_metrics_message` `web.py:221` | metrics cadence; `device_hz`/`jitter_ms` may be null |
 | `sensor` | `have_quat`, `rot`[9 row-major], `heading`, `pressure_pa`, `temp_c`, `mag_ut`[3], `fusion`, `pressure_hist[]`, `temp_hist[]` | `build_sensor_message` `web.py:246` | **None (silent) on a ToF-only session**; `rot`/`heading` computed server-side so the frontend never re-derives sign/permutation matrices — see `docs/coordinate-frames.md` |
-| `state` | `color_mode`, `ir_colormap`, `ir_freeze`, `mode`(realtime\|slam), `slam_trajectory`, `slam_walls`, `slam_follow` | `_state_message` | echoed after every `set_color`/`set_ir`/`set_mode`/`slam_opt` (one-way flow) **and** sent first on connect. Web Phase 5: the six display prefs (all but `mode`) are seeded from + persisted to the shared `roomscan.toml` [viewer]` table (`web.ui_from_config`/`_persist_ui`), so a reconnect **and** a server restart bring a tab current; `mode` is not persisted (SLAM arms lazily → restart is always real-time) |
+| `state` | `color_mode`, `ir_colormap`, `ir_freeze`, `mode`(realtime\|slam), `slam_trajectory`, `slam_walls`, `slam_follow`, `idle_enabled`, `idle_level`(soft\|hard) | `_state_message` | echoed after every `set_color`/`set_ir`/`set_mode`/`slam_opt`/`set_idle` (one-way flow) **and** sent first on connect. Web Phase 5: the display prefs (all but `mode`) + the two sensor auto-idle prefs are seeded from + persisted to the shared `roomscan.toml` [viewer]` table (`web.ui_from_config`/`_persist_ui`), so a reconnect **and** a server restart bring a tab current; `mode` is not persisted (SLAM arms lazily → restart is always real-time) |
 | `session` | `mode`(live\|replay), `source_label`, `has_live`, `recording{active,path,elapsed_s,bytes}`, `playback{is_replay,capture_name,paused,speed_fps,loop,position,total_frames}` | `build_session_message` `web.py:400` | broadcast on change **and** on the metrics cadence (so timer/position tick) |
 | `captures` | `items[]{name,bytes,mtime}` (newest first) | `build_captures_message` `web.py:354` | on connect, on `list_captures`, after a recording stops |
 | `slam` | `pose`[16], `follow{eye,center,up}`, `traj_tail[][3]`, `traj_len`, `fitness`, `rmse`, `tracking_lost`, `slam_ms`, `frames_integrated`, `mesh_seq`, `mesh_verts` | `build_slam_message` (web Phase 4) | every processed frame in SLAM mode; follow eye/center/up computed server-side; traj downsampled to ≤256 |
@@ -77,6 +77,7 @@ a `SessionController` (`ctrl is not None`) — absent in a `--replay`-launched p
 | `load_capture` | `name` | swap reader → replay (`sanitize_capture_name` → basename-only, `.bin`, must-exist; off-loop via `to_thread`) → echo `session` | `web.py:974` |
 | `go_live` | — | swap reader → live proxy → echo `session` | `web.py:982` |
 | `transport` | `action`(pause\|resume\|speed\|loop\|restart\|seek), `value` | playback control; `seek`/`restart` run off-loop via `to_thread` → echo `session` | `web.py:986` |
+| `set_idle` | `enabled?`, `level?`(soft\|hard) | sensor auto-idle prefs (laser-wear reduction); persisted to `[viewer]` → echo `state`. Disabling cancels any armed idle timer. The idle itself is driven server-side off the viewer count (see below), not by an inbound message | this change |
 | `set_mode` | `mode`(realtime\|slam) | switch top-bar mode; arms/disarms the `SlamRunner` off-loop (lazy worker build) → echo `state` | web Phase 4 |
 | `slam_opt` | `trajectory?`, `walls?`(solid\|split), `follow?` | SLAM display toggles → echo `state` | web Phase 4 |
 | `save` | — | write full-res `mapper.mesh()` + trajectory → `results/web_<ts>.ply`/`.tum` (off-loop); toast + `saved` echo. Disabled in real-time / empty map | web Phase 4 |
@@ -99,6 +100,12 @@ a `SessionController` (`ctrl is not None`) — absent in a `--replay`-launched p
 - **Off-loop for blocking work.** Anything that scans a file or joins a thread (`load_capture`, `seek`,
   `restart`) is dispatched via `asyncio.to_thread` so the single broadcaster/event-loop never stalls.
   A SLAM integrate/raycast that blocks belongs off-loop the same way.
+- **Server-driven sensor auto-idle (no message).** To spare the ToF laser (VCSEL), the server watches its
+  own viewer count: the last tab disconnecting arms a debounced (`sensor_idle_delay_s`) `SET_STANDBY`
+  (`_viewer_left`), and a tab connecting wakes it (`_viewer_arrived`). It acts only on a live device we're
+  streaming from (not a replay excursion — the command-ACK path there is the file, not the device), and a
+  boot-time `startup-wake` guarantees a device a prior server left idled resumes streaming. This is *not* an
+  inbound message — it's server policy over the WebSocket lifecycle. `set_idle` only tunes its enable/depth.
 - **Persisted display state seeds the same `state` echo.** Web Phase 5: durable UI prefs live in
   `roomscan.toml` [viewer]`, seed `UiState` at boot (`web.ui_from_config`) and are written back on change
   (`web._persist_ui`, best-effort, reload-then-save). A new *durable* toggle adds a `ViewerConfig` field +

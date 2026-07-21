@@ -57,6 +57,7 @@ from .protocol import (
     FrameHeader,
     FrameType,
     ProtocolError,
+    StandbyLevel,
     StreamId,
 )
 from .sensors import (
@@ -105,6 +106,14 @@ _SPEED_BASE_FPS = 30.0
 
 _VALID_COLOR_MODES = ("depth", "reflectance", "confidence")
 _VALID_IR_COLORMAPS = ("gray", "turbo")
+_VALID_IDLE_LEVELS = ("soft", "hard")
+
+
+def idle_standby_level(name: str) -> int:
+    """Map an `idle_level` name to its SET_STANDBY param. Anything but "hard"
+    (including an unrecognized value) is treated as soft standby -- the safer,
+    instant-resume default."""
+    return int(StandbyLevel.HARD if name == "hard" else StandbyLevel.SOFT)
 
 # Success command results look like "OK applied=1" / "REJECTED applied=0":
 # a ResultCode name (upper snake) followed by applied=<int>.
@@ -132,6 +141,13 @@ class UiState:
     slam_trajectory: bool = True
     slam_walls: str = "split"          # "solid" | "split" -> MeshPrep wall_mode
     slam_follow: bool = True
+    # Laser-wear auto-idle (SET_STANDBY): when enabled, the server idles the ToF
+    # sensor while no tab is connected and wakes it on connect. `idle_level` picks
+    # the depth (soft = FSM standby, hard = XSHUT power-down). These ride the same
+    # persisted-pref + `state` echo path as the display toggles so a settings UI
+    # (or roomscan.toml) can drive them; the debounce delay is config-only.
+    idle_enabled: bool = True
+    idle_level: str = "soft"           # "soft" | "hard"
 
 
 # --- pure helpers (no socket, no async) -------------------------------------
@@ -426,16 +442,18 @@ def _state_message(ui: UiState) -> dict:
     return {"type": "state", "color_mode": ui.color_mode,
             "ir_colormap": ui.ir_colormap, "ir_freeze": ui.ir_freeze,
             "mode": ui.mode, "slam_trajectory": ui.slam_trajectory,
-            "slam_walls": ui.slam_walls, "slam_follow": ui.slam_follow}
+            "slam_walls": ui.slam_walls, "slam_follow": ui.slam_follow,
+            "idle_enabled": ui.idle_enabled, "idle_level": ui.idle_level}
 
 
 # --- settings persistence (Web Phase 5) -------------------------------------
 #
 # The web UI's display preferences live in the SAME `roomscan.toml` [viewer]
 # table the desktop viewer/panel uses, so a single config follows the user
-# across both frontends. Only the six display prefs below are web-owned; every
-# other [viewer] field (fov/port/near-mode/yaw-fusion/...) is preserved
-# verbatim because we mutate and re-save the whole loaded `ViewerConfig`.
+# across both frontends. Only the web-owned prefs below (the six display toggles
+# plus the two sensor auto-idle prefs) are written; every other [viewer] field
+# (fov/port/near-mode/yaw-fusion/...) is preserved verbatim because we mutate and
+# re-save the whole loaded `ViewerConfig`.
 #
 # `mode` is deliberately NOT persisted/restored: the SLAM worker is armed lazily
 # on the first `set_mode slam` (no GPU burned until then), so a server restart
@@ -457,18 +475,24 @@ def ui_from_config(cfg: ViewerConfig) -> UiState:
     if cfg.slam_walls in _VALID_WALL_MODES:
         ui.slam_walls = cfg.slam_walls
     ui.slam_follow = bool(cfg.slam_follow)
+    ui.idle_enabled = bool(cfg.sensor_idle_enabled)
+    if cfg.sensor_idle_level in _VALID_IDLE_LEVELS:
+        ui.idle_level = cfg.sensor_idle_level
     return ui
 
 
 def apply_ui_to_config(ui: UiState, cfg: ViewerConfig) -> None:
-    """Copy the six web-owned display prefs from `ui` into `cfg` in place
-    (leaving `mode` and every non-web field alone), ready to `cfg.save()`."""
+    """Copy the web-owned prefs from `ui` into `cfg` in place (the six display
+    toggles + the two sensor auto-idle prefs; leaving `mode` and every non-web
+    field alone), ready to `cfg.save()`."""
     cfg.color = ui.color_mode
     cfg.ir_colormap = ui.ir_colormap
     cfg.ir_freeze_range = bool(ui.ir_freeze)
     cfg.slam_trajectory = bool(ui.slam_trajectory)
     cfg.slam_walls = ui.slam_walls
     cfg.slam_follow = bool(ui.slam_follow)
+    cfg.sensor_idle_enabled = bool(ui.idle_enabled)
+    cfg.sensor_idle_level = ui.idle_level
 
 
 def _persist_ui(state) -> None:
@@ -1103,13 +1127,94 @@ _results_dir.mkdir(exist_ok=True)
 app.mount("/results", StaticFiles(directory=str(_results_dir)), name="results")
 
 
+# --- sensor auto-idle (SET_STANDBY, laser-wear reduction) -------------------
+#
+# The device streams continuously once a host attaches, firing the VCSEL every
+# frame even when nobody is looking. To spare the laser, the server idles it
+# whenever the viewer count hits zero and wakes it the instant a tab connects.
+# The idle is DEBOUNCED (sensor_idle_delay_s) so a tab reload doesn't thrash the
+# sensor FSM. It acts only on a live device we're actually streaming from -- not
+# during a replay excursion, where the command-ACK path is the capture file, not
+# the device (so a standby command would never be acknowledged). The device only
+# ever idles when commanded, so a headless capture.py session (no web server)
+# keeps streaming exactly as before.
+
+
+def _auto_idle_active(state) -> bool:
+    """True iff auto-idle should act now: enabled, a live device exists, and the
+    controller is streaming from it (mode == "live", not a replay excursion)."""
+    ui = getattr(state, "ui_state", None)
+    if ui is None or not getattr(ui, "idle_enabled", False):
+        return False
+    ctrl = getattr(state, "controller", None)
+    return ctrl is not None and ctrl.has_live and ctrl.mode == "live"
+
+
+def _cancel_idle_timer(state) -> None:
+    timer = getattr(state, "idle_timer", None)
+    if timer is not None:
+        timer.cancel()
+        state.idle_timer = None
+
+
+def _dispatch_standby(state, level: int, label: str) -> None:
+    """Fire-and-forget a SET_STANDBY at `level` via the shared dispatcher (which
+    spawns its own worker thread, so this never blocks the event loop). The
+    result/ACK lands on the LogBus like any other command."""
+    dispatcher = getattr(state, "dispatcher", None)
+    if dispatcher is None:
+        return
+    state.command_labels.add(label)
+    dispatcher.dispatch(int(CommandCode.SET_STANDBY), int(level), label)
+
+
+async def _viewer_arrived(state) -> None:
+    """A tab connected. Cancel any pending idle and, if we had idled the sensor,
+    wake it back to streaming. Safe to call on every connect: a no-op unless the
+    sensor was actually idled."""
+    if not hasattr(state, "sensor_idled"):
+        return  # partially-built app.state (unit tests) -- nothing to manage
+    _cancel_idle_timer(state)
+    if state.sensor_idled:
+        _dispatch_standby(state, int(StandbyLevel.ACTIVE), "auto-wake")
+        state.sensor_idled = False
+
+
+async def _viewer_left(state) -> None:
+    """A tab disconnected. If it was the last one, arm the debounced idle timer;
+    when it fires (and the viewer set is still empty), idle the sensor."""
+    if not hasattr(state, "sensor_idled"):
+        return
+    if state.clients:                       # other tabs still watching
+        return
+    _cancel_idle_timer(state)
+    if not _auto_idle_active(state):
+        return
+
+    def _fire() -> None:
+        state.idle_timer = None
+        # Re-check under the event loop at fire time: a tab may have reconnected
+        # during the debounce, or the source swapped to replay.
+        if state.clients or not _auto_idle_active(state):
+            return
+        level = idle_standby_level(state.ui_state.idle_level)
+        _dispatch_standby(state, level, f"auto-idle ({state.ui_state.idle_level})")
+        state.sensor_idled = True
+
+    loop = asyncio.get_event_loop()
+    state.idle_timer = loop.call_later(float(getattr(state, "idle_delay_s", 5.0)), _fire)
+
+
 async def _drop_client(clients: set, ws: WebSocket) -> None:
-    """Remove a client and best-effort close it; never raises."""
+    """Remove a client and best-effort close it; never raises. Also arms the
+    debounced sensor idle if that was the last viewer (covers tabs that die
+    without a clean disconnect, caught by a failed broadcast send)."""
     clients.discard(ws)
     try:
         await ws.close()
     except Exception:
         pass
+    await _viewer_left(app.state)
 
 
 async def _broadcast_bytes(clients: set, data: bytes) -> None:
@@ -1287,6 +1392,7 @@ async def websocket_endpoint(websocket: WebSocket):
     state = app.state
     clients: set = state.clients
     clients.add(websocket)
+    await _viewer_arrived(state)   # cancel any pending idle; wake the sensor if idled
 
     # Bring the new tab current immediately.
     try:
@@ -1313,6 +1419,7 @@ async def websocket_endpoint(websocket: WebSocket):
         log.warning("ws receive loop error: %r", exc)
     finally:
         clients.discard(websocket)
+        await _viewer_left(state)   # arm the debounced sensor idle if that was the last tab
 
 
 async def _handle_inbound(state, msg: dict) -> None:
@@ -1430,6 +1537,25 @@ async def _handle_inbound(state, msg: dict) -> None:
             ui.slam_follow = bool(msg["follow"])
         _persist_ui(state)
         await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+
+    elif mtype == "set_idle":
+        # Runtime control of the sensor auto-idle (persisted like the display
+        # prefs). `enabled` toggles the whole feature; `level` picks soft/hard.
+        changed = False
+        if "enabled" in msg:
+            ui.idle_enabled = bool(msg["enabled"])
+            changed = True
+        if "level" in msg:
+            if msg["level"] not in _VALID_IDLE_LEVELS:
+                log.warning("invalid set_idle level: %r", msg.get("level"))
+                return
+            ui.idle_level = msg["level"]
+            changed = True
+        if changed:
+            _persist_ui(state)
+            if not ui.idle_enabled:
+                _cancel_idle_timer(state)   # a pending idle must not fire once disabled
+            await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
 
     elif mtype == "save":
         slam = getattr(state, "slam_runner", None)
@@ -1552,12 +1678,25 @@ def main(argv=None) -> int:
     app.state.clients = set()
     app.state.command_labels = set()
     app.state.debounce = {}
+    # Sensor auto-idle (SET_STANDBY): idle_enabled/idle_level live in ui_state
+    # (persisted); the debounce delay and the runtime bookkeeping live here.
+    app.state.idle_delay_s = float(getattr(config, "sensor_idle_delay_s", 5.0) or 5.0)
+    app.state.sensor_idled = False   # whether we've commanded the device into standby
+    app.state.idle_timer = None      # asyncio TimerHandle for the debounced idle
     app.state.ready = True
 
     # The controller owns the reader thread now (Web Phase 3): it runs the same
     # reader._run_reader body, but can stop+respawn it against a new source for
     # capture load / Go Live / seek, and tees raw bytes into the Recorder.
     controller.start()
+
+    # A previous server may have left the sensor in standby (SET_STANDBY persists
+    # on the device across a host restart). Guarantee it is streaming now, whatever
+    # this launch's idle setting is -- a harmless no-op if the device is already
+    # active (firmware acks without touching the sensor). Fire-and-forget; the ACK
+    # (or a startup-race timeout) just lands on the log bus.
+    if live_source is not None:
+        _dispatch_standby(app.state, int(StandbyLevel.ACTIVE), "startup-wake")
 
     port = 8000
     url = f"http://localhost:{port}/static/index.html"

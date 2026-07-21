@@ -67,6 +67,13 @@ class ViewerConfig:
                                         # install shouldn't start with the slider and the
                                         # visibility gate disagreeing)
     ir_opacity: float = 0.5            # IR overlay opacity 0..1
+    sensor_idle_enabled: bool = True        # auto-idle the ToF laser (VCSEL) when no web
+                                            # viewer is connected, to reduce wear
+    sensor_idle_level: str = "soft"         # depth of the auto-idle: "soft" (FSM standby,
+                                            # instant resume) | "hard" (XSHUT power-down)
+    sensor_idle_delay_s: float = 5.0        # debounce after the last viewer disconnects
+                                            # before idling (so a tab reload doesn't thrash
+                                            # the sensor FSM)
     yaw_fusion: bool = True                 # graft mag heading onto SFLP yaw
     flatfield_path: Optional[str] = None    # path to a per-zone reflectance FPN
                                             # correction (.npz from tools/build_flatfield.py);

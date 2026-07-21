@@ -45,6 +45,12 @@
 #define RS_CMD_SET_FRAME_PERIOD_US (4u)
 #define RS_CMD_SET_EXPOSURE_MS     (5u)
 #define RS_CMD_REINIT              (6u)
+#define RS_CMD_SET_STANDBY         (7u) /* param: 0 = wake/resume, 1 = soft standby, 2 = hard power-down */
+
+/* Standby levels (RS_CMD_SET_STANDBY param + ACK applied). */
+#define RS_STANDBY_ACTIVE          (0u) /* streaming (VCSEL firing per frame) */
+#define RS_STANDBY_SOFT            (1u) /* vl53l9_stop() -> FSM STANDBY; VCSEL idle, config kept */
+#define RS_STANDBY_HARD            (2u) /* + platform_power_disable() (XSHUT low); full re-bring-up to wake */
 
 /* ACK (RS_FRAME_ACK) payload: u32 cmd, u32 result, u32 applied (LE). */
 #define RS_RESULT_OK               (0u)

@@ -114,6 +114,7 @@ via a new frame revision.
 | 4   | SET_FRAME_PERIOD_US | period in µs (u32) | applied period (u32) — stored and echoed (read back from the sensor), but has no observable effect while the app uses `VL53L9_SYNC_MANUAL` (vl53l9.h:248 — period governs AUTONOMOUS mode only); retained for the future autonomous-mode option |
 | 5   | SET_EXPOSURE_MS   | exposure in ms (u32) | applied exposure (u32) |
 | 6   | REINIT            | ignored       | 0 — the ACK is sent **after** the re-init completes (normally well under the host's 2 s timeout); if the first re-init attempt itself faults, the device enters its bounded recovery ladder (up to ~3.1 s) and may finish successfully after the host has already timed out — hosts must treat a REINIT timeout as "outcome unknown", not "failed" (a late ACK is silently ignored by token matching) |
+| 7   | SET_STANDBY       | standby level (u32): 0 = wake/resume, 1 = soft standby, 2 = hard power-down | standby level now in effect (u32) — echoes param on success. Idles the ToF laser (VCSEL) to reduce wear when no host is viewing. **Soft** (1) = `vl53l9_stop()` → FSM STANDBY: VCSEL stops firing per frame, I3C config/calibration retained, instant resume via wake. **Hard** (2) = additionally `platform_power_disable()` (XSHUT low): sensor fully unpowered; waking re-runs the full re-init cycle (reset → re-address → init → calib → start), so a wake-from-hard ACK is sent **after** that completes (same "outcome unknown on timeout" caveat as REINIT). Applied only at the per-frame safe point (after readout ack, before the next trigger) so `vl53l9_stop()` never races an in-flight trigger. While idled the device streams no DATA frames but keeps servicing the command channel; wake resumes streaming. A wake (0) issued while already active, or a standby issued while already idled at that level, is a harmless no-op ack |
 
 ### Result-code registry
 
@@ -161,3 +162,8 @@ specced with the Phase 4 transport work).
 - **v1 rev 2026-07-08 (f)**: semantics clarified (additive, no wire change) — CALIB registry row split its `seq` convention: periodic/stream-start retransmits carry the next RAW frame's counter, but a recovery/REINIT-triggered retransmit carries the last-captured counter (EVENT-frame convention), per code review deferred from Phase 3 Task 5 and applied in Task 6.
 - **v1 rev 2026-07-09**: additive — IMU_QUAT (9) and ENV (10) streams for LSM6DSV16X orientation +
   sensor-hub environmental data. No layout change; hosts skip unknown stream_ids, no version bump.
+- **v1 rev 2026-07-16**: additive — SET_STANDBY (cmd 7) command for laser-wear reduction: idles the
+  ToF VCSEL (soft = FSM STANDBY / hard = XSHUT power-down) when no host is viewing, wakes on demand.
+  New enum value only, unchanged 8-byte COMMAND / 12-byte ACK layout; no version bump. The host web
+  server drives it automatically off its viewer count (debounced), depth selectable via `[viewer]`
+  `idle_level`. No firmware default behavior change: the device only idles when commanded.

@@ -13,7 +13,7 @@ Engineering conventions live in [`docs/engineering-practices.md`](./docs/enginee
 ## Overriding architecture decisions
 
 - **Transport: native USB CDC OR Ethernet UDP (Phase 5).**
-  *(Revises the 2026-07-10 "Ethernet is shelved" decision.)* The device now streams flawlessly over either USB CDC or Ethernet (UDP unicast). If Ethernet is plugged in, the device acts as a DHCP client (or falls back to a self-assigned IP server) and streams via UDP to the host when a packet is received. This removes the USB cable length limit and prepares the plumbing for Phase 6's hardware time-sync (PTP) requirements. USB CDC is still supported and automatically falls back if Ethernet is not connected.
+  *(Revises the 2026-07-10 "Ethernet is shelved" decision.)* The device now streams flawlessly over either USB CDC or Ethernet (UDP unicast). If Ethernet is plugged in, the device acts as a DHCP client (or falls back to a self-assigned IP server) and streams via UDP to the host when a packet is received. This removes the USB cable length limit and prepares the plumbing for Phase 6's hardware time-sync (PTP) requirements. USB CDC is still supported and automatically falls back if Ethernet is not connected. *(2026-07-21: the host→device COMMAND channel now works over Ethernet too — previously CDC-only, the ETH transport discarded inbound datagrams; see the Phase 3 command-channel addendum.)*
 - **Sensors: X-NUCLEO-IKS4A1** adds IMU (LSM6DSV16X, hardware SFLP orientation), magnetometer (yaw-drift
   correction), barometer (Z-drift constraint), temp/humidity (thermal comp). **Integrated as of Phase 4
   (2026-07-10)** — LSM6DSV16X as a native I3C target sharing I3C1 with the ToF (HUB1-only routing,
@@ -352,6 +352,18 @@ reflectance super-resolution / sensor-fusion-overlay work (both scoped, not yet 
 > no version bump. Command registry 1-6 (PING, SEND_CALIB, SET_USECASE, SET_FRAME_PERIOD_US,
 > SET_EXPOSURE_MS, REINIT), result registry 0-5 (OK, UNKNOWN_CMD, BAD_PARAM, REJECTED_BINNING,
 > SENSOR_ERROR, BUSY). Full spec + version-history entries in `docs/protocol.md`.
+>
+> **2026-07-21 addition — SET_STANDBY (cmd 7) + Ethernet command RX** (on-rig verified over UDP):
+> `SET_STANDBY` (param 0=wake/1=soft/2=hard) idles the ToF VCSEL for laser-wear reduction — soft =
+> `vl53l9_stop()` → FSM STANDBY (instant resume), hard = `+ platform_power_disable()` (full re-init to
+> wake). Applied at the same `rs_pending` safe point as the reconfig commands; a new loop-top idle branch
+> services transport + polls for the wake instead of blocking on a frame event. The host `roomscan-web`
+> drives it automatically off its viewer count (debounced, `[viewer] sensor_idle_*`). **Also found + fixed:
+> the Phase 5 Ethernet transport was stream-out-only — `udp_receive_callback` discarded all inbound
+> payloads, so NO command (ping/usecase/reinit/standby) had ever reached the board over Ethernet.** Inbound
+> UDP now feeds the same `rs_parse_command`/`rs_pending` path as CDC (`rs_poll_commands_from` factored to
+> take a byte-reader; `rs_poll_eth_commands` drains an `ETH_ReadCommands` buffer). Verified: soft+hard drop
+> RAW to 0 frames/3s, wake resumes ~90 fps, PING+all standby ACK'd over UDP, 0 CRC.
 >
 > **Firmware command channel** (Tasks 2, 4): TinyUSB CDC RX + a bounded fixed-size frame parser
 > (magic/CRC-checked, malformed input dropped and counted, polled once per acquisition-loop iteration —

@@ -19,6 +19,18 @@ static bool eth_link_up = false;
 static uint32_t frame_seq_num = 0;
 static ip_addr_t target_ip;
 
+/* Inbound COMMAND accumulation. Every datagram's payload is appended here (bounded);
+ * the main loop drains it via ETH_ReadCommands at the command-poll safe point and runs
+ * it through the same rs_parse_command path as the USB CDC RX. Keepalive datagrams and
+ * any other non-command bytes are harmless -- the parser scans for the frame magic and
+ * resyncs past junk. Sized to hold several 44-byte command frames between ~36 ms polls;
+ * on overflow new bytes are dropped (the host's command client retries on ACK timeout).
+ * No lock: the udp_recv callback runs synchronously inside ethernetif_input() (bare-metal
+ * lwIP, NO_SYS), i.e. on the same main-loop thread as ETH_ReadCommands -- never an ISR. */
+#define ETH_CMD_BUF_SIZE 256
+static uint8_t eth_cmd_buf[ETH_CMD_BUF_SIZE];
+static uint16_t eth_cmd_len = 0;
+
 /* Static IP config in case DHCP fails or no link */
 #define IP_ADDR0 172
 #define IP_ADDR1 31
@@ -75,10 +87,34 @@ static void Netif_Config(void)
 static void udp_receive_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
     if (p != NULL) {
         target_ip = *addr;
-        printf("[ETH] Received packet from %d.%d.%d.%d, target_ip updated!\n",
-            ip4_addr1(addr), ip4_addr2(addr), ip4_addr3(addr), ip4_addr4(addr));
+        /* Buffer the payload as potential COMMAND-frame bytes for the main loop to
+         * parse (see eth_cmd_buf). This is also how a bare keepalive datagram claims
+         * the stream target above -- its non-magic bytes are simply resynced away. */
+        uint16_t space = (eth_cmd_len < ETH_CMD_BUF_SIZE) ? (uint16_t)(ETH_CMD_BUF_SIZE - eth_cmd_len) : 0;
+        if (space > 0) {
+            uint16_t n = (p->tot_len < space) ? (uint16_t)p->tot_len : space;
+            pbuf_copy_partial(p, eth_cmd_buf + eth_cmd_len, n, 0);
+            eth_cmd_len = (uint16_t)(eth_cmd_len + n);
+        }
         pbuf_free(p);
     }
+}
+
+uint32_t ETH_ReadCommands(uint8_t *dst, uint32_t max) {
+    uint32_t n = eth_cmd_len;
+    if (n > max) {
+        n = max;
+    }
+    if (n == 0) {
+        return 0;
+    }
+    memcpy(dst, eth_cmd_buf, n);
+    uint16_t remain = (uint16_t)(eth_cmd_len - n);
+    if (remain > 0) {
+        memmove(eth_cmd_buf, eth_cmd_buf + n, remain);
+    }
+    eth_cmd_len = remain;
+    return n;
 }
 
 void ETH_Init(void)
