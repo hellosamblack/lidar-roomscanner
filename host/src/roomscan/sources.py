@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import socket
 import struct
+import sys
 import threading
 import time
 from typing import Iterator, Optional
@@ -87,6 +88,7 @@ class UdpSource:
                  zeroconf_factory=Zeroconf, mdns_timeout_ms: float = 1500,
                  keepalive_s: float = 1.0):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.settimeout(timeout)
         self.sock.bind(("", port))
 
@@ -162,11 +164,21 @@ class UdpSource:
         self._maybe_keepalive()
         try:
             data, addr = self.sock.recvfrom(2048)
-            self.target_ip = addr[0]
-            
+
             if len(data) < 6:
+                # Too short to be a device fragment -- and crucially NOT a
+                # reason to re-point `target_ip` at the sender. When mDNS finds
+                # nothing we fall back to broadcast, and Linux loops our own
+                # 1-byte wake datagram straight back into this socket: adopting
+                # that sender address made the source latch onto *the host
+                # itself*, so every later wake/keepalive went to 127-of-us and
+                # the board was never told where to stream. Self-poisoning on
+                # the first read, permanently (owner, 2026-07-28: launch
+                # reported "Ethernet/UDP - <our own IP>").
                 return b""
-            
+
+            self.target_ip = addr[0]
+
             seq_num, frag_idx, total_frags = struct.unpack("<IBB", data[:6])
             payload = data[6:]
             
@@ -229,9 +241,34 @@ def get_best_source(port: Optional[str] = None, baud: int = 921600, timeout: flo
             udp.sock.settimeout(old_timeout)
             return udp
 
-    # No data received, fallback to Serial
+    # No data received, fallback to Serial.
+    udp.sock.settimeout(old_timeout)
+    try:
+        serial_source = SerialSource(port, baud, timeout)
+    except Exception as exc:
+        # A *missing* CDC port is not a launch blocker. Since Phase 5 the
+        # production transport is Ethernet, and a headless rig can legitimately
+        # have no scanner serial port at all -- ST-Link unplugged, USB_USER
+        # carrying power only. Crashing the launch there is nonsense: it
+        # reports a serial problem for an Ethernet deployment, and it lost a
+        # launch just because the board happened to be booting (DHCP) during
+        # the probe window (owner, 2026-07-28: "this is preventing me from
+        # launching the application (which does not depend on stlink, just
+        # ethernet)"). Hand back the UDP source instead -- its keepalive keeps
+        # re-waking the board, so the stream starts by itself the moment the
+        # device shows up. A *busy* port still raises: that means a real
+        # scanner port exists and something else holds it, which the caller
+        # (panel._open_source) offers to resolve interactively.
+        from . import portguard
+        if portguard.classify_open_error(exc) == "busy":
+            udp.close()
+            raise
+        print(f"[source] no scanner serial port ({exc}); "
+              f"listening for the Ethernet stream on UDP :{udp.target_port} instead",
+              file=sys.stderr, flush=True)
+        return udp
     udp.close()
-    return SerialSource(port, baud, timeout)
+    return serial_source
 
 
 class Recorder:

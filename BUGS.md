@@ -34,6 +34,9 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-020 | fixed   | host/native   | Native transform loader was Windows-only (`.dll` name + `build/Release/` path) — blank viewer on the Linux headless host; reader fault never surfaced to the page |
 | BUG-021 | fixed   | host/web      | Web viewer loaded Three.js from a CDN (unpkg) — headless/remote browser couldn't fetch it, `app.js` threw on the bare `three` import, page stuck at "Offline" |
 | BUG-022 | fixed   | host/web      | Headless-host browser has no WebGL — `new THREE.WebGLRenderer()` threw "Error creating WebGL context", viewer stuck "Offline"; auto-open now passes Chrome `--enable-unsafe-swiftshader` |
+| BUG-023 | fixed   | firmware      | System clock sourced from the ST-LINK's MCO — board is dead (silent network, PHY link LED on) whenever the ST-LINK cable is unplugged |
+| BUG-024 | fixed   | host/sources  | A *missing* CDC serial port aborted the launch of an Ethernet-only deployment |
+| BUG-025 | fixed   | host/sources  | `UdpSource` retargeted onto its own looped-back broadcast wake, adopting the host itself as the device |
 
 ---
 
@@ -656,3 +659,89 @@ fresh host".
 
 **The in-browser diagnostic panel (added this session) is what cracked it** — it turned an opaque
 "Offline" into the exact throwing line. Keep it.
+
+---
+
+## BUG-023 — System clock sourced from the ST-LINK's MCO
+
+- **Status:** **fixed** 2026-07-28 · **Reported:** 2026-07-28 (owner: "I am now powering the device
+  over USBUSER and have removed the STLINK connection… this is preventing me from launching the
+  application (which does not depend on stlink, just ethernet)") · **Area:** firmware
+- **Where:** `firmware/scanner-stream/Src/main.c` (`SystemClock_Config`),
+  `53L9A1_PostprocessSingle.ioc` (`RCC.PLLSourceVirtual`/`PLLM`/`PLLN`/`PLLFRACN`)
+
+The NUCLEO-H563ZI has **no HSE crystal fitted**. `OSC_IN`/`PH0` is driven by `STLK_MCO`, the 8 MHz MCO
+output of the on-board ST-LINK MCU (MB1404 schematic sheet 9: `T_MCO` → R77 → buffer U10 → SB49/SB50 →
+`PH0-OSC_IN`; X3's footprint is unpopulated) — which is why the generated config asked for
+`RCC_HSE_BYPASS_DIGITAL` rather than a crystal. That buffer runs off `3V3_STLK`, derived from
+`VBUS_STLK`, i.e. **from the ST-LINK USB cable on CN1**.
+
+So with the ST-LINK unplugged and the board powered from USB_USER (JP2 moved to 9-10 per the
+schematic's "In SINK mode, the jumper JP2 must be set to 'USB USER'"), the system clock simply had no
+source. The firmware wedged before `ETH_Init()` and the board sat there **powered, PHY link LED on,
+activity LED flashing, and the network completely silent** — no DHCP, no ARP entry, no mDNS, nothing on
+UDP :5000. Those PHY LEDs come from the LAN8742's own power-on autonegotiation and the switch's
+broadcast traffic, so they indicate nothing about whether firmware is running. Diagnosis: board absent
+from a full `172.17.2.0/24` ARP sweep and from a raw mDNS query pinned to the board's NIC.
+
+**Attempted and rejected:** detecting the `HAL_RCC_OscConfig` failure and falling back to HSI. It
+rescued a *forced* HSE failure (`RCC_HSE_ON` with no crystal, ST-LINK attached) on the bench but **did
+not rescue the real unplugged case**, so HSE's absence does not present as a clean `HSERDY` timeout.
+Best theory: the undriven `OSC_IN` pin floats and self-oscillates on noise in digital-bypass mode, so
+`HSERDY` sets and PLL1 then locks onto garbage instead of timing out. Do not try to detect this.
+
+**Fix:** PLL1 sources from **HSI unconditionally**; HSE is never enabled. `PLLM 4 / PLLN 31 /
+FRACN 2048` puts HSI/4 = 16 MHz in the same `VCIRANGE_3` input band the 8 MHz HSE used, giving the same
+500 MHz VCO and the same 250 MHz SYSCLK — every downstream clock is bit-identical. USB runs off HSI48
+and Ethernet off the LAN8742's own 25 MHz crystal, so neither transport is affected. The only cost is
+HSI's ~1% RC accuracy on frame timestamps, measured as immaterial: **91.5 fps decoded-frame rate vs the
+91.4 fps HSE baseline**, inside run-to-run noise. Owner-verified streaming with the ST-LINK physically
+unplugged.
+
+**Also added, because this failure was invisible:** boot-progress LEDs (`BootLedsInit` /
+`rs_boot_heartbeat` in `main.c`) — all dark = never reached `main()`; LD3 red = wedged in init or
+`Error_Handler()`/`handle_error()`; LD1 green = clocks + peripherals up; LD2 yellow blinking = the
+acquisition loop is turning over. Note the heartbeat must live inside `vl53l9_app()`'s own `while(1)`:
+that function never returns, so a heartbeat in `main()`'s outer loop fires exactly once at boot and
+then sits dark while the board streams normally (this cost a diagnostic round-trip).
+
+---
+
+## BUG-024 — A missing CDC serial port aborted an Ethernet-only launch
+
+- **Status:** **fixed** 2026-07-28 · **Reported:** 2026-07-28 (owner, same session as BUG-023) ·
+  **Area:** host/sources
+- **Where:** `host/src/roomscan/sources.py` (`get_best_source`)
+
+`get_best_source` probes UDP first and falls back to `SerialSource`, whose `find_port()` raises
+`RuntimeError: no scanner serial port found among [...]` when no CAFE:4001 device is enumerated. On a
+headless Ethernet rig — ST-LINK unplugged, USB_USER carrying power only — there is legitimately no
+scanner serial port at all, so `roomscan-web` died with a serial traceback for a deployment that only
+ever wanted Ethernet. It also lost a launch whenever the board happened to be booting (DHCP) during the
+5 s probe window.
+
+**Fix:** a *missing* port is no longer a launch blocker — Ethernet has been the production transport
+since Phase 5. `get_best_source` hands back the UDP source instead, whose keepalive keeps re-waking the
+board so the stream starts by itself once the device appears, and prints a clear one-line reason to
+stderr. A *busy* port still raises: that means a real scanner port exists and something else holds it,
+which `panel._open_source` offers to resolve interactively. Classification reuses
+`portguard.classify_open_error`.
+
+---
+
+## BUG-025 — `UdpSource` retargeted onto its own looped-back broadcast wake
+
+- **Status:** **fixed** 2026-07-28 · **Reported:** 2026-07-28 (found while verifying BUG-024: the
+  launch banner read `[source] Ethernet/UDP · 172.17.2.54` — the host's *own* address) ·
+  **Area:** host/sources
+- **Where:** `host/src/roomscan/sources.py` (`UdpSource.read`)
+
+When mDNS resolves nothing, `_resolve_target` falls back to broadcasting the wake datagram. Linux loops
+that 1-byte broadcast straight back into the same socket, and `read()` set `self.target_ip = addr[0]`
+from **any** sender before checking the length — so the source adopted *the host itself* as the device
+on its very first read, permanently. Every subsequent wake and keepalive then went to us instead of the
+board, which is never told where to stream. Self-poisoning, and it would have broken Ethernet discovery
+even with a perfectly healthy board (it is only masked when mDNS succeeds and supplies a unicast IP).
+
+**Fix:** only a datagram long enough to be a real fragment (≥ 6 B, the fragment sub-header) may
+retarget; short datagrams return `b""` without touching `target_ip`.

@@ -74,6 +74,50 @@ static void MX_TIM3_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 extern void vl53l9_app(void);
+
+/* Boot progress on the three user LEDs, so a board with no debugger and no
+ * serial console can still say where it got to. Deliberately the very first
+ * thing main() does, before any clock or peripheral setup:
+ *   all three dark              -> never reached main(): held in reset, no MCU
+ *                                  power, or a fault before HAL_Init()
+ *   LED3 (red,    PG4) solid    -> reached main(), then either wedged in
+ *                                  SystemClock_Config()/peripheral init or hit
+ *                                  Error_Handler() (which lights it too)
+ *   LED1 (green,  PB0) solid    -> clocks + peripherals are up
+ *   LED2 (yellow, PF4) blinking -> the acquisition loop is turning over
+ * Healthy steady state is therefore green solid + yellow blinking + red dark.
+ * Diagnosing the 2026-07-28 "board is powered and the PHY link LED is on but
+ * the network is completely silent" failure needed exactly this signal and did
+ * not have it: the PHY's link/activity LEDs come from its own power-on
+ * autonegotiation and the switch's broadcast traffic, so they say nothing at
+ * all about whether the firmware is running. */
+static void BootLedsInit(void)
+{
+  BSP_LED_Init(LED1);
+  BSP_LED_Init(LED2);
+  BSP_LED_Init(LED3);
+  BSP_LED_Off(LED1);
+  BSP_LED_Off(LED2);
+  BSP_LED_On(LED3);             /* cleared again once init completes */
+}
+
+/* Toggle the heartbeat roughly twice a second without blocking the caller.
+ * Called from the acquisition loop inside vl53l9_app(), NOT from main()'s
+ * while(1): vl53l9_app() owns its own `while (1)` and never returns, so a
+ * heartbeat in main() would fire exactly once at boot and sit there dark while
+ * the board streamed perfectly happily (first version of this did exactly that
+ * -- 2026-07-28). Driving it from the acquisition loop also makes it mean
+ * something sharper: "frames are being acquired", not just "the core is up". */
+void rs_boot_heartbeat(void)
+{
+  static uint32_t last = 0;
+  uint32_t now = HAL_GetTick();
+  if ((now - last) >= 500U)
+  {
+    last = now;
+    BSP_LED_Toggle(LED2);
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -93,14 +137,13 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  BootLedsInit();               /* before anything that can wedge -- see above */
   /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -112,6 +155,11 @@ int main(void)
   /* MX_USB_PCD_Init(); */ /* USB owned by TinyUSB (see USER CODE 2) */
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
+  /* MX_GPIO_Init() drives all three LED pins low as part of its generated
+   * "Configure GPIO pin Output Level" block, so the boot state has to be
+   * (re-)asserted here rather than straight after SystemClock_Config(). */
+  BSP_LED_Off(LED3);            /* survived the clock + peripheral init */
+  BSP_LED_On(LED1);             /* green: clocks are up */
 
   /* Route the 48 MHz USB kernel clock (HSI48). This lived in the now-bypassed
    * HAL_PCD_MspInit (stm32h5xx_hal_msp.c) — without it the USB PHY never
@@ -141,7 +189,9 @@ int main(void)
     Error_Handler();
   }
   setvbuf(stdout, NULL, _IOLBF, 0);
-  
+
+  printf("clock: SYSCLK 250 MHz from HSI (no dependency on the ST-LINK MCO)\r\n");
+
   ETH_Init();
 
   /* Infinite loop */
@@ -151,7 +201,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    vl53l9_app();
+    vl53l9_app();               /* owns its own loop; heartbeats from in there */
   }
   /* USER CODE END 3 */
 }
@@ -174,23 +224,46 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_HSI
-                              |RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS_DIGITAL;
+  /* PLL1 runs off the internal HSI, NOT HSE. The NUCLEO-H563ZI has no HSE
+   * crystal fitted: OSC_IN (PH0) is driven by STLK_MCO, the 8 MHz MCO output of
+   * the on-board ST-LINK MCU (MB1404 schematic sheet 9: T_MCO -> R77 -> buffer
+   * U10 -> SB49/SB50 -> PH0-OSC_IN; X3's footprint is unpopulated), which is
+   * why the original generated config asked for RCC_HSE_BYPASS_DIGITAL. That
+   * buffer runs off 3V3_STLK, derived from VBUS_STLK -- i.e. from the ST-LINK
+   * USB cable on CN1. So the board's system clock died the moment the ST-LINK
+   * was unplugged, even with JP2 at 9-10 feeding it 5 V from USB_USER: the
+   * whole firmware wedged in Error_Handler() before ETH_Init(), and the board
+   * sat there with a PHY link LED on and a completely silent network -- no
+   * DHCP, no mDNS, no frames (owner, 2026-07-28).
+   *
+   * Detecting that and falling back was tried first and did NOT rescue it on
+   * the bench (it recovered a *forced* HSE failure with the ST-LINK attached,
+   * but not the real unplugged case), so the dependency is removed outright
+   * rather than papered over. Nothing needs HSE: PLLM = 4 puts HSI/4 = 16 MHz
+   * in the same VCIRANGE_3 input band the 8 MHz HSE used, and 31 + 2048/8192 =
+   * 31.25 x 16 MHz gives the same 500 MHz VCO and the same 250 MHz SYSCLK, so
+   * every downstream clock is bit-identical. USB runs off HSI48 and Ethernet
+   * off the LAN8742's own 25 MHz crystal. The only cost is HSI's ~1% RC
+   * accuracy on frame timestamps, measured as immaterial (90.50 fps on HSI vs
+   * 91.41/90.48 fps on HSE -- inside the run-to-run noise).
+   *
+   * Mirrored into 53L9A1_PostprocessSingle.ioc (RCC.PLLSourceVirtual/PLLM/
+   * PLLN/PLLFRACN) so a CubeMX regeneration keeps it. */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSIDiv = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLL1_SOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = 1;
-  RCC_OscInitStruct.PLL.PLLN = 62;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLL1_SOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = 4;
+  RCC_OscInitStruct.PLL.PLLN = 31;
   RCC_OscInitStruct.PLL.PLLP = 2;
   RCC_OscInitStruct.PLL.PLLQ = 2;
   RCC_OscInitStruct.PLL.PLLR = 2;
   RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1_VCIRANGE_3;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1_VCORANGE_WIDE;
-  RCC_OscInitStruct.PLL.PLLFRACN = 4096;
+  RCC_OscInitStruct.PLL.PLLFRACN = 2048;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -631,6 +704,7 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+  BSP_LED_On(LED3);             /* red: wedged here, forever, with IRQs off */
   __disable_irq();
   while (1)
   {

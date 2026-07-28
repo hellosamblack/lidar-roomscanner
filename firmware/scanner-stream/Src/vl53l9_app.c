@@ -52,6 +52,7 @@
 #include "rs_lsm.h"
 
 extern UART_HandleTypeDef hcom_uart[];
+extern void rs_boot_heartbeat(void);   /* yellow LD2 liveness -- see main.c */
 extern I3C_HandleTypeDef hi3c1;
 
 static void handle_error(void);
@@ -1907,6 +1908,8 @@ void vl53l9_app() {
 
     while (1) {
 
+        rs_boot_heartbeat();    /* yellow LD2 blinking == this loop is turning over */
+
         /* Keep USB serviced every iteration, even when waits below return fast. */
         tud_task(); ETH_Process();
 
@@ -2220,6 +2223,7 @@ static void handle_error(void) {
     tud_disconnect();
     vl53l9_status_t final_status = { 0 };
     vl53l9_get_status(&device[CONF_DEVICE_ID], &final_status);
+    BSP_LED_On(LED3);   /* red LD3: this is the other spin-forever path (see main.c) */
     while (1)
         ;
 }

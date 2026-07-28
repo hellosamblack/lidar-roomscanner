@@ -2,6 +2,8 @@ import socket
 import struct
 import time
 
+import pytest
+
 from roomscan.decoder import StreamDecoder
 from roomscan.protocol import FrameHeader, FrameType, StreamId, pack_frame
 from roomscan.sources import FileSource, Recorder, UdpSource, get_best_source, pump
@@ -116,6 +118,97 @@ def test_get_best_source_resends_wake_packet_and_returns_promptly_on_data(monkey
     assert not fake.closed                # never fell back to Serial
     assert fake.writes >= 2               # resent the wake packet, not just once
     assert elapsed < 1.0                  # returned promptly, did not wait out probe_s
+
+
+def test_udp_source_does_not_retarget_on_a_short_loopback_datagram():
+    """Regression (owner, 2026-07-28): with no mDNS the source broadcasts its
+    wake, Linux loops that 1-byte datagram back into the same socket, and
+    `read()` used to set `target_ip` from *any* sender -- so the host adopted
+    itself as the device and every subsequent wake/keepalive went nowhere near
+    the board. Only a datagram long enough to be a real fragment may retarget."""
+    _FakeZeroconf._answer = None              # no mDNS -> broadcast fallback
+    src = UdpSource(port=0, timeout=0.01, zeroconf_factory=_FakeZeroconf)
+    real_sock, src.sock = src.sock, None
+    real_sock.close()
+    assert src.target_ip == "255.255.255.255"
+
+    class _Loopback:
+        def recvfrom(self, n): return b"\x00", ("172.17.2.54", 5000)
+        def settimeout(self, v): pass
+        def close(self): pass
+
+    src.sock = _Loopback()
+    src.keepalive_s = 0                       # keepalive would need a real socket
+    assert src.read() == b""
+    assert src.target_ip == "255.255.255.255"  # unchanged -- still broadcasting
+
+
+class _SilentUdp:
+    """A UdpSource stand-in that never hears the device (probe times out)."""
+    def __init__(self, *a, **k):
+        self.sock = _FakeSock()
+        self.target_port = 5000
+        self.closed = False
+
+    def write(self, data): pass
+    def read(self): return b""
+    def close(self): self.closed = True
+
+
+class _FakeSock:
+    def gettimeout(self): return 0.05
+    def settimeout(self, v): pass
+
+
+def test_get_best_source_keeps_udp_when_there_is_no_serial_port(monkeypatch, capsys):
+    """Regression (owner, 2026-07-28): with the ST-Link unplugged and the board
+    powered from USB_USER there IS no CDC port, so the serial fallback raised
+    `no scanner serial port found among [...]` and killed the launch of an
+    app that only ever wanted Ethernet. A missing port must degrade to the UDP
+    source -- its keepalive re-wakes the board, so the stream starts on its own
+    once the device appears."""
+    import roomscan.sources as sources
+
+    holder = {}
+
+    def _make(*a, **k):
+        holder["udp"] = _SilentUdp()
+        return holder["udp"]
+
+    class _NoPort:
+        def __init__(self, *a, **k):
+            raise RuntimeError("no scanner serial port found among ['/dev/ttyACM0']")
+
+    monkeypatch.setattr(sources, "UdpSource", _make)
+    monkeypatch.setattr(sources, "SerialSource", _NoPort)
+    result = sources.get_best_source(probe_s=0.05, resend_s=0.01)
+
+    assert result is holder["udp"]
+    assert not result.closed              # still usable -- socket left open
+    assert "no scanner serial port" in capsys.readouterr().err
+
+
+def test_get_best_source_still_raises_for_a_busy_serial_port(monkeypatch):
+    """A *busy* port is a different story: a real scanner port exists and
+    something else holds it, which panel._open_source resolves interactively.
+    Swallowing that would hide the one case the user can actually fix."""
+    import roomscan.sources as sources
+
+    holder = {}
+
+    def _make(*a, **k):
+        holder["udp"] = _SilentUdp()
+        return holder["udp"]
+
+    class _BusyPort:
+        def __init__(self, *a, **k):
+            raise PermissionError(13, "Access is denied.")
+
+    monkeypatch.setattr(sources, "UdpSource", _make)
+    monkeypatch.setattr(sources, "SerialSource", _BusyPort)
+    with pytest.raises(PermissionError):
+        sources.get_best_source(probe_s=0.05, resend_s=0.01)
+    assert holder["udp"].closed           # no socket leak on the raising path
 
 
 def test_file_source_replays_all_frames(tmp_path):

@@ -758,6 +758,19 @@ top of 445 KB/s raw), so nothing here waits on Ethernet.
 
 ### Phase 5 — Transport cutover to Ethernet  ← **✅ Complete**
 
+> **Status 2026-07-28 — the tether is genuinely gone.** Until now every "Ethernet" run still had the
+> ST-LINK cable plugged in, which hid a hard dependency: the NUCLEO-H563ZI has **no HSE crystal**, so
+> the system clock was the ST-LINK MCU's 8 MHz MCO. Unplug CN1 and the firmware wedged before
+> `ETH_Init()` — board powered, PHY link LED on, network totally silent (**BUG-023**). PLL1 now runs
+> off HSI unconditionally (same 250 MHz SYSCLK; ~1% RC accuracy on timestamps, measured immaterial at
+> 91.5 vs 91.4 fps decoded-frame rate). Owner-verified streaming over Ethernet with the ST-LINK
+> physically unplugged and the board powered from USB_USER (JP2 at 9-10). Two host-side launch bugs
+> fell out of the same session: a *missing* CDC port no longer aborts an Ethernet-only launch
+> (**BUG-024**) and `UdpSource` no longer adopts the host itself as the device by latching onto its
+> own looped-back broadcast wake (**BUG-025**). New boot-progress LEDs (LD1 green = clocks up, LD2
+> yellow blinking = acquisition loop alive, LD3 red = wedged) make a headless board diagnosable
+> without a debugger — the PHY's own link/activity LEDs say nothing about whether firmware is running.
+>
 > **Status 2026-07-14:** verified end-to-end on hardware. The device streams flawlessly over both USB CDC and Ethernet UDP.
 >
 > **Ethernet Implementation:**
