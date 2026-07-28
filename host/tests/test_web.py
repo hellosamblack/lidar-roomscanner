@@ -1244,3 +1244,14 @@ def test_set_color_handler_persists(tmp_path):
         config_mod.config_path = orig
     assert state.ui_state.color_mode == "confidence"
     assert ViewerConfig.load(p).color == "confidence"
+
+
+def test_root_redirects_to_static_index():
+    """The bare site root is a convenience redirect to the app entry point --
+    typing the hostname alone used to 404 (only /static and /results were
+    mounted)."""
+    route = next(r for r in web.app.routes if getattr(r, "path", None) == "/")
+    assert "GET" in route.methods
+    resp = asyncio.run(web.root_redirect())
+    assert resp.status_code == 307
+    assert resp.headers["location"] == "/static/index.html"

@@ -36,6 +36,7 @@ from pathlib import Path
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .colors import turbo
@@ -1125,6 +1126,13 @@ app.mount("/static", StaticFiles(directory=str(static_dir), html=True), name="st
 _results_dir = Path(RESULTS_DIR)
 _results_dir.mkdir(exist_ok=True)
 app.mount("/results", StaticFiles(directory=str(_results_dir)), name="results")
+
+
+@app.get("/", include_in_schema=False)
+async def root_redirect() -> RedirectResponse:
+    # Temporary, not permanent: browsers cache a 308 indefinitely, which would
+    # outlive any future move of the app off /static.
+    return RedirectResponse(url="/static/index.html", status_code=307)
 
 
 # --- sensor auto-idle (SET_STANDBY, laser-wear reduction) -------------------
