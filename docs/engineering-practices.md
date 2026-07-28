@@ -96,6 +96,25 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
   `host/tools/web_ui_shot.py` to screenshot *and* drive the page (headless Chrome over CDP) against a
   replay server — the full recipe (sandbox/detach caveats, replay selection) is in `docs/web-ui-testing.md`.
 
+### Reporting a measured improvement
+
+An X× claim is a technical assertion; treat a suspiciously good one as a bug in the measurement until
+proven otherwise. The 2026-07-28 orientation-noise pass produced three wrong numbers before a right one
+(BUG-027), all from the same class of mistake:
+
+- **Know your metric's floor before you quote a ratio.** Measure the metric with the effect *disabled*
+  (there, a replay with no IMU: floor 0.0004°). Without that you can't tell "we fixed it" from "we hit
+  the measurement's own resolution".
+- **Check for quantization in the readout path.** Reading noise off the `sensor` JSON `rot` gave a bogus
+  42× because `build_sensor_message` rounds it to 5 decimals and censors small changes to exactly zero.
+- **Before/after must be measured identically**, adjacent in time, with every intermediate filter in the
+  same state — a host-side smoother left enabled will mask the firmware effect you're attributing.
+- **Check that the data is still live.** A stalled sensor leaves the host holding a stale value, which
+  reads as a spectacular noise reduction. Confirm stream rates + 0 drops/gaps after every reflash
+  (`host/tools/orientation_probe.py health`).
+- Order-independent statistics beat index-wise diffs on variable-length payloads: POINT_CLOUD carries
+  only *valid* points, so index i is a different ray between frames.
+
 ## Self-improvement after milestones
 
 - **After every milestone** (a phase completing, or any major merge to main), run a retrospective BEFORE
