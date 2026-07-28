@@ -1,5 +1,7 @@
 # Panel UI Redesign Implementation Plan
 
+> **Status: ✅ SHIPPED 2026-07-14** (code-complete + reviewed; on-rig fixes BUG-011..BUG-018). The desktop panel was then **deprecated in place** (Web Phase 5, 2026-07-16 — `roomscan-web` is the primary UI), so the remaining "on-rig eyeball" items are legacy-only, not blockers.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Restructure `roomscan-panel` from a sidebar-driven, multi-mode window into a two-mode (Real-Time / SLAM), first-person-by-default, HUD-driven instrument with menu-driven settings — without changing any SLAM/TSDF math, protocol, or firmware.

@@ -1,7 +1,7 @@
 # LSM6DSV16X: magnetometer yaw-drift correction (host-side 9-axis fusion)
 
 **Date:** 2026-07-10
-**Status:** design (approved sections; pending written-spec review)
+**Status:** ✅ shipped — merged via PR #2 (`33b7796`); on-rig mag calibration + `AXIS_CONVENTION` verified 2026-07-10 (BUG-004; procedure in `docs/yaw-fusion.md`)
 **Depends on:** the shipped LSM6DSV16X panel integration (`docs/superpowers/specs/2026-07-09-lsm6dsv16x-orientation-env-panel-design.md`).
 Stream 9 (SFLP game-rotation-vector quaternion) and stream 10 (env: pressure / **magnetometer** / temp)
 are already flowing and hardware-verified. This feature is **host-side Python only** — no firmware or

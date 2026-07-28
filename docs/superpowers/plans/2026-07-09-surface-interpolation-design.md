@@ -1,6 +1,6 @@
 # Surface interpolation for adjacent points — design
 
-Status: approved, pending implementation plan.
+Status: ✅ shipped — implemented per `2026-07-09-surface-interpolation-implementation.md`; spatial mode later rebuilt as vectorized grid-adjacency triangulation (BUG-001/BUG-002). Panel-only feature; the panel is deprecated legacy since Web Phase 5.
 Owner: panel (`host/src/roomscan/panel.py`), Phase 3.5 GUI panel follow-on.
 
 ## Goal

@@ -1,5 +1,7 @@
 # IKS4A1 HUB1 Native-I3C Multi-Device Bus Fix Implementation Plan
 
+> **Status: ✅ SHIPPED 2026-07-10** — HUB1 native-I3C + PartID-keyed multi-device ENTDAA hardware-verified (~28 fps, 0 CRC); see `ROADMAP.md` Phase 4 + `docs/iks4a1-stacking.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the ToF (VL53L9CX) and the IKS4A1's LSM6DSV16X (HUB1) coexist as two genuine

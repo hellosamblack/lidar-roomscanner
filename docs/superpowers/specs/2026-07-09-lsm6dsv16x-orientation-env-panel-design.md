@@ -1,7 +1,7 @@
 # LSM6DSV16X → panel: orientation + environmental sensor data
 
 **Date:** 2026-07-09
-**Status:** design (approved sections; pending written-spec review)
+**Status:** ✅ shipped 2026-07-10 — streams 9/10 + panel sensors group live (see `ROADMAP.md` Phase 4)
 **Depends on:** the HUB1 native-I3C bus fix (`rs_assign_dynamic_addresses()`, on `origin/main`) — the
 LSM6DSV16X is already a working native-I3C target at `0x50` on the shared I3C1 bus.
 

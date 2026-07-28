@@ -1,7 +1,7 @@
 # Web Phase 1 — Core Real-Time Web Instrument
 
 **Date:** 2026-07-15
-**Status:** approved (brainstorm), pending implementation plan
+**Status:** ✅ Complete (2026-07-16) — 606 tests green, headless-Chrome verified; see `ROADMAP.md` Web Phase 1
 **Branch:** (TBD — cut from `main`)
 **Owner:** hellosamblack
 

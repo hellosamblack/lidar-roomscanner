@@ -1,5 +1,7 @@
 # Phase 1: Binary Frame Protocol + Real-Time 3D Visualizer — Implementation Plan
 
+> **Status: ✅ SHIPPED 2026-07-08** — both milestones (1a VCOM, 1b native CDC) verified on hardware; see `ROADMAP.md` Phase 1.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the firmware's ASCII depth dump with a versioned binary frame protocol and build a PC app that renders the depth stream as a live 3D point cloud.

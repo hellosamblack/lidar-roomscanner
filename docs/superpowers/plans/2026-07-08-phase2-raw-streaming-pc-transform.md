@@ -1,5 +1,7 @@
 # Phase 2: Raw Streaming + PC-Side Transform Implementation Plan
 
+> **Status: ✅ SHIPPED 2026-07-08** — equivalence gate passed (731/731 pairs within 0.01 mm), raw-only firmware live at ~24.6 fps; see `ROADMAP.md` Phase 2.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Move the `vl53l9-transform-c` post-processing pipeline from the STM32 to the PC: firmware streams raw `3DMD` frames + calibration; the PC runs the identical C library natively, unlocking full 54×42 resolution at ~30 fps over the existing USB CDC link and making every output stream (depth/IR/confidence/ambient/ZAPC) a host-side choice.

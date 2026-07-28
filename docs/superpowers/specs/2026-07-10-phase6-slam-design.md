@@ -1,6 +1,6 @@
 # Phase 6 — Real-time SLAM (PC): design spec
 
-**Status:** approved design (2026-07-10). **Next:** implementation plan (`writing-plans`).
+**Status:** ✅ implemented — plan `docs/superpowers/plans/2026-07-10-phase6-slam.md` executed (Tasks 1–11); validation in `docs/phase6-slam-validation.md`. Phase 6 continues: GPU-memory hardening (6.G) + drift correction / loop-closure evaluation (6.D) in `ROADMAP.md`. Since superseded in part: SLAM runs on local CUDA:0 (not CPU-only) and the web app is the primary live surface.
 **Prereq reading:** `docs/coordinate-frames.md` (every pose/prior/constraint below lives in those frames),
 `ROADMAP.md` Phase 6 (locked algorithm decisions), `docs/deprojector-validation.md` (FoV model).
 

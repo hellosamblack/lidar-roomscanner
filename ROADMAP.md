@@ -25,7 +25,7 @@ Engineering conventions live in [`docs/engineering-practices.md`](./docs/enginee
   are done; owner swapped IKS4A1 up to Phase 4, ahead of Ethernet.)*
 - **Protocol rule:** design the frame protocol transport-agnostic from day one —
   `magic + version + seq + timestamp + payload + CRC32`, multi-stream, little-endian — so an eventual
-  Ethernet cutover (Phase 5, shelved) is plumbing, not a redesign. Spec lives in `docs/protocol.md`; any
+  Ethernet cutover (Phase 5 — since shipped, vindicating the rule) is plumbing, not a redesign. Spec lives in `docs/protocol.md`; any
   wire change bumps the version and follows the `protocol-change` skill checklist.
 - **Firmware fork rule:** our firmware lives in `roomscanner/firmware/` as a copy of `<APP>` that
   references the `53L9A1/` package in place for shared Drivers/Middlewares/Utilities. `<APP>` itself is
@@ -798,11 +798,24 @@ streams exist — good ordering), and the zero-config link; none of it blocks th
     resolves it (fallback: the fixed /30 device address). `SerialSource`-style auto-find for the network.
   - PTP master on the PC, as before.
 
-### Phase 6 — Real-time SLAM (PC)  ← **next up (2026-07-10)**
+### Phase 6 — Real-time SLAM (PC)  ← **in progress**
 
 SFLP quaternion as rotation prior → 3-DoF constrained **point-to-plane ICP, frame-to-model** against the
 TSDF raycast (Open3D tensor pipeline: `t.pipelines.registration` + VoxelBlockGrid), IR as intensity
 channel, barometer as soft 1-DoF Z constraint.
+
+> **Status (2026-07-28):** the core pipeline is **built and running**. Shipped so far: the
+> `roomscan.slam` subpackage (SFLP-prior + point-to-plane frame-to-model ICP + TSDF `Mapper`,
+> `roomscan-slam` CLI; offline validation record: `docs/phase6-slam-validation.md` — its CPU timings
+> predate the GPU); off-thread live-view rendering (`MeshPrep` + pose/mesh transport split, block
+> below); the panel SLAM mode (since deprecated with the panel) and its replacement — **Web Phase 4's
+> `SlamRunner` on local CUDA:0 (RTX 2000 Ada, ~7 ms/frame) is the primary live SLAM surface**; a
+> display-only stationarity hold that kills stationary ICP-translation jitter (map accuracy
+> byte-identical); and CUDA at-scale validation (GPU ~2.1× per-step vs CPU with a flat degradation
+> curve; 3 of 4 latent CUDA bugs fixed — the 4th is sub-phase 6.G). **Open:** sub-phase **6.D**
+> (drift correction / loop-closure evaluation — the owner's next target, 2026-07-28), sub-phase
+> **6.G** (GPU-memory OOM on long scans), and the on-rig flat-field capture (Phase 2.5 follow-up)
+> gating reflectance-quality work.
 
 > **Live-view rendering (2026-07-14)** — the "rendering-first for live view" step (live view ≥30 fps,
 > ideally 120+, flat as the map grows; the fps goal is architecture-bound, not compute-bound). Shipped
@@ -854,7 +867,39 @@ channel, barometer as soft 1-DoF Z constraint.
 > IR billboard texture render/UV orientation + opacity, settings-dialog re-open widget lifetime, and
 > dialog scroll reachability (currently a plain `Vert` — may need `ScrollableVert`).
 
-#### Sub-phase 6.G — SLAM GPU-memory hardening (long-scan OOM)  ← **next**
+#### Sub-phase 6.D — Drift correction with LiDAR: ICP-yaw feedback + loop-closure evaluation  ← **next (owner target, 2026-07-28)**
+
+The SFLP orientation prior is 6-axis: roll/pitch are gravity-referenced and drift-free, but **yaw
+drifts** — bounded today only by the slow magnetometer fusion (`docs/yaw-fusion.md`, a gentle drift
+bound that freezes on magnetic anomalies, not a hard reference). Translation already comes from ICP
+alone. "Use the LiDAR to correct IMU drift" is **not the same thing as loop closure** — three distinct
+mechanisms, in increasing scope:
+
+1. **Frame-to-model ICP (already running).** Every frame registers against the TSDF raycast, so the
+   pose the map is built with is already LiDAR-corrected — the IMU is only the prior/initial guess.
+   Local drift is continuously suppressed; the residual failure mode is slow *map warp* accumulated
+   over a long scan.
+2. **ICP→IMU feedback (cheap; the likely first deliverable).** Feed the ICP-refined yaw back into the
+   orientation filter — complementing or replacing the mag graft while ICP tracking is good. Indoor
+   point-cloud yaw beats magnetic yaw (rebar/wiring distortion — the yaw-fusion spec says so itself),
+   and `YawFusion`'s gated-graft machinery already exists to receive it. Also stabilizes the prior
+   handed to the *next* frame's ICP after fast motion.
+3. **Loop closure (global; evaluate before building).** Detect a revisited place, add a pose-graph
+   constraint, redistribute the accumulated error over the whole trajectory, then re-integrate the
+   map. Frame-to-model already gives a *soft, implicit* version — re-entering a mapped area snaps the
+   pose back onto the existing map — but it can never fix warp already integrated into the TSDF; only
+   a pose graph + reintegration pass can. Caveats for this sensor: 55°×42° FoV / 2,268 pts per frame
+   means classic LiDAR place-recognition descriptors (Scan Context et al.) don't apply — revisit
+   detection would be pose-proximity-gated ICP verification, not appearance-based — and TSDF
+   reintegration is expensive (needs a submap or keyframe-replay design).
+
+Scope: **measure first** — record a closed-loop capture (walk a loop, return to a marked start pose)
+and quantify end-to-end drift (`start_end_gap_m` in the `roomscan-slam` metrics; the Task-9 capture
+showed 1.1–1.4 m over ~70 m of path, pre-GPU). Then ship (2), re-measure, and decide from the residual
+whether (3) earns its complexity — frame-to-model may already be enough inside a single room; loop
+closure pays off on multi-room trajectories.
+
+#### Sub-phase 6.G — SLAM GPU-memory hardening (long-scan OOM)  ← **open**
 
 The GPU SLAM path OOMs on a long scan: over a 68 m walk, CUDA memory creeps to **~11.7 GB** and hits a
 `ParallelFor` allocation failure. This is **not** the map itself — the raycast is already frustum-bounded
@@ -877,10 +922,12 @@ Scope for this sub-phase:
 - **Regression guard:** extend `tools/slam-container/cuda_smoke.py` with a long-run / high-block-count
   memory-ceiling assertion so a future change can't silently reintroduce the creep.
 
-Runs in the WSL GPU container (native Windows Open3D CUDA is a dead end — CUDA 12.6 rejects Win11-26200;
-GPU runs via `wslc --gpus all` + the Linux CUDA wheel); CPU SLAM is unaffected (it already
-meets the ~28 fps sensor ceiling). Belongs to the "GPU hardening for offline" leg of the owner's
-"both, sequenced" directive — the live-view rendering leg already shipped (above).
+*(Environment updated 2026-07-28: originally scoped for the retired Windows box's WSL GPU container —
+native Windows Open3D CUDA was a dead end. The current headless Linux host runs SLAM **in-process on
+local CUDA:0** (RTX 2000 Ada passthrough), so measure and fix there; `tools/slam-container/` survives
+only as the optional `[slam] backend=remote` path.)* CPU SLAM is unaffected (it already meets the
+~28 fps sensor ceiling). Belongs to the "GPU hardening for offline" leg of the owner's "both,
+sequenced" directive — the live-view rendering leg already shipped (above).
 
 **Read `docs/coordinate-frames.md` first** — every pose/prior/constraint here lives in one of the four
 documented frames; the world frame, the body→world sandwich (`T_WORLD_TO_CV @ R @ T_CV_TO_BODY`), and the
@@ -918,6 +965,10 @@ baro-Z-is-Open3D-−Y mapping are all specified there.
   recorded-capture work, needs usbipd for live device). Only do this if profiling shows VoxelBlockGrid
   integrate/raycast blowing the ~35 ms frame budget — the RTX 4080's real job is Phase 7 (3DGS
   training). Validate real-time budget with recorded Phase 1/2 datasets before hardware-in-the-loop.
+  *(Superseded 2026-07-16: the runtime host is now the headless Linux box with an RTX 2000 Ada passed
+  through — local CUDA:0 works in-process (~7 ms/frame), no source build or WSL needed; the
+  Windows-wheel/RTX 4080 notes above describe the retired dev box. The capture-first validation rule
+  was followed and stands.)*
 - **Real-time RGB camera (owner question 2026-07-08, architecture decided):** live high-fidelity image
   mapping uses a webcam **plugged directly into the PC**, physically mounted on the handheld rig (the
   scanner is tethered anyway — the camera's USB run rides the same tether as the Ethernet cable).

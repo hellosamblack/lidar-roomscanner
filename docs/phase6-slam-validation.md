@@ -1,5 +1,11 @@
 # Phase 6 SLAM — offline validation on the real motion capture
 
+> *(Historical validation record, pre-GPU: all timings below are CPU-only. Performance has since been
+> superseded by the local-CUDA:0 path — RTX 2000 Ada on the headless host, ~7 ms/frame (see `ROADMAP.md`
+> Phase 6 / Web Phase 4). The trajectory-quality findings, gate methodology, and mode comparison remain
+> the reference — in particular `start_end_gap_m` ≈ 1.1–1.4 m over ~70 m is the drift baseline that
+> sub-phase 6.D targets.)*
+
 Task 9 wires Tasks 1–8 (deprojection, TSDF, ICP odometry, frame-to-model
 `Mapper`, `SlamConfig`, `metrics`) into `roomscan-slam` and runs the empirical
 validation gate against a real handheld capture:

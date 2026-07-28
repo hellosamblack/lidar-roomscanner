@@ -1,5 +1,7 @@
 # LSM6DSV16X Orientation + Environmental Panel Implementation Plan
 
+> **Status: ✅ SHIPPED 2026-07-10** — streams 9 (SFLP quat) + 10 (env) + panel sensors group live, full stack 27.85 fps / 0 CRC; see `ROADMAP.md` Phase 4.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stream the LSM6DSV16X's SFLP orientation quaternion and its sensor-hub environmental data

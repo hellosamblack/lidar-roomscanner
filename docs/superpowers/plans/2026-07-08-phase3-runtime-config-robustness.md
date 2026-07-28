@@ -1,5 +1,7 @@
 # Phase 3: Runtime Configuration + Device Robustness — Implementation Plan
 
+> **Status: ✅ SHIPPED 2026-07-09** — COMMAND/ACK channel, EVENT + bounded recovery, viewer keys, config persistence; see `ROADMAP.md` Phase 3. *(Addendum 2026-07-21: `SET_STANDBY` cmd 7 + Ethernet command RX added on-rig-verified.)*
+
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development. Checkbox steps.
 
 **Goal:** Bidirectional protocol: a host→device **control channel** (profile/exposure/frame-period at runtime, CALIB on request) and the device-robustness half — EVENT-frame emission, `handle_error` → bounded re-init recovery (kills the 1-in-5 boot hang as a user-visible failure), and the connect-time-transient investigation. Owner scope calls: **binning stays fixed at 2 (full 54×42)** — no resolution knob; robustness **is** in scope.

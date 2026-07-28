@@ -1,5 +1,7 @@
 # LSM6DSV16X Magnetometer Yaw-Drift Correction — Implementation Plan
 
+> **Status: ✅ SHIPPED** — merged to `main` via PR #2 (`33b7796`); on-rig mag calibration + `AXIS_CONVENTION` verification completed 2026-07-10 (BUG-004: `mag_cal.json`, `AXIS_CONVENTION = diag(1,-1,-1)`).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Bound the SFLP quaternion's free-running yaw drift host-side by grafting a gated, long-time-constant, tilt-compensated magnetometer heading onto it (yaw-only; tilt stays SFLP), producing a drift-corrected orientation for the live gizmo and the future ICP rotation prior.

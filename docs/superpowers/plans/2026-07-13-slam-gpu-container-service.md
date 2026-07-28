@@ -1,5 +1,7 @@
 # SLAM GPU Container Service Implementation Plan
 
+> **Status: ⚠ SUPERSEDED 2026-07-16** — built for the retired Windows box (native Windows Open3D CUDA was a dead end → WSL container). The current headless Linux host has an RTX 2000 Ada passed through, so SLAM runs **in-process on local CUDA:0** (~7 ms/frame); the container/service survives only as the optional `[slam] backend=remote` path (`tools/slam-container/`).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Run the GPU-bound SLAM compute (`Mapper.step`) inside a `--gpus all` WSL container behind the existing `SlamWorker` interface, so the Windows panel keeps USB capture + rendering while a black-box CUDA service accelerates the live and processed render.

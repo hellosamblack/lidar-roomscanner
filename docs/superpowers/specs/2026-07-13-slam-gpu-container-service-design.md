@@ -1,7 +1,7 @@
 # SLAM GPU compute offloaded to a WSL container (black-box service)
 
 **Date:** 2026-07-13
-**Status:** Design approved, spec under review
+**Status:** ⚠ superseded 2026-07-16 — the headless Linux host has an RTX 2000 Ada passed through; SLAM runs in-process on local CUDA:0. Kept only as the optional `[slam] backend=remote` path.
 **Owner:** hellosamblack
 **Related:** `docs/superpowers/specs/2026-07-10-phase6-slam-design.md`, memory `gpu-cuda-build-blocker`
 

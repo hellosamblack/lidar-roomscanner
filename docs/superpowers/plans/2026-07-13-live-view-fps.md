@@ -1,5 +1,7 @@
 # Live-view fps Implementation Plan
 
+> **Status: ✅ SHIPPED 2026-07-14** (code-complete + reviewed; the ≥30/120-fps-flat runtime numbers were never verified on-rig). The desktop panel this targeted is now deprecated legacy — `MeshPrep` + the pose/mesh transport split live on in the primary web UI (Web Phase 4 `SlamRunner`).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Keep the live SLAM viewport at ≥30 fps (target 120), flat as the map grows, on both the local and remote backends, by moving all O(map-size) mesh work off the GUI tick and decoupling pose from mesh on the remote wire — while preserving the exact final map.

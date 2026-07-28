@@ -1,6 +1,7 @@
 # Vendor external dependencies into the repo — design
 
 **Date:** 2026-07-15
+**Status:** ✅ done — `53L9A1`, TinyUSB, lwIP vendored under `firmware/vendor/`; three.js vendored under `host/src/roomscan/static/vendor/` (BUG-021)
 **Goal:** Make `roomscanner/` self-contained: no build/runtime dependency resolves to a
 path outside the repository. Driven by owner request "there are dependencies that live
 outside this repo (notably `F:\git\personal\lidar\53L9A1`) — move them into the repo and

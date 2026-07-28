@@ -1,7 +1,7 @@
 # Web Phase 2 — Sensors (IMU/env streams 9/10)
 
 **Date:** 2026-07-16
-**Status:** implementing
+**Status:** ✅ Complete (2026-07-16) — 610 tests green, headless-Chrome verified; see `ROADMAP.md` Web Phase 2
 **Branch:** `main` (commit-to-main workflow)
 **Owner:** hellosamblack
 **Predecessor:** Web Phase 1 (`2026-07-15-web-phase1-core-instrument-design.md`) — ✅ done

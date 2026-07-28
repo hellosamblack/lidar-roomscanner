@@ -1,7 +1,7 @@
 # Panel UI redesign — modes, floating HUD, menu-driven settings
 
 **Date:** 2026-07-13
-**Status:** approved (brainstorm), pending implementation plan
+**Status:** ✅ shipped 2026-07-14 (BUG-011..018 fixed on-rig); the panel was then deprecated in place (Web Phase 5, 2026-07-16) — `roomscan-web` is the primary UI
 **Branch:** feature/phase6-slam
 **Owner:** hellosamblack
 

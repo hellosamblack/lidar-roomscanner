@@ -1,5 +1,7 @@
 # Surface Interpolation Implementation Plan
 
+> **Status: ✅ SHIPPED 2026-07-09** — spatial mode later replaced with vectorized grid-adjacency triangulation (BUG-001/BUG-002). Panel-only feature; the panel is deprecated legacy since Web Phase 5 (2026-07-16).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let adjacent depth-camera points that are close enough get covered by a triangle mesh instead of drawn as dots, with two switchable adjacency strategies (grid / spatial), in the `roomscan-panel` GUI.

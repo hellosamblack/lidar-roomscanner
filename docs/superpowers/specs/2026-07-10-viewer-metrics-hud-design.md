@@ -1,6 +1,7 @@
 # Viewer metrics HUD — design
 
 **Date:** 2026-07-10
+**Status:** ✅ shipped (`metrics_hud.py`, merged; extended for Ethernet in Phase 5, carried into the web HUD in Web Phase 1)
 **Scope:** `host/` `roomscan-panel` only (the classic legacy-Open3D `roomscan-view`
 cannot overlay text on its scene; it keeps its existing one-line stats).
 
