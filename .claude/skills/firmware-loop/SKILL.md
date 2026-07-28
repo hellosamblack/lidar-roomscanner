@@ -17,6 +17,10 @@ flash-and-observe.
 
 ## Build
 
+> **On the current headless Linux dev box, skip to "Build + flash on Linux" below.** The
+> STM32CubeIDE/`STM32_Programmer_CLI` paths in the next two sections are from the retired Windows box
+> and do not exist here.
+
 Requires `arm-none-eabi-gcc` on PATH, CMake ≥3.22, Ninja. On this machine the toolchain is NOT on the
 default PATH — it ships with STM32CubeIDE 2.2.0; prepend
 `C:\ST\STM32CubeIDE_2.2.0\STM32CubeIDE\plugins\...\tools\bin` (glob for `com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32*`)
@@ -54,6 +58,36 @@ STM32_Programmer_CLI -c port=SWD -rst
 ```
 
 Alternative: drag-drop the `.bin` onto the `NOD_H563ZI` mass-storage drive.
+
+## Build + flash on Linux (the current headless dev box)
+
+`arm-none-eabi-gcc` and `cmake` are on PATH; **Ninja is not**, and `CMakePresets.json` hardcodes the
+Ninja generator — install it into the venv once (`host/.venv/bin/python -m pip install ninja`), then:
+
+```sh
+PATH="$PWD/host/.venv/bin:$PATH" cmake --build firmware/scanner-stream/build/Debug
+```
+
+Flashing works from this box over SWD, but **the apt `stlink-tools` 1.8.0 cannot identify the H5**
+(`st-info --probe` → `chipid: 0x000`); H5 IDCODE support landed on stlink `develop` after the v1.8.0
+tag. Build it locally, no root needed (~3 min) — full recipe in the `firmware-build-on-linux` memory;
+the scratchpad it lands in is **not durable**, so expect to redo this on a fresh box:
+
+```sh
+export LD_LIBRARY_PATH=~/scratchpad/stlink-build/src/build/lib
+~/scratchpad/stlink-build/src/build/bin/st-info --probe          # expect chipid 0x484 / STM32H5xx
+~/scratchpad/stlink-build/src/build/bin/st-flash --connect-under-reset --reset \
+    write firmware/scanner-stream/build/Debug/scanner_stream.bin 0x08000000
+```
+
+`--connect-under-reset` is **required** — the NUCLEO's NRST isn't bridged to the ST-Link, so a plain
+hot-plug halt fails "Can not connect to target". Success = "Flash written and verified! jolly good!".
+Observe over Ethernet/UDP (mDNS `roomscanner._roomscan._udp.local.`); no CDC needed.
+
+**No packet capture here:** this is an unprivileged LXC, so `tcpdump` fails with "You don't have
+permission to perform this capture on that device". Diagnose the network with ordinary sockets
+instead — an ARP sweep (`ping` the /24, then `ip neigh`), a raw mDNS query bound to the board's NIC,
+and a UDP wake+listen on :5000.
 
 **Stale-port care**: either a reflash or a bare `-rst` causes the MCU's USB peripheral to fully
 power-cycle, so the native CDC port disappears and re-enumerates a moment later. Reopening too soon
@@ -128,6 +162,20 @@ reporting one bare "fps" number (this exact ambiguity caused real confusion in t
 - Board dead-silent for the CDC port well past `--boot-timeout` → likely genuinely wedged (rare; the
   internal retry above handles the common case). Reset via SWD; if that doesn't recover it, attach a
   debugger rather than guessing.
+- **Read the boot LEDs first on a silent board** — they cost one glance and rule out whole theories
+  (added 2026-07-28 for exactly this; see `BootLedsInit`/`rs_boot_heartbeat` in `main.c`). Healthy is
+  **LD1 green solid + LD2 yellow blinking**:
+
+  | LEDs | Meaning |
+  |---|---|
+  | all dark | never reached `main()` — held in reset, no MCU power, fault before `HAL_Init()` |
+  | LD3 red solid | reached `main()`, then wedged in clock/peripheral init, or hit `Error_Handler()`/`handle_error()` |
+  | LD1 green solid | clocks + peripherals up |
+  | LD2 yellow blinking (~2 Hz) | the acquisition loop is turning over |
+
+  The **PHY's own link/activity LEDs prove nothing** — they come from the LAN8742's power-on
+  autonegotiation and the switch's broadcast traffic, and stay lit on a completely dead firmware.
+  (LD4/LD6 belong to the ST-LINK block, LD5 = 5 V rail, LD7 = USB_USER VBUS present.)
 - **Always check the local logs** when debugging crashes or freezes:
   - `logs/app.log` captures Python UI interactions (buttons, mode changes) and all uncaught Python exceptions.
   - `logs/firmware.log` captures the raw serial `printf` output from the ST-Link VCOM port (1Hz heartbeat + probes).
@@ -139,7 +187,18 @@ reporting one bare "fps" number (this exact ambiguity caused real confusion in t
   machine they've typically enumerated as CDC = COM15, ST-Link VCOM = COM14 — examples, not guarantees;
   always resolve by VID/PID, never hardcode a COM number.
 - **ST-LINK VCOM Baud Rate**: The ST-Link VCOM translates host CDC settings to the actual USART pins on the MCU. If your Python host script opens the port at a mismatched baud rate (e.g. 921600) while the MCU's `BSP_COM_Init` is set to 115200, you will get **silent drops** (no output at all), not garbage text. Always match the MCU's `115200` baud rate when reading ST-LINK logs.
-- **ST-Link power and clock dependency:** The target MCU's clock configuration uses `RCC_HSE_BYPASS_DIGITAL` which relies on the 8 MHz clock output (MCO) from the ST-Link debugger chip. If the ST-Link USB is unplugged, the ST-Link chip is unpowered, the external clock is lost, and the target MCU halts in `Error_Handler()` at boot. Furthermore, an unpowered ST-Link pulls the target's `NRST` line low, resetting it. Both USB USER and ST-Link cables must be connected (or ST-Link powered externally) for the board to run.
+- **ST-Link clock dependency — FIXED 2026-07-28 (BUG-023), the board now runs untethered.** History,
+  because the symptom is so misleading: the NUCLEO-H563ZI has **no HSE crystal**, so the generated
+  `RCC_HSE_BYPASS_DIGITAL` config took its 8 MHz from `STLK_MCO`, the ST-Link MCU's MCO output, whose
+  buffer is powered from the ST-Link USB cable (CN1). Unplug CN1 and the target halted in
+  `Error_Handler()` before `ETH_Init()` — **powered board, PHY link LED on, activity LED flashing,
+  network totally silent**. `SystemClock_Config` now sources PLL1 from **HSI unconditionally** (same
+  250 MHz SYSCLK), so only the USB_USER cable is needed, with **JP2 at 9-10**. Two corrections to what
+  this entry used to claim: detecting the HSE failure and falling back does **not** work (a floating
+  `OSC_IN` in digital-bypass mode appears to set `HSERDY` on noise rather than time out — a forced HSE
+  failure with the ST-Link attached is **not** a valid stand-in for the real unplugged case), and an
+  unpowered ST-Link does **not** hold the target in reset — the board boots and streams fine with CN1
+  removed.
 - After flashing or resetting, the app may wait on sensor init — no output for ~1 s is normal; the
   internal boot retry means a slow-but-successful bring-up can take several seconds before the first
   frame, which is expected, not a hang, as long as frames eventually arrive.
