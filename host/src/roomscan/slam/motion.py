@@ -26,25 +26,13 @@ from collections import deque
 
 import numpy as np
 
+# `coherence` is generic (it also gates the web display's orientation smoother),
+# so it lives in the Open3D-free `roomscan.motion`. Re-exported here because it
+# is documented above as part of this module's story, and SLAM code imports it
+# from here.
+from ..motion import coherence
 
-def coherence(increments) -> float:
-    """Directional coherence of a sequence of 3D displacement increments:
-    ``||sum(inc)|| / sum(||inc||)``.
-
-    - ~1.0 for consistent straight-line motion (increments reinforce),
-    - ~1/sqrt(N) for N zero-mean random jitter steps (increments cancel),
-    - 0.0 for no motion at all (all increments zero),
-    - 1.0 for an empty set (no evidence of jitter -> treat as "moving", i.e.
-      never suppress on no data).
-    """
-    inc = np.asarray(increments, dtype=np.float64).reshape(-1, 3)
-    if inc.shape[0] == 0:
-        return 1.0
-    path = float(np.linalg.norm(inc, axis=1).sum())
-    if path < 1e-9:
-        return 0.0
-    net = float(np.linalg.norm(inc.sum(axis=0)))
-    return net / path
+__all__ = ["coherence", "StationarityGate"]
 
 
 class StationarityGate:

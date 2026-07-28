@@ -23,6 +23,7 @@ roomscan-slam = "roomscan.slam.cli:main"
 roomscan-web = "roomscan.web:main"        # primary UI: browser instrument, headless-capable
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 # Resolve `roomscan` from ./src and `tools` from ./ without relying on an
 # editable install (matters when running the suite from a git worktree).
 pythonpath = ["src", "."]

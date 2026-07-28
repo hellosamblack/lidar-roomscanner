@@ -52,6 +52,10 @@ class ViewerConfig:
     surface_enabled: bool = False
     surface_mode: str = "grid"          # "grid" | "spatial"
     surface_threshold_pct: float = 4.0
+    view_colormap: str = "turbo"
+    web_point_size: float = 0.025
+    web_point_size_auto: bool = True   # scale each point with its range from the sensor
+                                       # (then web_point_size is the size at 1 m of range)
     imu_gizmo: bool = True             # show the orientation gizmo in the scene
     sensors_panel: bool = True         # show the Sensors panel group
     gizmo_scale: float = 0.15          # gizmo axis length (metres)

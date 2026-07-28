@@ -39,6 +39,10 @@ export function createIr(hub) {
             canvas.width = width;
             canvas.height = height;
             imageData = ctx.createImageData(width, height);
+            // Follow the incoming aspect rather than the CSS default: the server
+            // rolls the pane to gravity, so a 90°/270° turn arrives portrait
+            // (42x54) and the fixed 4/3 rule would squash it.
+            canvas.style.aspectRatio = width + ' / ' + height;
         }
         const out = imageData.data;   // RGBA
         for (let i = 0, j = 0; i < width * height; i++) {

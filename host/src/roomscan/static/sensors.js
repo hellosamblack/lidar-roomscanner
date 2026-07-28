@@ -174,6 +174,8 @@ export function createSensors(hub) {
     const pressVal = $('sensor-press-val');
     const tempSpark = $('sensor-temp-spark');
     const tempVal = $('sensor-temp-val');
+    const resetBtn = $('sensor-reset-heading');
+    const magCalBtn = $('sensor-mag-cal');
     if (!gizmo || !compass) { D('sensor DOM missing — skipping', 'error'); return {}; }
 
     // prime placeholders
@@ -182,19 +184,32 @@ export function createSensors(hub) {
     drawSparkline(pressSpark, null);
     drawSparkline(tempSpark, null);
 
+    if (resetBtn) {
+        resetBtn.addEventListener('click', () => {
+            hub.send({ type: 'reset_fusion' });
+        });
+    }
+
+    if (magCalBtn) {
+        magCalBtn.addEventListener('click', () => {
+            // TODO: open mag-calibration modal
+        });
+    }
+
     hub.on('sensor', (msg) => {
         try {
             drawGizmo(gizmo, msg.rot);
             drawCompass(compass, msg.heading);
             if (headingEl) headingEl.textContent =
                 (msg.heading === null || msg.heading === undefined) ? '—' : msg.heading.toFixed(1) + '°';
-            if (fusionEl) fusionEl.textContent = msg.fusion || 'off';
+            if (fusionEl) fusionEl.textContent = msg.fusion || 'Off';
             if (pressVal) pressVal.textContent =
                 (msg.pressure_pa === null || msg.pressure_pa === undefined) ? '—' : Math.round(msg.pressure_pa) + ' Pa';
             if (tempVal) tempVal.textContent =
                 (msg.temp_c === null || msg.temp_c === undefined) ? '—' : msg.temp_c.toFixed(1) + ' °C';
             drawSparkline(pressSpark, msg.pressure_hist);
             drawSparkline(tempSpark, msg.temp_hist);
+            if (resetBtn) resetBtn.disabled = (msg.fusion_key === 'off');
             if (!window.__gotSensor) { window.__gotSensor = true; D('first sensor frame'); }
         } catch (e) {
             D('sensor draw threw: ' + (e && e.message), 'error');

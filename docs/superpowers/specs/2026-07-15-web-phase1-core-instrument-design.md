@@ -392,6 +392,16 @@ six phases without a rewrite at each step.
 
 ### 8.1 Layout regions
 
+> **Superseded 2026-07-28 (dock layout).** The corner-pinned regions below grew
+> into each other once every phase had added its block (the diagnostics panel
+> covered the IR card and the event-log console). The regions still exist
+> conceptually, but each is now a **card inside one of two column-wrapping
+> docks** — `#left-dock` (telemetry, sensors, SLAM HUD, IR monitor,
+> diagnostics) and `#right-rail` (one card per control group) — bounded by the
+> band between the top bar and the console, so an over-full stack wraps into a
+> new column instead of overlapping. New UI goes in a dock, never in its own
+> `position: fixed` corner. See `docs/web-ui-testing.md` -> "The dock layout".
+
 Full-bleed `<canvas>` for the 3D scene underneath everything; fixed
 overlay regions on top, each pinned to a screen edge/corner so later
 phases add *regions*, not restructure existing ones:

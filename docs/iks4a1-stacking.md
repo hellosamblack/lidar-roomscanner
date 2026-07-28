@@ -135,6 +135,51 @@ the SLAM rotation prior). Knobs live at the top of `rs_lsm.c`:
   With the LIS2MDL readable via the hub, run a tilt-compensated e-compass (datasheets dt0058/dt0060) to pin
   absolute heading — the biggest orientation-accuracy win available, and the strongest reason to fix the hub.
 
+## Orientation-noise pass (applied 2026-07-28, measured on-target)
+
+Symptom: with the board stationary on a light tripod, the web point cloud shimmered at its edges. The
+orientation was carrying ~0.14° mean / 0.25° p95 of zero-mean change per frame — net 0.14° over 15 s
+against 22.9° summed absolute, i.e. essentially all noise — which the renderer swings on a 3 m lever arm.
+
+The dominant cause was **aliasing in the firmware, not sensor grade**. SFLP runs at 480 Hz; the host takes
+one sample per ToF frame (~30 Hz); `rs_lsm_read_latest` kept only the **last** quaternion of each ~16-sample
+FIFO batch. Point-sampling a 480 Hz signal at 30 Hz folds the whole 0–240 Hz noise band down into 0–15 Hz,
+and there was no anti-alias filter anywhere in the chain.
+
+- **`RS_LSM_SFLP_AVERAGE` (new, on)** — average the whole FIFO batch instead of keeping its last sample.
+  This is the correct decimation; white noise falls as √N. Sign-align each sample to the accumulator first
+  (q and −q are the same rotation), then component-wise mean + renormalize — exact enough at
+  milliradian spread, and no iteration.
+- **`RS_LSM_GY_LPF1_ON` / `_BW` (new, on, 110b = 28.4 Hz)** — the gyro's LPF1 was **bypassed** (POR default),
+  leaving the chain 187 Hz wide at ODR 480 Hz (AN5763 Table 20, the ODR = 480 Hz block — do not read the
+  342 Hz row, that is 960 Hz). Handheld motion lives below ~20 Hz. Phase is −50.7° @ 20 Hz ≈ 7 ms group
+  delay, a fifth of a frame. **Caveat:** AN5763 Figure 6 does not draw the SFLP tap point, so it is not
+  documented whether LPF1 reaches the fusion — flip `RS_LSM_GY_LPF1_ON` to A/B it rather than assuming.
+- **LIS2MDL `CFG_REG_B = 0x03` (new)** — `OFF_CANC | LPF`. CFG_REG_B was left at its 0x00 POR default, i.e.
+  the 4.5 mG RMS / ODR÷2 (50 Hz) corner of AN5069 Table 9; this moves it to the 3.0 mG RMS / ODR÷4 (25 Hz)
+  corner. The LPF costs no extra current; OFF_CANC additionally runs alternating set/reset pulses so the AMR
+  bridge's own offset is cancelled sample-to-sample (AN5069 §8) rather than drifting under the host's static
+  `mag_cal.json` hard-iron fit. 25 Hz is still ~10× what a 20 s yaw-fusion time constant can use.
+
+**Measured** (same rig, same 15 s window, host smoothing bypassed so this is the firmware alone), as
+frame-to-frame change of the rotation actually applied to the broadcast cloud:
+
+| | deg/frame | edge motion at 3 m |
+|---|---|---|
+| before | 0.0329 | 1.72 mm |
+| after | 0.0118 | 0.62 mm |
+
+**2.8× from firmware.** Streams 7/9/10 all still at 30.3 Hz, 0 drops, 0 gaps.
+
+**The floor is now the wire format, not the sensor.** The residual measures a *coherence* of 0.14 — below
+the ~0.32 of white noise at window 10, i.e. strongly anti-correlated, which is the signature of quantization
+dither rather than either sensor noise or real tripod motion. That fits: the SFLP game-rotation vector is
+batched to FIFO as **IEEE-754 half-precision** components (`sflp_word_to_quat`), whose ~4.9e-4 step near 0.7
+is ≈0.057° of angle. Averaging the batch dithers across that step, which is why it helped at all; no amount
+of additional upstream filtering will go below it. Going further means leaving the SFLP FIFO format —
+batching raw XL/GY and fusing on the host, or reading the gravity/gbias vectors — which is a much larger
+change and was not attempted.
+
 ## RESOLVED (2026-07-10) — stacked I3C now streams the full sensor suite at 27.85 fps
 
 The "shared I3C fails at operating speed when stacked" conflict below is **fixed in firmware**. Root cause

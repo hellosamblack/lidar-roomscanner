@@ -21,8 +21,8 @@ transformed, and *re-encoded* into these `/ws` messages.
 One socket, two encodings, distinguished by WS frame opcode:
 
 - **Binary frames** — high-rate render payloads. First 4 bytes are a little-endian `u32` **tag**;
-  the frontend switches on it (`app.js`). Tags: `TAG_POINT_CLOUD = 1`, `TAG_IR_IMAGE = 2`
-  (`web.py:75-76`). Add new binary tags here and keep them contiguous.
+  the frontend switches on it (`app.js`). Tags: `TAG_POINT_CLOUD = 1`, `TAG_IR_IMAGE = 2`,
+  `TAG_MESH = 3`, `TAG_SURFACE = 4` (`web.py`). Add new binary tags here and keep them contiguous.
 - **Text frames** — JSON objects, always with a `"type"` string field. Everything that isn't a
   per-frame render payload (metrics, sensors, UI state, control echoes, logs) is JSON.
 
@@ -35,20 +35,41 @@ for display (units, precision).
 
 | tag | name | layout | built by |
 |-----|------|--------|----------|
-| 1 | `POINT_CLOUD` | `u32 tag · f32[3N] positions · f32[3N] colors` (positions then colors, concatenated) | `pack_point_cloud` `web.py:204` |
+| 1 | `POINT_CLOUD` | `u32 tag · f32[3N] positions · f32[3N] colors` (positions then colors, concatenated) | `pack_point_cloud` |
 | 2 | `IR_IMAGE` | `u32 tag · u16 width · u16 height · u8[w*h*3] RGB` | `pack_ir_image` `web.py:212` |
 | 3 | `MESH` | `9×u32 header (tag, mesh_seq, flags, then 6 counts) · per-submesh f32 pos·f32 col·u32 idx · floor f32 pos·u32 line-idx` | `pack_mesh` (web Phase 4) — a SLAM `MeshPacket`; flags bit0=decimated, bit1=walls_split; emitted on the mesh-throttle cadence only |
+| 4 | `SURFACE` | `u32 tag · u16 w · u16 h · u32 n_tris · f32[3·W·H] positions · f32[3·W·H] colors · u8[W·H] valid · u32[3·T] tri_indices · u8[W·H] covered` | `pack_surface_cloud` — grid-ordered positions+colors + triangulated mesh indices; sent instead of POINT_CLOUD when `surface_enabled` is true |
 
-`POINT_CLOUD` goes out every broadcast tick (so late joiners see data within ~36 ms);
+`POINT_CLOUD` (or `SURFACE` in surface mode) goes out every broadcast tick (so late joiners see data within ~36 ms);
 `IR_IMAGE` rides a slower cadence (`web.py:855`, `:869`).
+
+**Frame of reference — positions are gravity-aligned, not sensor-frame.** `POINT_CLOUD`/`SURFACE`
+positions are pre-multiplied server-side by `display_rotation(fused_quat)` — the canonical
+`T_WORLD_TO_CV @ R @ T_CV_TO_BODY` sandwich from `docs/coordinate-frames.md`, the same matrix shipped
+as the `sensor` message's `rot` — so the scene reads upright however the board is held (desktop-panel
+orbit parity). `IR_IMAGE` is rolled to match, snapped to the nearest 90° via `ir_gravity_rot`, so
+**`width`/`height` swap on a 90°/270° roll** (54×42 ↔ 42×54): clients must size from the message and
+follow its aspect, never assume landscape. With no orientation yet (ToF-only session, or before the
+first stream-9 sample) both fall back to the raw sensor frame — identity rotation, zero turns.
+The client applies **no** further rotation; doing so would double-count.
+
+The display quat is **smoothed** first (`OrientationSmoother`). Raw fused orientation carries ~0.14°
+mean / 0.25° p95 of zero-mean noise per update, which a 3 m lever arm turns into visible shimmer at the
+cloud edges; a magnitude deadband can't suppress it without also dragging on a slow deliberate pan
+(~0.7°/frame), so the gate is directional **coherence** over a trailing window — the same discriminator
+as the SLAM stationarity hold, sharing `roomscan.motion.coherence`. Measured on the live rig
+(2026-07-28): 1.72 mm → 0.34 mm mean edge motion at 3 m, with coherent motion still tracked 1:1.
+Smoothing is **display-only** — SLAM reads `sensor_state.fused_quat()` directly, so it can never reach
+the reconstruction, and the `sensor` message's `rot` stays **raw** so the gizmo remains an honest
+sensor readout.
 
 ### JSON (`type` → shape)
 
 | type | key fields | built by | notes |
 |------|-----------|----------|-------|
 | `metrics` | `render_fps`, `streams[]{stream_id,label,device_hz,host_hz,bytes_per_s,jitter_ms}`, `link_bytes_per_s`, `resources`(null), `drops`, `gaps` | `build_metrics_message` `web.py:221` | metrics cadence; `device_hz`/`jitter_ms` may be null |
-| `sensor` | `have_quat`, `rot`[9 row-major], `heading`, `pressure_pa`, `temp_c`, `mag_ut`[3], `fusion`, `pressure_hist[]`, `temp_hist[]` | `build_sensor_message` `web.py:246` | **None (silent) on a ToF-only session**; `rot`/`heading` computed server-side so the frontend never re-derives sign/permutation matrices — see `docs/coordinate-frames.md` |
-| `state` | `color_mode`, `ir_colormap`, `ir_freeze`, `mode`(realtime\|slam), `slam_trajectory`, `slam_walls`, `slam_follow`, `idle_enabled`, `idle_level`(soft\|hard) | `_state_message` | echoed after every `set_color`/`set_ir`/`set_mode`/`slam_opt`/`set_idle` (one-way flow) **and** sent first on connect. Web Phase 5: the display prefs (all but `mode`) + the two sensor auto-idle prefs are seeded from + persisted to the shared `roomscan.toml` [viewer]` table (`web.ui_from_config`/`_persist_ui`), so a reconnect **and** a server restart bring a tab current; `mode` is not persisted (SLAM arms lazily → restart is always real-time) |
+| `sensor` | `have_quat`, `rot`[9 row-major], `heading`, `pressure_pa`, `temp_c`, `mag_ut`[3], `fusion`(human label), `fusion_key`(raw status), `has_mag_cal`, `pressure_hist[]`, `temp_hist[]` | `build_sensor_message` `web.py:246` | **None (silent) on a ToF-only session**; `rot`/`heading` computed server-side so the frontend never re-derives sign/permutation matrices — see `docs/coordinate-frames.md`. `fusion` is a human-friendly label (`_FUSION_LABELS`); `fusion_key` is the raw `YawFusion.status` (`off`/`init`/`active`/`gated:no-cal`/`gated:gimbal`/`gated:motion`/`gated:anomaly`). `pressure_hist`/`temp_hist` are decimated (1 sample/2 s, ~10 min window) for sparklines |
+| `state` | `color_mode`, `ir_colormap`, `ir_freeze`, `view_colormap`(turbo\|gray), `point_size`, `point_size_auto`, `surface_enabled`, `surface_mode`(grid\|spatial), `surface_threshold_pct`, `mode`(realtime\|slam), `slam_trajectory`, `slam_walls`, `slam_follow`, `idle_enabled`, `idle_level`(soft\|hard) | `_state_message` | echoed after every `set_color`/`set_ir`/`set_view`/`set_mode`/`slam_opt`/`set_idle` (one-way flow) **and** sent first on connect. Web Phase 5: the display prefs (all but `mode`) + the two sensor auto-idle prefs are seeded from + persisted to the shared `roomscan.toml` [viewer]` table (`web.ui_from_config`/`_persist_ui`), so a reconnect **and** a server restart bring a tab current; `mode` is not persisted (SLAM arms lazily → restart is always real-time) |
 | `session` | `mode`(live\|replay), `source_label`, `has_live`, `recording{active,path,elapsed_s,bytes}`, `playback{is_replay,capture_name,paused,speed_fps,loop,position,total_frames}` | `build_session_message` `web.py:400` | broadcast on change **and** on the metrics cadence (so timer/position tick) |
 | `captures` | `items[]{name,bytes,mtime}` (newest first) | `build_captures_message` `web.py:354` | on connect, on `list_captures`, after a recording stops |
 | `slam` | `pose`[16], `follow{eye,center,up}`, `traj_tail[][3]`, `traj_len`, `fitness`, `rmse`, `tracking_lost`, `slam_ms`, `frames_integrated`, `mesh_seq`, `mesh_verts` | `build_slam_message` (web Phase 4) | every processed frame in SLAM mode; follow eye/center/up computed server-side; traj downsampled to ≤256 |
@@ -77,10 +98,12 @@ a `SessionController` (`ctrl is not None`) — absent in a `--replay`-launched p
 | `load_capture` | `name` | swap reader → replay (`sanitize_capture_name` → basename-only, `.bin`, must-exist; off-loop via `to_thread`) → echo `session` | `web.py:974` |
 | `go_live` | — | swap reader → live proxy → echo `session` | `web.py:982` |
 | `transport` | `action`(pause\|resume\|speed\|loop\|restart\|seek), `value` | playback control; `seek`/`restart` run off-loop via `to_thread` → echo `session` | `web.py:986` |
+| `set_view` | `colormap?`(turbo\|gray), `point_size?`, `point_size_auto?`, `surface?`, `surface_mode?`(grid\|spatial), `surface_threshold?` | 3D viewport display: colormap, point size, surface interpolation toggle + settings; all optional, only provided fields update → echo `state`. `point_size_auto` scales each point by its range from the sensor (a client-side shader uniform, no wire change) so every zone subtends the same solid angle; with it on, `point_size` means the size at **1 m of range** rather than metres | `web.py` |
 | `set_idle` | `enabled?`, `level?`(soft\|hard) | sensor auto-idle prefs (laser-wear reduction); persisted to `[viewer]` → echo `state`. Disabling cancels any armed idle timer. The idle itself is driven server-side off the viewer count (see below), not by an inbound message | this change |
 | `set_mode` | `mode`(realtime\|slam) | switch top-bar mode; arms/disarms the `SlamRunner` off-loop (lazy worker build) → echo `state` | web Phase 4 |
 | `slam_opt` | `trajectory?`, `walls?`(solid\|split), `follow?` | SLAM display toggles → echo `state` | web Phase 4 |
 | `save` | — | write full-res `mapper.mesh()` + trajectory → `results/web_<ts>.ply`/`.tum` (off-loop); toast + `saved` echo. Disabled in real-time / empty map | web Phase 4 |
+| `reset_fusion` | — | reset the `YawFusion` filter state (clears accumulated yaw correction); the heading snaps fresh on the next valid magnetometer sample. Publishes `"heading fusion reset"` on the bus | sensors card |
 
 ## Invariants (hold when adding a message)
 
@@ -115,7 +138,9 @@ a `SessionController` (`ctrl is not None`) — absent in a `--replay`-launched p
 ## Frontend consumers
 
 9 vanilla ES modules under `host/src/roomscan/static/`, wired through a hub in `app.js` (no build step,
-no framework). Binary tags are demuxed in `ws.js`; each JSON `type` is routed to its module
+no framework), plus `layout.js` — a deliberately *classic* (non-module) script owning the two-dock
+column-wrapping layout and the diagnostics panel, so both survive a failure of the module graph
+(see `docs/web-ui-testing.md` -> "The dock layout"). Binary tags are demuxed in `ws.js`; each JSON `type` is routed to its module
 (`metrics.js`, `sensors.js`, `capture.js`, `controls.js`, `ir.js`, `slam.js`, …). `slam.js` (web Phase 4)
 renders the SLAM mesh/trajectory into `scene.js`'s single Three.js context (via a handle `app.js` passes
 it) and drives the follow camera — no second WebGL context. Saved maps download from a `/results/<name>`

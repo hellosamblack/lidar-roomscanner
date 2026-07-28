@@ -529,6 +529,17 @@ phases — (1) core real-time instrument, (2) sensors (IMU/env streams 9/10), (3
 legacy for a local-display box (it can't run on the GPU-less headless host), no longer imported by the web
 server, and it prints a deprecation notice on launch.
 
+**Parity gap found after the fact (2026-07-28, BUG-026):** "fully replaces" was not quite true — **gravity
+alignment of the live view was never ported**. It existed only in `panel.py` (IR pane via `ir_gravity_rot`,
+orbit-mode cloud via `T_WORLD_TO_CV @ R @ T_CV_TO_BODY`), so booting the board upside down rendered both the
+IR pane and the point cloud upside down in the web app. The orientation matrix was already on the wire as the
+`sensor` message's `rot`, but only the 2D gizmo consumed it. Now fixed with continuous full alignment
+(desktop-panel parity, owner's choice), plus a coherence-gated **display-only** smoother, because rotating
+the cloud by the raw quat swings sensor noise on the scene's lever arm. That in turn surfaced BUG-027
+(firmware aliasing) — the two are worth reading together. Wire semantics in `docs/web-protocol.md`; when
+auditing the rest of the panel's feature set for other unported behaviour, this is the precedent that it can
+happen silently.
+
 **"Showcase" is not a separate phase (owner clarification, 2026-07-16):** the earlier plan listed a 6th
 "showcase mode" phase, but Showcase was only ever **another name for SLAM mapping** — the record → build →
 save flow — a naming artifact from earlier in the project. The desktop panel already dissolved it ("SLAM

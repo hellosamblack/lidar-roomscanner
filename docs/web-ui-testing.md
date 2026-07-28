@@ -57,7 +57,7 @@ capture controls `btn-record`, `btn-refresh-caps`, `#cap-list .cap-row`,
 `btn-playpause`, `seg-speed button[data-fps=…]`, `chk-loop`, `seek`, and the
 Web-Phase-4 SLAM controls `#seg-mode button[data-mode=realtime|slam]`,
 `chk-slam-traj`, `chk-slam-follow`, `#seg-walls button[data-walls=split|solid]`,
-`btn-save`, `#saved-list .cap-row a`).
+`btn-save`, `#saved-list .cap-row a`, and the diagnostics toggle `diag-toggle`).
 
 **SLAM verification needs a stream-9 capture.** SLAM builds nothing from a capture
 with no IMU_QUAT (stream 9) — the mapper gets no rotation prior and loses tracking
@@ -72,6 +72,57 @@ feeding — SLAM is fed from the 30 Hz broadcaster only while in SLAM mode, so ~
 frames take ~11 s to integrate. `window.__gotMesh` and the diag line
 `slam.js: first mesh: N non-wall verts` confirm the mesh path (the *first* emit is
 an empty packet — N=0 — by design; later ones carry geometry).
+
+## The dock layout (why nothing overlaps)
+
+Every floating block lives in one of two **docks** — `#left-dock` (telemetry HUD,
+sensors, SLAM HUD, IR monitor, diagnostics) and `#right-rail` (one card per
+control group). A dock is a height-bounded **column-wrapping** flex container
+spanning the band between the top bar and the event-log console, so a stack that
+would run past the bottom of that band spills into a **new column** instead of
+overflowing onto whatever is below. `layout.js` (a *classic* script, so it keeps
+working when the ES module graph fails) keeps the band in sync with the measured
+top-bar/console heights and resolves the one collision CSS can't see — the left
+dock's columns marching into the right dock's — by degrading in order:
+
+1. collapse Diagnostics → 2. scroll the right dock (one column) →
+3. collapse the IR monitor body → 4. collapse the sensors body.
+
+Consequences when adding UI: **put a new block inside a dock** (as a `.card`
+child) rather than giving it its own `position: fixed` corner — a fixed block is
+outside the layout and *will* overlap something at some viewport size. Give it an
+explicit `width`, and mark any hideable body `.card-body` so the collapse
+degradation can reach it.
+
+Regression check — assert zero overlaps at whatever size you're testing (paste as
+a `--steps` `js`; it reports through `__diag`, which the tool prints):
+
+```js
+(function(){function c(r,d){return {left:Math.max(r.left,d.left),right:Math.min(r.right,d.right),
+top:Math.max(r.top,d.top),bottom:Math.min(r.bottom,d.bottom)}}var b=[];
+['left-dock','right-rail'].forEach(function(id){var e=document.getElementById(id);if(!e)return;
+var dr=e.getBoundingClientRect();[].slice.call(e.children).forEach(function(k){var r=c(k.getBoundingClientRect(),dr);
+if(r.right-r.left>1&&r.bottom-r.top>1)b.push({n:k.id||k.className,r:r})})});
+['topbar','log-console'].forEach(function(id){var e=document.getElementById(id);if(e)b.push({n:id,r:e.getBoundingClientRect()})});
+var bad=[];for(var i=0;i<b.length;i++)for(var j=i+1;j<b.length;j++){var a=b[i].r,d=b[j].r;
+if(Math.min(a.right,d.right)-Math.max(a.left,d.left)>1&&Math.min(a.bottom,d.bottom)-Math.max(a.top,d.top)>1)
+bad.push(b[i].n+' X '+b[j].n)}window.__diag('OVERLAP '+innerWidth+'x'+innerHeight+' n='+b.length+
+' overlaps='+bad.length+(bad.length?' :: '+bad.join(' | '):''));return bad.length})()
+```
+
+Verified 0 overlaps at 1600×1000, 1280×800, 1100×560 and 820×700, with the SLAM
+cards shown and the event log expanded to its 28vh maximum.
+
+## The diagnostics panel
+
+`window.__diag`'s on-page sink is now the collapsible `#diag-card` (header
+`#diag-toggle`, text sink still `#diag-log`, which `web_ui_shot.py` prints). It is
+**collapsed by default**, shows a line count — or a red error count — in its
+header, and **opens itself on the first error** so a silent module/import failure
+is still visible without devtools. Clicking the header persists the choice in
+`localStorage['roomscan.diag.collapsed']`, and an explicit choice wins over the
+auto-open. If you're driving a run where you want the log visible regardless:
+`document.getElementById('diag-card').classList.remove('collapsed')`.
 
 Driving gotchas (cost time in Web Phase 3):
 - **Wait for server-rendered lists before clicking them.** Rows built from a

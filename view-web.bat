@@ -33,6 +33,29 @@ if not exist "%VENV_PY%" (
     )
 )
 
+setlocal enabledelayedexpansion
+
+set "PIDS="
+for /f "tokens=5" %%A in ('netstat -ano ^| findstr /R /C:":8000 .*LISTENING"') do (
+    echo !PIDS! | find "%%A" >nul || set "PIDS=!PIDS! %%A"
+)
+
+if defined PIDS (
+    echo [warn] A server is already running on port 8000 ^(PID:!PIDS!^)
+    set /p response="Kill and restart? (y/N) "
+    if /i "!response!"=="y" (
+        echo [cleanup] Killing existing server ^(PID:!PIDS!^)...
+        for %%P in (!PIDS!) do (
+            taskkill /PID %%P /F >nul 2>&1 || echo [note] Could not kill process %%P; continuing anyway
+        )
+        timeout /t 1 /nobreak >nul
+    ) else (
+        echo [abort] Keeping existing server running. Exiting.
+        endlocal
+        exit /b 0
+    )
+)
+
 echo [run] Starting web viewer on http://localhost:8000/static/index.html
 echo [tip] Your browser opens automatically once the server is up. Press Ctrl+C here to stop.
 "%VENV_PY%" -m roomscan.web %*

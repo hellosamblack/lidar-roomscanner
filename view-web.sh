@@ -34,6 +34,35 @@ if ! "$VENV_PY" -c "import fastapi, uvicorn, numpy, serial, roomscan" >/dev/null
     "$VENV_PY" -m pip install --quiet -e "host[web]"
 fi
 
+check_and_handle_existing_server() {
+    local port=8000
+    local pids=""
+
+    if command -v lsof >/dev/null 2>&1; then
+        pids=$(lsof -ti :$port 2>/dev/null || true)
+    elif command -v netstat >/dev/null 2>&1; then
+        pids=$(netstat -tlnp 2>/dev/null | grep ":$port " | awk '{print $NF}' | cut -d'/' -f1 || true)
+    fi
+
+    if [ -n "$pids" ]; then
+        local formatted_pids
+        formatted_pids=$(echo "$pids" | tr '\n' ' ' | xargs)
+        echo "[warn] A server is already running on port $port (PID: $formatted_pids)"
+        read -p "Kill and restart? (y/N) " -n 1 -r response
+        echo
+        if [[ $response =~ ^[Yy]$ ]]; then
+            echo "[cleanup] Killing existing server (PID: $formatted_pids)..."
+            echo "$pids" | xargs -r kill -9 2>/dev/null || true
+            sleep 1
+        else
+            echo "[abort] Keeping existing server running. Exiting."
+            exit 0
+        fi
+    fi
+}
+
+check_and_handle_existing_server
+
 echo "[run] Starting web viewer on http://localhost:8000/static/index.html"
 echo "[tip] Your browser opens automatically once the server is up. Press Ctrl+C here to stop."
 exec "$VENV_PY" -m roomscan.web "$@"

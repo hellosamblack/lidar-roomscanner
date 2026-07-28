@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -27,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 import webbrowser
 import zlib
 from contextlib import asynccontextmanager
@@ -39,7 +41,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .colors import turbo
+from .colors import gray, turbo
 from .config import ViewerConfig
 from .control import CommandClient, CommandDispatcher
 from .decoder import StreamDecoder
@@ -68,8 +70,11 @@ from .sensors import (
     T_WORLD_TO_CV,
     YawFusion,
     absolute_heading,
+    ir_gravity_rot,
+    quat_mul,
     quat_to_matrix,
 )
+from .motion import coherence
 from .sources import FileSource, Recorder, SerialSource, UdpSource, get_best_source
 from .viewer import Stats, resolve_args
 
@@ -79,6 +84,7 @@ log = logging.getLogger("roomscan.web")
 TAG_POINT_CLOUD = 1
 TAG_IR_IMAGE = 2
 TAG_MESH = 3               # SLAM reconstruction mesh (web Phase 4)
+TAG_SURFACE = 4            # surface-interpolated point cloud (grid + triangles)
 
 # Broadcast cadences (seconds). Point cloud paces the outer loop at a 30 Hz
 # target (owner, 2026-07-16) -- the cap must sit at or above the source rate so
@@ -107,6 +113,8 @@ _SPEED_BASE_FPS = 30.0
 
 _VALID_COLOR_MODES = ("depth", "reflectance", "confidence")
 _VALID_IR_COLORMAPS = ("gray", "turbo")
+_VALID_VIEW_COLORMAPS = ("turbo", "gray")
+_VALID_SURFACE_MODES = ("grid", "spatial")
 _VALID_IDLE_LEVELS = ("soft", "hard")
 
 
@@ -147,6 +155,16 @@ class UiState:
     # the depth (soft = FSM standby, hard = XSHUT power-down). These ride the same
     # persisted-pref + `state` echo path as the display toggles so a settings UI
     # (or roomscan.toml) can drive them; the debounce delay is config-only.
+    view_colormap: str = "turbo"       # 3D viewport colormap: "turbo" | "gray"
+    point_size: float = 0.025          # Three.js point size, world units (sizeAttenuation); when
+                                       # point_size_auto it is the size at 1 m of RANGE instead
+    point_size_auto: bool = True       # scale each point by its range from the sensor, so every
+                                       # zone's splat subtends the same solid angle (the zone
+                                       # pitch grows as r*dtheta, so one fixed size cannot cover
+                                       # a near and a far surface at once)
+    surface_enabled: bool = False      # surface interpolation (triangulated mesh)
+    surface_mode: str = "grid"         # "grid" (relative depth %) | "spatial" (3D Euclidean)
+    surface_threshold_pct: float = 4.0 # grid: max depth gap %; spatial: % of mean depth -> metres
     idle_enabled: bool = True
     idle_level: str = "soft"           # "soft" | "hard"
 
@@ -202,14 +220,156 @@ def _cmd_status(tail: str) -> str | None:
     return None
 
 
-def select_colors(outputs: dict, deproj: Deprojector, color_mode: str):
+def _apply_colormap(vn: np.ndarray, colormap: str) -> np.ndarray:
+    return gray(vn) if colormap == "gray" else turbo(vn)
+
+
+def display_rotation(quat) -> np.ndarray | None:
+    """Body -> Open3D-CV-world rotation used to gravity-align the live display,
+    or None when there is no orientation yet (ToF-only session).
+
+    This is the one composed mapping from `docs/coordinate-frames.md`
+    (`T_WORLD_TO_CV @ R @ T_CV_TO_BODY`) — the same matrix the desktop panel
+    applied to its orbit-mode cloud (`panel.py:1337`) and the same one shipped to
+    the client as the gizmo's `rot`. Never re-derive it locally."""
+    if quat is None:
+        return None
+    return T_WORLD_TO_CV @ quat_to_matrix(*quat) @ T_CV_TO_BODY
+
+
+def rotate_points(pts: np.ndarray, rot: np.ndarray | None) -> np.ndarray:
+    """Rotate an (..., 3) array of CV-frame points by `rot`, returning float32.
+    A no-op (same array back) when `rot` is None or there are no points, so the
+    un-oriented path stays allocation-free."""
+    if rot is None or pts.size == 0:
+        return pts
+    return np.ascontiguousarray(pts @ rot.T, dtype=np.float32)
+
+
+def rotation_key(rot: np.ndarray | None):
+    """Cache key for `rot`: quantized so a stationary sensor keeps hitting the
+    cached point-cloud bytes, while real motion invalidates them."""
+    return None if rot is None else tuple(np.round(rot.ravel(), 3).tolist())
+
+
+def quat_slerp(a, b, t: float):
+    """Shortest-arc spherical interpolation between unit quats [w,x,y,z]."""
+    qa = np.asarray(a, dtype=np.float64)
+    qb = np.asarray(b, dtype=np.float64)
+    dot = float(qa @ qb)
+    if dot < 0.0:            # take the short way round (q and -q are the same rotation)
+        qb, dot = -qb, -dot
+    dot = min(1.0, max(-1.0, dot))
+    if dot > 0.9995:         # nearly parallel: lerp is numerically safer than slerp
+        q = qa + t * (qb - qa)
+    else:
+        theta = math.acos(dot)
+        s = math.sin(theta)
+        q = (math.sin((1.0 - t) * theta) / s) * qa + (math.sin(t * theta) / s) * qb
+    n = float(np.linalg.norm(q))
+    return tuple(qa) if n < 1e-12 else tuple(q / n)
+
+
+def quat_angle_deg(a, b) -> float:
+    """Angle in degrees between two unit quats (rotation-aware, sign-agnostic)."""
+    dot = abs(float(np.asarray(a, dtype=np.float64) @ np.asarray(b, dtype=np.float64)))
+    return float(math.degrees(2.0 * math.acos(min(1.0, max(-1.0, dot)))))
+
+
+def quat_rotvec(a, b) -> np.ndarray:
+    """Rotation vector (axis × angle, in degrees) taking unit quat `a` to `b`."""
+    qa = np.asarray(a, dtype=np.float64)
+    qb = np.asarray(b, dtype=np.float64)
+    if qa @ qb < 0.0:
+        qb = -qb                                   # shortest arc
+    conj = np.array([qa[0], -qa[1], -qa[2], -qa[3]])
+    rel = np.asarray(quat_mul(tuple(conj), tuple(qb)), dtype=np.float64)
+    if rel[0] < 0.0:
+        rel = -rel
+    v = rel[1:]
+    n = float(np.linalg.norm(v))
+    if n < 1e-12:
+        return np.zeros(3)
+    angle = 2.0 * math.atan2(n, float(rel[0]))
+    return math.degrees(angle) * (v / n)
+
+
+class OrientationSmoother:
+    """Coherence-gated low-pass on the gravity-alignment quaternion.
+
+    Measured on a *stationary* rig (2026-07-28, live Ethernet stream): the fused
+    orientation carries ~0.14 deg mean / 0.25 deg p95 of zero-mean noise per
+    update — net rotation 0.14 deg over 15 s against 22.9 deg of summed absolute
+    change, i.e. essentially pure jitter. Rotating the cloud by that raw signal
+    swings a 3 m lever arm, which is why it reads as shimmer at the cloud edges.
+
+    A magnitude deadband cannot fix this, for the same reason it could not fix
+    the SLAM translation jitter (slam/motion.py): 0.25 deg/frame of noise
+    overlaps a slow deliberate pan (~20 deg/s = 0.7 deg/frame at 28 fps), so any
+    threshold that suppresses the noise also drags on real aiming. The
+    discriminator that separates them is directional COHERENCE — real rotation
+    accumulates in a consistent direction (-> 1), noise cancels (-> 1/sqrt(N)).
+    So this reuses `slam.motion.coherence` on the per-update rotation vectors:
+    incoherent history damps by `floor_alpha`, coherent motion passes 1:1, and a
+    single large step short-circuits the window so a fast flick never lags.
+
+    Strictly display-only. SLAM feeds off `sensor_state.fused_quat()` directly,
+    so a smoothed display quat can never reach the reconstruction — the same
+    invariant that made the SLAM stationarity hold safe.
+    """
+
+    def __init__(self, window: int = 10, coherence_thresh: float = 0.5,
+                 snap_deg: float = 2.0, floor_alpha: float = 0.05):
+        self.window = int(window)
+        self.coherence_thresh = float(coherence_thresh)
+        self.snap_deg = float(snap_deg)
+        self.floor_alpha = float(floor_alpha)
+        self._held: tuple[float, float, float, float] | None = None
+        self._prev_raw: tuple[float, float, float, float] | None = None
+        self._hist: deque = deque(maxlen=self.window)
+
+    def _alpha(self, delta_deg: float) -> float:
+        # A single large step is motion whatever the history says -- act now.
+        if delta_deg >= self.snap_deg:
+            return 1.0
+        # Never suppress before there's enough evidence to call it jitter.
+        if len(self._hist) < self.window:
+            return 1.0
+        coh = coherence(np.array(self._hist))
+        if coh <= self.coherence_thresh:
+            return self.floor_alpha
+        span = max(1.0 - self.coherence_thresh, 1e-9)
+        ramp = (coh - self.coherence_thresh) / span
+        return self.floor_alpha + (1.0 - self.floor_alpha) * ramp
+
+    def update(self, quat):
+        """Feed the newest fused quat; return the smoothed one to display."""
+        if quat is None:
+            return None
+        quat = tuple(float(v) for v in quat)
+        if self._held is None:
+            # First sample: adopt outright. Easing in from identity would swing
+            # the whole scene through a large arc on the first frame.
+            self._held = self._prev_raw = quat
+            return self._held
+        # Always measure increments RAW-to-RAW, never against the held value, or
+        # damping would feed back into the motion estimate and lock the gate shut.
+        self._hist.append(quat_rotvec(self._prev_raw, quat))
+        self._prev_raw = quat
+        self._held = quat_slerp(self._held, quat,
+                                self._alpha(quat_angle_deg(self._held, quat)))
+        return self._held
+
+
+def select_colors(outputs: dict, deproj: Deprojector, color_mode: str,
+                  colormap: str = "turbo"):
     """Deproject depth and colorize by the selected plane (§7.2).
 
     Returns (pts, colors, fell_back): pts (N,3) float32 metres, colors (N,3)
     float32 in [0,1], and fell_back True iff the requested non-depth plane was
     missing this frame and depth coloring was substituted. Coloring reuses the
-    validity mask (finite, >0, < max_range) + min-max normalize + turbo, exactly
-    as the classic viewer. `color_mode == "depth"` colors by deprojected Z.
+    validity mask (finite, >0, < max_range) + min-max normalize + turbo/gray,
+    exactly as the classic viewer. `color_mode == "depth"` colors by deprojected Z.
     """
     depth = outputs["depth"]
     pts = deproj(depth)
@@ -230,7 +390,7 @@ def select_colors(outputs: dict, deproj: Deprojector, color_mode: str):
             vals = plane[valid].astype(np.float64, copy=False)
 
     vn = (vals - vals.min()) / max(float(np.ptp(vals)), 1e-6)
-    colors = turbo(vn)
+    colors = _apply_colormap(vn, colormap)
     return pts.astype(np.float32, copy=False), colors.astype(np.float32, copy=False), fell_back
 
 
@@ -240,6 +400,73 @@ def pack_point_cloud(pts: np.ndarray, colors: np.ndarray) -> bytes:
     pos = np.ascontiguousarray(pts, dtype="<f4").ravel()
     col = np.ascontiguousarray(colors, dtype="<f4").ravel()
     return struct.pack("<I", TAG_POINT_CLOUD) + pos.tobytes() + col.tobytes()
+
+
+def select_surface(outputs: dict, deproj: Deprojector, color_mode: str,
+                   colormap: str = "turbo", surface_mode: str = "grid",
+                   threshold_pct: float = 4.0):
+    """Grid-structured coloring + triangulation for surface mode.
+
+    Returns (pts_grid, colors_grid, valid, triangles, covered, fell_back):
+    pts_grid (h,w,3) f32, colors_grid (h,w,3) f32, valid (h,w) bool,
+    triangles (T,3) int64, covered (h*w,) bool, fell_back bool."""
+    from .surface import grid_triangles, grid_triangles_3d
+
+    depth = outputs["depth"]
+    pts_grid, valid = deproj.grid(depth)
+    fell_back = False
+
+    if color_mode == "depth":
+        vals = pts_grid[..., 2]
+    else:
+        plane = outputs.get(color_mode)
+        if plane is None:
+            fell_back = True
+            vals = pts_grid[..., 2]
+        else:
+            vals = plane.astype(np.float64, copy=False)
+
+    valid_vals = vals[valid]
+    if valid_vals.size > 0:
+        lo, hi = float(valid_vals.min()), float(valid_vals.max())
+    else:
+        lo, hi = 0.0, 1.0
+    rng = max(hi - lo, 1e-6)
+    vn = np.clip((vals - lo) / rng, 0.0, 1.0)
+    colors_grid = _apply_colormap(vn, colormap)
+    colors_grid[~valid] = 0.0
+
+    if surface_mode == "spatial":
+        mean_z = float(np.mean(pts_grid[valid, 2])) if np.any(valid) else 1.0
+        threshold_m = max((threshold_pct / 100.0) * mean_z, 1e-6)
+        triangles, covered = grid_triangles_3d(pts_grid, valid, threshold_m)
+    else:
+        triangles, covered = grid_triangles(pts_grid, valid, threshold_pct)
+
+    return (pts_grid.astype(np.float32, copy=False),
+            colors_grid.astype(np.float32, copy=False),
+            valid, triangles, covered, fell_back)
+
+
+def pack_surface_cloud(pts_grid: np.ndarray, colors_grid: np.ndarray,
+                       valid: np.ndarray, triangles: np.ndarray,
+                       covered: np.ndarray) -> bytes:
+    """SURFACE binary (tag 4): grid-ordered positions + colors + triangle mesh.
+
+    Layout: u32 tag=4 · u16 w · u16 h · u32 n_tris ·
+    f32[3*W*H] positions · f32[3*W*H] colors · u8[W*H] valid ·
+    u32[3*T] tri_indices · u8[W*H] covered."""
+    h, w = pts_grid.shape[:2]
+    n_tris = len(triangles)
+    pos = np.ascontiguousarray(pts_grid.reshape(-1, 3), dtype="<f4").ravel()
+    col = np.ascontiguousarray(colors_grid.reshape(-1, 3), dtype="<f4").ravel()
+    val = np.ascontiguousarray(valid.ravel(), dtype=np.uint8)
+    tri = (np.ascontiguousarray(triangles.ravel(), dtype="<u4")
+           if n_tris > 0 else np.array([], dtype="<u4"))
+    cov = np.ascontiguousarray(covered, dtype=np.uint8)
+    header = struct.pack("<IHHI", TAG_SURFACE, w, h, n_tris)
+    return (header + pos.tobytes() + col.tobytes() + val.tobytes()
+            + tri.tobytes() + cov.tobytes())
 
 
 def pack_ir_image(rgb: np.ndarray) -> bytes:
@@ -373,6 +600,17 @@ def build_metrics_message(snapshot: MetricsSnapshot) -> dict:
     }
 
 
+_FUSION_LABELS = {
+    "off": "Off",
+    "init": "Initializing",
+    "active": "Active",
+    "gated:no-cal": "No mag calibration",
+    "gated:gimbal": "Gimbal lock",
+    "gated:motion": "Fast motion",
+    "gated:anomaly": "Mag anomaly",
+}
+
+
 def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | None) -> dict | None:
     """SensorState -> `sensor` JSON dict (streams 9/10), or None when there is no
     sensor data at all (so the broadcaster stays silent on a ToF-only session).
@@ -386,14 +624,14 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
     """
     quat = sensor_state.fused_quat()
     env = sensor_state.latest_env()
-    press_hist = sensor_state.pressure_history()
-    temp_hist = sensor_state.temp_history()
-    if quat is None and env is None and press_hist.size == 0:
+    press_spark = sensor_state.pressure_spark_history()
+    temp_spark = sensor_state.temp_spark_history()
+    if quat is None and env is None and press_spark.size == 0:
         return None
 
     rot = None
-    if quat is not None:
-        r = T_WORLD_TO_CV @ quat_to_matrix(*quat) @ T_CV_TO_BODY
+    r = display_rotation(quat)
+    if r is not None:
         rot = [round(float(v), 5) for v in r.reshape(-1)]   # row-major 9
 
     heading = None
@@ -406,6 +644,7 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
         if quat is not None:
             heading = round(absolute_heading(quat, tuple(mag)), 1)
 
+    raw_status = sensor_state.fusion_status()
     return {
         "type": "sensor",
         "have_quat": quat is not None,
@@ -414,9 +653,11 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
         "pressure_pa": round(float(env.pressure_pa), 1) if env is not None else None,
         "temp_c": round(float(env.temp_c), 2) if env is not None else None,
         "mag_ut": mag_out,
-        "fusion": sensor_state.fusion_status(),
-        "pressure_hist": [round(float(v), 1) for v in press_hist.tolist()],
-        "temp_hist": [round(float(v), 2) for v in temp_hist.tolist()],
+        "fusion": _FUSION_LABELS.get(raw_status, raw_status),
+        "fusion_key": raw_status,
+        "has_mag_cal": mag_cal is not None,
+        "pressure_hist": [round(float(v), 1) for v in press_spark.tolist()],
+        "temp_hist": [round(float(v), 2) for v in temp_spark.tolist()],
     }
 
 
@@ -442,6 +683,11 @@ def resolve_command(name: str, param) -> tuple[CommandCode, int, str] | None:
 def _state_message(ui: UiState) -> dict:
     return {"type": "state", "color_mode": ui.color_mode,
             "ir_colormap": ui.ir_colormap, "ir_freeze": ui.ir_freeze,
+            "view_colormap": ui.view_colormap, "point_size": ui.point_size,
+            "point_size_auto": ui.point_size_auto,
+            "surface_enabled": ui.surface_enabled,
+            "surface_mode": ui.surface_mode,
+            "surface_threshold_pct": ui.surface_threshold_pct,
             "mode": ui.mode, "slam_trajectory": ui.slam_trajectory,
             "slam_walls": ui.slam_walls, "slam_follow": ui.slam_follow,
             "idle_enabled": ui.idle_enabled, "idle_level": ui.idle_level}
@@ -472,6 +718,15 @@ def ui_from_config(cfg: ViewerConfig) -> UiState:
     if cfg.ir_colormap in _VALID_IR_COLORMAPS:
         ui.ir_colormap = cfg.ir_colormap
     ui.ir_freeze = bool(cfg.ir_freeze_range)
+    if cfg.view_colormap in _VALID_VIEW_COLORMAPS:
+        ui.view_colormap = cfg.view_colormap
+    if 0.001 <= float(cfg.web_point_size) <= 1.0:   # same range `set_view` enforces
+        ui.point_size = float(cfg.web_point_size)
+    ui.point_size_auto = bool(cfg.web_point_size_auto)
+    ui.surface_enabled = bool(cfg.surface_enabled)
+    if cfg.surface_mode in _VALID_SURFACE_MODES:
+        ui.surface_mode = cfg.surface_mode
+    ui.surface_threshold_pct = float(cfg.surface_threshold_pct)
     ui.slam_trajectory = bool(cfg.slam_trajectory)
     if cfg.slam_walls in _VALID_WALL_MODES:
         ui.slam_walls = cfg.slam_walls
@@ -489,6 +744,12 @@ def apply_ui_to_config(ui: UiState, cfg: ViewerConfig) -> None:
     cfg.color = ui.color_mode
     cfg.ir_colormap = ui.ir_colormap
     cfg.ir_freeze_range = bool(ui.ir_freeze)
+    cfg.view_colormap = ui.view_colormap
+    cfg.web_point_size = float(ui.point_size)
+    cfg.web_point_size_auto = bool(ui.point_size_auto)
+    cfg.surface_enabled = bool(ui.surface_enabled)
+    cfg.surface_mode = ui.surface_mode
+    cfg.surface_threshold_pct = float(ui.surface_threshold_pct)
     cfg.slam_trajectory = bool(ui.slam_trajectory)
     cfg.slam_walls = ui.slam_walls
     cfg.slam_follow = bool(ui.slam_follow)
@@ -1282,6 +1543,11 @@ async def _broadcaster() -> None:
     last_item = None          # (header, outputs); kept so IR/metrics tick when slot is idle
     last_pc_key = None        # (seq, color_mode) -> cached packed point cloud
     last_pc_bytes = None
+    # Display-only de-jitter of the gravity alignment. Lazily created like
+    # `state.deproj`, so a hand-built state (tests) doesn't have to know about it.
+    smoother = getattr(state, "orientation_smoother", None)
+    if smoother is None:
+        smoother = state.orientation_smoother = OrientationSmoother()
     last_ir = 0.0
     last_metrics = 0.0
     last_sensor = 0.0
@@ -1320,19 +1586,42 @@ async def _broadcaster() -> None:
             if state.deproj is None:
                 state.deproj = Deprojector(w, h, state.args.fov_h, state.args.fov_v)
 
-            # POINT_CLOUD every tick (so late joiners see data within ~36ms),
-            # but only in real-time mode -- SLAM mode replaces the cloud with the
-            # reconstructed mesh, so skip the deproject+send entirely there.
-            # Cache the packed bytes; rebuild only when the frame or color mode
-            # changed, so a stalled feed doesn't re-deproject 28x/s for nothing.
+            # Gravity-align the live display with the fused orientation, so the
+            # scene reads upright however the board is held (desktop-panel orbit
+            # parity, panel.py:1332-1337). Raw fused quat, no yaw baseline --
+            # gravity is absolute. None on a ToF-only session => sensor frame.
+            # Smoothed display-side only: the raw quat's ~0.14 deg/update noise
+            # becomes visible shimmer once it swings a 3 m lever arm.
+            grav_quat = smoother.update(state.sensor_state.fused_quat())
+            grav_rot = display_rotation(grav_quat)
+
+            # POINT_CLOUD (or SURFACE) every tick (so late joiners see data
+            # within ~36ms), but only in real-time mode -- SLAM mode replaces
+            # the cloud with the reconstructed mesh.  Cache the packed bytes;
+            # rebuild only when the frame, orientation, color mode, colormap, or
+            # surface settings changed.
             if ui.mode == "realtime":
-                key = (header.seq, ui.color_mode)
+                surf_key = ((ui.surface_enabled, ui.surface_mode,
+                             ui.surface_threshold_pct) if ui.surface_enabled
+                            else None)
+                key = (header.seq, ui.color_mode, ui.view_colormap, surf_key,
+                       rotation_key(grav_rot))
                 if key != last_pc_key:
-                    pts, colors, fell_back = select_colors(outputs, state.deproj, ui.color_mode)
+                    if ui.surface_enabled:
+                        pg, cg, val, tris, cov, fell_back = select_surface(
+                            outputs, state.deproj, ui.color_mode,
+                            ui.view_colormap, ui.surface_mode,
+                            ui.surface_threshold_pct)
+                        last_pc_bytes = pack_surface_cloud(
+                            rotate_points(pg, grav_rot), cg, val, tris, cov)
+                    else:
+                        pts, colors, fell_back = select_colors(
+                            outputs, state.deproj, ui.color_mode, ui.view_colormap)
+                        last_pc_bytes = pack_point_cloud(
+                            rotate_points(pts, grav_rot), colors)
                     if fell_back:
                         _log_debounced(state, bus, f"color-miss:{ui.color_mode}",
                                        f"color mode {ui.color_mode!r} unavailable this frame, showing depth")
-                    last_pc_bytes = pack_point_cloud(pts, colors)
                     last_pc_key = key
                 if last_pc_bytes is not None:
                     await _broadcast_bytes(clients, last_pc_bytes)
@@ -1367,6 +1656,13 @@ async def _broadcaster() -> None:
                         vmin = vmax = None
                     rgb = reflectance_to_rgb(refl, colormap=ui.ir_colormap,
                                              vmin=vmin, vmax=vmax, upscale=1)
+                    # Roll the pane to the nearest 90 deg so its "down" is
+                    # physical down, matching the gravity-aligned cloud. Same
+                    # smoothed quat, so the pane can't flap between turns when
+                    # the sensor sits near a 45 deg snap boundary.
+                    steps = ir_gravity_rot(grav_quat) if grav_quat is not None else 0
+                    if steps:
+                        rgb = np.rot90(rgb, steps)
                     await _broadcast_bytes(clients, pack_ir_image(rgb))
                 else:
                     _log_debounced(state, bus, "ir-miss",
@@ -1520,6 +1816,40 @@ async def _handle_inbound(state, msg: dict) -> None:
         _persist_ui(state)
         await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
 
+    elif mtype == "set_view":
+        changed = False
+        if "colormap" in msg:
+            if msg["colormap"] not in _VALID_VIEW_COLORMAPS:
+                log.warning("invalid set_view colormap: %r", msg.get("colormap"))
+                return
+            ui.view_colormap = msg["colormap"]
+            changed = True
+        if "point_size" in msg:
+            ps = float(msg["point_size"])
+            if 0.001 <= ps <= 1.0:
+                ui.point_size = ps
+                changed = True
+        if "point_size_auto" in msg:
+            ui.point_size_auto = bool(msg["point_size_auto"])
+            changed = True
+        if "surface" in msg:
+            ui.surface_enabled = bool(msg["surface"])
+            changed = True
+        if "surface_mode" in msg:
+            if msg["surface_mode"] not in _VALID_SURFACE_MODES:
+                log.warning("invalid set_view surface_mode: %r", msg.get("surface_mode"))
+                return
+            ui.surface_mode = msg["surface_mode"]
+            changed = True
+        if "surface_threshold" in msg:
+            t = float(msg["surface_threshold"])
+            if 0.1 <= t <= 50.0:
+                ui.surface_threshold_pct = t
+                changed = True
+        if changed:
+            _persist_ui(state)
+            await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+
     elif mtype == "set_mode":
         mode = msg.get("mode")
         if mode not in _VALID_MODES:
@@ -1580,6 +1910,10 @@ async def _handle_inbound(state, msg: dict) -> None:
             return
         state.bus.publish(f"saved {ply.name} ({n} verts)")
         await _broadcast_text(state.clients, json.dumps(build_saved_message(RESULTS_DIR)))
+
+    elif mtype == "reset_fusion":
+        state.sensor_state.reset_fusion()
+        state.bus.publish("heading fusion reset")
 
     else:
         log.warning("unknown inbound message type: %r", mtype)
@@ -1683,6 +2017,7 @@ def main(argv=None) -> int:
     app.state.mag_cal = mag_cal
     app.state.slam_runner = slam_runner
     app.state.deproj = None
+    app.state.orientation_smoother = OrientationSmoother()
     app.state.clients = set()
     app.state.command_labels = set()
     app.state.debounce = {}

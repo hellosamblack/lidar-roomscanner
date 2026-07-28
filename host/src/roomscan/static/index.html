@@ -13,9 +13,15 @@
     <script>
     (function () {
         var buf = [];
+        window.__diagErrors = 0;   // read by layout.js to auto-open the panel
         function render() {
             var el = document.getElementById('diag-log');
             if (el) { el.textContent = buf.slice(-60).join('\n'); el.scrollTop = el.scrollHeight; }
+            var count = document.getElementById('diag-count');
+            var n = window.__diagErrors;
+            if (count) count.textContent = n ? (n + ' error' + (n > 1 ? 's' : '')) : (buf.length + ' lines');
+            var card = document.getElementById('diag-card');
+            if (card) card.classList.toggle('has-error', n > 0);
         }
         function stamp() {
             try { return new Date().toISOString().substr(11, 12); } catch (e) { return '??'; }
@@ -23,6 +29,17 @@
         window.__diag = function (msg, level) {
             buf.push(stamp() + ' ' + (level || 'info').toUpperCase() + ' ' + msg);
             try { (level === 'error' ? console.error : console.log)('[diag] ' + msg); } catch (e) {}
+            if (level === 'error') {
+                window.__diagErrors++;
+                // First error opens the panel — unless the user has already
+                // expressed a preference (layout.js persists one on click).
+                try {
+                    var card = document.getElementById('diag-card');
+                    if (card && window.__diagErrors === 1 && localStorage.getItem('roomscan.diag.collapsed') === null) {
+                        card.classList.remove('collapsed');
+                    }
+                } catch (e) {}
+            }
             render();
         };
         window.addEventListener('error', function (e) {
@@ -63,9 +80,22 @@
             --success: #10b981;
             --warning: #f59e0b;
             --topbar-h: 48px;
+            /* Dock band (kept in sync with the real top-bar / event-log heights
+               by layout.js). Every floating block lives inside this band. */
+            --dock-top: 64px;
+            --dock-bottom: 48px;
+            --dock-gap: 14px;
         }
 
         * { box-sizing: border-box; }
+
+        /* Thin dark scrollbars — the platform default (light track) reads as a
+           rendering bug on a glass card, and the wide gutter shifts columns. */
+        * { scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.22) transparent; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.3); }
 
         body {
             margin: 0;
@@ -125,19 +155,66 @@
         }
         .dot.connected { background-color: var(--success); box-shadow: 0 0 12px var(--success); }
 
-        /* Left rail — read-only telemetry HUD. NEVER intercepts OrbitControls. */
-        #left-rail {
+        /* ================= docks: the anti-overlap layout =================
+         *
+         * Every floating block (telemetry, sensors, SLAM HUD, IR monitor,
+         * diagnostics, and each control group) is a child of one of two docks.
+         * A dock is a HEIGHT-BOUNDED, COLUMN-WRAPPING flex container spanning
+         * the band between the top bar and the event-log console: blocks stack
+         * top-down and, the moment the stack would run past the bottom of that
+         * band, the next block spills into a NEW COLUMN instead of overflowing
+         * onto whatever sits below. So blocks never overlap each other, the top
+         * bar, or the console. The one case CSS can't see — the left dock's
+         * columns marching into the right dock's — is resolved by layout.js,
+         * which degrades (collapse diagnostics -> scroll the right dock ->
+         * collapse IR -> collapse sensors) until the two sides clear.
+         *
+         * The dock box itself spans the viewport but is inert; only the blocks
+         * inside it take pointer events, so the canvas keeps the whole window.
+         */
+        .dock {
             position: fixed;
-            top: calc(var(--topbar-h) + 16px);
-            left: 16px;
+            top: var(--dock-top);
+            height: calc(100vh - var(--dock-top) - var(--dock-bottom));
+            width: calc(100vw - 32px);
+            display: flex;
+            flex-flow: column wrap;
+            align-content: flex-start;          /* natural column widths, packed left */
+            gap: var(--dock-gap);
+            z-index: 12;
+            pointer-events: none;
+        }
+        .dock > * { flex: 0 0 auto; max-height: 100%; pointer-events: auto; }
+        .dock--left { left: 16px; }
+        /* wrap-reverse flips the cross axis: column 1 hugs the right edge and
+           extra columns grow leftwards (mirror image of the left dock). */
+        .dock--right { right: 16px; flex-flow: column wrap-reverse; }
+        /* Tight-viewport fallback (layout.js): stop wrapping, scroll instead.
+           Class-based (not #right-rail) so this out-specifies .dock--right. */
+        .dock.dock--scroll { flex-wrap: nowrap; overflow-y: auto; overflow-x: hidden; width: auto; }
+        .dock.dock--scroll > * { max-height: none; }
+
+        /* Collapsed body — user-driven (.collapsed) or layout-driven
+           (.auto-collapsed, applied only to break a dock collision).
+           !important because .hud-card .card-body below re-asserts display:flex
+           at equal specificity — collapse must win wherever it lands. */
+        .collapsed > .card-body, .auto-collapsed > .card-body { display: none !important; }
+        /* A card with no collapse control of its own says why its body vanished. */
+        .hud-card.auto-collapsed::after, #ir-card.auto-collapsed::after {
+            content: 'body hidden — window too narrow';
+            font-family: 'Inter', sans-serif; font-size: 0.62rem; color: var(--text-muted);
+        }
+
+        /* Left dock — read-only telemetry HUD cards. NEVER intercept OrbitControls. */
+        .hud-card {
             width: 232px;
-            z-index: 10;
             padding: 16px;
-            pointer-events: none;               /* the working #metrics-overlay pattern */
             font-family: 'JetBrains Mono', monospace;
             display: flex; flex-direction: column; gap: 6px;
         }
-        #left-rail * { pointer-events: none; }  /* and everything inside it (§8.1) */
+        .dock > .hud-card { pointer-events: none; }   /* the working #metrics-overlay pattern */
+        .hud-card * { pointer-events: none; }         /* and everything inside it (§8.1) */
+        .hud-card .card-body { display: flex; flex-direction: column; gap: 6px; }
 
         .hud-row { display: flex; justify-content: space-between; gap: 16px; font-size: 0.8rem; color: var(--text-muted); }
         .hud-val { color: var(--text-main); font-weight: 700; }
@@ -146,6 +223,7 @@
             font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em;
             color: var(--text-muted); font-weight: 600;
         }
+        .hud-card > .hud-section-label:first-child { margin-top: 0; }
         .hud-stream { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; font-size: 0.78rem; color: var(--text-muted); }
         .hud-stream__label { color: var(--text-main); }
         .hud-stream__jit { color: var(--text-muted); min-width: 44px; text-align: right; }
@@ -158,22 +236,16 @@
         .sensor-widget canvas { display: block; }
         .sensor-cap { font-size: 0.62rem; color: var(--text-muted); text-align: center; }
         .sensor-spark { display: block; width: 100%; height: 32px; margin: 1px 0 4px 0; }
+        .sensor-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 2px; }
+        .sensor-btn { pointer-events: auto !important; padding: 5px 8px; font-size: 0.68rem; }
+        .sensor-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+        .sensor-btn--secondary { border-style: dashed; }
 
-        /* Right rail — interactive control panel: scrollable stack of groups. */
-        #right-rail {
-            position: fixed;
-            top: calc(var(--topbar-h) + 16px);
-            right: 16px;
-            width: 300px;
-            max-height: calc(100vh - var(--topbar-h) - 96px);   /* viewport-bounded from the start (§8.1) */
-            overflow-y: auto;
-            z-index: 10;
-            padding: 16px;
-            display: flex; flex-direction: column; gap: 14px;
+        /* ---- component: control-group (collapsible card in the right dock) ---- */
+        .control-group {
+            display: flex; flex-direction: column; gap: 12px;
+            width: 300px; padding: 14px 16px; overflow: hidden;
         }
-
-        /* ---- component: control-group (collapsible section) ---- */
-        .control-group { display: flex; flex-direction: column; gap: 12px; }
         .control-group__header {
             display: flex; align-items: center; justify-content: space-between;
             width: 100%;
@@ -187,10 +259,20 @@
         .control-group__header:hover { color: var(--text-main); }
         .control-group__header .chevron { transition: transform 0.2s ease; font-size: 0.7rem; }
         .control-group.collapsed .chevron { transform: rotate(-90deg); }
-        .control-group__body { display: flex; flex-direction: column; gap: 10px; }
+        /* min-height:0 + overflow-y lets a group taller than the dock band
+           scroll inside itself instead of pushing past the console. */
+        .control-group__body { display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow-y: auto; }
         .control-group.collapsed .control-group__body { display: none; }
 
         .field-label { font-size: 0.7rem; color: var(--text-muted); font-weight: 500; }
+
+        /* ---- component: debug-section (collapsed-by-default sub-group) ---- */
+        .debug-section { border-top: 1px solid var(--panel-border); padding-top: 8px; }
+        .debug-section > summary { cursor: pointer; list-style: none; }
+        .debug-section > summary::-webkit-details-marker { display: none; }
+        .debug-section > summary::after { content: ' \25B8'; font-size: 0.6rem; }
+        .debug-section[open] > summary::after { content: ' \25BE'; }
+        .debug-section__body { display: flex; flex-direction: column; gap: 10px; padding-top: 10px; }
 
         /* ---- component: button (default + primary) ---- */
         button {
@@ -232,6 +314,12 @@
         /* generic hide utility (shared by the transport block + IR card) */
         .hidden { display: none !important; }
 
+        /* Shared slider (range input) style */
+        .slider { width: 100%; accent-color: var(--accent); cursor: pointer; }
+
+        /* Surface options sub-group (mirrors control-group__body gap) */
+        #surface-opts { display: flex; flex-direction: column; gap: 10px; }
+
         /* ---- Capture & Playback (Web Phase 3) ---- */
         #btn-record.recording { background: var(--danger); border-color: var(--danger); color: white; }
         #btn-record.recording:hover { background: #f87171; }
@@ -257,17 +345,15 @@
         .toggle input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
         .toggle--sm { font-size: 0.72rem; }
 
-        /* Bottom-left — IR monitor canvas card. */
+        /* IR monitor canvas card (left dock). 300px so the header's colormap +
+           freeze + close controls all fit on one line. */
         #ir-card {
-            position: fixed;
-            left: 16px; bottom: 52px;
-            z-index: 12;
-            width: 260px;
+            width: 300px;
             padding: 10px;
             display: flex; flex-direction: column; gap: 8px;
         }
         #ir-card.hidden { display: none; }
-        .ir-card__header { display: flex; align-items: center; gap: 8px; }
+        .ir-card__header { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
         .ir-card__title { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600; flex: 1; }
         .ir-card__close {
             background: none; border: none; color: var(--text-muted);
@@ -316,10 +402,33 @@
         .log-line--cmd .log-line__src { color: var(--success); }
         .log-line__msg { white-space: pre-wrap; word-break: break-word; }
 
+        /* Diagnostics card (left dock, last) — the window.__diag sink. Collapsible
+           and collapsed by default; it un-collapses itself on the first error so a
+           silent module/import failure is still visible without devtools. */
+        #diag-card { width: 300px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+        .diag__header {
+            display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            width: 100%; background: none; border: none; padding: 0;
+            font-family: 'Inter', sans-serif;
+            font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;
+            color: var(--text-muted); cursor: pointer;
+        }
+        .diag__header:hover { background: none; color: var(--text-main); }
+        .diag__header .chevron { transition: transform 0.2s ease; font-size: 0.7rem; }
+        #diag-card.collapsed .chevron, #diag-card.auto-collapsed .chevron { transform: rotate(-90deg); }
+        .diag__count { font-family: 'JetBrains Mono', monospace; font-size: 0.66rem; color: var(--text-muted); }
+        #diag-card.has-error .diag__count { color: var(--danger); }
+        #diag-card.has-error { border-color: rgba(239, 68, 68, 0.45); }
+        #diag-log {
+            margin: 0; max-height: 26vh; overflow: auto;
+            color: #7fe0ff; font: 11px/1.45 'JetBrains Mono', ui-monospace, monospace;
+            white-space: pre-wrap; word-break: break-word;
+        }
+
         /* Toast layer — floats ABOVE the collapsible console (always visible). */
         #toast-layer {
             position: fixed;
-            left: 50%; bottom: 56px;
+            left: 50%; bottom: calc(var(--dock-bottom) + 8px);
             transform: translateX(-50%);
             z-index: 30;
             pointer-events: none;
@@ -351,8 +460,8 @@
         <div id="mode-switch-slot">
             <!-- Real-Time ↔ SLAM (web Phase 4); active state driven from `state`. -->
             <div class="segmented" id="seg-mode">
-                <button data-mode="realtime" class="active">Real-Time</button>
-                <button data-mode="slam">SLAM</button>
+                <button data-mode="realtime" class="active" title="Live point-cloud view from the device">Real-Time</button>
+                <button data-mode="slam" title="3D mapping mode — reconstructs a mesh from the stream">SLAM</button>
             </div>
         </div>
         <div class="status-indicator">
@@ -361,118 +470,186 @@
         </div>
     </div>
 
-    <!-- Left rail (§7.4): read-only telemetry HUD. pointer-events:none. -->
-    <div id="left-rail" class="card">
-        <div class="hud-row"><span>View FPS</span><span class="hud-val" id="hud-view-fps">--</span></div>
-        <div class="hud-row"><span>Device FPS</span><span class="hud-val" id="hud-device-fps">--</span></div>
-        <div class="hud-section-label">Streams</div>
-        <div id="hud-streams"></div>
-        <div class="hud-section-label">Link</div>
-        <div class="hud-row"><span>Bandwidth</span><span class="hud-val" id="hud-link-value">--</span></div>
-        <div class="hud-bar"><div class="hud-bar__fill" id="hud-link-fill"></div></div>
-        <div class="hud-row"><span>Drops</span><span class="hud-val" id="hud-drops">0</span></div>
-        <div class="hud-row"><span>Gaps</span><span class="hud-val" id="hud-gaps">0</span></div>
+    <!-- Left dock (§7.4/§8.1): telemetry HUD cards · IR monitor · diagnostics.
+         Blocks flow top-down and wrap into a new column when the band between
+         the top bar and the event-log console runs out — never overlapping. -->
+    <div id="left-dock" class="dock dock--left">
+        <div id="left-rail" class="card hud-card">
+            <div class="hud-row"><span>View FPS</span><span class="hud-val" id="hud-view-fps">--</span></div>
+            <div class="hud-row"><span>Device FPS</span><span class="hud-val" id="hud-device-fps">--</span></div>
+            <div class="hud-section-label">Streams</div>
+            <div id="hud-streams"></div>
+            <div class="hud-section-label">Link</div>
+            <div class="hud-row"><span>Bandwidth</span><span class="hud-val" id="hud-link-value">--</span></div>
+            <div class="hud-bar"><div class="hud-bar__fill" id="hud-link-fill"></div></div>
+            <div class="hud-row"><span>Drops</span><span class="hud-val" id="hud-drops">0</span></div>
+            <div class="hud-row"><span>Gaps</span><span class="hud-val" id="hud-gaps">0</span></div>
+        </div>
 
         <!-- Sensors (streams 9/10) — gizmo · compass · sparklines (Web Phase 2). -->
-        <div class="hud-section-label">Sensors</div>
-        <div class="sensor-widgets">
-            <div class="sensor-widget">
-                <canvas id="sensor-gizmo" width="1" height="1"></canvas>
-                <span class="sensor-cap">Orientation</span>
-            </div>
-            <div class="sensor-widget">
-                <canvas id="sensor-compass" width="1" height="1"></canvas>
-                <span class="sensor-cap" id="sensor-heading">—</span>
+        <div id="sensors-card" class="card hud-card">
+            <div class="hud-section-label">Sensors</div>
+            <div class="card-body">
+                <div class="sensor-widgets">
+                    <div class="sensor-widget">
+                        <canvas id="sensor-gizmo" width="1" height="1"></canvas>
+                        <span class="sensor-cap">Orientation</span>
+                    </div>
+                    <div class="sensor-widget">
+                        <canvas id="sensor-compass" width="1" height="1"></canvas>
+                        <span class="sensor-cap" id="sensor-heading">—</span>
+                    </div>
+                </div>
+                <div class="hud-row"><span>Heading</span><span class="hud-val" id="sensor-fusion">Off</span></div>
+                <div class="hud-row"><span>Pressure</span><span class="hud-val" id="sensor-press-val">—</span></div>
+                <canvas id="sensor-press-spark" class="sensor-spark" width="1" height="1"></canvas>
+                <div class="hud-row"><span>Temp</span><span class="hud-val" id="sensor-temp-val">—</span></div>
+                <canvas id="sensor-temp-spark" class="sensor-spark" width="1" height="1"></canvas>
+                <div class="sensor-actions">
+                    <button id="sensor-reset-heading" class="sensor-btn" title="Reset heading fusion — snaps to magnetometer on next valid sample">Reset Heading</button>
+                    <button id="sensor-mag-cal" class="sensor-btn sensor-btn--secondary" disabled title="Magnetometer calibration (coming soon)">Calibrate Mag</button>
+                </div>
             </div>
         </div>
-        <div class="hud-row"><span>Fusion</span><span class="hud-val" id="sensor-fusion">off</span></div>
-        <div class="hud-row"><span>Pressure</span><span class="hud-val" id="sensor-press-val">—</span></div>
-        <canvas id="sensor-press-spark" class="sensor-spark" width="1" height="1"></canvas>
-        <div class="hud-row"><span>Temp</span><span class="hud-val" id="sensor-temp-val">—</span></div>
-        <canvas id="sensor-temp-spark" class="sensor-spark" width="1" height="1"></canvas>
 
         <!-- SLAM HUD (web Phase 4): shown only in SLAM mode (slam.js toggles). -->
-        <div id="slam-hud" class="hidden">
+        <div id="slam-hud" class="card hud-card hidden">
             <div class="hud-section-label">SLAM</div>
-            <div class="hud-row"><span>Tracking</span><span class="hud-val" id="slam-track">—</span></div>
-            <div class="hud-row"><span>Fitness</span><span class="hud-val" id="slam-fitness">—</span></div>
-            <div class="hud-row"><span>RMSE</span><span class="hud-val" id="slam-rmse">—</span></div>
-            <div class="hud-row"><span>Frames</span><span class="hud-val" id="slam-frames">0</span></div>
-            <div class="hud-row"><span>Vertices</span><span class="hud-val" id="slam-verts">0</span></div>
-            <div class="hud-row"><span>SLAM</span><span class="hud-val" id="slam-ms">—</span></div>
+            <div class="card-body">
+                <div class="hud-row"><span>Tracking</span><span class="hud-val" id="slam-track">—</span></div>
+                <div class="hud-row"><span>Fitness</span><span class="hud-val" id="slam-fitness">—</span></div>
+                <div class="hud-row"><span>RMSE</span><span class="hud-val" id="slam-rmse">—</span></div>
+                <div class="hud-row"><span>Frames</span><span class="hud-val" id="slam-frames">0</span></div>
+                <div class="hud-row"><span>Vertices</span><span class="hud-val" id="slam-verts">0</span></div>
+                <div class="hud-row"><span>SLAM</span><span class="hud-val" id="slam-ms">—</span></div>
+            </div>
+        </div>
+
+        <!-- IR monitor canvas card (§7.3), independently toggleable. -->
+        <div id="ir-card" class="card">
+            <div class="ir-card__header">
+                <span class="ir-card__title">IR Monitor</span>
+                <div class="segmented segmented--sm" id="ir-card-colormap">
+                    <button data-colormap="gray" title="Grayscale IR intensity">Gray</button>
+                    <button data-colormap="turbo" title="Turbo false-color IR heatmap">Turbo</button>
+                </div>
+                <label class="toggle toggle--sm" title="Lock the IR intensity range instead of auto-scaling"><input type="checkbox" id="ir-card-freeze"><span>Freeze</span></label>
+                <button class="ir-card__close" id="ir-card-close" title="Hide the IR monitor card">&times;</button>
+            </div>
+            <canvas id="ir-canvas" class="card-body" width="1" height="1"></canvas>
+        </div>
+
+        <!-- Diagnostic feed (populated by window.__diag). Collapsed by default;
+             opens itself on the first error so a failure stays traceable without
+             devtools. #diag-log is the text sink the inline head script writes. -->
+        <div id="diag-card" class="card collapsed">
+            <button class="diag__header" id="diag-toggle" type="button">
+                <span>Diagnostics</span>
+                <span class="diag__count" id="diag-count"></span>
+                <span class="chevron">&#9662;</span>
+            </button>
+            <pre id="diag-log" class="card-body">diag: waiting…</pre>
         </div>
     </div>
 
-    <!-- Right rail (§8.1): interactive control panel, collapsible groups. -->
-    <div id="right-rail" class="card">
-        <div class="control-group">
+    <!-- Right dock (§8.1): interactive control panel — one card per collapsible
+         group, wrapping into extra columns (rightwards-anchored) when tall. -->
+    <div id="right-rail" class="dock dock--right">
+        <div class="control-group card">
             <button class="control-group__header"><span>Device</span><span class="chevron">&#9662;</span></button>
             <div class="control-group__body">
-                <button class="primary" id="btn-ping">Ping Device</button>
-                <div class="btn-row">
-                    <button id="btn-calib">Calibrate</button>
-                    <button id="btn-reinit">Reinit</button>
-                </div>
                 <div class="field-label">Usecase</div>
                 <div class="segmented" id="seg-usecase">
-                    <button data-uc="0">AR Range</button>
-                    <button data-uc="1">Precision</button>
+                    <button data-uc="0" title="Short-range, fast refresh — optimized for AR applications">AR Range</button>
+                    <button data-uc="1" title="Long-range, high-accuracy depth measurement">Precision</button>
                 </div>
+                <details class="debug-section">
+                    <summary class="field-label" title="Low-level device diagnostics and recovery">Debug</summary>
+                    <div class="debug-section__body">
+                        <button id="btn-ping" title="Send a ping to verify device connectivity">Ping</button>
+                        <div class="btn-row">
+                            <button id="btn-calib" title="Request the sensor calibration data from the device">Calibrate</button>
+                            <button id="btn-reinit" title="Reinitialize the sensor (full restart)">Reinit</button>
+                        </div>
+                    </div>
+                </details>
             </div>
         </div>
 
-        <div class="control-group">
+        <div class="control-group card">
             <button class="control-group__header"><span>View</span><span class="chevron">&#9662;</span></button>
             <div class="control-group__body">
                 <div class="field-label">Color Mode</div>
                 <div class="segmented" id="seg-color">
-                    <button data-mode="depth">Depth</button>
-                    <button data-mode="reflectance">Reflect</button>
-                    <button data-mode="confidence">Confid</button>
+                    <button data-mode="depth" title="Color points by distance from the sensor">Depth</button>
+                    <button data-mode="reflectance" title="Color points by surface reflectance (IR return strength)">Reflect</button>
+                    <button data-mode="confidence" title="Color points by measurement confidence">Confid</button>
                 </div>
-                <button id="btn-reset-cam">Reset Camera</button>
+                <div class="field-label">Colormap</div>
+                <div class="segmented" id="seg-view-colormap">
+                    <button data-colormap="turbo" title="Turbo false-color (blue → green → yellow → red)">Turbo</button>
+                    <button data-colormap="gray" title="Grayscale intensity">Gray</button>
+                </div>
+                <div class="field-label">Point Size <span class="hud-val" id="point-size-val">0.025 m @1 m</span></div>
+                <input type="range" class="slider" id="sl-point-size" min="0.005" max="0.15" step="0.005" value="0.025" title="Adjust 3D point size — in Auto this is the size at 1 m of range">
+                <label class="toggle" title="Scale each point with its distance from the sensor, so near and far surfaces get equal coverage"><input type="checkbox" id="chk-point-auto" checked><span>Auto (scale with range)</span></label>
+                <div class="field-label">Render</div>
+                <div class="segmented" id="seg-render">
+                    <button data-render="points" title="Draw each zone as an individual dot">Points</button>
+                    <button data-render="surface" title="Connect adjacent zones into a triangulated surface">Surface</button>
+                </div>
+                <div id="surface-opts" class="hidden">
+                    <div class="field-label">Surface Mode</div>
+                    <div class="segmented segmented--sm" id="seg-surface-mode">
+                        <button data-smode="grid" title="Relative depth-gap threshold (% of nearer depth)">Grid</button>
+                        <button data-smode="spatial" title="3D Euclidean distance threshold (adaptive to mean depth)">Spatial</button>
+                    </div>
+                    <div class="field-label">Threshold <span class="hud-val" id="surface-threshold-val">4.0%</span></div>
+                    <input type="range" class="slider" id="sl-surface-threshold" min="0.5" max="15.0" step="0.5" value="4.0" title="Maximum depth gap to connect adjacent zones">
+                </div>
+                <button id="btn-reset-cam" title="Reset the 3D camera to the default viewpoint">Reset Camera</button>
             </div>
         </div>
 
-        <div class="control-group">
+        <div class="control-group card">
             <button class="control-group__header"><span>IR Monitor</span><span class="chevron">&#9662;</span></button>
             <div class="control-group__body">
-                <label class="toggle"><input type="checkbox" id="chk-ir-show" checked><span>Show IR card</span></label>
+                <label class="toggle" title="Show or hide the IR monitor image in the left dock"><input type="checkbox" id="chk-ir-show" checked><span>Show IR card</span></label>
                 <div class="field-label">Colormap</div>
                 <div class="segmented" id="seg-ir-colormap">
-                    <button data-colormap="gray">Gray</button>
-                    <button data-colormap="turbo">Turbo</button>
+                    <button data-colormap="gray" title="Grayscale IR intensity">Gray</button>
+                    <button data-colormap="turbo" title="Turbo false-color IR heatmap">Turbo</button>
                 </div>
-                <label class="toggle"><input type="checkbox" id="chk-ir-freeze"><span>Freeze range</span></label>
+                <label class="toggle" title="Lock the IR intensity range instead of auto-scaling each frame"><input type="checkbox" id="chk-ir-freeze"><span>Freeze range</span></label>
             </div>
         </div>
 
         <!-- Capture & Playback (Web Phase 3): record live, browse + load captures,
              transport controls in replay. Active/disabled state is driven from the
              server's session/captures echo (one-way flow), never local clicks. -->
-        <div class="control-group">
+        <div class="control-group card">
             <button class="control-group__header"><span>Capture &amp; Playback</span><span class="chevron">&#9662;</span></button>
             <div class="control-group__body">
-                <button id="btn-record">&#9679; Record</button>
+                <button id="btn-record" title="Start or stop recording the live stream to a capture file">&#9679; Record</button>
                 <div class="cap-status" id="record-status"></div>
 
                 <div class="field-label">Source</div>
                 <div class="cap-list" id="cap-list"></div>
-                <button id="btn-refresh-caps">&#8635; Refresh list</button>
+                <button id="btn-refresh-caps" title="Reload the capture library from the server">&#8635; Refresh list</button>
 
                 <div class="transport hidden" id="transport">
                     <div class="btn-row">
-                        <button id="btn-playpause">Pause</button>
-                        <button id="btn-restart">&#8676; Restart</button>
+                        <button id="btn-playpause" title="Pause or resume capture playback">Pause</button>
+                        <button id="btn-restart" title="Jump back to the start of the capture">&#8676; Restart</button>
                     </div>
                     <div class="field-label">Speed</div>
                     <div class="segmented segmented--sm" id="seg-speed">
-                        <button data-fps="15">0.5&times;</button>
-                        <button data-fps="30">1&times;</button>
-                        <button data-fps="60">2&times;</button>
-                        <button data-fps="0">Max</button>
+                        <button data-fps="15" title="Half-speed playback">0.5&times;</button>
+                        <button data-fps="30" title="Real-time playback">1&times;</button>
+                        <button data-fps="60" title="Double-speed playback">2&times;</button>
+                        <button data-fps="0" title="Play as fast as possible (no delay)">Max</button>
                     </div>
-                    <label class="toggle toggle--sm"><input type="checkbox" id="chk-loop"><span>Loop at end</span></label>
+                    <label class="toggle toggle--sm" title="Automatically restart playback when the capture ends"><input type="checkbox" id="chk-loop"><span>Loop at end</span></label>
                     <input type="range" id="seek" min="0" max="1000" value="0">
                     <div class="cap-status" id="pos-status">&mdash;</div>
                 </div>
@@ -481,35 +658,21 @@
 
         <!-- SLAM (web Phase 4): mesh display options + save. Shown only in SLAM
              mode; all state driven from the server `state`/`saved` echo. -->
-        <div class="control-group hidden" id="slam-group">
+        <div class="control-group card hidden" id="slam-group">
             <button class="control-group__header"><span>SLAM</span><span class="chevron">&#9662;</span></button>
             <div class="control-group__body">
-                <label class="toggle"><input type="checkbox" id="chk-slam-traj" checked><span>Trajectory trail</span></label>
-                <label class="toggle"><input type="checkbox" id="chk-slam-follow" checked><span>Follow camera</span></label>
+                <label class="toggle" title="Show or hide the path the device has traveled"><input type="checkbox" id="chk-slam-traj" checked><span>Trajectory trail</span></label>
+                <label class="toggle" title="Camera automatically follows the device position"><input type="checkbox" id="chk-slam-follow" checked><span>Follow camera</span></label>
                 <div class="field-label">Walls</div>
                 <div class="segmented segmented--sm" id="seg-walls">
-                    <button data-walls="split">Split</button>
-                    <button data-walls="solid">Solid</button>
+                    <button data-walls="split" title="Render walls and non-walls as separate meshes">Split</button>
+                    <button data-walls="solid" title="Render the entire mesh as a single solid surface">Solid</button>
                 </div>
-                <button class="primary" id="btn-save" disabled>&#128190; Save map</button>
+                <button class="primary" id="btn-save" disabled title="Export the reconstructed mesh as a PLY file">&#128190; Save map</button>
                 <div class="field-label">Saved maps</div>
                 <div class="cap-list" id="saved-list"></div>
             </div>
         </div>
-    </div>
-
-    <!-- Bottom-left (§7.3): IR monitor canvas card, independently toggleable. -->
-    <div id="ir-card" class="card">
-        <div class="ir-card__header">
-            <span class="ir-card__title">IR Monitor</span>
-            <div class="segmented segmented--sm" id="ir-card-colormap">
-                <button data-colormap="gray">Gray</button>
-                <button data-colormap="turbo">Turbo</button>
-            </div>
-            <label class="toggle toggle--sm"><input type="checkbox" id="ir-card-freeze"><span>Freeze</span></label>
-            <button class="ir-card__close" id="ir-card-close" title="Hide">&times;</button>
-        </div>
-        <canvas id="ir-canvas" width="1" height="1"></canvas>
     </div>
 
     <!-- Bottom (§7.1): collapsible full-width event-log console. -->
@@ -524,12 +687,10 @@
     <!-- Toast layer (§7.1): floats above the console, visible even collapsed. -->
     <div id="toast-layer"></div>
 
-    <!-- On-page diagnostic log (populated by window.__diag). Visible so a
-         failure is traceable without opening devtools. -->
-    <div id="diag-log" style="position:fixed;left:8px;bottom:8px;max-width:40vw;max-height:34vh;
-        overflow:auto;z-index:99999;background:rgba(0,0,0,0.82);color:#7fe0ff;
-        font:11px/1.45 'JetBrains Mono',ui-monospace,monospace;white-space:pre-wrap;
-        padding:8px 10px;border:1px solid rgba(255,255,255,0.18);border-radius:6px;">diag: waiting…</div>
+    <!-- Dock layout manager + diagnostics collapse. A CLASSIC script on purpose:
+         it must keep working (and the diag panel must stay readable) even when
+         the ES module graph below fails to load. -->
+    <script src="layout.js" defer></script>
 
     <!-- Import map: lets the browser resolve the bare "three" specifier that
          three's jsm addons (e.g. OrbitControls) import internally. Without this,

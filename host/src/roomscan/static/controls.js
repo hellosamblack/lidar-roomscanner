@@ -38,6 +38,41 @@ export function createControls(hub) {
     });
     $('btn-reset-cam')?.addEventListener('click', () => hub.emit('reset_camera'));
 
+    // View: colormap, point size, render mode, surface settings
+    const segViewColormap = $('seg-view-colormap');
+    const slPointSize = $('sl-point-size');
+    const chkPointAuto = $('chk-point-auto');
+    const pointSizeVal = $('point-size-val');
+    const segRender = $('seg-render');
+    const surfaceOpts = $('surface-opts');
+    const segSurfaceMode = $('seg-surface-mode');
+    const slSurfaceThreshold = $('sl-surface-threshold');
+    const surfaceThresholdVal = $('surface-threshold-val');
+
+    function sendView(fields) { hub.send({ type: 'set_view', ...fields }); }
+
+    segViewColormap?.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-colormap]');
+        if (btn) sendView({ colormap: btn.dataset.colormap });
+    });
+    slPointSize?.addEventListener('input', () => {
+        sendView({ point_size: parseFloat(slPointSize.value) });
+    });
+    chkPointAuto?.addEventListener('change', () => {
+        sendView({ point_size_auto: chkPointAuto.checked });
+    });
+    segRender?.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-render]');
+        if (btn) sendView({ surface: btn.dataset.render === 'surface' });
+    });
+    segSurfaceMode?.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-smode]');
+        if (btn) sendView({ surface_mode: btn.dataset.smode });
+    });
+    slSurfaceThreshold?.addEventListener('input', () => {
+        sendView({ surface_threshold: parseFloat(slSurfaceThreshold.value) });
+    });
+
     // --- IR Monitor group: colormap + freeze (server-driven) + card show/hide ---
     const segIrColormap = $('seg-ir-colormap');
     const chkIrFreeze = $('chk-ir-freeze');
@@ -61,6 +96,24 @@ export function createControls(hub) {
         setActive(segColor, 'mode', msg.color_mode);
         setActive(segIrColormap, 'colormap', msg.ir_colormap);
         if (chkIrFreeze) chkIrFreeze.checked = !!msg.ir_freeze;
+        // View: colormap, point size, render mode, surface
+        setActive(segViewColormap, 'colormap', msg.view_colormap);
+        if (slPointSize && msg.point_size !== undefined) slPointSize.value = msg.point_size;
+        if (chkPointAuto && msg.point_size_auto !== undefined) chkPointAuto.checked = !!msg.point_size_auto;
+        if (pointSizeVal && msg.point_size !== undefined) {
+            // In auto the slider is a per-metre-of-range gain, so say so.
+            const auto = chkPointAuto ? chkPointAuto.checked : false;
+            pointSizeVal.textContent = msg.point_size.toFixed(3) + ' m' + (auto ? ' @1 m' : '');
+        }
+        setActive(segRender, 'render', msg.surface_enabled ? 'surface' : 'points');
+        if (surfaceOpts) surfaceOpts.classList.toggle('hidden', !msg.surface_enabled);
+        setActive(segSurfaceMode, 'smode', msg.surface_mode);
+        if (slSurfaceThreshold && msg.surface_threshold_pct !== undefined) {
+            slSurfaceThreshold.value = msg.surface_threshold_pct;
+        }
+        if (surfaceThresholdVal && msg.surface_threshold_pct !== undefined) {
+            surfaceThresholdVal.textContent = msg.surface_threshold_pct.toFixed(1) + '%';
+        }
     });
 
     function setActive(seg, attr, value) {

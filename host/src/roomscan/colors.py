@@ -20,6 +20,12 @@ def turbo(zn: np.ndarray) -> np.ndarray:
     return np.clip(rgb, 0.0, 1.0)
 
 
+def gray(zn: np.ndarray) -> np.ndarray:
+    """Map values in [0, 1] to (N, 3) grayscale RGB in [0, 1]."""
+    x = np.clip(np.asarray(zn, dtype=np.float64), 0.0, 1.0)
+    return np.stack([x, x, x], axis=-1)
+
+
 def percentile_range(vals: np.ndarray, lo_pct: float = 2.0,
                      hi_pct: float = 98.0) -> tuple[float, float]:
     """Return (vmin, vmax) as the lo_pct/hi_pct percentiles of the finite values.

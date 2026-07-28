@@ -37,6 +37,8 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-023 | fixed   | firmware      | System clock sourced from the ST-LINK's MCO — board is dead (silent network, PHY link LED on) whenever the ST-LINK cable is unplugged |
 | BUG-024 | fixed   | host/sources  | A *missing* CDC serial port aborted the launch of an Ethernet-only deployment |
 | BUG-025 | fixed   | host/sources  | `UdpSource` retargeted onto its own looped-back broadcast wake, adopting the host itself as the device |
+| BUG-026 | fixed   | host/web      | Web UI never gravity-aligned the view — boot the board upside down and both IR and point cloud render upside down |
+| BUG-027 | fixed   | firmware      | SFLP quaternion decimated 480 Hz → 30 Hz by keeping one sample of ~16, aliasing the whole noise band into the output |
 
 ---
 
@@ -745,3 +747,67 @@ even with a perfectly healthy board (it is only masked when mDNS succeeds and su
 
 **Fix:** only a datagram long enough to be a real fragment (≥ 6 B, the fragment sub-header) may
 retarget; short datagrams return `b""` without touching `target_ip`.
+
+## BUG-026 — Web UI never gravity-aligned the view; "Reset Heading" cannot fix tilt
+
+- **Status:** **fixed** 2026-07-28 · **Reported:** 2026-07-28 (owner: "powering it up with the board
+  upside down shows an upside down view in both IR and point cloud, and Reset Heading doesn't fix it")
+  · **Area:** host/web
+- **Where:** `host/src/roomscan/web.py` (`_broadcaster`), `host/src/roomscan/static/ir.js`
+
+Gravity alignment existed **only in the deprecated desktop panel** and was never ported to the web app
+when it became the primary UI (Web Phases 1–5). `panel.py:3020` rolled the IR pane with
+`ir_gravity_rot`, and `panel.py:1332-1337` gravity-aligned the orbit-mode cloud with
+`T_WORLD_TO_CV @ R @ T_CV_TO_BODY` — but `web.py` shipped raw deprojected CV-frame points and an
+unrotated IR array. `ir_gravity_rot` was imported nowhere outside `panel.py` and its tests. The
+orientation matrix *was* already on the wire (`build_sensor_message`'s `rot`), but its only consumer
+was the 2D gizmo canvas; `scene.js` never read it.
+
+"Reset Heading" is a red herring by construction, not a second bug: it sends `reset_fusion` →
+`YawFusion.reset()`, which clears only the accumulated **yaw** delta. The fusion is built on
+`graft_yaw`, whose contract is "roll/pitch are preserved" — tilt comes from the accelerometer and is
+deliberately never touched (`docs/coordinate-frames.md`). No yaw reset can un-flip a view.
+
+**Fix:** the broadcaster pre-multiplies POINT_CLOUD/SURFACE positions by `display_rotation(quat)` and
+rolls IR_IMAGE via `ir_gravity_rot` (owner chose continuous full alignment, desktop-panel parity).
+`ir.js` now sets `canvas.style.aspectRatio` from the message, because a 90°/270° roll makes the pane
+portrait (42×54) and the CSS had a hardcoded `aspect-ratio: 4/3` that would have squashed it.
+Verified live: the broadcast cloud's ray grid is destroyed (2094×2016 distinct directions) and `rot⁻¹`
+recovers exactly the 54×42 sensor grid. Protocol note in `docs/web-protocol.md`.
+
+## BUG-027 — SFLP quaternion aliased by unfiltered 480 Hz → 30 Hz decimation
+
+- **Status:** **fixed** 2026-07-28 · **Reported:** 2026-07-28 (owner, after BUG-026: "the point cloud
+  is very slightly jittery now, especially noticeable at the edges") · **Area:** firmware
+- **Where:** `firmware/scanner-stream/Src/rs_lsm.c` (`rs_lsm_read_latest`)
+
+Gravity-aligning the cloud (BUG-026) multiplied the orientation signal by the scene's lever arm, which
+exposed a latent firmware defect: SFLP runs at 480 Hz, the host consumes one sample per ToF frame
+(~30 Hz), and `rs_lsm_read_latest` drained the FIFO keeping only the **last** quaternion of each
+~16-sample batch. Point-sampling a 480 Hz signal at 30 Hz folds the entire 0–240 Hz noise band into
+0–15 Hz — textbook aliasing, with no anti-alias filter anywhere in the chain. Measured on a stationary
+rig: 0.14° mean / 0.25° p95 of change per frame, net 0.14° over 15 s against 22.9° summed absolute
+(ratio 0.006 — essentially all noise), i.e. ~7 mm mean / 13 mm p95 of edge shimmer at 3 m.
+
+Two adjacent defaults were wrong for this rig and fixed in the same pass: the gyro's **LPF1 was
+bypassed** (POR default), leaving the chain 187 Hz wide at ODR 480 Hz (AN5763 Table 20, the ODR = 480 Hz
+block — the 342 Hz row is 960 Hz); and **LIS2MDL `CFG_REG_B` sat at its 0x00 POR default**, i.e. the
+4.5 mG RMS / ODR÷2 corner of AN5069 Table 9 with both the low-pass and offset cancellation off.
+
+**Fix:** `RS_LSM_SFLP_AVERAGE` averages the batch (correct decimation, √N on white noise; sign-aligned
+before accumulating since q and −q are the same rotation); `RS_LSM_GY_LPF1_*` enables gyro LPF1 at
+28.4 Hz; `CFG_REG_B = OFF_CANC | LPF` moves the mag to 3.0 mG RMS / 25 Hz. **Measured, firmware alone,
+host smoothing bypassed:** 0.0329 → 0.0118 deg/frame (1.72 → 0.62 mm of edge motion at 3 m), **2.8×**,
+with streams 7/9/10 still at 30.3 Hz, 0 drops, 0 gaps.
+
+**Remaining floor is the LSM's FIFO encoding, not the sensor.** The SFLP game-rotation vector is
+batched as three **IEEE-754 half-precision** components with w reconstructed
+(`sflp_word_to_quat`); the fp16 ulp near 0.7 is ~4.9e-4, and a perturbation δ in a quaternion's vector
+part is ≈2δ of angle → ~0.056° per step. Dithered over 16 samples that predicts 0.014 deg/frame against
+0.0118 measured, and the residual's directional coherence is **0.14** — *below* the ~0.32 of white noise
+at window 10, i.e. anti-correlated, the signature of quantization dither rather than sensor noise or
+tripod vibration. AN5763 §6.5: SFLP data is readable **from the FIFO only**, so there is no
+higher-precision register path. Because fp16 is floating point the floor should **vary with
+orientation** (finer near identity) — an untested prediction. Beating it means leaving the SFLP FIFO
+format (batch raw XL/GY and fuse host-side); **open, not attempted.** Analysis + method in
+`docs/iks4a1-stacking.md` → "Orientation-noise pass"; measure with `host/tools/orientation_probe.py`.

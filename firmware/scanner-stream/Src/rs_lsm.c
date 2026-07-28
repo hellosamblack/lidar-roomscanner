@@ -45,6 +45,31 @@
  * game-rotation vector is already internally bias-corrected regardless of this flag. */
 #define RS_LSM_SFLP_BATCH_AUX (0)
 
+/* ---- Orientation-noise reduction (2026-07-28) --------------------------------------------
+ * Measured on a stationary rig: the host saw ~0.14 deg mean / 0.25 deg p95 of zero-mean
+ * orientation noise per frame (net 0.14 deg over 15 s against 22.9 deg summed absolute), which
+ * the point-cloud renderer swings on a 3 m lever arm into visible edge shimmer.
+ *
+ * Root cause is a DECIMATION defect, not sensor grade: SFLP runs at 480 Hz and the host consumes
+ * one sample per ToF frame (~28 Hz), and rs_lsm_read_latest used to keep only the LAST quaternion
+ * of each ~17-sample FIFO batch. Point-sampling a 480 Hz signal at 28 Hz folds the entire
+ * 0-240 Hz noise band into 0-14 Hz -- textbook aliasing, no anti-alias filter anywhere in the
+ * chain. Averaging the batch instead is the correct decimation and cuts white noise by sqrt(N)
+ * (~4.1x at 17 samples) for a handful of flops.
+ *
+ * RS_LSM_GY_LPF1_BW additionally band-limits the gyro feeding the fusion. AN5763 Table 20, the
+ * ODR = 480 Hz block: LPF1 bypassed (the POR default we currently run) leaves the gyro chain
+ * 187 Hz wide -- absurd for a handheld scanner, where real motion lives below ~20 Hz. Selecting
+ * 110 gives 28.4 Hz (-50.7 deg @ 20 Hz, i.e. ~7 ms group delay -- a fifth of a 36 ms frame, so
+ * the rotation prior stays timely). White noise scales as sqrt(BW), so 187 -> 28.4 Hz is worth
+ * ~2.6x on its own. NB AN5763 Figure 6 does not draw the SFLP tap point, so whether LPF1 actually
+ * reaches the fusion is MEASURED on-target, not assumed; set RS_LSM_GY_LPF1_ON to 0 to A/B it.
+ * (The accelerometer has no equivalent knob: its LPF1 is fixed at ODR/2 in high-performance mode,
+ * and Figure 3 shows the embedded-function tap sitting ahead of the configurable LPF2.) */
+#define RS_LSM_SFLP_AVERAGE (1)   /* average each FIFO batch instead of keeping the last sample */
+#define RS_LSM_GY_LPF1_ON   (1)
+#define RS_LSM_GY_LPF1_BW   LSM6DSV16X_GY_AGGRESSIVE  /* 110b -> 28.4 Hz @ ODR 480 Hz */
+
 #define LSM_ADDR 0x50u           /* LSM6DSV16X dynamic I3C address (rs_assign_dynamic_addresses) */
 
 extern I3C_HandleTypeDef hi3c1;
@@ -166,9 +191,18 @@ static void sflp_word_to_quat(const uint8_t data[6], float quat_wxyz[4]) {
 static int rs_lsm_shub_init(void) {
     /* One-time slave power-up writes via the write-once channel. Each needs its own
      * enable-cycle-disable so the single DATAWRITE channel fires per slave. */
-    static const struct { uint8_t addr, reg, val; } inits[3] = {
+    /* LIS2MDL noise (AN5069 Table 9): we already run LP=0 (high-resolution) at 100 Hz with
+     * temperature compensation, but CFG_REG_B was left at its 0x00 POR default -- filter OFF and
+     * offset cancellation OFF -- which is the 4.5 mG RMS / ODR/2 (50 Hz) corner of that table.
+     * Setting LPF|OFF_CANC moves us to the 3.0 mG RMS / ODR/4 (25 Hz) corner; the AN notes the
+     * low-pass costs no extra current, and OFF_CANC additionally runs alternating set/reset
+     * pulses so the AMR bridge's own offset is cancelled sample-to-sample (AN5069 §8) instead of
+     * drifting under the host's static mag_cal.json hard-iron fit. 25 Hz of bandwidth is still
+     * ~10x what a 20 s yaw-fusion time constant can use. */
+    static const struct { uint8_t addr, reg, val; } inits[4] = {
         { 0x5D, 0x10, 0x20 },  /* LPS22DF CTRL_REG1: ODR 25 Hz continuous */
         { 0x1E, 0x60, 0x8C },  /* LIS2MDL CFG_REG_A: temp-comp, 100 Hz, continuous */
+        { 0x1E, 0x61, 0x03 },  /* LIS2MDL CFG_REG_B: OFF_CANC | LPF -> 25 Hz BW, 3.0 mG RMS */
         { 0x38, 0x04, 0x3C },  /* STTS22H CTRL: free-run + auto-inc + BDU */
     };
     /* We never software-reset the LSM (would drop the I3C dynamic address), so the sensor-hub
@@ -197,7 +231,7 @@ static int rs_lsm_shub_init(void) {
     lsm6dsv16x_sh_master_interface_pull_up_set(&g_ctx, 1);
     lsm6dsv16x_sh_write_mode_set(&g_ctx, LSM6DSV16X_ONLY_FIRST_CYCLE);
     lsm6dsv16x_sh_syncro_mode_set(&g_ctx, LSM6DSV16X_SH_TRG_XL_GY_DRDY);
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < (int)(sizeof inits / sizeof inits[0]); i++) {
         lsm6dsv16x_sh_cfg_write_t w = { inits[i].addr, inits[i].reg, inits[i].val };
         if (lsm6dsv16x_sh_cfg_write(&g_ctx, &w) != 0) {
             return -1;
@@ -292,6 +326,13 @@ int rs_lsm_init(void) {
         return -3;
     }
 
+    /* Band-limit the gyro (see RS_LSM_GY_LPF1_* above). Order matters: set the bandwidth before
+     * enabling, so the filter never runs a cycle at the POR bandwidth. LPF1 is only available in
+     * high-performance mode -- which we selected above -- and must not be used if the OIS/EIS
+     * chains are ever enabled (AN5763 3.9); this build enables neither. */
+    lsm6dsv16x_filt_gy_lp1_bandwidth_set(&g_ctx, RS_LSM_GY_LPF1_BW);
+    lsm6dsv16x_filt_gy_lp1_set(&g_ctx, RS_LSM_GY_LPF1_ON);
+
     /* SFLP game rotation vector -> FIFO. (LSM config persists across MCU -rst, so
      * explicitly set game_rotation to the desired state rather than skipping the call.) */
     lsm6dsv16x_sflp_data_rate_set(&g_ctx, RS_LSM_SFLP_ODR);
@@ -329,6 +370,11 @@ uint8_t rs_lsm_shub_status_raw(void) {
 int rs_lsm_read_latest(rs_lsm_sample_t *out) {
     out->have_quat = 0;
     out->have_env = 0;
+#if RS_LSM_SFLP_AVERAGE
+    /* Accumulate the batch rather than keeping its last sample -- see RS_LSM_SFLP_AVERAGE. */
+    float quat_acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    uint16_t quat_n = 0;
+#endif
 
     lsm6dsv16x_fifo_status_t status;
     if (lsm6dsv16x_fifo_status_get(&g_ctx, &status) != 0) {
@@ -345,9 +391,32 @@ int rs_lsm_read_latest(rs_lsm_sample_t *out) {
         }
         switch (word.tag) {
         case LSM6DSV16X_SFLP_GAME_ROTATION_VECTOR_TAG:
+#if RS_LSM_SFLP_AVERAGE
+        {
+            float q[4];
+            sflp_word_to_quat(word.data, q);
+            /* q and -q are the same rotation, so align each sample to the accumulator before
+             * adding or opposite-hemisphere samples would cancel. Within one ~35 ms batch the
+             * spread is milliradians, so a component-wise mean + renormalize is indistinguishable
+             * from a proper quaternion barycentre and costs no iteration. */
+            if (quat_n != 0) {
+                float dot = quat_acc[0] * q[0] + quat_acc[1] * q[1] +
+                            quat_acc[2] * q[2] + quat_acc[3] * q[3];
+                if (dot < 0.0f) {
+                    q[0] = -q[0]; q[1] = -q[1]; q[2] = -q[2]; q[3] = -q[3];
+                }
+            }
+            for (int k = 0; k < 4; k++) {
+                quat_acc[k] += q[k];
+            }
+            quat_n++;
+            break;
+        }
+#else
             sflp_word_to_quat(word.data, out->quat);
             out->have_quat = 1;
             break;
+#endif
 #if RS_LSM_ENABLE_SHUB
         case LSM6DSV16X_SENSORHUB_SLAVE0_TAG:   /* LPS22DF pressure */
         case LSM6DSV16X_SENSORHUB_SLAVE1_TAG:   /* LIS2MDL mag */
@@ -359,5 +428,17 @@ int rs_lsm_read_latest(rs_lsm_sample_t *out) {
             break;
         }
     }
+#if RS_LSM_SFLP_AVERAGE
+    if (quat_n != 0) {
+        float n = sqrtf(quat_acc[0] * quat_acc[0] + quat_acc[1] * quat_acc[1] +
+                        quat_acc[2] * quat_acc[2] + quat_acc[3] * quat_acc[3]);
+        if (n > 1e-6f) {
+            for (int k = 0; k < 4; k++) {
+                out->quat[k] = quat_acc[k] / n;   /* normalize == divide by the mean's magnitude */
+            }
+            out->have_quat = 1;
+        }
+    }
+#endif
     return (out->have_quat || out->have_env) ? 0 : -1;
 }

@@ -79,6 +79,13 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
 - **Logging**: The app writes automatic rotating logs to `logs/app.log` (Python tracebacks, UI actions) and 
   `logs/firmware.log` (ST-Link VCOM output). Always check these when diagnosing crashes or hangs.
 
+## Web UI
+
+- **Every interactive button/toggle/control must have a `title` attribute** (native browser tooltip)
+  describing what it does. Use short, plain-language phrases — one sentence max, no jargon. When adding
+  a new button to `index.html`, add a `title` in the same commit. For `<label class="toggle">` elements,
+  put the `title` on the `<label>`, not the inner `<input>`.
+
 ## Verification discipline
 
 - Before claiming a milestone works: run the pytest suite, then the on-target check (flash, run the host

@@ -22,7 +22,8 @@ class EnvSample:
 
 
 class SensorState:
-    def __init__(self, history: int = 256, fusion: "YawFusion | None" = None):
+    def __init__(self, history: int = 256, fusion: "YawFusion | None" = None,
+                 env_spark_interval_s: float = 2.0, env_spark_depth: int = 300):
         self._lock = threading.Lock()
         self._quat: tuple[float, float, float, float] | None = None
         self._env: EnvSample | None = None
@@ -30,6 +31,10 @@ class SensorState:
         self._temp = deque(maxlen=history)
         self._fusion = fusion
         self._raw_mag: tuple[float, float, float] | None = None
+        self._spark_interval_us = int(env_spark_interval_s * 1e6)
+        self._pressure_spark = deque(maxlen=env_spark_depth)
+        self._temp_spark = deque(maxlen=env_spark_depth)
+        self._last_spark_t: int | None = None
 
     def feed(self, frame: Frame) -> None:
         if frame.header.frame_type != FrameType.DATA:
@@ -49,6 +54,11 @@ class SensorState:
                 self._raw_mag = mag
                 self._pressure.append(pressure)
                 self._temp.append(temp)
+                if (self._last_spark_t is None
+                        or (frame.header.t_us - self._last_spark_t) >= self._spark_interval_us):
+                    self._pressure_spark.append(pressure)
+                    self._temp_spark.append(temp)
+                    self._last_spark_t = frame.header.t_us
 
     def latest_quat(self) -> tuple[float, float, float, float] | None:
         with self._lock:
@@ -79,6 +89,21 @@ class SensorState:
     def temp_history(self) -> np.ndarray:
         with self._lock:
             return np.array(self._temp, dtype=np.float64)
+
+    def pressure_spark_history(self) -> np.ndarray:
+        with self._lock:
+            return np.array(self._pressure_spark, dtype=np.float64)
+
+    def temp_spark_history(self) -> np.ndarray:
+        with self._lock:
+            return np.array(self._temp_spark, dtype=np.float64)
+
+    def reset_fusion(self) -> None:
+        """Reset the yaw-fusion filter so it snaps fresh on the next valid mag
+        sample.  Safe to call even without a fusion filter attached."""
+        with self._lock:
+            if self._fusion is not None:
+                self._fusion.reset()
 
 
 def quat_to_matrix(w: float, x: float, y: float, z: float) -> np.ndarray:
@@ -284,6 +309,15 @@ class YawFusion:
             self._delta = wrap180(self._delta + gain * wrap180(heading - (yaw + self._delta)))
         self.status = "active"
         self._last_t = t_us
+
+    def reset(self) -> None:
+        """Clear accumulated yaw correction so the filter snaps fresh on the
+        next valid magnetometer sample."""
+        self._delta = 0.0
+        self._have_delta = False
+        self._last_quat = None
+        self._last_t = None
+        self.status = "init"
 
     def fused_quat(self):
         if self._last_quat is None:

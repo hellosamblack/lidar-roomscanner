@@ -353,8 +353,218 @@ def test_resolve_command_ping_and_unknown():
 # Sensors (streams 9/10) -- build_sensor_message + reader integration (Phase 2)
 # =============================================================================
 
-def _sframe(sid, payload: bytes) -> Frame:
-    return Frame(FrameHeader(FrameType.DATA, sid, 0, 1, 1000, 0, 0, len(payload)), payload)
+def _sframe(sid, payload: bytes, t_us: int = 1000) -> Frame:
+    return Frame(FrameHeader(FrameType.DATA, sid, 0, 1, t_us, 0, 0, len(payload)), payload)
+
+
+# ---------------------------------------------------------------------------
+# Gravity alignment of the live display (desktop-panel orbit parity).
+# ---------------------------------------------------------------------------
+
+def test_display_rotation_none_without_orientation():
+    # ToF-only session: no quat => no rotation => raw sensor frame.
+    assert web.display_rotation(None) is None
+
+
+def test_display_rotation_is_the_canonical_sandwich():
+    q = (0.92388, 0.38268, 0.0, 0.0)   # ~45 deg about x
+    expect = T_WORLD_TO_CV @ quat_to_matrix(*q) @ T_CV_TO_BODY
+    assert np.allclose(web.display_rotation(q), expect)
+
+
+def test_rotate_points_noop_without_rotation():
+    pts = np.arange(9, dtype=np.float32).reshape(3, 3)
+    assert web.rotate_points(pts, None) is pts       # same array, no allocation
+
+
+def test_rotate_points_matches_matrix_product_and_is_float32():
+    pts = np.array([[1.0, 2.0, 3.0], [-4.0, 0.5, 2.0]], dtype=np.float32)
+    rot = web.display_rotation((0.92388, 0.0, 0.38268, 0.0))
+    out = web.rotate_points(pts, rot)
+    assert out.dtype == np.float32
+    assert np.allclose(out, (rot @ pts.T).T, atol=1e-5)
+
+
+def test_rotate_points_handles_the_surface_grid_shape():
+    # select_surface hands back (h, w, 3); the rotation must broadcast over it.
+    grid = np.random.default_rng(0).normal(size=(4, 5, 3)).astype(np.float32)
+    rot = web.display_rotation((0.70711, 0.70711, 0.0, 0.0))
+    out = web.rotate_points(grid, rot)
+    assert out.shape == (4, 5, 3)
+    assert np.allclose(out.reshape(-1, 3), (rot @ grid.reshape(-1, 3).T).T, atol=1e-5)
+
+
+# Board held upright the reference way (vertical, USB down, facing North):
+# body X=Up -> world Z, body Y=Right -> world -Y, body Z=Forward -> world X. That
+# matrix is a 180 deg turn about (1,0,1)/sqrt(2), hence this quaternion.
+_Q_UPRIGHT = (0.0, 1.0 / np.sqrt(2.0), 0.0, 1.0 / np.sqrt(2.0))
+_Q_ROLL_180 = (0.0, 0.0, 0.0, 1.0)     # 180 deg about body Z (the sensor's boresight)
+
+
+def test_display_rotation_is_identity_when_held_upright():
+    # Sanity-check the frame algebra end to end: held the reference way, the
+    # gravity-aligned display frame IS the raw sensor frame, so nothing moves.
+    assert np.allclose(web.display_rotation(_Q_UPRIGHT), np.eye(3), atol=1e-6)
+
+
+def test_rotate_points_upside_down_board_is_flipped_upright():
+    from roomscan.sensors import graft_yaw, quat_mul, quat_yaw_deg
+
+    up_cv = np.array([[0.0, -1.0, 0.0]], dtype=np.float32)   # CV +Y is down
+    upside_down = quat_mul(_Q_UPRIGHT, _Q_ROLL_180)
+
+    # Held upright, a point above the sensor renders above it.
+    assert web.rotate_points(up_cv, web.display_rotation(_Q_UPRIGHT))[0][1] < -0.9
+    # Held upside down, that same raw pixel is physically below the sensor, and
+    # alignment must render it below -- this is the reported bug.
+    assert web.rotate_points(up_cv, web.display_rotation(upside_down))[0][1] > 0.9
+    # Yaw alone can never undo the flip -- this is why "Reset Heading" (a yaw-only
+    # fusion reset) is structurally incapable of fixing an upside-down view.
+    yaw_stripped = graft_yaw(upside_down, -quat_yaw_deg(upside_down))
+    assert web.rotate_points(up_cv, web.display_rotation(yaw_stripped))[0][1] > 0.9
+
+
+def _perturb(quat, deg, axis=(1.0, 0.0, 0.0)):
+    """Rotate `quat` by `deg` about a body axis — a stand-in for IMU noise."""
+    from roomscan.sensors import quat_mul
+    a = np.radians(deg) / 2.0
+    n = np.array(axis, dtype=float) / np.linalg.norm(axis)
+    return quat_mul(quat, (np.cos(a), *(np.sin(a) * n)))
+
+
+def test_quat_slerp_endpoints_and_midpoint():
+    a, b = _Q_UPRIGHT, _perturb(_Q_UPRIGHT, 40.0)
+    assert web.quat_angle_deg(web.quat_slerp(a, b, 0.0), a) == pytest.approx(0.0, abs=1e-6)
+    assert web.quat_angle_deg(web.quat_slerp(a, b, 1.0), b) == pytest.approx(0.0, abs=1e-4)
+    assert web.quat_angle_deg(a, web.quat_slerp(a, b, 0.5)) == pytest.approx(20.0, abs=1e-3)
+
+
+def test_quat_slerp_takes_the_short_way_round():
+    a = _Q_UPRIGHT
+    b = tuple(-v for v in _perturb(_Q_UPRIGHT, 10.0))   # same rotation, negated
+    assert web.quat_angle_deg(a, web.quat_slerp(a, b, 1.0)) == pytest.approx(10.0, abs=1e-3)
+
+
+def test_smoother_adopts_the_first_sample_without_ramping():
+    # Must not ease in from identity on connect -- that would swing the whole
+    # scene through a large arc on the first frame.
+    sm = web.OrientationSmoother()
+    assert sm.update(_Q_UPRIGHT) == pytest.approx(_Q_UPRIGHT)
+    assert sm.update(None) is None
+
+
+def test_smoother_damps_stationary_noise_to_sub_millimetre():
+    # Replay the measured stationary profile (2026-07-28 live rig): zero-mean
+    # ~0.14 deg/update wobble. What the eye reads as shimmer is the per-update
+    # CHANGE, so that -- not excursion from truth -- is what must collapse.
+    rng = np.random.default_rng(7)
+    sm = web.OrientationSmoother()
+    sm.update(_Q_UPRIGHT)
+    prev_raw = prev_held = _Q_UPRIGHT
+    raw_step, held_step = [], []
+    for _ in range(200):
+        noisy = _perturb(_Q_UPRIGHT, rng.normal(0.0, 0.14), axis=rng.normal(size=3))
+        held = sm.update(noisy)
+        raw_step.append(web.quat_angle_deg(prev_raw, noisy))
+        held_step.append(web.quat_angle_deg(prev_held, held))
+        prev_raw, prev_held = noisy, held
+    # Frame-to-frame shimmer drops by an order of magnitude...
+    assert np.mean(held_step) < np.mean(raw_step) / 10.0
+    # ...to well under 0.02 deg/update, i.e. sub-millimetre at a 3 m lever arm.
+    assert np.degrees(np.radians(np.mean(held_step))) < 0.02
+    assert np.radians(np.mean(held_step)) * 3000.0 < 1.0        # mm at 3 m
+    # And it must not wander off the true attitude while damping.
+    assert web.quat_angle_deg(_Q_UPRIGHT, prev_held) < 0.1
+
+
+def test_smoother_tracks_real_motion_one_to_one():
+    # A deliberate sweep must not lag: past snap_deg the blend weight is 1.0.
+    sm = web.OrientationSmoother()
+    q = _Q_UPRIGHT
+    sm.update(q)
+    for _ in range(10):
+        q = _perturb(q, 5.0)          # 5 deg/update, well past snap_deg=2.0
+        held = sm.update(q)
+    assert web.quat_angle_deg(held, q) == pytest.approx(0.0, abs=1e-4)
+
+
+def test_smoother_does_not_suppress_before_the_window_fills():
+    # No evidence of jitter yet => never damp. Motion right after connect must
+    # pass straight through (same rule as StationarityGate's full-window guard).
+    sm = web.OrientationSmoother()
+    q = _Q_UPRIGHT
+    sm.update(q)
+    for _ in range(sm.window - 1):
+        q = _perturb(q, 0.1)
+        held = sm.update(q)
+    assert web.quat_angle_deg(held, q) == pytest.approx(0.0, abs=1e-4)
+
+
+def test_smoother_separates_a_slow_pan_from_jitter_of_the_same_magnitude():
+    """The whole reason for coherence gating: identical per-update magnitude,
+    opposite treatment. A magnitude deadband cannot tell these apart."""
+    step = 0.15            # deg per update -- same for both cases
+    rng = np.random.default_rng(11)
+
+    # (a) incoherent: random directions => held should barely move.
+    jit = web.OrientationSmoother()
+    jit.update(_Q_UPRIGHT)
+    for _ in range(60):
+        noisy = _perturb(_Q_UPRIGHT, rng.normal(0.0, step), axis=rng.normal(size=3))
+        held_jit = jit.update(noisy)
+    lag_jitter = web.quat_angle_deg(_Q_UPRIGHT, held_jit)
+
+    # (b) coherent: every increment the same way => held should keep up.
+    pan = web.OrientationSmoother()
+    q = _Q_UPRIGHT
+    pan.update(q)
+    for _ in range(60):
+        q = _perturb(q, step)          # steady pan about a fixed axis
+        held_pan = pan.update(q)
+    lag_pan = web.quat_angle_deg(held_pan, q)
+
+    assert lag_jitter < 0.1, "incoherent wobble should be held, not followed"
+    assert lag_pan < 0.1, "a coherent pan must track without lagging"
+    # The pan genuinely travelled while the jitter went nowhere.
+    assert web.quat_angle_deg(_Q_UPRIGHT, held_pan) > 5.0
+
+
+def test_smoother_snaps_on_a_single_large_step_even_while_gated():
+    # Drive the gate closed with jitter, then flick: the flick must not be eaten.
+    rng = np.random.default_rng(3)
+    sm = web.OrientationSmoother()
+    sm.update(_Q_UPRIGHT)
+    for _ in range(30):
+        sm.update(_perturb(_Q_UPRIGHT, rng.normal(0.0, 0.15), axis=rng.normal(size=3)))
+    flick = _perturb(_Q_UPRIGHT, 20.0, axis=(0.0, 1.0, 0.0))
+    assert web.quat_angle_deg(sm.update(flick), flick) == pytest.approx(0.0, abs=1e-4)
+
+
+def test_smoother_converges_so_a_slow_pan_does_not_lag_forever():
+    # Holding a new attitude must settle there, not park at a fixed offset.
+    sm = web.OrientationSmoother()
+    sm.update(_Q_UPRIGHT)
+    target = _perturb(_Q_UPRIGHT, 0.2)      # inside the deadband: slowest path
+    for _ in range(400):
+        held = sm.update(target)
+    assert web.quat_angle_deg(held, target) < 0.01
+
+
+def test_ir_gravity_rot_turns_the_pane_when_board_is_upside_down():
+    from roomscan.sensors import ir_gravity_rot, quat_mul
+
+    assert ir_gravity_rot(_Q_UPRIGHT) == 0
+    assert ir_gravity_rot(quat_mul(_Q_UPRIGHT, _Q_ROLL_180)) == 2   # two 90 deg turns
+
+
+def test_rotation_key_quantizes_and_survives_json_free_comparison():
+    assert web.rotation_key(None) is None
+    r = web.display_rotation((0.92388, 0.38268, 0.0, 0.0))
+    assert web.rotation_key(r) == web.rotation_key(r.copy())
+    # Sub-milliradian noise must not invalidate the cached point-cloud bytes.
+    assert web.rotation_key(r) == web.rotation_key(r + 1e-5)
+    # Real motion must.
+    assert web.rotation_key(r) != web.rotation_key(web.display_rotation((1.0, 0.0, 0.0, 0.0)))
 
 
 def test_build_sensor_message_none_when_empty():
@@ -382,7 +592,7 @@ def test_build_sensor_message_env_fields_and_history():
     ss = SensorState()
     ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", 1.0, 0.0, 0.0, 0.0)))
     for i in range(3):
-        ss.feed(_sframe(StreamId.ENV, struct.pack("<5f", 101000.0 + i, 1.0, 2.0, 3.0, 22.0 + i)))
+        ss.feed(_sframe(StreamId.ENV, struct.pack("<5f", 101000.0 + i, 1.0, 2.0, 3.0, 22.0 + i), t_us=1000 + i * 3_000_000))
     msg = web.build_sensor_message(ss, None)
     assert msg is not None
     assert msg["pressure_pa"] == pytest.approx(101002.0, abs=0.5)   # latest wins
@@ -509,6 +719,7 @@ def _build_app_state(replay_path: Path, replay_fps: float = 20.0):
     web.app.state.sensor_state = sensor_state
     web.app.state.mag_cal = None
     web.app.state.deproj = None
+    web.app.state.orientation_smoother = web.OrientationSmoother()
     web.app.state.clients = set()
     web.app.state.command_labels = set()
     web.app.state.debounce = {}
@@ -1244,6 +1455,80 @@ def test_set_color_handler_persists(tmp_path):
         config_mod.config_path = orig
     assert state.ui_state.color_mode == "confidence"
     assert ViewerConfig.load(p).color == "confidence"
+
+
+# --- auto point size (range-adaptive splats) --------------------------------
+
+def test_config_point_size_auto_default_matches_uistate():
+    """A fresh install must agree between file default and UiState default --
+    auto is ON by default (owner decision)."""
+    assert ViewerConfig().web_point_size_auto is web.UiState().point_size_auto is True
+
+
+def test_config_point_size_auto_round_trips_toml(tmp_path):
+    p = tmp_path / "roomscan.toml"
+    ViewerConfig(web_point_size_auto=False, web_point_size=0.05).save(p)
+    back = ViewerConfig.load(p)
+    assert back.web_point_size_auto is False
+    assert back.web_point_size == 0.05
+
+
+def test_ui_from_config_maps_point_size_and_auto():
+    ui = web.ui_from_config(ViewerConfig(web_point_size=0.08, web_point_size_auto=False))
+    assert ui.point_size == 0.08
+    assert ui.point_size_auto is False
+
+
+def test_ui_from_config_rejects_out_of_range_point_size():
+    """A corrupt/out-of-range size in the file must not reach the material --
+    same 0.001..1.0 range `set_view` enforces on the wire."""
+    default = web.UiState().point_size
+    assert web.ui_from_config(ViewerConfig(web_point_size=0.0)).point_size == default
+    assert web.ui_from_config(ViewerConfig(web_point_size=25.0)).point_size == default
+
+
+def test_apply_ui_to_config_writes_point_size_auto():
+    cfg = ViewerConfig()
+    web.apply_ui_to_config(web.UiState(point_size=0.04, point_size_auto=False), cfg)
+    assert cfg.web_point_size == 0.04
+    assert cfg.web_point_size_auto is False
+
+
+def test_state_message_carries_point_size_auto():
+    m = web._state_message(web.UiState(point_size=0.03, point_size_auto=False))
+    assert m["point_size"] == 0.03
+    assert m["point_size_auto"] is False
+
+
+def test_set_view_point_size_auto_updates_and_persists(tmp_path):
+    """End-to-end through the real inbound handler: the toggle lands in UiState,
+    in the `state` echo, and in roomscan.toml."""
+    import types
+    import roomscan.config as config_mod
+    p = tmp_path / "roomscan.toml"
+    state = types.SimpleNamespace(config=ViewerConfig(), ui_state=web.UiState(),
+                                  clients=set(), controller=None)
+    orig = config_mod.config_path
+    config_mod.config_path = lambda: p
+    try:
+        asyncio.run(web._handle_inbound(
+            state, {"type": "set_view", "point_size_auto": False, "point_size": 0.06}))
+    finally:
+        config_mod.config_path = orig
+    assert state.ui_state.point_size_auto is False
+    assert state.ui_state.point_size == 0.06
+    assert web._state_message(state.ui_state)["point_size_auto"] is False
+    back = ViewerConfig.load(p)
+    assert back.web_point_size_auto is False and back.web_point_size == 0.06
+
+
+def test_set_view_ignores_out_of_range_point_size():
+    """Out-of-range sizes are dropped without disturbing the current value."""
+    import types
+    state = types.SimpleNamespace(config=None, ui_state=web.UiState(),
+                                  clients=set(), controller=None)
+    asyncio.run(web._handle_inbound(state, {"type": "set_view", "point_size": 99.0}))
+    assert state.ui_state.point_size == web.UiState().point_size
 
 
 def test_root_redirects_to_static_index():

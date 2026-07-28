@@ -63,6 +63,57 @@ export function createScene(hub) {
     const points = new THREE.Points(geometry, material);
     scene.add(points);
 
+    // --- auto point size ---------------------------------------------------
+    // The sensor is an angular imager: a fixed 54x42 zone grid over 55x42 deg,
+    // so the world spacing between neighbouring points is ~r*dtheta (dtheta ~
+    // 0.018 rad) and GROWS with range. One fixed world size therefore can't fit
+    // a scene: whatever makes a far wall solid makes a near wall a blob field.
+    // In auto mode each point's size is scaled by its own range, so every zone
+    // covers the same solid angle and coverage is uniform at any distance --
+    // then `material.size` means "size at 1 m of range" instead of metres.
+    //
+    // PointsMaterial has no per-vertex size, so we patch its vertex shader
+    // rather than hand-rolling a ShaderMaterial (which would forfeit
+    // vertexColors/fog/attenuation). `transformed` is the object-space position
+    // and the server sends sensor-frame metres with the sensor at the origin
+    // (Deprojector: x = z*tan(a), y = z*tan(b), z), so length(transformed) IS
+    // the range. Using ray length rather than bare z also buys back part of the
+    // off-axis sec(a) spreading for free.
+    const pointUniforms = {
+        uAutoSize: { value: 1.0 },     // 0 = fixed metres, 1 = metres per metre of range
+        uMinPx: { value: 1.0 },        // device px: far points must not drop below a pixel
+        uMaxPx: { value: 64.0 * window.devicePixelRatio },
+    };
+    material.onBeforeCompile = (shader) => {
+        Object.assign(shader.uniforms, pointUniforms);
+        shader.vertexShader = shader.vertexShader
+            .replace('void main() {',
+                'uniform float uAutoSize;\nuniform float uMinPx;\nuniform float uMaxPx;\nvoid main() {')
+            .replace('gl_PointSize = size;',
+                'gl_PointSize = size * mix( 1.0, length( transformed ), uAutoSize );')
+            // After the USE_SIZEATTENUATION block, so this bounds the FINAL
+            // on-screen size: no sub-pixel dropout at range, and no
+            // screen-filling quad (or driver point-size cap) up close.
+            .replace('#include <logdepthbuf_vertex>',
+                'gl_PointSize = clamp( gl_PointSize, uMinPx, uMaxPx );\n\t#include <logdepthbuf_vertex>');
+    };
+
+    // Surface mesh — triangulated grid when surface mode is on.
+    const meshGeom = new THREE.BufferGeometry();
+    const meshMat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+    const surfaceMesh = new THREE.Mesh(meshGeom, meshMat);
+    surfaceMesh.visible = false;
+    scene.add(surfaceMesh);
+    // Uncovered-but-valid points shown alongside the mesh.
+    const uncovGeom = new THREE.BufferGeometry();
+    uncovGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX_POINTS * 3), 3));
+    uncovGeom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(MAX_POINTS * 3), 3));
+    uncovGeom.setDrawRange(0, 0);
+    const uncovPoints = new THREE.Points(uncovGeom, material);
+    uncovPoints.visible = false;
+    scene.add(uncovPoints);
+    let surfaceOn = false;
+
     // --- SLAM follow camera (web Phase 4) ---------------------------------
     // When follow is on, slam.js pushes an eye/center/up each frame and this
     // loop lerps the camera to it with OrbitControls disabled; when off,
@@ -73,7 +124,17 @@ export function createScene(hub) {
     const followCenter = new THREE.Vector3();
     const followUp = new THREE.Vector3(0, -1, 0);
     let haveFollowTarget = false;
-    function setPointsVisible(v) { points.visible = v; }
+    function setPointsVisible(v) {
+        if (v) {
+            points.visible = !surfaceOn;
+            surfaceMesh.visible = surfaceOn;
+            uncovPoints.visible = surfaceOn;
+        } else {
+            points.visible = false;
+            surfaceMesh.visible = false;
+            uncovPoints.visible = false;
+        }
+    }
     function setFollow(on) {
         followOn = !!on;
         if (!followOn) { controls.enabled = true; }
@@ -87,15 +148,14 @@ export function createScene(hub) {
 
     // --- point cloud ingest (§6.1: u32 tag · f32[3N] positions · f32[3N] colors) ---
     hub.on('point_cloud', (buffer) => {
-        // Skip the 4-byte tag header; the rest is 6 floats per point.
         const data = new Float32Array(buffer, 4);
         let numPoints = Math.floor(data.length / 6);
-        if (numPoints > MAX_POINTS) numPoints = MAX_POINTS;   // clamp to buffer
+        if (numPoints > MAX_POINTS) numPoints = MAX_POINTS;
         if (!window.__gotFrame) { window.__gotFrame = true; D('first point cloud: ' + numPoints + ' pts'); }
 
         const positions = geometry.attributes.position.array;
         const colors = geometry.attributes.color.array;
-        const colorOffset = Math.floor(data.length / 6) * 3;  // colors follow ALL positions in the wire buffer
+        const colorOffset = Math.floor(data.length / 6) * 3;
         const n3 = numPoints * 3;
         for (let i = 0; i < n3; i++) {
             positions[i] = data[i];
@@ -104,6 +164,68 @@ export function createScene(hub) {
         geometry.attributes.position.needsUpdate = true;
         geometry.attributes.color.needsUpdate = true;
         geometry.setDrawRange(0, numPoints);
+    });
+
+    // --- surface cloud ingest (tag 4: grid-ordered positions + triangles) ---
+    hub.on('surface_cloud', (buffer) => {
+        const view = new DataView(buffer);
+        let off = 4;
+        const gw = view.getUint16(off, true); off += 2;
+        const gh = view.getUint16(off, true); off += 2;
+        const nTris = view.getUint32(off, true); off += 4;
+        const N = gw * gh;
+
+        // Use buffer.slice for typed arrays to avoid alignment requirements.
+        const pos = new Float32Array(buffer.slice(off, off + N * 12)); off += N * 12;
+        const col = new Float32Array(buffer.slice(off, off + N * 12)); off += N * 12;
+        const valid = new Uint8Array(buffer, off, N); off += N;
+        const tris = nTris > 0 ? new Uint32Array(buffer.slice(off, off + nTris * 12)) : null;
+        off += nTris * 12;
+        const covered = new Uint8Array(buffer, off, N);
+
+        if (!window.__gotFrame) { window.__gotFrame = true; D('first surface: ' + gw + 'x' + gh + ' ' + nTris + ' tris'); }
+
+        // Mesh: set all grid positions/colors, index by triangles.
+        meshGeom.setAttribute('position', new THREE.BufferAttribute(pos.slice(), 3));
+        meshGeom.setAttribute('color', new THREE.BufferAttribute(col.slice(), 3));
+        if (tris) {
+            meshGeom.setIndex(new THREE.BufferAttribute(tris.slice(), 1));
+        } else {
+            meshGeom.setIndex(null);
+        }
+        meshGeom.computeVertexNormals();
+
+        // Uncovered-but-valid points: copy only those not part of any triangle.
+        const uncPos = uncovGeom.attributes.position.array;
+        const uncCol = uncovGeom.attributes.color.array;
+        let ui = 0;
+        for (let i = 0; i < N; i++) {
+            if (valid[i] && !covered[i]) {
+                uncPos[ui * 3]     = pos[i * 3];
+                uncPos[ui * 3 + 1] = pos[i * 3 + 1];
+                uncPos[ui * 3 + 2] = pos[i * 3 + 2];
+                uncCol[ui * 3]     = col[i * 3];
+                uncCol[ui * 3 + 1] = col[i * 3 + 1];
+                uncCol[ui * 3 + 2] = col[i * 3 + 2];
+                ui++;
+            }
+        }
+        uncovGeom.attributes.position.needsUpdate = true;
+        uncovGeom.attributes.color.needsUpdate = true;
+        uncovGeom.setDrawRange(0, ui);
+    });
+
+    // --- state echo: point size + surface visibility ---
+    hub.on('state', (msg) => {
+        if (msg.point_size !== undefined) material.size = msg.point_size;
+        // Uniform-only: toggling auto never recompiles the program.
+        if (msg.point_size_auto !== undefined) pointUniforms.uAutoSize.value = msg.point_size_auto ? 1.0 : 0.0;
+        if (msg.surface_enabled !== undefined) {
+            surfaceOn = !!msg.surface_enabled;
+            points.visible = !surfaceOn;
+            surfaceMesh.visible = surfaceOn;
+            uncovPoints.visible = surfaceOn;
+        }
     });
 
     function resetCamera() {
@@ -117,6 +239,7 @@ export function createScene(hub) {
         camera.aspect = window.innerWidth / window.innerHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(window.innerWidth, window.innerHeight);
+        pointUniforms.uMaxPx.value = 64.0 * window.devicePixelRatio;   // may change across displays
     });
 
     // Render loop + VIEW-fps measurement (browser paint rate, published ~1/s).
