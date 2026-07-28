@@ -10,7 +10,15 @@ from dataclasses import dataclass
 import numpy as np
 
 from .magcal import MagCalibration
-from .protocol import Frame, FrameType, StreamId, decode_env, decode_imu_quat
+from .protocol import (
+    Frame,
+    FrameType,
+    ImuRawBatch,
+    StreamId,
+    decode_env,
+    decode_imu_quat,
+    decode_imu_raw,
+)
 
 
 @dataclass(frozen=True)
@@ -23,8 +31,14 @@ class EnvSample:
 
 class SensorState:
     def __init__(self, history: int = 256, fusion: "YawFusion | None" = None,
-                 env_spark_interval_s: float = 2.0, env_spark_depth: int = 300):
+                 env_spark_interval_s: float = 2.0, env_spark_depth: int = 300,
+                 imu_raw_history: int = 64):
         self._lock = threading.Lock()
+        # stream 11: latest raw-FIFO batch + a short rolling window of them. Nothing
+        # consumes these yet — host-side fusion off the raw words (and Allan-variance
+        # characterisation) is the follow-up to the fp16 SFLP noise floor.
+        self._imu_raw: ImuRawBatch | None = None
+        self._imu_raw_hist: deque[tuple[int, ImuRawBatch]] = deque(maxlen=imu_raw_history)
         self._quat: tuple[float, float, float, float] | None = None
         self._env: EnvSample | None = None
         self._pressure = deque(maxlen=history)
@@ -59,6 +73,21 @@ class SensorState:
                     self._pressure_spark.append(pressure)
                     self._temp_spark.append(temp)
                     self._last_spark_t = frame.header.t_us
+        elif sid == StreamId.IMU_RAW:
+            batch = decode_imu_raw(frame.payload)
+            with self._lock:
+                self._imu_raw = batch
+                self._imu_raw_hist.append((frame.header.t_us, batch))
+
+    def latest_imu_raw(self) -> ImuRawBatch | None:
+        """Newest stream-11 raw-FIFO batch, or None if the device isn't sending them."""
+        with self._lock:
+            return self._imu_raw
+
+    def imu_raw_history(self) -> list[tuple[int, ImuRawBatch]]:
+        """Rolling window of (frame t_us, batch), oldest first."""
+        with self._lock:
+            return list(self._imu_raw_hist)
 
     def latest_quat(self) -> tuple[float, float, float, float] | None:
         with self._lock:

@@ -9,7 +9,11 @@
 #include <string.h>
 
 #include "lsm6dsv16x_reg.h"
+#include "rs_protocol.h"
 #include "stm32h5xx_hal.h"
+
+/* stream 11 puts an array of these straight on the wire — no padding allowed. */
+_Static_assert(sizeof(rs_lsm_raw_word_t) == RS_IMU_RAW_REC_SIZE, "IMU_RAW record must be 8 B");
 
 /* Sensor-hub baro/mag/temp slaves. WORKING as of 2026-07-10 -- verified on-target via
  * CONF_LSM_PROBE (all three slaves reading: P=982 hPa, T=26.6C, mag; shstat=0x01 ENDOP, nack=0).
@@ -40,10 +44,30 @@
 #define RS_LSM_SFLP_ODR     LSM6DSV16X_SFLP_480Hz     /* was 120Hz; orientation-prior rate (max) */
 #define RS_LSM_XL_FS        LSM6DSV16X_4g             /* was ±2g POR; headroom vs handheld-shake clip */
 #define RS_LSM_GY_FS        LSM6DSV16X_500dps         /* was ±250dps POR; wrist-flick headroom */
-/* Batch SFLP gravity + gyro-bias vectors to FIFO for host observability. Staged OFF: enabling
- * adds GRAVITY(0x17)/GBIAS(0x16) FIFO tags that the host stream layer must demux first. The
- * game-rotation vector is already internally bias-corrected regardless of this flag. */
-#define RS_LSM_SFLP_BATCH_AUX (0)
+/* Batch SFLP gravity + gyro-bias vectors to FIFO for host observability. ENABLED 2026-07-28:
+ * the host stream layer now demuxes GRAVITY(0x17)/GBIAS(0x16) — they ride stream 11
+ * (RS_STREAM_IMU_RAW) verbatim. The game-rotation vector is already internally bias-corrected
+ * regardless of this flag. */
+#define RS_LSM_SFLP_BATCH_AUX (1)
+
+/* ---- Raw FIFO pass-through (stream 11, 2026-07-28) ----------------------------------------
+ * The SFLP game-rotation quaternion is encoded fp16 in the FIFO (~0.056 deg/step), which is now
+ * the orientation noise FLOOR — averaging the batch (RS_LSM_SFLP_AVERAGE, below) already took us
+ * as far as decimation can. Escaping it means fusing on the host from the 16-bit fixed-point
+ * FIFO words, so batch the raw gyro + accel at the full XL/GY ODR and pass them through
+ * untouched. BDR_GY and BDR_XL are independent fields (FIFO_CTRL3), no shared decimation.
+ *
+ * TIMESTAMP is batched with them because the frame header's t_us is HAL_GetTick()*1000 — 1 ms
+ * granularity, far too coarse to integrate a 480 Hz gyro. The timestamp word carries the LSM's
+ * own 32-bit tick (~21.7 us/LSB) so the host can put every sample on the sensor's clock.
+ *
+ * Budget: 5 tags x 480 Hz = 2400 words/s + 480 timestamp words/s, drained at the ToF rate
+ * (~28 Hz) = ~90-105 words per drain against a 256-word FIFO: 2.3x headroom, but ONE missed
+ * drain overruns. g_lsm_fifo_ovr counts FIFO_STATUS.FIFO_OVR_IA so an overrun is visible
+ * on-target rather than silent. */
+#define RS_LSM_RAW_BATCH (1)
+#define RS_LSM_XL_BDR    LSM6DSV16X_XL_BATCHED_AT_480Hz
+#define RS_LSM_GY_BDR    LSM6DSV16X_GY_BATCHED_AT_480Hz
 
 /* ---- Orientation-noise reduction (2026-07-28) --------------------------------------------
  * Measured on a stationary rig: the host saw ~0.14 deg mean / 0.25 deg p95 of zero-mean
@@ -344,6 +368,16 @@ int rs_lsm_init(void) {
     };
     lsm6dsv16x_fifo_sflp_batch_set(&g_ctx, sflp_batch);
 
+#if RS_LSM_RAW_BATCH
+    /* Raw gyro/accel + the LSM timestamp into the same FIFO (see RS_LSM_RAW_BATCH above).
+     * TIMESTAMP_EN must be on for the counter to run at all; DEC_TS_BATCH = DEC_1 stamps
+     * every batch-counter tick, i.e. one timestamp word per XL/GY sample time. */
+    lsm6dsv16x_fifo_xl_batch_set(&g_ctx, RS_LSM_XL_BDR);
+    lsm6dsv16x_fifo_gy_batch_set(&g_ctx, RS_LSM_GY_BDR);
+    lsm6dsv16x_timestamp_set(&g_ctx, 1);
+    lsm6dsv16x_fifo_timestamp_batch_set(&g_ctx, LSM6DSV16X_TMSTMP_DEC_1);
+#endif
+
 #if RS_LSM_ENABLE_SHUB
     /* Sensor-hub environmental slaves are configured in a later bring-up step. */
     if (rs_lsm_shub_init() != 0) {
@@ -359,6 +393,8 @@ int rs_lsm_init(void) {
 }
 
 uint16_t g_lsm_tag_hist[32] = { 0 };  /* diagnostic: FIFO tag histogram (bench probe reads it) */
+uint32_t g_lsm_fifo_ovr = 0;          /* diagnostic: drains that found FIFO_STATUS.FIFO_OVR_IA set */
+uint16_t g_lsm_raw_dropped = 0;       /* diagnostic: stream-11 words dropped for want of buffer */
 
 uint8_t rs_lsm_shub_status_raw(void) {
     lsm6dsv16x_status_master_t st = { 0 };
@@ -368,8 +404,17 @@ uint8_t rs_lsm_shub_status_raw(void) {
 }
 
 int rs_lsm_read_latest(rs_lsm_sample_t *out) {
+    return rs_lsm_read_latest_raw(out, NULL, 0u, NULL);
+}
+
+int rs_lsm_read_latest_raw(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_t raw_max,
+                           uint16_t *raw_count) {
+    uint16_t raw_n = 0;
     out->have_quat = 0;
     out->have_env = 0;
+    if (raw_count != NULL) {
+        *raw_count = 0;
+    }
 #if RS_LSM_SFLP_AVERAGE
     /* Accumulate the batch rather than keeping its last sample -- see RS_LSM_SFLP_AVERAGE. */
     float quat_acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -380,6 +425,9 @@ int rs_lsm_read_latest(rs_lsm_sample_t *out) {
     if (lsm6dsv16x_fifo_status_get(&g_ctx, &status) != 0) {
         return -1;
     }
+    if (status.fifo_ovr) {
+        g_lsm_fifo_ovr++;   /* a drain was missed: samples were lost before we got here */
+    }
     uint16_t level = status.fifo_level;
     for (uint16_t i = 0; i < level; i++) {
         lsm6dsv16x_fifo_out_raw_t word;
@@ -388,6 +436,29 @@ int rs_lsm_read_latest(rs_lsm_sample_t *out) {
         }
         if (word.tag < 32) {
             g_lsm_tag_hist[word.tag]++;
+        }
+        if (raw != NULL) {
+            /* stream-11 pass-through: 16-bit fixed-point words only. 0x13 (game rotation)
+             * belongs to stream 9 and the sensor-hub tags to stream 10. */
+            switch (word.tag) {
+            case LSM6DSV16X_GY_NC_TAG:
+            case LSM6DSV16X_XL_NC_TAG:
+            case LSM6DSV16X_TIMESTAMP_TAG:
+            case LSM6DSV16X_SFLP_GYROSCOPE_BIAS_TAG:
+            case LSM6DSV16X_SFLP_GRAVITY_VECTOR_TAG:
+                if (raw_n < raw_max) {
+                    /* rebuild the FIFO_DATA_OUT_TAG register byte the driver took apart */
+                    raw[raw_n].tag = (uint8_t)(((uint8_t)word.tag << 3) | ((word.cnt & 0x3u) << 1));
+                    memcpy(raw[raw_n].data, word.data, 6);
+                    raw[raw_n].reserved = 0u;
+                    raw_n++;
+                } else {
+                    g_lsm_raw_dropped++;
+                }
+                break;
+            default:
+                break;
+            }
         }
         switch (word.tag) {
         case LSM6DSV16X_SFLP_GAME_ROTATION_VECTOR_TAG:
@@ -440,5 +511,8 @@ int rs_lsm_read_latest(rs_lsm_sample_t *out) {
         }
     }
 #endif
-    return (out->have_quat || out->have_env) ? 0 : -1;
+    if (raw_count != NULL) {
+        *raw_count = raw_n;
+    }
+    return (out->have_quat || out->have_env || raw_n != 0) ? 0 : -1;
 }

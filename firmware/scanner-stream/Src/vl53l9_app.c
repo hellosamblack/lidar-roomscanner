@@ -2104,7 +2104,11 @@ void vl53l9_app() {
          * skip this frame's IMU/env only -- the ToF stream above is already sent. */
         if (g_lsm_ok) {
             rs_lsm_sample_t lsm;
-            if (rs_lsm_read_latest(&lsm) == 0) {
+            /* One full FIFO's worth (256 words x 8 B = 2 KB); a drain can never yield more.
+             * Static, not stack: the acquisition loop's frame is already deep. */
+            static rs_lsm_raw_word_t lsm_raw[RS_LSM_RAW_FIFO_MAX];
+            uint16_t lsm_raw_n = 0;
+            if (rs_lsm_read_latest_raw(&lsm, lsm_raw, (uint16_t)RS_LSM_RAW_FIFO_MAX, &lsm_raw_n) == 0) {
                 if (lsm.have_quat) {
                     rs_send_frame_cdc(RS_STREAM_IMU_QUAT, rs_counter, 0u,
                                       (const uint8_t *)lsm.quat, RS_IMU_QUAT_SIZE, 0u, 0u);
@@ -2115,6 +2119,12 @@ void vl53l9_app() {
                     memcpy(env + 4, lsm.mag_ut, 12);
                     memcpy(env + 16, &lsm.temp_c, 4);
                     rs_send_frame_cdc(RS_STREAM_ENV, rs_counter, 0u, env, RS_ENV_SIZE, 0u, 0u);
+                }
+                /* Raw FIFO pass-through (stream 11): record count goes in `width`, `height` = 0
+                 * (docs/protocol.md). ~90-105 records/frame at 480 Hz batching = ~720-840 B. */
+                if (lsm_raw_n != 0) {
+                    rs_send_frame_cdc(RS_STREAM_IMU_RAW, rs_counter, 0u, (const uint8_t *)lsm_raw,
+                                      (uint32_t)lsm_raw_n * RS_IMU_RAW_REC_SIZE, lsm_raw_n, 0u);
                 }
             }
         }

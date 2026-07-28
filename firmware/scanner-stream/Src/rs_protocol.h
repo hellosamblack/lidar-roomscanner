@@ -15,7 +15,7 @@
 #define RS_STREAM_DEPTH_ZF32 (0u)
 #define RS_FLAG_DROPPED      (0x01u)
 
-/* Stream registry — see roomscanner/docs/protocol.md. 1-6 reserved (Phase 2+); 7-8 + 9-10 live. */
+/* Stream registry — see roomscanner/docs/protocol.md. 1-6 reserved (Phase 2+); 7-8 + 9-11 live. */
 #define RS_STREAM_DEPTH_ZAPC  (1u)
 #define RS_STREAM_AMBIENT     (2u)
 #define RS_STREAM_AMPLITUDE   (3u)
@@ -26,10 +26,14 @@
 #define RS_STREAM_CALIB       (8u) /* per-device calibration blob */
 #define RS_STREAM_IMU_QUAT    (9u)  /* 4x float32 [w,x,y,z] quaternion, LSM body frame */
 #define RS_STREAM_ENV         (10u) /* f32 pressure(Pa) + 3xf32 mag(uT) + f32 temp(C) */
+#define RS_STREAM_IMU_RAW     (11u) /* N x 8B verbatim LSM6DSV16X FIFO words (GY/XL/ts/gravity/gbias) */
 #define RS_RAW_3DMD_SIZE_BIN2 (14842u)
 #define RS_CALIB_SIZE         (2332u)
 #define RS_IMU_QUAT_SIZE      (16u)
 #define RS_ENV_SIZE           (20u)
+/* One IMU_RAW record: FIFO_DATA_OUT_TAG byte + the 6 FIFO data bytes + 1 reserved zero.
+ * payload_len = N * RS_IMU_RAW_REC_SIZE, and the header's `width` field carries N (`height` = 0). */
+#define RS_IMU_RAW_REC_SIZE   (8u)
 
 /* EVENT (RS_FRAME_EVENT) payload: u32 code, u32 detail, optional ASCII message. */
 #define RS_EVT_SENSOR_INIT_FAIL    (1u)

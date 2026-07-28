@@ -180,6 +180,14 @@ of additional upstream filtering will go below it. Going further means leaving t
 batching raw XL/GY and fusing on the host, or reading the gravity/gbias vectors — which is a much larger
 change and was not attempted.
 
+**Transport for that now exists (2026-07-28): stream 11, `IMU_RAW`.** The firmware batches GY_NC, XL_NC,
+TIMESTAMP, SFLP gbias and SFLP gravity at 480 Hz (`RS_LSM_RAW_BATCH` / `RS_LSM_SFLP_BATCH_AUX` in
+`Src/rs_lsm.c`) and passes the FIFO words through verbatim — 16-bit fixed point, no fp16 anywhere —
+~90–105 records per ToF frame. Layout and scale factors in `docs/protocol.md` → "IMU_RAW (stream 11)
+record layout"; the host decodes it (`decode_imu_raw`) and `SensorState` buffers it. **The host-side fusion
+that would actually beat the fp16 floor is still to come** — stream 11 is wire + storage only today, and
+stream 9 remains the orientation source.
+
 ## RESOLVED (2026-07-10) — stacked I3C now streams the full sensor suite at 27.85 fps
 
 The "shared I3C fails at operating speed when stacked" conflict below is **fixed in firmware**. Root cause
