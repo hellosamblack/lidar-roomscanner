@@ -111,6 +111,7 @@ class UdpSource:
         # harmless when already streaming. keepalive_s <= 0 disables it.
         self.keepalive_s = keepalive_s
         self._last_wake = 0.0
+        self._last_rx_time = time.time()
 
         # Try to resolve roomscanner.local
         self._resolve_target(zeroconf_factory, mdns_timeout_ms)
@@ -150,11 +151,24 @@ class UdpSource:
         """Re-send the wake datagram every keepalive_s so the board keeps
         streaming to us (see __init__). Called on every read() -- cheap, and
         the only place in the steady-state loop that runs regularly."""
-        if self.keepalive_s <= 0 or not self.target_ip:
-            return
         now = time.time()
+        
+        if self.keepalive_s <= 0:
+            return
+            
         if now - self._last_wake >= self.keepalive_s:
             self._last_wake = now
+            
+            # If we haven't received data in 2 seconds, fall back to mDNS resolution
+            # rather than just broadcasting. This recovers the stream if the board's IP 
+            # changed (e.g. DHCP after replug) on host networks where 255.255.255.255 
+            # won't reach it.
+            if now - self._last_rx_time > 2.0:
+                self._resolve_target(mdns_timeout_ms=500)
+                
+            if not self.target_ip:
+                return
+                
             try:
                 self.sock.sendto(b"\x00", (self.target_ip, self.target_port))
             except Exception:
@@ -178,6 +192,7 @@ class UdpSource:
                 return b""
 
             self.target_ip = addr[0]
+            self._last_rx_time = time.time()
 
             seq_num, frag_idx, total_frags = struct.unpack("<IBB", data[:6])
             payload = data[6:]
@@ -199,6 +214,10 @@ class UdpSource:
         except socket.timeout:
             return b""
         except BlockingIOError:
+            return b""
+        except OSError:
+            # Interface might be temporarily down (e.g. cable unplugged).
+            # Ignore and retry next poll rather than crashing the reader thread.
             return b""
 
     def write(self, data: bytes) -> None:

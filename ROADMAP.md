@@ -782,6 +782,8 @@ top of 445 KB/s raw), so nothing here waits on Ethernet.
 > yellow blinking = acquisition loop alive, LD3 red = wedged) make a headless board diagnosable
 > without a debugger — the PHY's own link/activity LEDs say nothing about whether firmware is running.
 >
+> **Status 2026-07-28 addition — Ethernet hot-plug recovery:** Fixed a firmware hard-fault (an lwIP double-add assertion on `mdns_resp_add_netif`) that wedged the board when the Ethernet cable was unplugged and replugged. The host Python `UdpSource` was also upgraded to actively re-query mDNS when the stream drops, rather than blindly broadcasting `255.255.255.255` which fails to route on some Linux/Docker setups. The system now seamlessly recovers if the Ethernet tether is physically disconnected and reconnected.
+>
 > **Status 2026-07-14:** verified end-to-end on hardware. The device streams flawlessly over both USB CDC and Ethernet UDP.
 >
 > **Ethernet Implementation:**

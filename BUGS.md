@@ -39,6 +39,8 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-025 | fixed   | host/sources  | `UdpSource` retargeted onto its own looped-back broadcast wake, adopting the host itself as the device |
 | BUG-026 | fixed   | host/web      | Web UI never gravity-aligned the view — boot the board upside down and both IR and point cloud render upside down |
 | BUG-027 | fixed   | firmware      | SFLP quaternion decimated 480 Hz → 30 Hz by keeping one sample of ~16, aliasing the whole noise band into the output |
+| BUG-028 | fixed   | firmware      | Ethernet hot-plug replug wedges board (LD2 freezes) — lwIP double-add assertion on `mdns_resp_add_netif` |
+| BUG-029 | fixed   | host/sources  | `UdpSource` stream recovery fails due to `255.255.255.255` fallback keepalives not routing on some Linux network configs |
 
 ---
 
@@ -811,3 +813,21 @@ higher-precision register path. Because fp16 is floating point the floor should 
 orientation** (finer near identity) — an untested prediction. Beating it means leaving the SFLP FIFO
 format (batch raw XL/GY and fuse host-side); **open, not attempted.** Analysis + method in
 `docs/iks4a1-stacking.md` → "Orientation-noise pass"; measure with `host/tools/orientation_probe.py`.
+
+## BUG-028 — Ethernet hot-plug replug wedges board (lwIP double-add assertion)
+
+- **Status:** **fixed** 2026-07-28 · **Reported:** 2026-07-28 (owner) · **Area:** firmware
+- **Where:** `firmware/scanner-stream/Src/ethernet_transport.c`
+
+When the Ethernet cable is unplugged and plugged back in, the firmware wedged. The PHY link LED turned on, but LD2 stopped blinking, indicating an infinite loop. The root cause was that `ETH_Process` called `mdns_resp_add_netif` a second time on the same network interface after the DHCP lease was re-acquired. The ST port's `LWIP_PLATFORM_ASSERT` trapped the "Double add" assertion into an infinite `while(1)` loop without triggering a hard fault handler (so LD3 stayed off).
+
+**Fix:** Introduced a static flag `mdns_added` to ensure `mdns_resp_add_netif` and `mdns_resp_add_service` are only called once. Subsequent IP updates now correctly rely only on `mdns_resp_netif_settings_changed`.
+
+## BUG-029 — UdpSource stream recovery fails due to broadcast routing
+
+- **Status:** **fixed** 2026-07-28 · **Reported:** 2026-07-28 (owner) · **Area:** host/sources
+- **Where:** `host/src/roomscan/sources.py` (`UdpSource._maybe_keepalive`)
+
+Even after the firmware crash (BUG-028) was fixed, the `UdpSource` stream would not recover after a replug until the python server was restarted. The source was correctly detecting a stream timeout (>2s) but was falling back to sending its keepalive wake datagram to `255.255.255.255`. On many Linux/Docker host setups, raw broadcasts to `255.255.255.255` fail to route out of the physical Ethernet interface and instead go to a virtual bridge, meaning the board never received the keepalives.
+
+**Fix:** Updated `_maybe_keepalive` to actively re-query the board's IP via mDNS (`_resolve_target`) every keepalive interval when the stream is dead. This learns the new (or same) IP and resumes unicast wake packets, gracefully restoring the stream.

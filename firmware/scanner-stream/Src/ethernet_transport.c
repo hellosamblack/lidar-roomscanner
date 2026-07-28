@@ -167,16 +167,22 @@ void ETH_Process(void)
         }
         netif_set_down(&gnetif);
         dhcp_state = DHCP_STATE_INIT;
+        target_ip.addr = 0; // Clear target IP on link down
     }
 
     if (eth_link_up) {
+        static bool mdns_added = false;
+
         if (dhcp_state == DHCP_STATE_CLIENT_WAITING) {
             if (gnetif.ip_addr.addr != 0) {
                 dhcp_state = DHCP_STATE_CLIENT_BOUND;
-                err_t m1 = mdns_resp_add_netif(&gnetif, "roomscanner", 3600);
-                s8_t m2 = mdns_resp_add_service(&gnetif, "roomscanner", "_roomscan", DNSSD_PROTO_UDP, 5000, 3600, NULL, NULL);
+                if (!mdns_added) {
+                    mdns_resp_add_netif(&gnetif, "roomscanner", 3600);
+                    mdns_resp_add_service(&gnetif, "roomscanner", "_roomscan", DNSSD_PROTO_UDP, 5000, 3600, NULL, NULL);
+                    mdns_added = true;
+                }
                 mdns_resp_netif_settings_changed(&gnetif);
-                printf("[ETH] DHCP Client Bound: IP %s, mdns_add=%d, srv=%d\n", ip4addr_ntoa(netif_ip4_addr(&gnetif)), m1, m2);
+                printf("[ETH] DHCP Client Bound: IP %s\n", ip4addr_ntoa(netif_ip4_addr(&gnetif)));
             } else if ((HAL_GetTick() - dhcp_start_time) > 3000) {
                 // Timeout, switch to server
                 printf("[ETH] DHCP Client Timeout, switching to Server (172.31.253.1)\n");
@@ -191,8 +197,11 @@ void ETH_Process(void)
                 
                 dhcps_init();
                 dhcp_state = DHCP_STATE_SERVER;
-                mdns_resp_add_netif(&gnetif, "roomscanner", 3600);
-                mdns_resp_add_service(&gnetif, "roomscanner", "_roomscan", DNSSD_PROTO_UDP, 5000, 3600, NULL, NULL);
+                if (!mdns_added) {
+                    mdns_resp_add_netif(&gnetif, "roomscanner", 3600);
+                    mdns_resp_add_service(&gnetif, "roomscanner", "_roomscan", DNSSD_PROTO_UDP, 5000, 3600, NULL, NULL);
+                    mdns_added = true;
+                }
                 mdns_resp_netif_settings_changed(&gnetif);
             }
         } else if (dhcp_state == DHCP_STATE_CLIENT_BOUND || dhcp_state == DHCP_STATE_SERVER) {
