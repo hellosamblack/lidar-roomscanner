@@ -874,6 +874,25 @@ channel, barometer as soft 1-DoF Z constraint.
 > a **zero-yaw** control (SFLP yaw has an arbitrary origin — no magnetic input), and a **magnetometer
 > calibration modal** with sphere-coverage visualisation.
 >
+> **3D calibration feedback ("Shell & Steering", 2026-07-29, `cf3b243`)** — the modal's hero is now a
+> body-fixed 3D scene: a device model inside a translucent shell of the same 92 Fibonacci cells
+> (covered = solid discs, fill = |B| deviation, radius = sample count; missing = dashed hollow rings),
+> a 3 s comet trail, **B** and **g** arrows with a live **B∠g dip arc**, and a world-fixed "Steering"
+> widget showing a ghost device at the target attitude. New binary **tag 5 `MAGPOSE`** (68 B at 30 Hz,
+> only to clients with the modal open, ~2 kB/s). Guidance is now the exact rotation
+> `axis = unit(t × d)`, `angle = acos(t·d)` — that axis is a *body* axis, so it draws directly on the
+> model, which also **removed the old northern-hemisphere dip assumption** from the hint text.
+> The dip arc is a second, scale-immune error channel: for a correct calibration B∠g is a constant of
+> the location, so a wobbling arc reveals errors the |B| magnitude metrics structurally cannot.
+> Degrades to the 2D Lambert discs on no-WebGL / context-loss / `?magcal2d=1`. 914 tests.
+> Design: `docs/superpowers/specs/2026-07-29-magcal-3d-feedback-design.md`.
+> **Deferred:** driving pose from stream 11 / `ImuFusion` (design Phase 3 — note `ImuFusion.update()`
+> currently emits one quat per ToF frame, not 480/s, and should be a session-private instance never
+> attached to `SensorState`); `#ef4444` colour re-stepping (Phase 2).
+> **Unanswered by the owner:** free tumble with steering (implemented) vs a prescribed six-pose recipe,
+> plus four more in §12 of the design. **No capture contains a real tumble yet** — the tilt sweep fills
+> only 2 of 92 cells (it is one-dimensional); covered-shell screenshots used a synthetic fixture.
+>
 > **Measurement method matters here** — three plausible readings were wrong before the right one
 > emerged; see the `orientation-noise-floor` memory for the five traps (notably: use **p95**, never the
 > median, on this signal; and normalise quaternions for angles but NOT for tie counting).

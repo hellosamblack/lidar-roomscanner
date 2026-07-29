@@ -54,6 +54,14 @@ Error budget during a 100 °/s pan, measured:
   SLAM-non-regression tests. **This is the main un-landed capability — see §4.**
 - `web.py` — raw orientation readouts, per-signal jitter (p95 headline / mean secondary), four
   orientation decomposition modes, zero-yaw control, magnetometer calibration modal.
+- `magsweep.py` + `static/magcal.js` + `static/magcal3d.js` — the calibration tool. Coverage is a
+  **92-cell Fibonacci equal-area sphere lattice** over the **calibrated, body-frame** field direction
+  (raw would never span the sphere: hard-iron ~65 µT exceeds the ~50 µT field). Verdicts gate on
+  field **spread AND bias** — spread alone scored the current bad calibration "good" because it is
+  self-consistent at ~2× the wrong magnitude. Hero view is the body-fixed 3D "Shell & Steering" scene
+  (binary **`MAGPOSE` tag 5**, 68 B at 30 Hz, modal-open clients only), with a 2D Lambert-disc
+  fallback on no-WebGL / context-loss / `?magcal2d=1`. Design:
+  `docs/superpowers/specs/2026-07-29-magcal-3d-feedback-design.md`.
 - `host/tools/orientation_probe.py` — the canonical measurement CLI (`jitter` / `health` / `frame`).
 
 ---
@@ -90,10 +98,21 @@ Current `host/mag_cal.json` (fitted 2026-07-15) is accurate at ceiling-facing an
 monotonically with tilt: |B| reads 47 µT at the ceiling and 85 µT horizontal, against a fitted
 49.87 µT. Causes systematic heading errors up to ~90° in the horizontal wall-scanning attitude.
 
-**Action:** owner runs a full-sphere tumble using the new calibration modal, spending real time in
-the **horizontal** attitudes where the current fit is worst. The modal shows sphere coverage live,
-flags missing regions, and gates acceptance on **|B| consistency** (the defining property of a good
-calibration) rather than a bare fit residual. Re-run the tilt sweep afterwards to confirm |B| is flat.
+**Action:** owner runs a full-sphere tumble using the calibration modal, spending real time in the
+**horizontal** attitudes where the current fit is worst. The modal shows sphere coverage live in 3D,
+steers toward the largest remaining gap, and gates acceptance on **|B| consistency** (the defining
+property of a good calibration) rather than a bare fit residual. Re-run the tilt sweep afterwards to
+confirm |B| is flat across attitudes.
+
+**Status 2026-07-29:** the tool is built and verified live, but **the tumble has not happened** — the
+owner was away. Honesty check passed on the stationary rig: 2/92 cells, degenerate fit refused, and
+the saved calibration rendered at **+93% bias (96.3 µT vs its own 49.87)**. Three things still open:
+(a) the owner's answer on **free tumble vs a prescribed six-pose recipe** (free tumble is what
+shipped); (b) whether the empty-state shell — 92 bright dashed rings — reads as *unmissable* or just
+harsh (one-line tune: `EMPTY_INK` / `emptyMat.opacity`); (c) **no capture contains a real tumble** —
+`tilt_sweep_20260729.bin` fills 2 cells, `web_20260729_061440.bin` fills 6, and the covered-shell
+screenshots used a synthetic fixture. Record a real 30 s tumble via the `/ws` `record` action (NOT
+`capture.py --udp` — it starves the live UI).
 
 ### 4.2 Wire `imufusion` into the live display and A/B it
 The filter is built, tested, and off. To land it: enable it behind the existing opt-in, then A/B

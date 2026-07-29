@@ -42,6 +42,12 @@ The PR flow is retired. **Land work by committing straight to `main`, no PR.**
   when the owner asks (they may want to review the local commit first).
 - Subagents don't commit; the controlling session commits (subagent cwd defaults to the main
   checkout — the mis-commit that caused the 2026-07-10 main/PR divergence). This still holds.
+- **When you MERGE a subagent's feature commit, run this checklist yourself against it.** Subagents
+  are briefed on the feature, not on the planning docs, so their commit will land the code with no
+  ROADMAP/CLAUDE.md delta and you inherit the drift. On 2026-07-29 a 3D calibration view merged and
+  *none* of `ROADMAP.md`, `CLAUDE.md`, or the task's resume doc mentioned it — the resume doc would
+  have sent a fresh session hunting for a 2D-only modal. Caught only by a second wrap-up. Either brief
+  the subagent to include the doc deltas, or do the checklist as part of the merge commit.
 
 ## Rationalizations (all mean: do the checklist now)
 
