@@ -69,6 +69,25 @@ Web-Phase-4 SLAM controls `#seg-mode button[data-mode=realtime|slam]`,
 `chk-slam-traj`, `chk-slam-follow`, `#seg-walls button[data-walls=split|solid]`,
 `btn-save`, `#saved-list .cap-row a`, and the diagnostics toggle `diag-toggle`).
 
+**The Sensors card's numerics live in a collapsed `<details>`.** Since the
+2026-07-29 declutter, only the gizmo/compass, the selected orientation readout,
+the fusion state and Environment are visible by default; the full-precision raw
+ZYX values (`sensor-roll`/`…-quat`), the jitter table (`jitter-<signal>` for p95
+and `jitter-<signal>-mean` for mean) and the yaw-offset controls sit inside
+`#sensor-diag`. Set `document.getElementById('sensor-diag').open = true` in a
+step before shooting or asserting them — they are in the DOM and updating either
+way, but a screenshot won't show them. Opened, the drawer is its own scroll box
+(the card is capped at the dock band), so `#sensor-diag.scrollTop = 1e4` brings
+the jitter table into frame.
+
+**Beware `const` leaking between steps.** Each step's `js` is evaluated in the
+same page global scope, so a second step that re-declares `const s = …` throws
+`Identifier 's' has already been declared` — and the step's *whole* body then
+never runs. The tool prints `JS error in step …`, but the symptom reads exactly
+like the app ignoring your click (cost ~20 min on 2026-07-29: three "the mode
+select is broken" reproductions were all this). Wrap each step's body in an IIFE
+(`(()=>{ … })()`) or use distinct names.
+
 **The magnetometer-calibration modal has two renderers, and both must be shot.**
 Open it with `sensor-mag-cal`; drive it with `magcal-start` / `magcal-stop` /
 `magcal-clear`. The 3D "Shell & Steering" view (`magcal3d.js`) publishes a 1 Hz

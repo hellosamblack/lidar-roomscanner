@@ -44,6 +44,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-030 | open    | host/sensors  | Magnetometer calibration is direction-dependent: |B| ranges 47→85 µT with tilt, heading errors up to ~90° |
 | BUG-031 | open    | firmware      | ToF frame timestamp and IMU FIFO drain skewed ~0.9 ms (dominates handheld orientation error) |
 | BUG-032 | fixed   | host/slam     | GPU SLAM OOMs on a long scan — Open3D's CUDA cache grows ~5.1 MiB/frame from the throttled mesh extraction (NOT the per-frame path, which is byte-flat) |
+| BUG-033 | fixed   | host/web      | Sensors card outgrew the dock band (~1600 px of flat, half-duplicated rows) — jitter table unreachable, whole card auto-collapsed on a narrow window |
 
 ---
 
@@ -1033,3 +1034,59 @@ p99 8.6 → 8.8, wall 62.3 s → 62.7 s over an identical 1500-frame run. The un
 cadence, asserting peak ≤ 1500 MiB, tail growth ≤ 0.5 MiB/frame, and that releases actually happened
 (so the knob being disabled, or the hook being unwired, fails loudly). Unit coverage for the cadence and
 wiring is in `host/tests/test_slam_tsdf.py` (monkeypatched, so it runs on a CPU box).
+
+---
+
+## BUG-033 — Sensors card outgrew the dock band; readouts unreachable and half-duplicated
+
+- **Status:** **fixed** 2026-07-29 · **Reported:** 2026-07-29 (owner: "clean up our sensors panel,
+  it's cluttered and hard to read") · **Area:** host/web
+- **Where:** `host/src/roomscan/static/index.html` (`#sensors-card` markup + the `.sensor-*` CSS),
+  `host/src/roomscan/static/sensors.js`
+
+The card had accreted four flat blocks — Sensors, Orientation View, Raw Orientation, Jitter — plus two
+button pairs, ~25 rows in a 232 px rail. Two consequences, one cosmetic and one functional:
+
+- **Functional:** at ~1600 px the card was roughly twice the dock band (883 px at a 1000 px viewport).
+  `.dock > * { max-height: 100% }` capped it and the overflow was simply *clipped* with no scroll, so
+  the Jitter table — the whole point of the 2026-07-28 noise work — could not be read at any window
+  size; and `layout.js`'s degradation ladder ends in `autoCollapse('sensors-card')`, so a narrow
+  window hid the card entirely rather than a part of it.
+- **Cosmetic but load-bearing for readability:** the numbers were *duplicated*. "Orientation View" and
+  "Raw Orientation" both printed Roll/Pitch/Yaw, and in the default `zyx` mode those are the same
+  quantity to the digit; heading appeared three times (compass caption, raw heading, and the
+  mislabelled "Heading" row that actually showed *fusion state*); World mode printed its gravity+mag
+  caveat twice, because `#orient-world-note` said what `ORIENT_MODE_DESC.world` already said. On top
+  of that the shared `.hud-row` 16 px gap plus long strings ("p95 0.026° · mean 0.006°",
+  "Orientation (always trustworthy)", "No mag calibration") wrapped nearly every row onto two lines,
+  and the `<select>` clipped its own longest option mid-word.
+
+**Fix — three always-visible tiers plus one disclosure.** Visible: gizmo + compass → full-width mode
+`<select>` → the three (renamable, now borderless-until-hover) orientation values → conditional ⚠
+warnings → `Fusion` state, colour-coded by `fusion_key` (green active / amber gated / muted off), with
+`Reset Heading` + `Calibrate Mag` beside it → Environment. Inside a collapsed `#sensor-diag`
+`<details>`: the mode's singularity note, yaw offset + `Zero Yaw`/`Clear`, full-precision raw ZYX +
+quat, and Jitter as a `label · p95 · mean` grid under one unit heading. **Precision was not reduced
+anywhere** and the only element removed is the duplicate world note (with its now-dead
+`worldNote` binding).
+
+**Two gotchas worth keeping:**
+
+1. **Chrome does not pass a flex-shrunk `<details>`'s height to its content.** The obvious
+   construction — `<details>` as a flex column, `.sensor-details__body` as the `flex: 1 1 auto;
+   min-height: 0; overflow-y: auto` scroll box — measured `det h=376` with `body h=426`: the body kept
+   its natural height and spilled past the card, because Chrome renders details content in an
+   anonymous `::details-content` box, so the body is not a direct flex item. The scroll box has to be
+   the **`<details>` itself** (`min-height: 0; overflow-y: auto`), with the summary `position: sticky`
+   and an *opaque* background so scrolled rows don't read through the glass card.
+2. **The scroll container needs its own `pointer-events: auto`.** `.hud-card * { pointer-events: none }`
+   sets it explicitly on every descendant, so it defeats inheritance — a deliberate, scoped exception
+   to the left dock's "never intercept OrbitControls" rule, justified because the drawer already held
+   pointer-active buttons and the wheel would otherwise dolly the camera instead of scrolling.
+
+No `/ws` message, field, or precision changed — `docs/web-protocol.md` is unaffected. Verified in
+headless Chrome against `captures/tilt_sweep_20260729.bin` at 1600×1000 and 1280×720: card within the
+band in both states (`card=865` / `603`, zero overflow past the dock), drawer scrolls to the full
+jitter table, and mode switching, World-mode gating (`Zero Yaw` disabled, ⚠ invalid), zero-yaw/clear
+and label rename (propagating to the jitter row labels) all still round-trip through the server.
+959 tests, 0 console errors.

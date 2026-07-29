@@ -880,6 +880,21 @@ channel, barometer as soft 1-DoF Z constraint.
 > a **zero-yaw** control (SFLP yaw has an arbitrary origin — no magnetic input), and a **magnetometer
 > calibration modal** with sphere-coverage visualisation.
 >
+> **Sensors-card declutter (owner: "cluttered and hard to read", 2026-07-29)** — those readouts landed
+> as four flat blocks in a 232 px rail: ~25 rows, most wrapping onto two lines, and *duplicated*
+> (the selected mode's roll/pitch/yaw ARE the raw ZYX ones in the default mode; heading appeared
+> three times; World mode printed its gravity+mag caveat twice). At ~1600 px the card also ran past
+> the dock band, so the jitter table was unreachable and `layout.js` auto-collapsed the whole card on
+> a narrow window. Now three always-visible tiers (gizmo+compass · the selected orientation readout ·
+> Fusion state with its two buttons · Environment) plus a collapsed `#sensor-diag` `<details>` holding
+> the mode note, yaw offset, full-precision raw ZYX + quat, and jitter as a p95/mean **grid**.
+> Nothing was removed but the duplicate world note. **Presentation only** — no `/ws` message, field,
+> or precision changed, so `docs/web-protocol.md` is unaffected; 959 tests unchanged. Gotchas worth
+> keeping: Chrome renders `<details>` content in an anonymous `::details-content` box, so a
+> flex-shrunk `<details>` does **not** pass its height to a child (the scroll box must be the
+> `<details>` itself); and driving the card with `web_ui_shot.py` needs `#sensor-diag.open = true`
+> first — see `docs/web-ui-testing.md`. BUG-033.
+>
 > **3D calibration feedback ("Shell & Steering", 2026-07-29, `cf3b243`)** — the modal's hero is now a
 > body-fixed 3D scene: a device model inside a translucent shell of the same 92 Fibonacci cells
 > (covered = solid discs, fill = |B| deviation, radius = sample count; missing = dashed hollow rings),

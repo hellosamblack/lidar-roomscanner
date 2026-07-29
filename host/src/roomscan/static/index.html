@@ -230,16 +230,43 @@
         .hud-bar { height: 6px; border-radius: 3px; background: rgba(255,255,255,0.08); overflow: hidden; margin: 2px 0; }
         .hud-bar__fill { height: 100%; width: 0%; background: var(--accent); transition: width 0.3s ease; }
 
-        /* Sensors (Phase 2): gizmo + compass side by side, then sparklines. */
-        .sensor-widgets { display: flex; gap: 8px; justify-content: space-between; margin: 2px 0; }
+        /* ---- Sensors card (Phase 2; decluttered 2026-07-29) ----------------
+         *
+         * Three always-visible tiers — the visual pair (gizmo + compass), the
+         * SELECTED orientation readout, and environment — then everything
+         * diagnostic behind one collapsed <details>: the mode's singularity
+         * note, the yaw offset, the full-precision ZYX reference numbers, and
+         * the jitter table. Before this, all four blocks rendered flat, which
+         * stacked ~25 rows of largely DUPLICATE numbers (the selected mode's
+         * roll/pitch/yaw are literally the ZYX raw ones in the default mode,
+         * and heading appeared three times) into a 232px column, wrapping most
+         * of them onto two lines. Nothing was removed: the detail is one click
+         * away, and layout.js's ResizeObserver already re-flows the dock when
+         * the card grows.
+         *
+         * Tighter row gap than the shared .hud-row (16px -> 8px): these labels
+         * and values are long, and the wide gap was what pushed them to wrap.
+         */
+        #sensors-card .hud-row { gap: 8px; align-items: baseline; }
+        #sensors-card .hud-row > span:first-child { white-space: nowrap; }
+        .sensor-widgets { display: flex; gap: 8px; justify-content: space-around; margin: 0 0 2px; }
         .sensor-widget { display: flex; flex-direction: column; align-items: center; gap: 3px; }
         .sensor-widget canvas { display: block; }
         .sensor-cap { font-size: 0.62rem; color: var(--text-muted); text-align: center; }
-        .sensor-spark { display: block; width: 100%; height: 32px; margin: 1px 0 4px 0; }
-        .sensor-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 2px; }
-        .sensor-btn { pointer-events: auto !important; padding: 5px 8px; font-size: 0.68rem; }
+        .sensor-cap--val { font-size: 0.72rem; color: var(--text-main); font-weight: 700; }
+        .sensor-spark { display: block; width: 100%; height: 26px; margin: 0 0 2px 0; }
+        .sensor-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 4px; }
+        /* Narrow horizontal padding: at two per 200px row, 8px each side was
+           enough to break "Reset Heading" onto a second line. */
+        .sensor-btn { pointer-events: auto !important; padding: 5px 3px; font-size: 0.68rem; white-space: nowrap; }
         .sensor-btn:disabled { opacity: 0.35; cursor: not-allowed; }
         .sensor-btn--secondary { border-style: dashed; }
+        /* Fusion state reads as status, not trivia: green when actually fusing,
+           amber while gated (the common "No mag calibration" case), muted off. */
+        .sensor-state { font-size: 0.72rem; font-weight: 700; text-align: right; }
+        .sensor-state.is-active { color: var(--success); }
+        .sensor-state.is-gated { color: var(--warning); }
+        .sensor-state.is-off { color: var(--text-muted); font-weight: 400; }
 
         /* Orientation decomposition mode + labels (owner ask, 2026-07-28). */
         .sensor-select, .sensor-label-input {
@@ -247,8 +274,92 @@
             border: 1px solid rgba(255,255,255,0.15); border-radius: 4px;
             color: var(--text-main); font-size: 0.72rem; font-family: inherit;
         }
-        .sensor-select { padding: 2px 4px; }
-        .sensor-label-input { width: 68px; padding: 1px 4px; }
+        /* Full-width on its own line: squeezed beside a "Mode" label it clipped
+           its own longest option ("Roll-Pitch-Yaw (ZYX)") mid-word. */
+        .sensor-select { padding: 3px 4px; width: 100%; }
+        /* The axis labels stay renamable but stop *looking* like form fields
+           until pointed at — three boxed inputs in the primary readout were a
+           big part of the visual noise. */
+        .sensor-label-input {
+            width: 84px; padding: 1px 3px; font-size: 0.8rem; color: var(--text-muted);
+            background: transparent; border-color: transparent;
+        }
+        .sensor-label-input:hover {
+            background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.15);
+        }
+        .sensor-label-input:focus {
+            background: rgba(255,255,255,0.06); border-color: var(--accent-hover);
+            color: var(--text-main); outline: none;
+        }
+
+        /* Diagnostics disclosure (same <details> idiom as .debug-section).
+         *
+         * Opened, the drawer is taller than the dock band on most windows, so it
+         * has to scroll inside itself rather than clip at the band edge. The
+         * height it may use is discovered by flexbox, not a magic number: the
+         * dock already caps its children at 100% of the band, so a min-height:0
+         * chain from the card down to the <details> makes the drawer the one
+         * item that absorbs the shrink (every sibling's min-height is its own
+         * content). Same shape as .control-group__body in the right dock.
+         *
+         * The scroll box is the <details> ITSELF, not .sensor-details__body:
+         * Chrome renders details content inside an anonymous ::details-content
+         * box, so a shrunk <details> does not pass its height down to a child —
+         * measured 2026-07-29, the inner body kept its full 427px and spilled
+         * past the card. Consequence: the summary would scroll away, so it is
+         * sticky with an opaque backdrop.
+         */
+        #sensors-card { min-height: 0; }
+        #sensors-card > .card-body { flex: 1 1 auto; min-height: 0; }
+        .sensor-details {
+            border-top: 1px solid var(--panel-border); margin-top: 6px; padding-top: 6px;
+            min-height: 0; overflow-y: auto;
+            /* Needed on the scroll container too — .hud-card * sets none on every
+               descendant, so inheritance from the body below can't reach it. */
+            pointer-events: auto;
+        }
+        .sensor-details > summary {
+            pointer-events: auto !important; cursor: pointer; list-style: none;
+            font-family: 'Inter', sans-serif; font-size: 0.68rem; font-weight: 600;
+            text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted);
+            position: sticky; top: 0; z-index: 1;
+            /* Opaque, unlike the card's glass: scrolled rows must not read through. */
+            background: #16181e; padding: 2px 0;
+        }
+        .sensor-details > summary::-webkit-details-marker { display: none; }
+        .sensor-details > summary::after { content: ' \25B8'; font-size: 0.6rem; }
+        .sensor-details[open] > summary::after { content: ' \25BE'; }
+        .sensor-details > summary:hover { color: var(--text-main); }
+        /* pointer-events:auto is a deliberate exception to the left dock's
+           "never intercept OrbitControls" rule, scoped to a drawer the user had
+           to open: it already contains pointer-active buttons (Zero Yaw /
+           Clear), and without it the wheel would dolly the camera instead of
+           scrolling the drawer. It sits on the body rather than the <details>
+           so the sticky summary keeps working as a plain click target. */
+        .sensor-details__body {
+            display: flex; flex-direction: column; gap: 5px; padding-top: 8px;
+            pointer-events: auto;
+        }
+
+        /* Jitter: one row per signal, p95 and mean as their own columns under a
+           header, instead of "p95 0.026° · mean 0.006°" per row (which wrapped
+           every one of the five rows onto two lines). */
+        .jitter-table {
+            display: grid; grid-template-columns: 1fr auto auto; gap: 3px 10px;
+            font-size: 0.72rem; color: var(--text-muted);
+        }
+        .jitter-table__head {
+            font-family: 'Inter', sans-serif; font-size: 0.6rem; text-transform: uppercase;
+            letter-spacing: 0.04em; opacity: 0.75; text-align: right;
+        }
+        .jitter-num {
+            color: var(--text-main); font-weight: 700; text-align: right;
+            min-width: 44px; font-variant-numeric: tabular-nums;
+        }
+        .jitter-num--mean { color: var(--text-muted); font-weight: 400; }
+        /* Full quat never fits beside a label at 232px — give it its own line. */
+        .sensor-block-val { color: var(--text-main); font-size: 0.72rem; line-height: 1.35; word-spacing: 0.1em; }
+
         .hud-note { font-size: 0.68rem; color: var(--text-muted); line-height: 1.3; margin: 2px 0; }
         .hud-warn {
             font-size: 0.72rem; font-weight: 700; color: #ffb020;
@@ -618,7 +729,8 @@
             <div class="hud-row"><span>Gaps</span><span class="hud-val" id="hud-gaps">0</span></div>
         </div>
 
-        <!-- Sensors (streams 9/10) — gizmo · compass · sparklines (Web Phase 2). -->
+        <!-- Sensors (streams 9/10) — gizmo · compass · orientation · environment
+             (Web Phase 2), with the diagnostic numerics behind a disclosure. -->
         <div id="sensors-card" class="card hud-card">
             <div class="hud-section-label">Sensors</div>
             <div class="card-body">
@@ -629,75 +741,103 @@
                     </div>
                     <div class="sensor-widget">
                         <canvas id="sensor-compass" width="1" height="1"></canvas>
-                        <span class="sensor-cap" id="sensor-heading">—</span>
+                        <span class="sensor-cap sensor-cap--val" id="sensor-heading">—</span>
                     </div>
                 </div>
-                <div class="hud-row"><span>Heading</span><span class="hud-val" id="sensor-fusion">Off</span></div>
-                <div class="hud-row"><span>Pressure</span><span class="hud-val" id="sensor-press-val">—</span></div>
-                <canvas id="sensor-press-spark" class="sensor-spark" width="1" height="1"></canvas>
-                <div class="hud-row"><span>Temp</span><span class="hud-val" id="sensor-temp-val">—</span></div>
-                <canvas id="sensor-temp-spark" class="sensor-spark" width="1" height="1"></canvas>
 
                 <!-- Orientation decomposition mode + custom axis labels + singularity
                      warning (owner ask, 2026-07-28; world-mode follow-up same day).
-                     Presentation-only view of the SAME fused quat as Raw Orientation
-                     below -- see docs/web-protocol.md "Orientation decomposition modes"
-                     for the math + where each mode's singularity sits. -->
-                <div class="hud-section-label">Orientation View</div>
-                <div class="hud-row">
-                    <span>Mode</span>
-                    <select id="orient-mode-select" class="sensor-select" title="Which decomposition of the orientation quaternion to display">
-                        <option value="zyx">Roll-Pitch-Yaw (ZYX)</option>
-                        <option value="zxy">Alt Euler (ZXY)</option>
-                        <option value="boresight">Boresight (Az/El/Roll)</option>
-                        <option value="world">World (Gravity + North)</option>
-                    </select>
-                </div>
-                <div id="orient-mode-desc" class="hud-note">ZYX Tait-Bryan. Singularity: pitch to +-90 deg (device aimed steeply up/down).</div>
+                     Presentation-only view of the SAME fused quat as the ZYX
+                     reference under Diagnostics -- see docs/web-protocol.md
+                     "Orientation decomposition modes" for the math + where each
+                     mode's singularity sits. This is the card's PRIMARY readout;
+                     the mode's prose note now lives under Diagnostics, since the
+                     singularity *warning* below fires on its own when it matters. -->
+                <select id="orient-mode-select" class="sensor-select" title="Which decomposition of the orientation quaternion to display">
+                    <option value="zyx">Roll-Pitch-Yaw (ZYX)</option>
+                    <option value="zxy">Alt Euler (ZXY)</option>
+                    <option value="boresight">Boresight (Az/El/Roll)</option>
+                    <option value="world">World (Gravity + North)</option>
+                </select>
                 <div class="hud-row"><span><input id="orient-label-0" class="sensor-label-input" maxlength="24" value="Roll" title="Rename this axis"></span><span class="hud-val" id="orient-val-0">—</span></div>
                 <div class="hud-row"><span><input id="orient-label-1" class="sensor-label-input" maxlength="24" value="Pitch" title="Rename this axis"></span><span class="hud-val" id="orient-val-1">—</span></div>
                 <div class="hud-row"><span><input id="orient-label-2" class="sensor-label-input" maxlength="24" value="Yaw" title="Rename this axis"></span><span class="hud-val" id="orient-val-2">—</span></div>
                 <div id="orient-singularity-warn" class="hud-warn hidden">⚠ Near singularity — values unreliable</div>
                 <div id="orient-world-warn" class="hud-warn hidden">⚠ World mode invalid</div>
-                <div id="orient-world-note" class="hud-note hidden">Gravity+mag reference: drift-free but degrades while the device is moving (accel ≈ gravity tilt).</div>
 
-                <!-- "Zero yaw here" (owner ask, 2026-07-29): the SFLP yaw has no
-                     magnetometer input, so its zero point is an arbitrary power-on
-                     attitude that free-runs with gyro drift -- unlike roll/pitch,
-                     which are gravity-referenced and absolute. This offset is
-                     presentation-only (see docs/web-protocol.md) and applies to
-                     zyx/zxy/boresight's yaw-like slot ONLY: World mode's heading is
-                     ABSOLUTE magnetic north, so the button is disabled there
-                     (sensors.js's `isWorld` guard) rather than silently no-op'd. -->
-                <div class="hud-row"><span>Yaw offset</span><span class="hud-val" id="orient-yaw-offset">none</span></div>
-                <div class="sensor-actions">
-                    <button id="orient-zero-yaw" class="sensor-btn" title="Zero the displayed yaw at the current attitude (relative modes only -- World mode's heading is absolute magnetic north)">Zero Yaw Here</button>
-                    <button id="orient-clear-yaw-offset" class="sensor-btn sensor-btn--secondary" title="Clear the yaw offset -- back to the raw SFLP yaw" disabled>Clear</button>
+                <!-- Magnetometer/heading state and the two actions that change it,
+                     together (they were three blocks apart). -->
+                <div class="hud-row">
+                    <span title="Magnetometer yaw-fusion state (YawFusion.status)">Fusion</span>
+                    <span class="sensor-state is-off" id="sensor-fusion">Off</span>
                 </div>
-
-                <!-- Raw orientation numerics + jitter (owner ask, 2026-07-28): full-
-                     precision, pre-OrientationSmoother -- honest sensor noise, not the
-                     rounded/smoothed rot+heading above. -->
-                <div class="hud-section-label">Raw Orientation</div>
-                <div class="hud-row"><span>Roll</span><span class="hud-val" id="sensor-roll">—</span></div>
-                <div class="hud-row"><span>Pitch</span><span class="hud-val" id="sensor-pitch">—</span></div>
-                <div class="hud-row"><span>Yaw</span><span class="hud-val" id="sensor-yaw">—</span></div>
-                <div class="hud-row"><span>Heading</span><span class="hud-val" id="sensor-heading-raw">—</span></div>
-                <div class="hud-row"><span>Quat (w,x,y,z)</span><span class="hud-val" id="sensor-quat">—</span></div>
-
-                <div class="hud-section-label" title="Frame-to-frame change, raw (unsmoothed) signal, p95 headline / mean secondary. Roll/Pitch/Yaw follow the Orientation View mode above; Heading/Orientation are always the same regardless of mode.">Jitter (deg/frame, raw)</div>
-                <div class="hud-row"><span id="jitter-label-roll">Roll</span><span class="hud-val" id="jitter-roll">—</span></div>
-                <div class="hud-row"><span id="jitter-label-pitch">Pitch</span><span class="hud-val" id="jitter-pitch">—</span></div>
-                <div class="hud-row"><span id="jitter-label-yaw">Yaw</span><span class="hud-val" id="jitter-yaw">—</span></div>
-                <div class="hud-row"><span>Heading</span><span class="hud-val" id="jitter-heading">—</span></div>
-                <div class="hud-row"><span>Orientation (always trustworthy)</span><span class="hud-val" id="jitter-orientation">—</span></div>
-
                 <div class="sensor-actions">
                     <button id="sensor-reset-heading" class="sensor-btn" title="Reset heading fusion — snaps to magnetometer on next valid sample">Reset Heading</button>
                     <!-- Enabled by magcal.js once the modal is wired, so a broken
                          module graph leaves a disabled button rather than a dead one. -->
                     <button id="sensor-mag-cal" class="sensor-btn sensor-btn--secondary" disabled title="Magnetometer calibration: sweep coverage + quality">Calibrate Mag</button>
                 </div>
+
+                <div class="hud-section-label">Environment</div>
+                <div class="hud-row"><span>Pressure</span><span class="hud-val" id="sensor-press-val">—</span></div>
+                <canvas id="sensor-press-spark" class="sensor-spark" width="1" height="1"></canvas>
+                <div class="hud-row"><span>Temp</span><span class="hud-val" id="sensor-temp-val">—</span></div>
+                <canvas id="sensor-temp-spark" class="sensor-spark" width="1" height="1"></canvas>
+
+                <!-- Diagnostics: the mode's singularity note, the yaw offset +
+                     its buttons, the full-precision ZYX reference numerics, and
+                     the jitter table. All still here, just not competing with the
+                     live readout above. Collapsed by default; <details> is the
+                     same idiom .debug-section uses in the right dock, and its
+                     open/close resizes the card, which layout.js's ResizeObserver
+                     already watches. -->
+                <details class="sensor-details" id="sensor-diag">
+                    <summary title="Full-precision numerics, jitter statistics, yaw offset, and the selected mode's singularity note">Diagnostics</summary>
+                    <div class="sensor-details__body">
+                        <!-- One note, not two: the old #orient-world-note said the
+                             same thing as ORIENT_MODE_DESC.world does here, so in
+                             World mode the drawer printed the caveat twice. -->
+                        <div id="orient-mode-desc" class="hud-note">ZYX Tait-Bryan. Singularity: pitch to +-90 deg (device aimed steeply up/down).</div>
+
+                        <!-- "Zero yaw here" (owner ask, 2026-07-29): the SFLP yaw has no
+                             magnetometer input, so its zero point is an arbitrary power-on
+                             attitude that free-runs with gyro drift -- unlike roll/pitch,
+                             which are gravity-referenced and absolute. This offset is
+                             presentation-only (see docs/web-protocol.md) and applies to
+                             zyx/zxy/boresight's yaw-like slot ONLY: World mode's heading is
+                             ABSOLUTE magnetic north, so the button is disabled there
+                             (sensors.js's `isWorld` guard) rather than silently no-op'd. -->
+                        <div class="hud-row"><span>Yaw offset</span><span class="hud-val" id="orient-yaw-offset">none</span></div>
+                        <div class="sensor-actions">
+                            <button id="orient-zero-yaw" class="sensor-btn" title="Zero the displayed yaw at the current attitude (relative modes only -- World mode's heading is absolute magnetic north)">Zero Yaw</button>
+                            <button id="orient-clear-yaw-offset" class="sensor-btn sensor-btn--secondary" title="Clear the yaw offset -- back to the raw SFLP yaw" disabled>Clear</button>
+                        </div>
+
+                        <!-- Raw orientation numerics (owner ask, 2026-07-28): full-
+                             precision, pre-OrientationSmoother -- honest sensor noise, not
+                             the rounded/smoothed rot+heading the widgets above draw. ALWAYS
+                             ZYX, whatever Mode is selected, so it stays a fixed reference. -->
+                        <div class="hud-section-label" title="Full-precision, pre-smoothing. Always ZYX Tait-Bryan regardless of the Mode above, so it stays a fixed reference.">Raw (ZYX, full precision)</div>
+                        <div class="hud-row"><span>Roll</span><span class="hud-val" id="sensor-roll">—</span></div>
+                        <div class="hud-row"><span>Pitch</span><span class="hud-val" id="sensor-pitch">—</span></div>
+                        <div class="hud-row"><span>Yaw</span><span class="hud-val" id="sensor-yaw">—</span></div>
+                        <div class="hud-row"><span>Heading</span><span class="hud-val" id="sensor-heading-raw">—</span></div>
+                        <div>
+                            <div class="hud-row"><span>Quat (w,x,y,z)</span></div>
+                            <div class="sensor-block-val" id="sensor-quat">—</div>
+                        </div>
+
+                        <div class="hud-section-label" title="Frame-to-frame change of the raw (unsmoothed) signal, deg/frame. Roll/Pitch/Yaw follow the Mode above; Heading and Orientation are convention-independent and read the same in every mode.">Jitter (deg/frame)</div>
+                        <div class="jitter-table">
+                            <span></span><span class="jitter-table__head">p95</span><span class="jitter-table__head">mean</span>
+                            <span id="jitter-label-roll">Roll</span><span class="jitter-num" id="jitter-roll">—</span><span class="jitter-num jitter-num--mean" id="jitter-roll-mean">—</span>
+                            <span id="jitter-label-pitch">Pitch</span><span class="jitter-num" id="jitter-pitch">—</span><span class="jitter-num jitter-num--mean" id="jitter-pitch-mean">—</span>
+                            <span id="jitter-label-yaw">Yaw</span><span class="jitter-num" id="jitter-yaw">—</span><span class="jitter-num jitter-num--mean" id="jitter-yaw-mean">—</span>
+                            <span>Heading</span><span class="jitter-num" id="jitter-heading">—</span><span class="jitter-num jitter-num--mean" id="jitter-heading-mean">—</span>
+                            <span title="Total angular step of the orientation quaternion — convention-independent, so unlike the Euler rows above it is never inflated by a near-singular decomposition">Orientation</span><span class="jitter-num" id="jitter-orientation">—</span><span class="jitter-num jitter-num--mean" id="jitter-orientation-mean">—</span>
+                        </div>
+                    </div>
+                </details>
             </div>
         </div>
 

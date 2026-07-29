@@ -8,13 +8,21 @@
 //     the desktop render_compass convention.
 //   - pressure / temperature sparklines: min/max-autoscaled polyline over the
 //     history arrays + a live value readout.
+//
+// Card structure (decluttered 2026-07-29): the always-visible tiers are the two
+// widgets above, the SELECTED orientation readout (mode picker + 3 values +
+// warnings), the mag-fusion state with its two buttons, and Environment. The
+// diagnostic readouts — mode note, yaw offset + buttons, full-precision raw ZYX,
+// jitter table — sit inside the collapsed-by-default `#sensor-diag` <details>.
+// Nothing here cares whether it is open; every element is bound the same way.
+//
 // Plus a fusion-status line, and (owner ask, 2026-07-28) two more readouts:
 //   - Raw Orientation: `orientation_raw` — the fused quat + Euler roll/pitch/yaw
 //     + heading at FULL PRECISION, pre-OrientationSmoother (same raw signal as
 //     `rot`/`heading` above, just not rounded for a gizmo/compass draw). ALWAYS
 //     ZYX Tait-Bryan, regardless of the Orientation View mode below.
 //   - Jitter: `jitter` — server-computed rolling-window frame-to-frame noise
-//     (p95 headline / mean secondary, deg/frame) for roll/pitch/yaw/heading and
+//     (p95 and mean as two columns of a grid, deg/frame) for roll/pitch/yaw/heading and
 //     the overall orientation step. Computed server-side from full precision —
 //     never re-derive this client-side from the rounded `rot`/`heading` fields.
 //     roll/pitch/yaw follow the selected Orientation View mode; heading/orientation
@@ -207,11 +215,22 @@ function fmtDeg(v, decimals) {
     return (v === null || v === undefined) ? '—' : v.toFixed(decimals) + '°';
 }
 
-// A jitter signal's {mean_deg, p95_deg, n} -> "p95 0.032° · mean 0.021° (n=74)",
-// or "—" before the window has 2+ samples (mean_deg/p95_deg null).
-function fmtJitter(stat) {
-    if (!stat || stat.p95_deg === null || stat.p95_deg === undefined) return '—';
-    return `p95 ${stat.p95_deg.toFixed(3)}° · mean ${stat.mean_deg.toFixed(3)}°`;
+// One jitter number (p95 or mean) from a {mean_deg, p95_deg, n} stat -> "0.032",
+// or "—" before the window has 2+ samples (mean_deg/p95_deg null). The unit is
+// carried by the "Jitter (deg/frame)" heading, not repeated on every cell — the
+// old per-row "p95 0.032° · mean 0.021°" string wrapped all five rows.
+function fmtJitterNum(stat, key) {
+    const v = stat ? stat[key] : null;
+    return (v === null || v === undefined) ? '—' : v.toFixed(3);
+}
+
+// fusion_key ("off" / "init" / "active" / "gated:...") -> the .sensor-state
+// class that colours the readout: green fusing, amber gated, muted off.
+function fusionClass(key) {
+    if (key === 'active') return 'sensor-state is-active';
+    if (typeof key === 'string' && key.startsWith('gated')) return 'sensor-state is-gated';
+    if (key === 'init') return 'sensor-state';
+    return 'sensor-state is-off';
 }
 
 export function createSensors(hub) {
@@ -230,9 +249,13 @@ export function createSensors(hub) {
     const yawEl = $('sensor-yaw');
     const headingRawEl = $('sensor-heading-raw');
     const quatEl = $('sensor-quat');
+    // [p95 cell, mean cell] per signal — two columns of a grid, not one string.
     const jitterEls = {
-        roll: $('jitter-roll'), pitch: $('jitter-pitch'), yaw: $('jitter-yaw'),
-        heading: $('jitter-heading'), orientation: $('jitter-orientation'),
+        roll: [$('jitter-roll'), $('jitter-roll-mean')],
+        pitch: [$('jitter-pitch'), $('jitter-pitch-mean')],
+        yaw: [$('jitter-yaw'), $('jitter-yaw-mean')],
+        heading: [$('jitter-heading'), $('jitter-heading-mean')],
+        orientation: [$('jitter-orientation'), $('jitter-orientation-mean')],
     };
     const jitterLabelEls = {
         roll: $('jitter-label-roll'), pitch: $('jitter-label-pitch'), yaw: $('jitter-label-yaw'),
@@ -243,7 +266,6 @@ export function createSensors(hub) {
     const valEls = [$('orient-val-0'), $('orient-val-1'), $('orient-val-2')];
     const singularityWarn = $('orient-singularity-warn');
     const worldWarn = $('orient-world-warn');
-    const worldNote = $('orient-world-note');
     const yawOffsetVal = $('orient-yaw-offset');
     const zeroYawBtn = $('orient-zero-yaw');
     const clearYawBtn = $('orient-clear-yaw-offset');
@@ -344,7 +366,11 @@ export function createSensors(hub) {
             drawCompass(compass, msg.heading);
             if (headingEl) headingEl.textContent =
                 (msg.heading === null || msg.heading === undefined) ? '—' : msg.heading.toFixed(1) + '°';
-            if (fusionEl) fusionEl.textContent = msg.fusion || 'Off';
+            if (fusionEl) {
+                fusionEl.textContent = msg.fusion || 'Off';
+                fusionEl.className = fusionClass(msg.fusion_key);
+                fusionEl.title = msg.fusion_key ? 'YawFusion status: ' + msg.fusion_key : '';
+            }
             if (pressVal) pressVal.textContent =
                 (msg.pressure_pa === null || msg.pressure_pa === undefined) ? '—' : Math.round(msg.pressure_pa) + ' Pa';
             if (tempVal) tempVal.textContent =
@@ -363,8 +389,9 @@ export function createSensors(hub) {
                 ? or.quat.map((v) => v.toFixed(4)).join(', ') : '—';
 
             const j = msg.jitter || {};
-            for (const [signal, el] of Object.entries(jitterEls)) {
-                if (el) el.textContent = fmtJitter(j[signal]);
+            for (const [signal, [p95El, meanEl]] of Object.entries(jitterEls)) {
+                if (p95El) p95El.textContent = fmtJitterNum(j[signal], 'p95_deg');
+                if (meanEl) meanEl.textContent = fmtJitterNum(j[signal], 'mean_deg');
             }
 
             // Orientation View: selected-mode readout + labels + warnings.
@@ -385,10 +412,8 @@ export function createSensors(hub) {
                         `⚠ Near singularity — margin ${margin.toFixed(1)}°. Values unreliable.`;
                 }
             }
-            const isWorld = ov.mode === 'world';
-            if (worldNote) worldNote.classList.toggle('hidden', !isWorld);
             if (worldWarn) {
-                const showWarn = isWorld && ov.valid === false;
+                const showWarn = ov.mode === 'world' && ov.valid === false;
                 worldWarn.classList.toggle('hidden', !showWarn);
                 if (showWarn) worldWarn.textContent = '⚠ ' + (ov.reason || 'World mode invalid');
             }
