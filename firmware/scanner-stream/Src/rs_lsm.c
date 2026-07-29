@@ -385,12 +385,36 @@ int rs_lsm_init(void) {
     }
 #endif
 
+    /* Clock calibration. INTERNAL_FREQ_FINE (0x4F) is the per-part trim of the internal
+     * oscillator that clocks BOTH the ODRs and the FIFO timestamp counter. AN5763 6.4:
+     *
+     *     t_tick = 1 / (46080 * (1 + 0.0013 * FREQ_FINE))   [seconds]
+     *
+     * i.e. the nominal 21.7 us tick is only right for FREQ_FINE = 0. Parts are trimmed
+     * several percent away from nominal, and the host was integrating gyro against the
+     * nominal tick -- a pure scale error on every angle it derived. Read once here (the
+     * register is a factory trim, it does not change at runtime) and ship it to the host
+     * as stream 12 so the host can apply the formula itself.
+     *
+     * A read failure is NOT fatal: g_lsm_freq_fine_valid stays 0, no stream 12 goes out,
+     * and the host keeps its nominal-tick fallback. */
+    {
+        int8_t ff = 0;
+        if (lsm6dsv16x_odr_cal_reg_get(&g_ctx, &ff) == 0) {
+            g_lsm_freq_fine = ff;
+            g_lsm_freq_fine_valid = 1u;
+        }
+    }
+
     /* Continuous FIFO. */
     if (lsm6dsv16x_fifo_mode_set(&g_ctx, LSM6DSV16X_STREAM_MODE) != 0) {
         return -7;
     }
     return 0;
 }
+
+int8_t  g_lsm_freq_fine = 0;          /* INTERNAL_FREQ_FINE (0x4F), latched in rs_lsm_init */
+uint8_t g_lsm_freq_fine_valid = 0;    /* 1 once the register above has actually been read */
 
 uint16_t g_lsm_tag_hist[32] = { 0 };  /* diagnostic: FIFO tag histogram (bench probe reads it) */
 uint32_t g_lsm_fifo_ovr = 0;          /* diagnostic: drains that found FIFO_STATUS.FIFO_OVR_IA set */

@@ -11,11 +11,13 @@ import numpy as np
 
 from .magcal import MagCalibration
 from .protocol import (
+    IMU_RAW_TICK_US,
     Frame,
     FrameType,
     ImuRawBatch,
     StreamId,
     decode_env,
+    decode_imu_cal,
     decode_imu_quat,
     decode_imu_raw,
 )
@@ -39,6 +41,10 @@ class SensorState:
         # characterisation) is the follow-up to the fp16 SFLP noise floor.
         self._imu_raw: ImuRawBatch | None = None
         self._imu_raw_hist: deque[tuple[int, ImuRawBatch]] = deque(maxlen=imu_raw_history)
+        # stream 12: the LSM's own oscillator trim, which sets what a stream-11 timestamp
+        # tick is actually worth. Starts nominal — recordings made before stream 12 existed
+        # never carry one, and nominal is exactly the behaviour they were decoded with.
+        self._imu_tick_us: float = IMU_RAW_TICK_US
         self._quat: tuple[float, float, float, float] | None = None
         self._env: EnvSample | None = None
         self._pressure = deque(maxlen=history)
@@ -74,10 +80,23 @@ class SensorState:
                     self._temp_spark.append(temp)
                     self._last_spark_t = frame.header.t_us
         elif sid == StreamId.IMU_RAW:
-            batch = decode_imu_raw(frame.payload)
+            with self._lock:
+                tick_us = self._imu_tick_us
+            batch = decode_imu_raw(frame.payload, tick_us)
             with self._lock:
                 self._imu_raw = batch
                 self._imu_raw_hist.append((frame.header.t_us, batch))
+        elif sid == StreamId.IMU_CAL:
+            cal = decode_imu_cal(frame.payload)
+            with self._lock:
+                self._imu_tick_us = cal.tick_us
+
+    @property
+    def imu_tick_us(self) -> float:
+        """LSM timestamp-counter LSB in µs — the trimmed value once a stream-12 frame has
+        arrived, the nominal 21.7 µs before that (and forever, on an older recording)."""
+        with self._lock:
+            return self._imu_tick_us
 
     def latest_imu_raw(self) -> ImuRawBatch | None:
         """Newest stream-11 raw-FIFO batch, or None if the device isn't sending them."""

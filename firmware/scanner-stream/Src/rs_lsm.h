@@ -52,4 +52,11 @@ int rs_lsm_read_latest(rs_lsm_sample_t *out);
 int rs_lsm_read_latest_raw(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_t raw_max,
                            uint16_t *raw_count);
 
+/* INTERNAL_FREQ_FINE (register 0x4F), latched once by rs_lsm_init(). Factory trim of the
+ * internal oscillator that clocks the ODRs and the FIFO timestamp counter; the true tick
+ * period is 1 / (46080 * (1 + 0.0013 * freq_fine)) seconds (AN5763 6.4), NOT the nominal
+ * 21.7 us. `valid` is 0 until a successful read — the wire (stream 12) carries both. */
+extern int8_t  g_lsm_freq_fine;
+extern uint8_t g_lsm_freq_fine_valid;
+
 #endif /* RS_LSM_H */

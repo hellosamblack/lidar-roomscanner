@@ -42,6 +42,21 @@ def golden_imu_raw() -> bytes:
     return header + records + zlib.crc32(header + records).to_bytes(4, "little")
 
 
+def golden_imu_cal() -> bytes:
+    """One stream-12 (IMU_CAL) DATA frame: the LSM's INTERNAL_FREQ_FINE trim.
+
+    Payload is int8 freq_fine, uint8 valid, uint16 reserved(0). freq_fine = -23 is picked
+    to be negative (exercising the two's-complement decode) and to land near the ~2.98%
+    host-vs-LSM scale error measured on this rig: 1/(46080 * (1 + 0.0013 * -23)) gives
+    22.370 µs/tick against the nominal 21.7, i.e. +3.09%.
+    """
+    payload = struct.pack("<bBH", -23, 1, 0)
+    # header: DATA(1), stream 12, seq 42, t_us 1_000_000, width = height = 0
+    header = struct.pack("<4sBBBBIQHHII", b"RSCN", 1, 1, 12, 0, 42, 1_000_000,
+                         0, 0, len(payload), 0)
+    return header + payload + zlib.crc32(header + payload).to_bytes(4, "little")
+
+
 def build_sensors_snippet(path):
     """A tiny capture: CALIB, then N (RAW, IMU_QUAT, ENV) triples with a rotating quaternion."""
     import numpy as np
@@ -69,5 +84,6 @@ if __name__ == "__main__":
     FIXTURES.mkdir(exist_ok=True)
     (FIXTURES / "golden_depth_2x2.bin").write_bytes(golden_depth_2x2())
     (FIXTURES / "golden_imu_raw.bin").write_bytes(golden_imu_raw())
+    (FIXTURES / "golden_imu_cal.bin").write_bytes(golden_imu_cal())
     build_sensors_snippet(FIXTURES / "golden_sensors_snippet.bin")
     print("fixtures written")

@@ -305,10 +305,78 @@ static void iks4a1_i3c_probe(void) {
 }
 #endif /* CONF_IKS4A1_I3C_PROBE */
 
+/* ---- microsecond wall clock (TIM2) ----------------------------------------------------
+ *
+ * v1 was `HAL_GetTick() * 1000`: 1 ms granular, which put a ~0.3 ms RMS quantisation floor
+ * under every frame timestamp and, with the send-time stamping below, showed up on the bench
+ * as 1.9 ms RMS / 6.2 ms max skew between the ToF frame stamp and the IMU's own clock. At a
+ * handheld 100 deg/s that is 0.19 deg RMS / 0.62 deg worst case of angular misalignment
+ * between a depth frame and the rotation used to orient it -- an order of magnitude above the
+ * stationary orientation noise floor. So: a real hardware clock.
+ *
+ * TIM2 is the only 32-bit general-purpose timer this firmware does not already use (main.c's
+ * CubeMX init brings up TIM3 for PWM and nothing else; grep for `TIM` in Src/ -- TIM2 has no
+ * init, no MSP entry, no IRQ handler and no clock enable anywhere). Free-running, no
+ * interrupt, no channel: prescaled to exactly 1 MHz and left to roll over its full 32-bit
+ * range (~71.6 min), extended to the wire's u64 microseconds in software. The extension is
+ * safe as long as rs_time_us() is called at least once per wrap period, which the ~30 Hz
+ * acquisition loop guarantees by five orders of magnitude.
+ *
+ * Reading costs one register load plus a compare; the critical section only exists so the
+ * carry bookkeeping stays consistent if this is ever called from an ISR. */
+static uint64_t g_time_wraps_us = 0;  /* accumulated 2^32 µs carries */
+static uint32_t g_time_last_cnt = 0;  /* previous TIM2->CNT, for wrap detection */
+static uint8_t  g_time_started = 0;
+
+static void rs_time_start(void) {
+    __HAL_RCC_TIM2_CLK_ENABLE();
+    /* Timer kernel clock = PCLK1, doubled by hardware when the APB1 prescaler is not 1
+     * (RM0481 timer clock section). Derived at runtime so a clock-tree change cannot
+     * silently detune the µs tick. */
+    uint32_t tim_clk = HAL_RCC_GetPCLK1Freq();
+    if ((RCC->CFGR2 & RCC_CFGR2_PPRE1) != 0u) {
+        tim_clk *= 2u;
+    }
+    TIM2->CR1 = 0u;
+    TIM2->PSC = (tim_clk / 1000000u) - 1u;   /* 250 MHz / 250 = 1 MHz */
+    TIM2->ARR = 0xFFFFFFFFu;
+    TIM2->EGR = TIM_EGR_UG;                  /* latch PSC/ARR, zero CNT */
+    TIM2->SR  = 0u;                          /* UG set UIF; nothing consumes it, clear it */
+    g_time_last_cnt = 0u;
+    g_time_wraps_us = 0u;
+    g_time_started = 1u;
+    TIM2->CR1 = TIM_CR1_CEN;
+}
+
 static uint64_t rs_time_us(void) {
-    /* v1: HAL tick, 1 ms resolution widened to the u64 µs wire field.
-     * Upgrade to a TIM-based µs clock when IMU fusion needs it (Phase 5). */
-    return (uint64_t)HAL_GetTick() * 1000u;
+    if (!g_time_started) {
+        rs_time_start();
+    }
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    uint32_t cnt = TIM2->CNT;
+    if (cnt < g_time_last_cnt) {
+        g_time_wraps_us += 0x100000000ull;
+    }
+    g_time_last_cnt = cnt;
+    uint64_t now = g_time_wraps_us + cnt;
+    __set_PRIMASK(primask);
+    return now;
+}
+
+/* Stamp of the most recent platform event seen by rs_wait_event_usb(), taken before the
+ * USB/Ethernet pumping that follows the wait -- see the comment there. */
+static uint64_t g_evt_stamp_us = 0;
+
+/* When non-zero, rs_send_generic_cdc() stamps frames with this instead of reading the clock
+ * at send time. Armed around a ToF frame's sends with that frame's FRAME_READY instant so
+ * the variable command-poll/trigger/transmit latency between "data ready" and "bytes on the
+ * wire" stops folding into t_us. Disarmed immediately after, so EVENT/ACK frames -- which
+ * genuinely describe the moment they are sent -- keep the live clock. */
+static uint64_t g_frame_stamp_us = 0;
+
+static uint64_t rs_stamp_us(void) {
+    return g_frame_stamp_us ? g_frame_stamp_us : rs_time_us();
 }
 
 /* Pump the CDC FIFO out. Returns false if the host stalled >100 ms (frame aborted:
@@ -346,7 +414,7 @@ static bool rs_send_generic_cdc(uint8_t frame_type, uint8_t stream_id, uint32_t 
     }
     uint8_t hdr[RS_HEADER_SIZE];
     uint8_t tail[4];
-    rs_write_header(hdr, frame_type, stream_id, flags, seq, rs_time_us(), w, h, len);
+    rs_write_header(hdr, frame_type, stream_id, flags, seq, rs_stamp_us(), w, h, len);
     uint32_t crc = rs_crc32(0u, hdr, RS_HEADER_SIZE);
     crc = rs_crc32(crc, payload, len);
     rs_put_u32(tail, crc);
@@ -435,6 +503,12 @@ static int rs_wait_event_usb(uint32_t evt, uint32_t timeout_ms) {
     uint32_t waited = 0;
     for (;;) {
         int ret = platform_wait_for_event(evt, 5);
+        /* Stamp BEFORE pumping. platform_wait_for_event busy-waits on the ISR-set flag, so
+         * this lands within microseconds of the interrupt; tud_task()/ETH_Process() below
+         * can run for hundreds of microseconds and must not be inside the measurement. */
+        if (ret == 0) {
+            g_evt_stamp_us = rs_time_us();
+        }
         tud_task(); ETH_Process();
         if (ret == 0) {
             return 0;
@@ -1953,11 +2027,22 @@ void vl53l9_app() {
                                            * `continue` inside this inner for(;;) cannot
                                            * reach the outer loop directly in C, hence
                                            * the flag. */
+        /* The instant frame N's data became ready -- i.e. the sensor's FRAME_READY edge,
+         * which is the end of its integration window and therefore the physical time the
+         * depth samples describe. This, not the send-time clock, is what goes in the
+         * frame's t_us (armed below, just before the sends). Everything between here and
+         * the sends -- DMA readout, metadata parse, the command poll, the trigger for N+1,
+         * the transmit itself -- is variable-latency work that used to fold into the stamp
+         * and show up as skew against the IMU clock. */
+        uint64_t rs_ready_us = 0;
         for (;;) {
             ret = rs_wait_event_usb(PLATFORM_GPIO_IT_EVT, 1000);
+            rs_ready_us = g_evt_stamp_us; /* stamped inside the wait, at the interrupt */
             if (ret) {
                 uint8_t rs_is_ready = 0;
                 (void)vl53l9_poll_frame(p_dev, &rs_is_ready);
+                rs_ready_us = rs_time_us(); /* recovery path: no edge was seen, so the best
+                                             * available stamp is "when the poll found it" */
                 if (!rs_is_ready) {
                     if (++rs_attempts > 3) {
                         rs_send_event(RS_EVT_TRIGGER_TIMEOUT, (uint32_t)rs_attempts, NULL);
@@ -2079,6 +2164,13 @@ void vl53l9_app() {
             }
         }
 
+        /* Everything from here to the disarm below describes frame N, so it is stamped with
+         * frame N's FRAME_READY instant rather than the moment each send happens. That
+         * includes the paired IMU/env/raw frames: they are the samples that belong to this
+         * ToF frame, and giving the whole group one common, physically meaningful t_us is
+         * exactly what the host needs to align depth against rotation. */
+        g_frame_stamp_us = rs_ready_us;
+
         /* send frame N (and the periodic CALIB before it, so a host joining at frame 1
          * always has calib before its first RAW) while the sensor works on N+1 */
         {
@@ -2092,6 +2184,20 @@ void vl53l9_app() {
             if (rs_calib_countdown == 0) {
                 rs_send_frame_cdc(RS_STREAM_CALIB, rs_counter, 0u, calib_data,
                                   VL53L9_CALIB_DATA_SIZE, out_width, out_height);
+                /* IMU clock calibration rides the same cadence as CALIB, and for the same
+                 * reason: it is static per-device metadata that a host joining late (or
+                 * seeking into the middle of a recording) still has to have. Skipped
+                 * entirely when the register read failed -- absence means "use the
+                 * nominal tick", which is exactly the pre-2026-07-28 host behaviour. */
+                if (g_lsm_ok && g_lsm_freq_fine_valid) {
+                    uint8_t imu_cal[RS_IMU_CAL_SIZE];
+                    imu_cal[0] = (uint8_t)g_lsm_freq_fine; /* int8, two's complement */
+                    imu_cal[1] = 1u;                       /* valid */
+                    imu_cal[2] = 0u;
+                    imu_cal[3] = 0u;
+                    rs_send_frame_cdc(RS_STREAM_IMU_CAL, rs_counter, 0u, imu_cal,
+                                      RS_IMU_CAL_SIZE, 0u, 0u);
+                }
                 rs_calib_countdown = 64;
             }
             rs_calib_countdown--;
@@ -2128,6 +2234,8 @@ void vl53l9_app() {
                 }
             }
         }
+
+        g_frame_stamp_us = 0; /* disarm: EVENT/ACK frames go back to the live clock */
 
         /* measure frame rate */
         stop_time = platform_profiler_get_timestamp();

@@ -7,6 +7,7 @@ import pytest
 from roomscan.protocol import (
     ENV_SIZE,
     HEADER_SIZE,
+    IMU_CAL_SIZE,
     IMU_QUAT_SIZE,
     IMU_RAW_REC_SIZE,
     IMU_RAW_TICK_US,
@@ -16,14 +17,17 @@ from roomscan.protocol import (
     ProtocolError,
     StreamId,
     decode_env,
+    decode_imu_cal,
     decode_imu_quat,
     decode_imu_raw,
+    imu_tick_us,
 )
 
 
 def test_stream_ids():
     assert StreamId.IMU_QUAT == 9
     assert StreamId.ENV == 10
+    assert StreamId.IMU_CAL == 12
 
 
 def test_decode_imu_quat_roundtrip():
@@ -158,3 +162,84 @@ def test_sensor_state_feeds_imu_raw_without_touching_fused_quat():
     assert [t for t, _ in st.imu_raw_history()] == [500]
     assert st.fused_quat() == before          # stream 11 must not perturb stream 9's path
     assert pack_frame(raw, payload)[:4] == b"RSCN"
+
+
+# --- stream 12 (IMU_CAL) -----------------------------------------------------
+
+def test_imu_tick_us_formula():
+    """AN5763 6.4: t = 1 / (46080 * (1 + 0.0013 * FREQ_FINE))."""
+    assert imu_tick_us(0) == pytest.approx(1e6 / 46080.0)       # nominal ~21.70 µs
+    assert imu_tick_us(0) == pytest.approx(IMU_RAW_TICK_US, abs=0.01)
+    assert imu_tick_us(-23) == pytest.approx(22.3703, abs=1e-3)  # slow part -> longer tick
+    assert imu_tick_us(23) == pytest.approx(21.0714, abs=1e-3)   # fast part -> shorter tick
+
+
+def test_decode_imu_cal_signed_and_valid():
+    cal = decode_imu_cal(struct.pack("<bBH", -23, 1, 0))
+    assert cal.freq_fine == -23 and cal.valid is True
+    assert cal.tick_us == pytest.approx(imu_tick_us(-23))
+    # a 2.98% scale error is exactly the class of bug this stream exists to kill
+    assert cal.tick_us / IMU_RAW_TICK_US == pytest.approx(1.0306, abs=1e-3)
+
+
+def test_decode_imu_cal_invalid_falls_back_to_nominal():
+    cal = decode_imu_cal(struct.pack("<bBH", -23, 0, 0))
+    assert cal.valid is False
+    assert cal.tick_us == IMU_RAW_TICK_US
+
+
+def test_decode_imu_cal_bad_length():
+    with pytest.raises(ProtocolError):
+        decode_imu_cal(b"\x00" * 3)
+
+
+def test_golden_imu_cal_fixture_matches_decoder():
+    golden = (Path(__file__).parent / "fixtures" / "golden_imu_cal.bin").read_bytes()
+    assert zlib.crc32(golden[:-4]) == int.from_bytes(golden[-4:], "little")
+    header = FrameHeader.unpack(golden[:HEADER_SIZE])
+    assert header.stream_id == StreamId.IMU_CAL
+    assert header.width == header.height == 0
+    assert header.payload_len == IMU_CAL_SIZE
+    cal = decode_imu_cal(golden[HEADER_SIZE:HEADER_SIZE + header.payload_len])
+    assert cal.freq_fine == -23 and cal.valid is True
+    assert cal.tick_us == pytest.approx(22.3703, abs=1e-3)
+
+
+def test_golden_imu_cal_fixture_is_reproducible():
+    from make_fixtures import golden_imu_cal
+    golden = (Path(__file__).parent / "fixtures" / "golden_imu_cal.bin").read_bytes()
+    assert golden_imu_cal() == golden
+
+
+def test_sensor_state_applies_imu_cal_tick_to_later_batches():
+    from roomscan.protocol import Frame
+    from roomscan.sensors import SensorState
+
+    st = SensorState()
+    ts = _rec(ImuFifoTag.TIMESTAMP, 0, struct.pack("<IH", 1000, 0))
+
+    # before any stream 12: nominal tick, i.e. exactly how a pre-2026-07-28 capture decodes
+    st.feed(Frame(FrameHeader(FrameType.DATA, StreamId.IMU_RAW, 0, 1, 0, 1, 0, len(ts)), ts))
+    assert st.imu_tick_us == IMU_RAW_TICK_US
+    assert st.latest_imu_raw().timestamp_us[0] == pytest.approx(1000 * IMU_RAW_TICK_US)
+
+    cal = struct.pack("<bBH", -23, 1, 0)
+    st.feed(Frame(FrameHeader(FrameType.DATA, StreamId.IMU_CAL, 0, 1, 0, 0, 0, len(cal)), cal))
+    assert st.imu_tick_us == pytest.approx(imu_tick_us(-23))
+
+    st.feed(Frame(FrameHeader(FrameType.DATA, StreamId.IMU_RAW, 0, 2, 0, 1, 0, len(ts)), ts))
+    assert st.latest_imu_raw().timestamp_us[0] == pytest.approx(1000 * imu_tick_us(-23))
+
+
+def test_imu_cal_does_not_disturb_stream_9():
+    """Stream 12 must be inert with respect to the orientation path."""
+    from roomscan.protocol import Frame
+    from roomscan.sensors import SensorState
+
+    st = SensorState()
+    quat = struct.pack("<4f", 1.0, 0.0, 0.0, 0.0)
+    st.feed(Frame(FrameHeader(FrameType.DATA, StreamId.IMU_QUAT, 0, 1, 0, 0, 0, len(quat)), quat))
+    before = st.fused_quat()
+    cal = struct.pack("<bBH", -23, 1, 0)
+    st.feed(Frame(FrameHeader(FrameType.DATA, StreamId.IMU_CAL, 0, 1, 0, 0, 0, len(cal)), cal))
+    assert st.fused_quat() == before

@@ -13,7 +13,7 @@ One frame = 32-byte header, payload, CRC32. See the `protocol-change` skill befo
 | 6      | 1    | `stream_id`   | see Stream registry below; ignored for COMMAND/ACK           |
 | 7      | 1    | `flags`       | bit0 = DROPPED (DATA/EVENT only); COMMAND/ACK = 0            |
 | 8      | 4    | `seq`         | DATA: sensor `frame_counter`. COMMAND: host-chosen token. ACK: echoes the COMMAND token (not a frame counter). Host requirement: `seq` may **restart** (jump backwards, typically to a low value) after a device recovery or REINIT — hosts must treat a backwards jump as a single discontinuity, never as an error or a huge gap. |
-| 12     | 8    | `t_us`        | u64 µs since boot (v1 source: `HAL_GetTick()*1000`, 1 ms resolution; a TIM-backed µs clock is planned with Phase 5 IMU fusion); ignored for COMMAND/ACK |
+| 12     | 8    | `t_us`        | u64 µs since boot, from a free-running 1 MHz hardware timer (TIM2). **For a ToF frame and its paired IMU/env/raw frames this is the sensor's FRAME_READY instant — when the data became valid — not when the frame was transmitted**; the whole group shares one stamp. EVENT/ACK frames carry the live clock at send time. Ignored for COMMAND. |
 | 20     | 2    | `width`       | zones (DATA/EVENT); 0 for COMMAND/ACK                        |
 | 22     | 2    | `height`      | zones (DATA/EVENT); 0 for COMMAND/ACK                        |
 | 24     | 4    | `payload_len` | bytes; DEPTH_ZF32 ⇒ `width*height*4`; COMMAND = 8, ACK = 12   |
@@ -37,6 +37,7 @@ One frame = 32-byte header, payload, CRC32. See the `protocol-change` skill befo
 | 9 | IMU_QUAT | LSM6DSV16X SFLP game-rotation-vector: 4×float32 `[w, x, y, z]` unit quaternion (16 B), LSM body frame. One per ToF frame. `t_us` = capture time. **6-axis fusion — yaw drifts, uncorrected on-chip.** | live (Phase 4) |
 | 10 | ENV | LSM6DSV16X sensor-hub environmental sample: float32 pressure (Pa) + 3×float32 magnetic field `[x, y, z]` (µT) + float32 temperature (°C) = 20 B. One per ToF frame. `t_us` = capture time. | live (Phase 4) |
 | 11 | IMU_RAW | LSM6DSV16X FIFO words passed through **verbatim** (same philosophy as RAW_3DMD: sensor format on the wire, host demuxes). N × 8-byte records, `payload_len` = N × 8; **the header's `width` carries N and `height` is 0** (there is no zone grid). One frame per ToF frame, emitted only when N > 0. See the record layout below. | live (2026-07-28) |
+| 12 | IMU_CAL | LSM6DSV16X clock calibration: `INTERNAL_FREQ_FINE` (register 0x4F), the factory trim that sets what a stream-11 TIMESTAMP tick is actually worth. 4 B, `width` = `height` = 0. Static per device; sent on the **same 64-frame cadence as CALIB** (and at stream start) so a late-attaching host or a mid-recording seek always has one. Emitted only when the register read succeeded — its absence means "use the nominal tick". See the payload layout below. | live (2026-07-28) |
 
 TBD formats are pinned when the stream is first enabled (the transform library's capability
 negotiation decides); pinning a TBD format is additive (no version bump); *changing* a pinned
@@ -64,7 +65,7 @@ sensor-hub tags 0x0E–0x10 ride stream 10):
 |--------------|---------|-----------------|-------------|
 | 0x01 | `GY_NC` gyroscope | 3 × int16 `[x, y, z]` | 17.5 mdps/LSB |
 | 0x02 | `XL_NC` accelerometer | 3 × int16 `[x, y, z]` | 0.122 mg/LSB |
-| 0x04 | `TIMESTAMP` | uint32 tick in `data[0:4]`, BDR metadata in `data[4:6]` | ~21.7 µs/tick (nominal) |
+| 0x04 | `TIMESTAMP` | uint32 tick in `data[0:4]`, BDR metadata in `data[4:6]` | **stream 12**, nominally 21.7 µs/tick |
 | 0x16 | SFLP gyroscope bias | 3 × int16 `[x, y, z]` | 4.375 mdps/LSB (fixed ±125 dps) |
 | 0x17 | SFLP gravity vector | 3 × int16 `[x, y, z]` | 0.061 mg/LSB (fixed ±2 g) |
 
@@ -75,9 +76,8 @@ sensor-hub tags 0x0E–0x10 ride stream 10):
 change with them; there is no full-scale field on the wire. The two SFLP vectors are fixed-scale
 regardless of the XL/GY full scale.
 
-The timestamp word exists because the frame header's `t_us` is `HAL_GetTick() * 1000` — 1 ms
-granularity, far too coarse to integrate a 480 Hz gyro. It puts every sample on the LSM's own
-clock.
+The timestamp word exists to put every sample on the LSM's own clock, at a resolution the frame
+header cannot reach. **Scale it with stream 12, not with the nominal 21.7 µs** — see below.
 
 Volume: gyro, accel and both SFLP vectors batch at 480 Hz plus one timestamp word per sample
 time = ~2880 words/s, drained once per ToF frame (~28 Hz) ⇒ **~90–105 records/frame, ~720–840 B**,
@@ -86,6 +86,37 @@ inside a single 1400 B UDP datagram. The FIFO holds 256 words, so a drain has ~2
 
 **Stream 9 is unchanged** by this addition — same fp16 game-rotation word, same firmware
 batch-averaging, byte-for-byte identical behaviour.
+
+### IMU_CAL (stream 12) payload layout
+
+| Offset | Size | Field       | Notes                                                            |
+|--------|------|-------------|------------------------------------------------------------------|
+| 0      | 1    | `freq_fine` | `INTERNAL_FREQ_FINE` (register 0x4F), **int8, two's complement**  |
+| 1      | 1    | `valid`     | 1 = `freq_fine` was read from the device; 0 = use the nominal tick |
+| 2      | 2    | reserved    | 0                                                                 |
+
+Total 4 B. `width` = `height` = 0; `seq` = the ToF frame counter it was sent alongside.
+
+**The formula the host must apply** (AN5763 rev 4, §6.4) — this is the whole point of the stream:
+
+```
+t_tick = 1 / (46080 * (1 + 0.0013 * freq_fine))     seconds
+```
+
+`INTERNAL_FREQ_FINE` is the factory trim of the LSM's internal oscillator, in 0.13% steps. That
+oscillator clocks **both** the ODRs and the FIFO timestamp counter, so the nominal 21.7 µs tick
+is only right for a part that happened to land on `freq_fine = 0`. Measured on this rig
+2026-07-28 over 8027 paired ToF frames / 257 s, the host clock ran **1.029790×** the LSM's —
+~29790 ppm of pure scale error, entirely because the host was integrating gyro against the
+nominal tick. At that error a 90° pan integrates to ~87.3°, which swamps every other orientation
+error term we have.
+
+Compatibility: this is an additive `stream_id`, so decoders that predate it skip it (see
+*Decoder requirements*) and captures that predate it simply never carry one. A host **must**
+default to the nominal 21.7 µs until a stream-12 frame arrives, which is byte-for-byte the
+behaviour every existing recording was decoded with. Likewise `valid = 0` means fall back to
+nominal — it exists so a failed register read can never be mistaken for a legitimate
+`freq_fine` of 0.
 
 ## EVENT frame payload (frame_type = 2)
 
@@ -220,3 +251,20 @@ specced with the Phase 4 transport work).
   orientation fusion that escapes the SFLP FIFO's fp16 quaternion noise floor (~0.056°/step);
   the fusion itself is a follow-up. Streams 9 and 10 are unaffected. Firmware enables it via
   `RS_LSM_RAW_BATCH` / `RS_LSM_SFLP_BATCH_AUX` in `firmware/scanner-stream/Src/rs_lsm.c`.
+- **v1 rev 2026-07-28 (b)**: additive — IMU_CAL (12) plus a `t_us` **semantics** change (no layout
+  change, no version bump; the field is still a u64 µs at offset 12). Two timing defects measured
+  on the rig, both of which dominate handheld accuracy during motion:
+  1. *Clock scale.* Over 8027 paired ToF frames / 257 s the host-vs-LSM clock ratio was
+     **1.029790** (~29790 ppm) because the host scaled stream-11 timestamp ticks by the nominal
+     21.7 µs. Stream 12 carries the device's `INTERNAL_FREQ_FINE` so the host can apply the real
+     period, `1 / (46080 * (1 + 0.0013 * freq_fine))` (AN5763 §6.4). New stream_id only; hosts
+     skip unknown stream_ids and older captures (which never carry one) keep decoding against the
+     nominal tick exactly as before.
+  2. *Frame-stamp jitter.* `t_us` was `HAL_GetTick() * 1000` (1 ms granular) sampled at **send**
+     time, so all the variable latency between data-ready and transmit folded in: 1.9 ms RMS /
+     3.4 ms p95 / 6.2 ms max skew against the IMU clock, i.e. 0.19° RMS / 0.62° worst case of
+     depth-vs-rotation misalignment at 100 °/s. `t_us` now comes from a 1 MHz free-running TIM2
+     (32-bit, software-extended to the u64 wire field) and is **captured at the sensor's
+     FRAME_READY edge**, then shared by that frame's RAW/CALIB/IMU/env/raw sends.
+  Streams 7/9/10/11 are byte-for-byte unchanged in framing and payload; only what `t_us` means
+  changed, and it changed to something strictly more accurate.
