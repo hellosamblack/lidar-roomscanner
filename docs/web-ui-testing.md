@@ -121,6 +121,49 @@ frames take ~11 s to integrate. `window.__gotMesh` and the diag line
 `slam.js: first mesh: N non-wall verts` confirm the mesh path (the *first* emit is
 an empty packet — N=0 — by design; later ones carry geometry).
 
+**Record (and anything else gated on `has_live`) needs a live source, not `--replay`.**
+Launching with `--replay` sets `has_live=False`, and `#btn-record` is disabled whenever
+`!session.has_live` (`capture.js`) — the standard replay recipe above can't exercise
+Record, Go Live, or anything else live-only. On this headless box there's no real
+device to plug in, so fake one: monkeypatch `roomscan.web.get_best_source` to return an
+object with `.read()/.write()/.close()` that replays a real capture's raw bytes in a
+loop (`.read()` returning chunks + a small `time.sleep` to mimic pacing), then call the
+**real** `web.main()` so every other app-state field is wired exactly like production
+(`client` stays `None` since a `FakeLive` isn't a `SerialSource`/`UdpSource`, so `cmd`
+dispatch won't round-trip, but recording/session/captures all work — that's the tee
+path, not the command path). Verified 2026-07-29 for the post-recording naming modal:
+
+```python
+# /tmp/webtest/launch.py — NOT committed, scratch only
+import sys, time
+from pathlib import Path
+sys.path.insert(0, "/path/to/roomscanner/host/src")
+import roomscan.web as web
+
+RAW = Path("/tmp/webtest/src.bin").read_bytes()   # any real capture, e.g. captures/verify_slam.bin
+
+class FakeLive:
+    def __init__(self, data): self.data, self.pos = data, 0
+    def read(self):
+        time.sleep(0.03)
+        chunk = self.data[self.pos:self.pos + 4096]
+        self.pos = (self.pos + 4096) % len(self.data) if self.pos + 4096 < len(self.data) else 0
+        return chunk or self.data[:4096]
+    def write(self, d): pass
+    def close(self): pass
+
+web.get_best_source = lambda *a, **kw: FakeLive(RAW)
+sys.argv = ["roomscan-web"]
+sys.exit(web.main())
+```
+
+Run it exactly like the normal recipe (`setsid …/python /tmp/webtest/launch.py`, sandbox
+off, from a scratch cwd so `captures/`/`results/` land in `/tmp/webtest/` and never touch
+the repo's `host/captures/`). Click `#btn-record` to start/stop from a step same as any
+other button — the disabled check only reads `session.has_live`, which is now `True`.
+Teardown: `kill -9` the pid (not `pkill -f roomscan.web` — the process is literally
+running `launch.py`, that pattern won't match) and `rm -rf` the scratch dir.
+
 ## The dock layout (why nothing overlaps)
 
 Every floating block lives in one of two **docks** — `#left-dock` (telemetry HUD,
