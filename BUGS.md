@@ -43,6 +43,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-029 | fixed   | host/sources  | `UdpSource` stream recovery fails due to `255.255.255.255` fallback keepalives not routing on some Linux network configs |
 | BUG-030 | open    | host/sensors  | Magnetometer calibration is direction-dependent: |B| ranges 47→85 µT with tilt, heading errors up to ~90° |
 | BUG-031 | open    | firmware      | ToF frame timestamp and IMU FIFO drain skewed ~0.9 ms (dominates handheld orientation error) |
+| BUG-032 | fixed   | host/slam     | GPU SLAM OOMs on a long scan — Open3D's CUDA cache grows ~5.1 MiB/frame from the throttled mesh extraction (NOT the per-frame path, which is byte-flat) |
 
 ---
 
@@ -890,6 +891,26 @@ Tilt-error propagation contributes 0.004–0.05° below 60°, rising to 0.182° 
 90.6° (the DT0058 gimbal blow-up — real, but an order of magnitude below the calibration error).
 Orientation-estimate jitter itself is excellent throughout: p95 0.006–0.079°/frame.
 
+**Application-note review 2026-07-29** (`docs/imu-mag-appnote-review-2026-07-29.md`) narrowed this:
+- **Ruled out:** magnetometer byte-tearing (missing BDU was real and is fixed in `46b81b3`, but measured
+  on 27339 stationary samples the max jump is 23 LSB with ZERO above 64 LSB — no tears); **installation
+  error** (DT0103 — de-rotation preserves magnitude, so it cannot change |B|); and `AXIS_CONVENTION`
+  (an orthogonal sign matrix cannot change magnitude).
+- **Arithmetically excluded:** a simple hard-iron residual. Reaching the observed 85 µT max from a
+  ~50 µT field needs |δ| ≈ 35 µT, which would drive the minimum to ~15 µT; measured minimum is 47.4 µT.
+- **Still live**, both consistent with the 85.1/47.4 = **1.80** max/min ratio: a soft-iron/diagonal-gain
+  error the fit mis-estimates (follows the device anywhere), or a **world-fixed interferer — most
+  likely the tripod**, since tilting on it *translates* the sensor through an arc past ferrous mass.
+  The latter also explains the ~66 µT mean vs the 49.87 µT fit if the original tumble was hand-held.
+- **Therefore calibrate HAND-HELD in open space, away from the tripod.** Calibrating while mounted
+  would bake a position-dependent error into the fit that misbehaves in handheld use — the actual use
+  case. Discriminating test (~2 min): a hand-held level/45°/vertical check; flat |B| implicates the
+  tripod, a persistent 1.8:1 swing implicates the soft-iron model.
+- **Also found (DT0103, separate from |B|):** a general ellipsoid fit is **ambiguous up to a rotation** —
+  it can yield a perfectly constant |B| while systematically rotating the field vector, i.e. right
+  magnitude, wrong heading. 3D fitting cannot detect this; DT0103's accelerometer-assisted method pins
+  the magnetometer frame to the body frame. Worth adopting for heading accuracy independently of BUG-030.
+
 **Fix (needs the owner — physical):** re-run the tumble with **full-sphere coverage**, spending real
 time in the horizontal attitudes where the current fit is worst. The web calibration modal built
 2026-07-29 exists to make missing coverage visible during collection and to gate acceptance on
@@ -919,3 +940,47 @@ than the ToF frame-ready stamp, so the offset between them still breathes with p
 principled fix is to capture the LSM timestamp **at the frame-ready moment** rather than inferring it
 from whichever FIFO words happen to be present at drain time. Verification requires **real motion** —
 both defects are invisible on a stationary rig.
+
+---
+
+## BUG-032 — GPU SLAM OOMs on a long scan (Open3D CUDA cache grows per extraction)
+
+- **Status:** **fixed** 2026-07-29 · **Reported:** 2026-07-16 (CUDA at-scale validation, finding #4) ·
+  **Area:** host/slam
+- **Where:** `host/src/roomscan/slam/tsdf.py` (`_extract_vbg` / `_release_cache_if_due`)
+- **Sub-phase:** ROADMAP 6.G
+
+Over a 68 m walk the GPU SLAM path crept to **~11.7 GB** of CUDA memory and died on a `ParallelFor`
+allocation failure, capping how long an unattended GPU scan could run.
+
+**The stated hypothesis was wrong in an important way.** It had been attributed to "the caching
+allocator + **per-frame** temporaries never released". Measured with the new rig
+(`host/tools/slam_gpu_memory.py`, which logs NVML device bytes *and* active block count per frame so
+map-growth and work-growth can be separated):
+
+- **the per-frame path does not leak at all.** 4000 frames / 80 m of integrate + raycast + ICP with no
+  extraction: device memory stayed **byte-identical** at 937361408 B while the map grew 900 → 17k blocks.
+- **the throttled extraction does.** Add `mesh()` at the live cadence (`SlamWorker._MESH_EVERY = 5`) and
+  memory climbs 523 → **5483 MiB over 1500 frames (5.13 MiB/frame)** with the block count nearly flat.
+  On this 8 GiB card that OOMs a few hundred frames later.
+
+Mechanism: `_extract_vbg()` does a whole-grid `self._vbg.cpu()` copy (itself the fix for CUDA bug #3 —
+marching cubes OOMs on-GPU). Its temporaries scale with the active-block count, so each extraction asks
+Open3D's caching allocator for a slightly **larger** block than the last, and the previous one is cached
+but never reused again.
+
+**Fix:** `TsdfMap.release_cache_every` — `o3d.core.cuda.release_cache()` after every Nth *extraction*
+(default 1; 0 disables; no-op on a CPU grid). Extractions, not frames, is the right cadence: a
+frame-counter release would fire mostly on frames that allocated nothing. Exposed as
+`[slam] release_cache_every` and plumbed through `Mapper`, the `roomscan-slam` CLI, and
+`web.SlamRunner`; the remote backend forwards it in its existing mapper-kwargs JSON.
+
+**After:** 4000 frames / 80 m — **longer than the 68 m walk that OOM'd** — peak **651 MiB**, ending at
+523 MiB, tail growth **0.005 MiB/frame**. No per-frame cost: p50 6.1 ms unchanged, p90 7.0 → 7.1,
+p99 8.6 → 8.8, wall 62.3 s → 62.7 s over an identical 1500-frame run. The unfixed run would have needed
+~21 GB to reach the same frame count.
+
+**Guard:** `tools/slam-container/cuda_smoke.py::run_memory_ceiling` — 1200 frames at the live extraction
+cadence, asserting peak ≤ 1500 MiB, tail growth ≤ 0.5 MiB/frame, and that releases actually happened
+(so the knob being disabled, or the hook being unwired, fails loudly). Unit coverage for the cadence and
+wiring is in `host/tests/test_slam_tsdf.py` (monkeypatched, so it runs on a CPU box).
