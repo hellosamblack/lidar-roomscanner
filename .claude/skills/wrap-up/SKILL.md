@@ -39,6 +39,18 @@ consolidated report at the end.
 8. If one exists, run it
 9. If not, skip deployment entirely — do not ask about manual deployment
 
+**Restore what you stopped (added 2026-07-29 after leaving the owner's viewer dead a whole session):**
+9a. Did this session stop, replace, or repoint an **owner-facing service**? On this project that is
+    almost always `roomscan-web` on port 8000 — the address the owner has open in a browser — but the
+    same applies to anything you `pkill`ed, reflashed, or pointed at a replay instead of the device.
+9b. Restore it to its pre-session state and **verify** (`pgrep -af roomscan.web`, then
+    `curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/static/index.html` → 200, and check
+    the log's `[source]` line says the device, not a `--replay`). Say in the report that you stopped
+    it and that it is back — the owner cannot see your `pkill`.
+9c. Whoever needs it: `ROOMSCAN_NO_BROWSER=1 setsid host/.venv/bin/python -m roomscan.web
+    > /tmp/web-live.log 2>&1 < /dev/null &` with `dangerouslyDisableSandbox` (the sandbox kills
+    listeners — see the `agent-sandbox-port-binding` memory).
+
 **Task cleanup:**
 10. Check the task list for in-progress or stale items
 11. Mark completed tasks as done, flag orphaned ones
