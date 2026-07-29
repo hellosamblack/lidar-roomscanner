@@ -17,6 +17,18 @@ that one by content rather than by shape.
 
 Only stream 9 (IMU_QUAT) payloads are touched; every other frame is re-emitted
 byte-for-byte with a recomputed CRC, so the result stays a valid capture.
+
+**LIMITATION — this cannot verify that content is STABILISED.** Only the
+quaternion is rewritten, so the ToF/reflectance data does not co-rotate the way it
+would if you had physically rolled the board. Replaying a synthetic roll therefore
+*should* make the displayed content rotate; that is correct behaviour here, not a
+bug. Use this to exercise the mechanism — dimension swaps, transform plumbing, the
+square-frame fit, cache keys — and to hit angles you can't be bothered to hold.
+To check that a target stays upright as the board turns, you need a real physical
+boresight roll: ask the owner to record one (aim at an asymmetric, high-contrast
+target, roll about the lens axis only, pause at 0/±45/±90). Trusting a synthetic
+roll for this is how an inverted rotation sign survived two verification rounds
+(BUG-026 follow-up 2, `docs/engineering-practices.md` → "Verifying a rotation").
 """
 from __future__ import annotations
 

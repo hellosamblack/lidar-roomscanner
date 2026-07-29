@@ -102,6 +102,33 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
   `host/tools/web_ui_shot.py` to screenshot *and* drive the page (headless Chrome over CDP) against a
   replay server — the full recipe (sandbox/detach caveats, replay selection) is in `docs/web-ui-testing.md`.
 
+### Verifying a rotation (or any sign)
+
+A rotation that is correct in magnitude but inverted in direction passes most tests you would think to
+write. The IR gravity roll shipped backwards **twice** this way (BUG-026 follow-ups) — the content
+counter-rotated at 2× the board's rate, which is worse than applying no correction at all.
+
+- **Never verify a sign at a multiple of 90°.** 180° is its own inverse (−180 ≡ +180), and a 90° turn
+  swaps an image's width/height either way. Both of the original checks were of this form. Pick an angle
+  like 30° or 45°, where a flip is unmissable.
+- **Derive the expectation from an already-verified path, not from the formula.** Restating the
+  implementation in the test only pins the typo, not the convention. Here the point cloud was already
+  verified, and the IR image comes off the same 54×42 grid, so "where the aligned cloud puts the image's
+  +u axis on screen" is an independent ground truth — and it caught the inversion instantly.
+- **Watch for frames whose handedness flips the visual sense.** The specific trap:
+  `T_WORLD_TO_CV @ R @ T_CV_TO_BODY` rotates points in the CV frame where **Y points down**, so a positive
+  rotation there is *clockwise* on screen, while `np.rot90` is *counter-clockwise*. Same number, opposite
+  turn. `docs/coordinate-frames.md` is the reference; screen-space sense is not written on the matrix.
+- **Prefer an exact geometric check over a statistical proxy.** The first attempt here regressed
+  structure-tensor edge orientation against the correction angle and came back inconclusive (21.4 vs 23.7)
+  because a *panning* sweep has no stable dominant edge. Exact geometry settled it in one step; the
+  statistics were only worth running afterwards, on a genuine boresight-roll capture, as independent
+  confirmation.
+- **Synthetic attitude captures cannot validate stabilisation.** `host/tools/roll_capture.py` rewrites
+  only the stream-9 quaternion, so the image content does *not* co-rotate the way it would in reality. It
+  exercises the mechanism (dimensions, transform plumbing, fit) but is blind to whether content is
+  actually held still. That needs a real physical roll about the boresight — ask the owner to record one.
+
 ### Reporting a measured improvement
 
 An X× claim is a technical assertion; treat a suspiciously good one as a bug in the measurement until

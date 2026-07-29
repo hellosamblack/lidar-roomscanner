@@ -51,6 +51,16 @@ reuse an already-running remote-debugging instance instead.
 Each step is `{"js": <expr, awaited>, "wait": <seconds>, "out": <png path>}`.
 Because control is just JS in the page, you click real bindings (`element.click()`),
 so this exercises `controls.js` → `ws.send` → server, not a synthetic shortcut.
+
+**`wait` does not guarantee the replay advanced.** Stepping with `wait` seconds apart
+to sample a capture at different points can silently return the *same* frame three
+times — the replay may have already ended (it holds the last frame) or be paused,
+and nothing in the step result says so (seen 2026-07-29: three shots meant to span a
+roll sweep all read an identical `rotate(4.88deg)`). Assert the state you are relying
+on inside the `js` — read `#seek`/the transport position, or log the value you are
+sampling — rather than inferring progress from elapsed time. A per-step `__diag` line
+echoing the quantity under test makes a stalled replay obvious instead of producing
+three confidently identical "measurements".
 Useful element ids live in `host/src/roomscan/static/index.html` (e.g. `btn-ping`,
 `seg-color button[data-mode=…]`, `chk-ir-freeze`, `log-toggle`, the Web-Phase-3
 capture controls `btn-record`, `btn-refresh-caps`, `#cap-list .cap-row`,
