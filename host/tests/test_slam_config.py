@@ -109,3 +109,13 @@ def test_view_cadence_overrides_from_toml(tmp_path):
     assert cfg.mesh_upload_hz == 5.0
     assert cfg.live_vertex_budget == 80000
     assert cfg.fps_budget_ms == 4.0
+
+
+def test_release_cache_every_default_and_toml_override(tmp_path):
+    # Sub-phase 6.G: on by default (release after every extraction), and
+    # overridable -- 0 restores the pre-fix behaviour for A/B measurement.
+    from roomscan.slam.config import SlamConfig
+    assert SlamConfig().release_cache_every == 1
+    p = tmp_path / "roomscan.toml"
+    p.write_text("[slam]\nrelease_cache_every = 0\n", encoding="utf-8")
+    assert SlamConfig.load(p).release_cache_every == 0

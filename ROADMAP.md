@@ -538,7 +538,12 @@ IR pane and the point cloud upside down in the web app. The orientation matrix w
 the cloud by the raw quat swings sensor noise on the scene's lever arm. That in turn surfaced BUG-027
 (firmware aliasing) — the two are worth reading together. Wire semantics in `docs/web-protocol.md`; when
 auditing the rest of the panel's feature set for other unported behaviour, this is the precedent that it can
-happen silently.
+happen silently. **And the precedent has a second lesson (2026-07-29):** porting the panel's behaviour
+*verbatim* was itself not enough — the panel rolled the IR pane in 90° snaps, so once the cloud got
+continuous alignment the two disagreed by up to 45° and the pane ignored moderate tilts entirely. Parity
+with a deprecated implementation is a starting point, not the specification; check that the ported
+behaviour is still coherent with whatever the new code does alongside it. Fixed by splitting the roll into
+the server's quarter-turn snap plus a client-side `ir_roll_deg` residual (BUG-026 follow-up).
 
 **"Showcase" is not a separate phase (owner clarification, 2026-07-16):** the earlier plan listed a 6th
 "showcase mode" phase, but Showcase was only ever **another name for SLAM mapping** — the record → build →
@@ -838,10 +843,11 @@ channel, barometer as soft 1-DoF Z constraint.
 > `SlamRunner` on local CUDA:0 (RTX 2000 Ada, ~7 ms/frame) is the primary live SLAM surface**; a
 > display-only stationarity hold that kills stationary ICP-translation jitter (map accuracy
 > byte-identical); and CUDA at-scale validation (GPU ~2.1× per-step vs CPU with a flat degradation
-> curve; 3 of 4 latent CUDA bugs fixed — the 4th is sub-phase 6.G). **Open:** sub-phase **6.D**
-> (drift correction / loop-closure evaluation — the owner's next target, 2026-07-28), sub-phase
-> **6.G** (GPU-memory OOM on long scans), and the on-rig flat-field capture (Phase 2.5 follow-up)
-> gating reflectance-quality work.
+> curve; ~~3 of 4 latent CUDA bugs fixed — the 4th is sub-phase 6.G~~ **all 4 now fixed — the 4th
+> closed 2026-07-29 as sub-phase 6.G / BUG-032**). **Open:** sub-phase **6.D** (drift correction /
+> loop-closure evaluation — the owner's next target; its "measure first" gate needs an
+> owner-recorded closed-loop walk, which no capture contains) and the on-rig flat-field capture
+> (Phase 2.5 follow-up) gating reflectance-quality work.
 
 > **Orientation accuracy for handheld use (2026-07-29)** — a full pass on the orientation path,
 > triggered by BUG-027's leftover "beat the fp16 floor" item and then **re-prioritised by the owner's
@@ -981,28 +987,63 @@ showed 1.1–1.4 m over ~70 m of path, pre-GPU). Then ship (2), re-measure, and 
 whether (3) earns its complexity — frame-to-model may already be enough inside a single room; loop
 closure pays off on multi-room trajectories.
 
-#### Sub-phase 6.G — SLAM GPU-memory hardening (long-scan OOM)  ← **open**
+#### Sub-phase 6.G — SLAM GPU-memory hardening (long-scan OOM)  ← **✅ Complete (2026-07-29)**
 
-The GPU SLAM path OOMs on a long scan: over a 68 m walk, CUDA memory creeps to **~11.7 GB** and hits a
-`ParallelFor` allocation failure. This is **not** the map itself — the raycast is already frustum-bounded
-(`slam/mapper.py`) and the ~40k-block VoxelBlockGrid is only **~410 MB** — it's Open3D's **CUDA caching
-allocator + per-frame temporaries never released** (see the `cuda-at-scale-validation` finding #4; the
-first three CUDA bugs were fixed in `8258f2d`/`d229a58`, this fourth was deferred to a GPU-hardening
-sub-project). It caps how long an unattended GPU scan can run and is the last open item from the CUDA
-at-scale validation.
+The GPU SLAM path OOMed on a long scan: over a 68 m walk, CUDA memory crept to **~11.7 GB** and hit a
+`ParallelFor` allocation failure. It was **not** the map itself — the raycast is already frustum-bounded
+(`slam/mapper.py`) and the ~40k-block VoxelBlockGrid is only **~410 MB** — it was Open3D's **CUDA caching
+allocator** holding temporaries that were never reused (see the `cuda-at-scale-validation` finding #4; the
+first three CUDA bugs were fixed in `8258f2d`/`d229a58`, this fourth was deferred to this sub-project).
+It capped how long an unattended GPU scan could run and was the last open item from the CUDA at-scale
+validation. Tracked as **BUG-032**.
 
-Scope for this sub-phase:
-- **Measure** the per-frame GPU allocation growth curve over a full-length scan (instrument
-  `o3d.core.cuda`/`nvidia-smi` alongside `verify_e2e.py --max-frames`), to confirm the leak is the
-  caching allocator + temporaries and not a real map/grid growth we missed.
-- **Suspected fix:** periodic `o3d.core.cuda.release_cache()` (throttled — e.g. every N frames or when a
-  high-water mark is crossed), releasing cached-but-unused device blocks without disturbing the live
-  per-frame integrate/raycast (which stay on GPU) or the throttled host-side extraction (already `.cpu()`
-  per bug #3's fix).
-- **Verify** the fix holds over a scan longer than the 68 m run that OOM'd, with the 2.1× per-step
-  speedup and flat-degradation curve preserved (no new per-frame stall from the cache release).
-- **Regression guard:** extend `tools/slam-container/cuda_smoke.py` with a long-run / high-block-count
-  memory-ceiling assertion so a future change can't silently reintroduce the creep.
+> **Superseded by measurement (2026-07-29):** this sub-phase originally attributed the creep to the
+> caching allocator *plus* ~~"per-frame temporaries never released"~~, and scoped the fix as a release
+> "**every N frames** or when a high-water mark is crossed". Both were wrong: the per-frame path is
+> byte-flat, the *throttled extraction* is the leak, and the correct cadence is **per extraction**. The
+> table below is the evidence.
+
+**What the measurement actually found (and it inverted the stated hypothesis).** A new rig,
+`host/tools/slam_gpu_memory.py`, logs NVML device bytes + active block count + hashmap capacity +
+per-step wall time for **every** frame, so "memory tracks the map" and "memory tracks the work done"
+can be told apart directly instead of inferred from a high-water mark. On the RTX 2000 Ada (8 GiB):
+
+| run | frames | device memory above baseline | tail growth |
+|---|---|---|---|
+| per-frame path only (integrate + raycast + ICP, no extraction) | 4000 (80 m) | **byte-identical** — never moved off 937361408 B while the map grew 900 → 17k blocks | 0 |
+| + extraction at the live cadence (`SlamWorker._MESH_EVERY = 5`) | 1500 (30 m) | 523 → **5483 MiB** | **5.13 MiB/frame** |
+| + extraction, with the fix | 4000 (80 m) | 523 → peak **651 MiB**, ends at 523 | **0.005 MiB/frame** |
+
+So the per-frame path — the thing the roadmap named as the suspect — **does not leak at all**. The
+culprit is the *throttled* `mesh()`/`point_cloud()` extraction, specifically `TsdfMap._extract_vbg()`'s
+whole-grid `self._vbg.cpu()` copy: its temporaries scale with the active-block count, so each extraction
+asks the caching allocator for a slightly **larger** block than the last and the previous one is cached,
+never reused. That is also why the fix is throttled on **extractions, not frames** — a frame-cadence
+release would fire mostly on frames that allocated nothing.
+
+**Fix (shipped):** `TsdfMap.release_cache_every` (`slam/tsdf.py`) calls `o3d.core.cuda.release_cache()`
+after every Nth extraction — **default 1**, `0` disables, no-op on a CPU grid. Plumbed through
+`Mapper(release_cache_every=…)`, `[slam] release_cache_every` in `roomscan.toml`, the `roomscan-slam`
+CLI, and `web.SlamRunner` (so the live web SLAM surface gets it). The remote backend forwards it in its
+existing mapper-kwargs JSON, so the container path is covered too.
+
+**Verified:** no per-frame cost — step latency is unchanged (p50 6.1 ms, p90 7.0→7.1, p99 8.6→8.8) and
+wall time matched (62.3 s off vs 62.7 s on over the same 1500 frames). The fixed 4000-frame / 80 m run
+is **longer than the 68 m walk that OOM'd** and holds a flat ceiling; the unfixed run would have needed
+~21 GB to reach the same point.
+
+**Regression guard:** `tools/slam-container/cuda_smoke.py` gained `run_memory_ceiling()` — a 1200-frame
+run with live-cadence extraction asserting a peak ceiling (1500 MiB), a flat tail growth
+(≤0.5 MiB/frame), and that releases actually happened (catches the knob being disabled or the hook
+becoming unwired). Thresholds sit in the wide gap between fixed (~0.005–0.04) and unfixed (5.13), so it
+should not flap.
+
+Two pieces of shared scaffolding came out of this, both used by the rig *and* the guard:
+`roomscan.slam.gpumem` (a ctypes NVML probe — Open3D exposes no "bytes allocated" API, and this avoids
+adding pynvml) and `roomscan.slam.synthscene` (a deterministic analytic room + camera walk, runnable to
+any length — needed because **no recorded capture contains a long walk**: everything in `captures/` is
+stationary or a braced tilt sweep. Poses are not injected; `Mapper.step` still does its own raycast +
+ICP + integrate, so the measured path is the production one).
 
 *(Environment updated 2026-07-28: originally scoped for the retired Windows box's WSL GPU container —
 native Windows Open3D CUDA was a dead end. The current headless Linux host runs SLAM **in-process on

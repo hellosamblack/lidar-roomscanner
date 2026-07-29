@@ -559,6 +559,65 @@ def test_ir_gravity_rot_turns_the_pane_when_board_is_upside_down():
     assert ir_gravity_rot(quat_mul(_Q_UPRIGHT, _Q_ROLL_180)) == 2   # two 90 deg turns
 
 
+# ---------------------------------------------------------------------------
+# Continuous IR gravity roll: the 90-deg snap plus a <=45-deg client residual.
+# ---------------------------------------------------------------------------
+
+def _rolled(deg):
+    """_Q_UPRIGHT rolled `deg` about the sensor boresight (body Z)."""
+    from roomscan.sensors import quat_mul
+    a = np.radians(deg) / 2.0
+    return quat_mul(_Q_UPRIGHT, (np.cos(a), 0.0, 0.0, np.sin(a)))
+
+
+@pytest.mark.parametrize("roll", [0.0, 12.0, 40.0, 50.0, 90.0, 137.0, 180.0, -33.0, -95.0])
+def test_snap_plus_residual_reconstructs_the_continuous_roll(roll):
+    """The whole point of the split: snap + residual must equal the continuous
+    angle, so the pane ends up exactly as level as the point cloud."""
+    from roomscan.sensors import (ir_gravity_angle_deg, ir_gravity_residual_deg,
+                                  ir_gravity_rot, wrap180)
+    q = _rolled(roll)
+    total = 90.0 * ir_gravity_rot(q) + ir_gravity_residual_deg(q)
+    assert wrap180(total - ir_gravity_angle_deg(q)) == pytest.approx(0.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("roll", [0.0, 12.0, 40.0, 50.0, 90.0, 137.0, 180.0, -33.0, -95.0])
+def test_residual_never_exceeds_a_quarter_turn(roll):
+    # Bounds the CSS rotation, which is what bounds the empty corners in the
+    # square frame. Anything larger means the snap picked the wrong quarter.
+    from roomscan.sensors import ir_gravity_residual_deg
+    assert abs(ir_gravity_residual_deg(_rolled(roll))) <= 45.0 + 1e-9
+
+
+def test_residual_is_what_the_snap_alone_would_miss():
+    # A 40 deg roll snaps to ZERO turns -- the pane would not move at all while
+    # the cloud tilts the full 40. This is the reported bug, in one assertion.
+    from roomscan.sensors import ir_gravity_residual_deg, ir_gravity_rot
+    q = _rolled(40.0)
+    assert ir_gravity_rot(q) == 0
+    assert ir_gravity_residual_deg(q) == pytest.approx(40.0, abs=1e-3)
+
+
+def test_ir_roll_rides_the_sensor_message_from_the_display_quat():
+    ss = SensorState()
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *_Q_UPRIGHT)))
+    # No display quat supplied (e.g. before the first smoothed sample) -> null,
+    # and the client falls back to no residual rather than guessing.
+    assert web.build_sensor_message(ss, None)["ir_roll_deg"] is None
+    # Supplied -> the residual for THAT quat, not for the raw fused one, so it
+    # agrees with the snap the IR pane was rendered with.
+    msg = web.build_sensor_message(ss, None, ir_display_quat=_rolled(40.0))
+    assert msg["ir_roll_deg"] == pytest.approx(40.0, abs=0.01)
+    json.dumps(msg)
+
+
+def test_smoother_exposes_its_held_quat_for_the_ir_roll():
+    sm = web.OrientationSmoother()
+    assert sm.held is None                      # before any sample
+    sm.update(_Q_UPRIGHT)
+    assert sm.held == pytest.approx(_Q_UPRIGHT)
+
+
 def test_rotation_key_quantizes_and_survives_json_free_comparison():
     assert web.rotation_key(None) is None
     r = web.display_rotation((0.92388, 0.38268, 0.0, 0.0))

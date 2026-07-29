@@ -49,11 +49,28 @@ for display (units, precision).
 positions are pre-multiplied server-side by `display_rotation(fused_quat)` — the canonical
 `T_WORLD_TO_CV @ R @ T_CV_TO_BODY` sandwich from `docs/coordinate-frames.md`, the same matrix shipped
 as the `sensor` message's `rot` — so the scene reads upright however the board is held (desktop-panel
-orbit parity). `IR_IMAGE` is rolled to match, snapped to the nearest 90° via `ir_gravity_rot`, so
-**`width`/`height` swap on a 90°/270° roll** (54×42 ↔ 42×54): clients must size from the message and
-follow its aspect, never assume landscape. With no orientation yet (ToF-only session, or before the
-first stream-9 sample) both fall back to the raw sensor frame — identity rotation, zero turns.
-The client applies **no** further rotation; doing so would double-count.
+orbit parity). With no orientation yet (ToF-only session, or before the first stream-9 sample) it falls
+back to the raw sensor frame — identity rotation. The client applies **no** further rotation to the
+cloud; doing so would double-count.
+
+**`IR_IMAGE` is rolled to match, but in two halves.** The server pre-rotates by whole quarter turns
+(`ir_gravity_rot` → `np.rot90`), which is pixel-exact and free, so **`width`/`height` swap on a 90°/270°
+roll** (54×42 ↔ 42×54) — clients must size from the message, never assume landscape. The snap alone can
+be up to 45° short, which is visible: at ~40° of roll it is *zero* turns, so the pane sits still while
+the cloud tilts the full 40°. The remainder therefore rides the `sensor` message as **`ir_roll_deg`**
+and the client finishes the job with a CSS transform, so the 54×42 image is never resampled and stays
+pixel-crisp. Unlike the cloud, the IR client *must* apply that residual — it is the other half of the
+rotation, not a duplicate.
+
+`ir_roll_deg` is **CCW-positive** (`np.rot90`'s sense, which is also counter-clockwise on screen since
+row 0 renders at the top), so a CSS `rotate()` — which turns clockwise — needs the **negated** value.
+It is computed from the *smoothed* display quat, the same one the snap uses; deriving it from the raw
+fused quat instead would let snap and residual disagree near a 45° boundary and make the pane jump.
+`null` before the first smoothed sample, and the client then applies no residual rather than guessing.
+Because the image rotates freely, `ir.js` renders it inside a fixed **square** frame (`#ir-frame`),
+scaled so the rotated bounding box always fits: the card never changes shape as the board rolls and no
+field of view is cropped, at the cost of empty corners at intermediate angles (worst at 45°, where the
+image exactly inscribes the square).
 
 The display quat is **smoothed** first (`OrientationSmoother`). Raw fused orientation carries ~0.14°
 mean / 0.25° p95 of zero-mean noise per update, which a 3 m lever arm turns into visible shimmer at the
@@ -275,7 +292,7 @@ exact body-axis rotation above, plus a countdown of the cells left in the gap be
 | type | key fields | built by | notes |
 |------|-----------|----------|-------|
 | `metrics` | `render_fps`, `streams[]{stream_id,label,device_hz,host_hz,bytes_per_s,jitter_ms}`, `link_bytes_per_s`, `resources`(null), `drops`, `gaps` | `build_metrics_message` `web.py:221` | metrics cadence; `device_hz`/`jitter_ms` may be null |
-| `sensor` | `have_quat`, `rot`[9 row-major], `heading`, `pressure_pa`, `temp_c`, `mag_ut`[3], `fusion`(human label), `fusion_key`(raw status), `has_mag_cal`, `pressure_hist[]`, `temp_hist[]`, `orientation_raw`{quat[4],roll_deg,pitch_deg,yaw_deg,heading_deg}, `jitter`{window_s,roll/pitch/yaw/heading/orientation→{mean_deg,p95_deg,n}}, `orientation_view`{mode,labels[3],roll_deg,pitch_deg,yaw_deg,singularity_margin_deg,near_singularity,valid,reason,yaw_offset_deg,...} | `build_sensor_message` `web.py:246` | **None (silent) on a ToF-only session**; `rot`/`heading` computed server-side so the frontend never re-derives sign/permutation matrices — see `docs/coordinate-frames.md`. `fusion` is a human-friendly label (`_FUSION_LABELS`); `fusion_key` is the raw `YawFusion.status` (`off`/`init`/`active`/`gated:no-cal`/`gated:gimbal`/`gated:motion`/`gated:anomaly`). `pressure_hist`/`temp_hist` are decimated (1 sample/2 s, ~10 min window) for sparklines. `orientation_raw`/`jitter` add full-precision numerics + noise stats alongside the existing (also raw, just rounded) `rot`/`heading` — see the frame-of-reference section above; `rot`/`heading` themselves are unchanged by this addition. `orientation_view` is the selected-mode decomposition + singularity/validity — see "Orientation decomposition modes" above; `yaw_offset_deg` echoes the applied "Zero yaw here" offset (0.0 in World mode, where it never applies) — see "Zero yaw here" below |
+| `sensor` | `have_quat`, `rot`[9 row-major], `heading`, `pressure_pa`, `temp_c`, `mag_ut`[3], `fusion`(human label), `fusion_key`(raw status), `has_mag_cal`, `pressure_hist[]`, `temp_hist[]`, `orientation_raw`{quat[4],roll_deg,pitch_deg,yaw_deg,heading_deg}, `jitter`{window_s,roll/pitch/yaw/heading/orientation→{mean_deg,p95_deg,n}}, `orientation_view`{mode,labels[3],roll_deg,pitch_deg,yaw_deg,singularity_margin_deg,near_singularity,valid,reason,yaw_offset_deg,...}, `ir_roll_deg` | `build_sensor_message` | **None (silent) on a ToF-only session**; `rot`/`heading` computed server-side so the frontend never re-derives sign/permutation matrices — see `docs/coordinate-frames.md`. `fusion` is a human-friendly label (`_FUSION_LABELS`); `fusion_key` is the raw `YawFusion.status` (`off`/`init`/`active`/`gated:no-cal`/`gated:gimbal`/`gated:motion`/`gated:anomaly`). `pressure_hist`/`temp_hist` are decimated (1 sample/2 s, ~10 min window) for sparklines. `orientation_raw`/`jitter` add full-precision numerics + noise stats alongside the existing (also raw, just rounded) `rot`/`heading` — see the frame-of-reference section above; `rot`/`heading` themselves are unchanged by this addition. `orientation_view` is the selected-mode decomposition + singularity/validity — see "Orientation decomposition modes" above; `yaw_offset_deg` echoes the applied "Zero yaw here" offset (0.0 in World mode, where it never applies) — see "Zero yaw here" below. `ir_roll_deg` is the residual in-plane gravity roll the IR pane's server-side quarter-turn snap leaves behind, CCW-positive, `null` until the display quat exists — see the `IR_IMAGE` paragraph above; `ir.js` applies it as a CSS transform and must negate it |
 | `state` | `color_mode`, `ir_colormap`, `ir_freeze`, `view_colormap`(turbo\|gray), `point_size`, `point_size_auto`, `surface_enabled`, `surface_mode`(grid\|spatial), `surface_threshold_pct`, `mode`(realtime\|slam), `slam_trajectory`, `slam_walls`, `slam_follow`, `idle_enabled`, `idle_level`(soft\|hard), `orientation_mode`(zyx\|zxy\|boresight\|world), `orientation_labels`[3], `yaw_offset_deg` | `_state_message` | echoed after every `set_color`/`set_ir`/`set_view`/`set_mode`/`slam_opt`/`set_idle`/`set_orientation`/`zero_yaw`/`clear_yaw_offset` (one-way flow) **and** sent first on connect. Web Phase 5: the display prefs (all but `mode`) + the two sensor auto-idle prefs are seeded from + persisted to the shared `roomscan.toml` [viewer]` table (`web.ui_from_config`/`_persist_ui`), so a reconnect **and** a server restart bring a tab current; `mode` is not persisted (SLAM arms lazily → restart is always real-time). `orientation_mode`/`orientation_labels` (owner ask, 2026-07-28) follow the same persisted-pref pattern — `orientation_labels` round-trips to `roomscan.toml` as a single comma-joined string (`ViewerConfig.orientation_labels`), the flat-TOML writer being scalar-only. `yaw_offset_deg` (owner ask, 2026-07-29) is the raw "Zero yaw here" delta, also persisted (`ViewerConfig.yaw_offset_deg`, a plain float) — see "Zero yaw here" above |
 | `session` | `mode`(live\|replay), `source_label`, `has_live`, `recording{active,path,elapsed_s,bytes}`, `playback{is_replay,capture_name,paused,speed_fps,loop,position,total_frames}` | `build_session_message` `web.py:400` | broadcast on change **and** on the metrics cadence (so timer/position tick) |
 | `captures` | `items[]{name,bytes,mtime}` (newest first) | `build_captures_message` `web.py:354` | on connect, on `list_captures`, after a recording stops |

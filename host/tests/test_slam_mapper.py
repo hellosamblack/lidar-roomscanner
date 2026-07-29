@@ -201,3 +201,14 @@ def test_mapper_accepts_device_as_o3d_device_instance():
     assert m._device == o3d.core.Device("CPU:0")
     step = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
     assert not step.tracking_lost
+
+
+def test_mapper_forwards_release_cache_every_to_its_tsdf():
+    # Sub-phase 6.G: the knob has to reach TsdfMap (where the extraction that
+    # dirties the CUDA cache happens) -- a Mapper-only attribute would be
+    # silently inert.
+    assert Mapper(W, H, voxel_size=0.02)._tsdf.release_cache_every == 1
+    assert Mapper(W, H, voxel_size=0.02,
+                  release_cache_every=0)._tsdf.release_cache_every == 0
+    assert Mapper(W, H, voxel_size=0.02,
+                  release_cache_every=10)._tsdf.release_cache_every == 10

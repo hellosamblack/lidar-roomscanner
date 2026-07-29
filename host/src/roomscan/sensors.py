@@ -453,10 +453,9 @@ def gizmo_pose(quat: tuple[float, float, float, float], scale: float,
     return m
 
 
-def ir_gravity_rot(quat: tuple[float, float, float, float]) -> int:
-    """Return the number of CCW 90° turns (0–3) to apply to the raw IR image so
-    that its "down" matches the physical gravity direction detected by the SFLP
-    accelerometer/gyroscope fusion.
+def ir_gravity_angle_deg(quat: tuple[float, float, float, float]) -> float:
+    """In-plane rotation, in degrees, needed to put the IR image's "down" along
+    physical gravity. **Continuous** (not snapped), CCW-positive, [-180, 180).
 
     Method:
       1. Rotate the world-gravity vector [0, 0, -1] (SFLP Z-up world frame)
@@ -464,16 +463,42 @@ def ir_gravity_rot(quat: tuple[float, float, float, float]) -> int:
       2. The image plane is the CV XY plane. CV Right = SFLP Y. CV Down = SFLP -X.
       3. The in-plane gravity components are gx = g_body[1] and gy = -g_body[0].
       4. The in-plane roll angle is atan2(gx, gy) — 0° when gravity is along
-         +image-down, increasing CCW. Snap to nearest 90° and return rot90 count.
+         +image-down, increasing CCW.
+
+    CCW-positive is `np.rot90`'s sense, which is also **counter-clockwise on
+    screen** (row 0 renders at the top) — so a CSS `transform: rotate()` applying
+    the same turn needs the NEGATED value, since CSS rotates clockwise.
     """
     r = quat_to_matrix(*quat)   # body → world
     gravity_world = np.array([0.0, 0.0, -1.0])
     g_body = r.T @ gravity_world   # sensor body frame gravity vector
     gx, gy = float(g_body[1]), float(-g_body[0])   # in-plane components
-    angle_deg = math.degrees(math.atan2(gx, gy))
-    # Snap to nearest 90° and convert to rot90 count (CCW turns)
-    step = int(round(angle_deg / 90.0)) % 4
-    return step
+    return wrap180(math.degrees(math.atan2(gx, gy)))
+
+
+def ir_gravity_rot(quat: tuple[float, float, float, float]) -> int:
+    """Number of CCW 90° turns (0–3) to apply to the raw IR image so its "down"
+    approaches physical gravity — i.e. `ir_gravity_angle_deg` snapped to the
+    nearest quarter turn, as an `np.rot90` count.
+
+    Pixel-exact and free, but it can be up to 45° off. Pair it with
+    `ir_gravity_residual_deg` to cover the rest without resampling the image.
+    """
+    return int(round(ir_gravity_angle_deg(quat) / 90.0)) % 4
+
+
+def ir_gravity_residual_deg(quat: tuple[float, float, float, float]) -> float:
+    """The part of the gravity roll that `ir_gravity_rot`'s quarter-turn snap
+    leaves behind: `angle - 90*steps`, wrapped to (-45, 45]. CCW-positive.
+
+    Rotating the IR pane by the snap alone makes it agree with the
+    continuously-aligned point cloud only near multiples of 90°; at, say, 40° of
+    roll the snap is zero and the pane does not move at all while the cloud tilts
+    the full 40°. Applying this residual on top (client-side, as a CSS transform,
+    so the 54x42 image is never resampled) closes that gap.
+    """
+    angle = ir_gravity_angle_deg(quat)
+    return wrap180(angle - 90.0 * (int(round(angle / 90.0)) % 4))
 
 
 AXIS_CONVENTION = np.diag([1.0, -1.0, -1.0])   # mag-mounting-vs-IMU sign/permutation; resolved on-target

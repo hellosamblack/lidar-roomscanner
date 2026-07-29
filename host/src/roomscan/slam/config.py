@@ -67,6 +67,14 @@ class SlamConfig:
     # o3d.core.Device string) runs unchanged once a CUDA-enabled build is
     # installed; see slam/mapper.py's docstring.
     device: str = "CPU:0"
+    # Sub-phase 6.G (long-scan OOM): on CUDA, release Open3D's cached-but-unused
+    # device blocks every N mesh/point-cloud EXTRACTIONS. The per-frame
+    # integrate/raycast/ICP path is byte-flat; the throttled extraction's
+    # whole-grid `.cpu()` copy is what grew device memory ~5.1 MiB/frame until
+    # it OOM'd. 1 = release after every extraction (measured: same wall time and
+    # same p50/p90/p99 step latency as off); 0 disables. No-op on a CPU device.
+    # Measured with host/tools/slam_gpu_memory.py; see slam/tsdf.py.
+    release_cache_every: int = 1
     # Compute backend for the live worker: "local" runs Mapper in-process
     # (default, unchanged behavior); "remote" ships frames to a SlamService
     # (GPU WSL container) at remote_addr, falling back to local if unreachable.

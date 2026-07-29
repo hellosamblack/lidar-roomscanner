@@ -57,6 +57,11 @@ uses. `raycast()` now accepts an optional `block_coords` (or a `depth_hint`
 to derive them) so `Mapper` can pass the current frame's frustum; omitting it
 keeps the original all-active-blocks behavior for callers/tests that don't
 have a depth hint handy.
+
+Sub-phase 6.G note: on CUDA the throttled `mesh()`/`point_cloud()` extraction
+-- not the per-frame path -- is what grows device memory over a long scan, and
+`release_cache_every` bounds it. See `_release_cache_if_due` for the measured
+numbers and the mechanism.
 """
 from __future__ import annotations
 
@@ -66,6 +71,10 @@ import open3d as o3d
 
 def _resolve_device(device) -> o3d.core.Device:
     return device if isinstance(device, o3d.core.Device) else o3d.core.Device(device)
+
+
+def _is_cuda(device: o3d.core.Device) -> bool:
+    return "CUDA" in str(device).upper()
 
 
 # Open3D's VoxelBlockGrid takes the camera intrinsic/extrinsic as CPU:0 Float64
@@ -83,13 +92,20 @@ class TsdfMap:
                  block_resolution: int = 8, block_count: int = 40000,
                  depth_scale: float = 1000.0, depth_max: float = 5.0,
                  weight_threshold: float = 3.0,
-                 device: str | o3d.core.Device = "CPU:0"):
+                 device: str | o3d.core.Device = "CPU:0",
+                 release_cache_every: int = 1):
         self.voxel_size = voxel_size
         self.trunc_multiplier = trunc_multiplier
         self.depth_scale = depth_scale
         self.depth_max = depth_max
         self.weight_threshold = weight_threshold
         self._device = _resolve_device(device)
+        # Sub-phase 6.G: release Open3D's CUDA cache every N extractions
+        # (0 disables). See _release_cache_if_due for why extractions, not
+        # frames, are the right cadence.
+        self.release_cache_every = max(0, int(release_cache_every))
+        self._extractions = 0
+        self.cache_releases = 0
         self._empty = True
         self._vbg = o3d.t.geometry.VoxelBlockGrid(
             attr_names=("tsdf", "weight", "color"),
@@ -200,9 +216,46 @@ class TsdfMap:
         the speedup is); only this throttled, display-only extraction moves to
         the host. `.cpu()` copies the grid to CPU; no-op guard keeps the CPU
         path (self._device already CPU) allocation-free."""
-        if "CUDA" in str(self._device).upper():
+        if _is_cuda(self._device):
             return self._vbg.cpu()
         return self._vbg
+
+    def _release_cache_if_due(self) -> None:
+        """Drop Open3D's cached-but-unused CUDA blocks after an extraction.
+
+        Sub-phase 6.G (the long-scan OOM). Measured on an RTX 2000 Ada (8 GiB)
+        with `host/tools/slam_gpu_memory.py --synthetic`, device bytes above a
+        pre-Open3D NVML baseline:
+
+          * the per-frame path alone (integrate + raycast + ICP, no extraction)
+            is BYTE-FLAT over 4000 frames / 80 m -- device memory never moved
+            off 937361408 bytes while the map grew 900 -> 17k blocks. The map
+            is not the leak, and neither are the per-frame temporaries.
+          * add extraction at the live cadence (`SlamWorker._MESH_EVERY = 5`)
+            and over 1500 frames / 30 m device memory climbs 523 -> 5483 MiB,
+            5.13 MiB/frame, with the block count nearly flat -- i.e. it tracks
+            EXTRACTIONS, not map size. On an 8 GiB card that OOMs a few hundred
+            frames later.
+          * with this fix at the default cadence, the same workload run out to
+            4000 frames / 80 m peaks at 651 MiB and ends at 523, tail growth
+            0.005 MiB/frame. No per-frame cost: over an identical 1500-frame
+            A/B, step latency was p50 6.1 ms both ways (p90 7.0 -> 7.1,
+            p99 8.6 -> 8.8) and wall time 62.3 s -> 62.7 s.
+
+        The mechanism is `_extract_vbg()`'s `self._vbg.cpu()`: a whole-grid
+        device->host copy whose temporaries scale with the active-block count,
+        so each extraction asks the caching allocator for a slightly LARGER
+        block than the last and the previous one is cached, never reused. That
+        is why the cadence here is extractions rather than frames -- releasing
+        on a frame counter would fire mostly on frames that allocated nothing.
+
+        No-op on CPU grids and when `release_cache_every` is 0."""
+        if not self.release_cache_every or not _is_cuda(self._device):
+            return
+        self._extractions += 1
+        if self._extractions % self.release_cache_every == 0:
+            o3d.core.cuda.release_cache()
+            self.cache_releases += 1
 
     def mesh(self) -> o3d.t.geometry.TriangleMesh:
         if self._empty:
@@ -218,7 +271,9 @@ class TsdfMap:
             m.vertex.colors = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=self._device)
             m.triangle.indices = o3d.core.Tensor(np.zeros((0, 3), dtype=np.int32), device=self._device)
             return m
-        return self._extract_vbg().extract_triangle_mesh(self.weight_threshold)
+        out = self._extract_vbg().extract_triangle_mesh(self.weight_threshold)
+        self._release_cache_if_due()
+        return out
 
     def point_cloud(self) -> o3d.t.geometry.PointCloud:
         if self._empty:
@@ -226,4 +281,6 @@ class TsdfMap:
             pc.point.positions = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=self._device)
             pc.point.colors = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=self._device)
             return pc
-        return self._extract_vbg().extract_point_cloud(self.weight_threshold)
+        out = self._extract_vbg().extract_point_cloud(self.weight_threshold)
+        self._release_cache_if_due()
+        return out

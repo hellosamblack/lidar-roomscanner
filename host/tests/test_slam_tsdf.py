@@ -1,5 +1,6 @@
 import numpy as np
 import open3d as o3d
+import roomscan.slam.tsdf as tsdf_mod
 from roomscan.slam.tsdf import TsdfMap
 from roomscan.slam.intrinsics import pinhole
 
@@ -187,3 +188,94 @@ def test_geometry_created_on_the_configured_device():
     pts = model.point.positions.cpu().numpy()
     assert len(pts) > 500
     assert m.mesh().vertex.positions.device == dev
+
+
+# --------------------------------------------------------------- sub-phase 6.G
+# The long-scan OOM: on CUDA it is the throttled mesh()/point_cloud()
+# extraction, not the per-frame path, that grows device memory (~5.1 MiB/frame
+# measured), because `_extract_vbg()`'s whole-grid `.cpu()` copy leaves
+# ever-larger temporaries in Open3D's caching allocator. These tests cover the
+# cadence + wiring on a CPU box; the on-GPU ceiling assertion lives in
+# tools/slam-container/cuda_smoke.py.
+
+
+def _populated_map():
+    m = TsdfMap(voxel_size=0.02, depth_max=5.0)
+    K = pinhole(W, H)
+    depth = _wall_depth(1.0)
+    for _ in range(4):
+        m.integrate(depth, K, np.eye(4))
+    return m
+
+
+def test_release_cache_every_defaults_to_one_and_clamps_negatives():
+    assert TsdfMap(voxel_size=0.02).release_cache_every == 1
+    assert TsdfMap(voxel_size=0.02, release_cache_every=0).release_cache_every == 0
+    assert TsdfMap(voxel_size=0.02, release_cache_every=-5).release_cache_every == 0
+
+
+def test_release_cache_is_a_noop_on_a_cpu_grid():
+    # A CPU grid has no CUDA cache to release: extraction must still work and
+    # the release must never fire (o3d.core.cuda.release_cache() on a
+    # CUDA-less build is exactly what we must not call).
+    m = _populated_map()
+    assert len(m.mesh().vertex.positions) > 100
+    assert m.point_cloud().point.positions.numpy().shape[0] > 100
+    assert m.cache_releases == 0
+
+
+def test_release_cache_fires_on_every_extraction_by_default(monkeypatch):
+    # The cadence logic itself is device-independent, so stub out the two
+    # device-specific pieces and assert it on any box.
+    calls = []
+    monkeypatch.setattr(tsdf_mod, "_is_cuda", lambda dev: True)
+    monkeypatch.setattr(o3d.core.cuda, "release_cache", lambda: calls.append(1))
+    m = TsdfMap(voxel_size=0.02, release_cache_every=1)
+    for _ in range(3):
+        m._release_cache_if_due()
+    assert len(calls) == 3
+    assert m.cache_releases == 3
+
+
+def test_release_cache_throttles_to_every_nth_extraction(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tsdf_mod, "_is_cuda", lambda dev: True)
+    monkeypatch.setattr(o3d.core.cuda, "release_cache", lambda: calls.append(1))
+    m = TsdfMap(voxel_size=0.02, release_cache_every=5)
+    for _ in range(12):
+        m._release_cache_if_due()
+    assert len(calls) == 2            # extractions 5 and 10
+    assert m.cache_releases == 2
+
+
+def test_release_cache_every_zero_never_fires(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tsdf_mod, "_is_cuda", lambda dev: True)
+    monkeypatch.setattr(o3d.core.cuda, "release_cache", lambda: calls.append(1))
+    m = TsdfMap(voxel_size=0.02, release_cache_every=0)
+    for _ in range(10):
+        m._release_cache_if_due()
+    assert calls == []
+    assert m.cache_releases == 0
+
+
+def test_mesh_and_point_cloud_each_count_as_one_extraction():
+    # Wiring check: both extraction entry points must go through the hook,
+    # since both perform the `.cpu()` grid copy that dirties the cache.
+    m = _populated_map()
+    seen = []
+    m._release_cache_if_due = lambda: seen.append(1)   # type: ignore[method-assign]
+    m.mesh()
+    m.point_cloud()
+    assert len(seen) == 2
+
+
+def test_empty_map_extraction_does_not_count_as_an_extraction():
+    # The empty-map guards return a placeholder without touching the grid --
+    # nothing was allocated, so there is nothing to release.
+    m = TsdfMap(voxel_size=0.02)
+    seen = []
+    m._release_cache_if_due = lambda: seen.append(1)   # type: ignore[method-assign]
+    m.mesh()
+    m.point_cloud()
+    assert seen == []

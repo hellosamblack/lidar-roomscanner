@@ -46,6 +46,7 @@ class Mapper:
                  min_confidence: float | None = _DEFAULT_MIN_CONFIDENCE,
                  weight_threshold: float = 3.0,
                  device: str | o3d.core.Device = "CPU:0",
+                 release_cache_every: int = 1,
                  stationary_hold: bool = True,
                  stationary_window: int = 10,
                  stationary_coherence: float = 0.5,
@@ -60,7 +61,8 @@ class Mapper:
         self._deproj = Deprojector(width, height, fov_h, fov_v)
         self._intr = pinhole(width, height, fov_h, fov_v, device=self._device)
         self._tsdf = TsdfMap(voxel_size=voxel_size, weight_threshold=weight_threshold,
-                             device=self._device)
+                             device=self._device,
+                             release_cache_every=release_cache_every)
         self._gate = dict(max_dist=max_dist, min_fitness=min_fitness, max_rmse=max_rmse)
         self._clock = clock
         # Stationarity hold (owner: "device is stationary, tweak it until this

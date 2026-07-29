@@ -82,6 +82,7 @@ from .sensors import (
     boresight_view_deg,
     graft_yaw,
     gravity_body_from_imu_raw,
+    ir_gravity_residual_deg,
     ir_gravity_rot,
     quat_mul,
     quat_pitch_alt_deg,
@@ -426,6 +427,14 @@ class OrientationSmoother:
         span = max(1.0 - self.coherence_thresh, 1e-9)
         ramp = (coh - self.coherence_thresh) / span
         return self.floor_alpha + (1.0 - self.floor_alpha) * ramp
+
+    @property
+    def held(self):
+        """The current smoothed quat (None before the first sample). Read-only
+        view for consumers that need the display orientation outside the tick
+        that produced it -- e.g. the `sensor` message's `ir_roll_deg`, which must
+        agree with the IR pane's snap."""
+        return self._held
 
     def update(self, quat):
         """Feed the newest fused quat; return the smoothed one to display."""
@@ -955,7 +964,8 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
                           jitter: OrientationJitter | None = None,
                           orientation_mode: str = "zyx",
                           axis_labels=DEFAULT_AXIS_LABELS,
-                          yaw_offset_deg: float = 0.0) -> dict | None:
+                          yaw_offset_deg: float = 0.0,
+                          ir_display_quat=None) -> dict | None:
     """SensorState -> `sensor` JSON dict (streams 9/10), or None when there is no
     sensor data at all (so the broadcaster stays silent on a ToF-only session).
 
@@ -1076,6 +1086,13 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
         "orientation_raw": orientation_raw,
         "orientation_view": orientation_view_out,
         "jitter": jitter_out,
+        # Residual in-plane roll the IR pane's server-side 90-deg snap leaves
+        # behind, for the client to finish with a CSS transform (see
+        # `ir_gravity_residual_deg`). CCW-positive, so CSS must negate it.
+        # Computed from the SMOOTHED display quat -- the same one the snap uses --
+        # or the two would disagree near a 45-deg boundary and the pane would jump.
+        "ir_roll_deg": (None if ir_display_quat is None
+                        else round(ir_gravity_residual_deg(ir_display_quat), 2)),
     }
 
 
@@ -1435,7 +1452,8 @@ class SlamRunner:
         cfg = SlamConfig.load()
         device = preferred_device()
         worker = make_slam_worker(width, height, fov_h=self._fov_h,
-                                  fov_v=self._fov_v, device=device)
+                                  fov_v=self._fov_v, device=device,
+                                  release_cache_every=cfg.release_cache_every)
         worker.start()
         meshprep = MeshPrep(vertex_budget=cfg.live_vertex_budget,
                             fps_budget_ms=cfg.fps_budget_ms)
@@ -2309,7 +2327,8 @@ async def _broadcaster() -> None:
             smsg = build_sensor_message(state.sensor_state, state.mag_cal, jitter,
                                          orientation_mode=state.ui_state.orientation_mode,
                                          axis_labels=state.ui_state.orientation_labels,
-                                         yaw_offset_deg=state.ui_state.yaw_offset_deg)
+                                         yaw_offset_deg=state.ui_state.yaw_offset_deg,
+                                         ir_display_quat=smoother.held)
             if smsg is not None:
                 await _broadcast_text(clients, json.dumps(smsg))
 

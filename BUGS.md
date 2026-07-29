@@ -780,6 +780,24 @@ portrait (42×54) and the CSS had a hardcoded `aspect-ratio: 4/3` that would hav
 Verified live: the broadcast cloud's ray grid is destroyed (2094×2016 distinct directions) and `rot⁻¹`
 recovers exactly the 54×42 sensor grid. Protocol note in `docs/web-protocol.md`.
 
+**Follow-up (2026-07-29, owner: "the IR preview window needs to rotate too").** The fix above gave the
+cloud *continuous* alignment but the IR pane only the panel's **quarter-turn snap**, so the two disagreed
+by up to 45°: at ~40° of roll the snap is **zero turns** and the pane sat still while the cloud tilted the
+full 40°. Half-ported parity, not a new root cause. The rotation is now split — the server keeps the snap
+(pixel-exact, and it is what makes the dimensions swap) and publishes the ≤45° remainder as
+**`ir_roll_deg`** on the `sensor` message; `ir.js` finishes it with a CSS transform, so the 54×42 image is
+never resampled. `ir_roll_deg` is CCW-positive (`np.rot90`'s sense, which is CCW on screen too), so CSS —
+which turns clockwise — negates it; the sign was established by a marker test, not by reasoning about
+conventions. It is computed from the **smoothed** display quat, the same one the snap uses, or the two
+disagree at a 45° boundary and the pane jumps. The image now spins inside a fixed **square** frame
+(`#ir-frame`) scaled so the rotated bounding box always fits, so the card never changes shape and no field
+of view is cropped (empty corners at intermediate angles; worst at 45°, where it exactly inscribes).
+Verified by DOM readback at 14.6°/31.6°/44.6° residual (all `fits:true`; at 44.6° the bbox is exactly
+278×278 in a 278 px frame) and live at 169° roll, where snap 180° + residual −11.0° sums to the 169° the
+cloud uses. **Caught in review:** `build_sensor_message` already had a *local* `display_quat` (the
+yaw-offset orientation view), so the new parameter of that name was silently clobbered and the residual
+was being taken from the raw fused quat — renamed `ir_display_quat`.
+
 ## BUG-027 — SFLP quaternion aliased by unfiltered 480 Hz → 30 Hz decimation
 
 - **Status:** **fixed** 2026-07-28 · **Reported:** 2026-07-28 (owner, after BUG-026: "the point cloud

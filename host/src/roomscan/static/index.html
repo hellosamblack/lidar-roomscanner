@@ -481,9 +481,20 @@
             font-size: 1.1rem; line-height: 1; padding: 0 4px; width: auto;
         }
         .ir-card__close:hover { color: var(--text-main); background: none; }
-        #ir-canvas {
-            width: 100%; height: auto; aspect-ratio: 4 / 3;
+        /* The pane is gravity-rolled, so the image spins inside a SQUARE frame of
+           fixed size: the card never changes shape as the board rolls, and the
+           whole field of view stays visible (corners go empty at intermediate
+           angles). ir.js sizes + rotates the canvas to fit; the frame only has to
+           be square and clip. */
+        #ir-frame {
+            position: relative;
+            width: 100%; aspect-ratio: 1 / 1;
             background: #000; border-radius: 6px;
+            overflow: hidden;
+        }
+        #ir-canvas {
+            position: absolute; top: 50%; left: 50%;
+            transform-origin: center center;
             image-rendering: pixelated;         /* crisp nearest-neighbour upscale (§7.3) */
         }
 
@@ -714,7 +725,9 @@
                 <label class="toggle toggle--sm" title="Lock the IR intensity range instead of auto-scaling"><input type="checkbox" id="ir-card-freeze"><span>Freeze</span></label>
                 <button class="ir-card__close" id="ir-card-close" title="Hide the IR monitor card">&times;</button>
             </div>
-            <canvas id="ir-canvas" class="card-body" width="1" height="1"></canvas>
+            <div id="ir-frame" class="card-body">
+                <canvas id="ir-canvas" width="1" height="1"></canvas>
+            </div>
         </div>
 
         <!-- Diagnostic feed (populated by window.__diag). Collapsed by default;

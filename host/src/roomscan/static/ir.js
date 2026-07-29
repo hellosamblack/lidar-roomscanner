@@ -11,13 +11,26 @@
 // click state) — one-way state flow (§8.3). The card is show/hide toggleable,
 // driven by the right rail's IR group through the hub ("ir_show").
 //
+// GRAVITY ROLL. The pane is kept level with physical gravity so it agrees with the
+// gravity-aligned point cloud. That happens in two parts: the server pre-rotates by
+// whole quarter turns (`ir_gravity_rot`, pixel-exact and free, which is why the
+// incoming width/height swap on a 90°/270° turn), and this module finishes the
+// remaining ≤45° from the `sensor` message's `ir_roll_deg` using a CSS transform —
+// so the 54x42 image is never resampled and stays pixel-crisp. `ir_roll_deg` is
+// CCW-positive (np.rot90's sense); CSS rotates clockwise, hence the negation.
+//
+// The image spins inside a fixed SQUARE frame (#ir-frame), scaled so the rotated
+// bounding box always fits: the card never changes shape as the board rolls and no
+// field of view is cropped, at the cost of empty corners at intermediate angles.
+//
 // Public surface:  createIr(hub) -> {}
-// Hub events:  subscribes "ir_image", "state", "ir_show";  sends set_ir via hub.send
+// Hub events:  subscribes "ir_image", "sensor", "state", "ir_show";  sends set_ir via hub.send
 
 const D = (m, l) => { try { window.__diag && window.__diag('ir.js: ' + m, l); } catch (e) {} };
 
 export function createIr(hub) {
     const card = document.getElementById('ir-card');
+    const frame = document.getElementById('ir-frame');
     const canvas = document.getElementById('ir-canvas');
     const segColormap = document.getElementById('ir-card-colormap');
     const chkFreeze = document.getElementById('ir-card-freeze');
@@ -26,6 +39,41 @@ export function createIr(hub) {
 
     const ctx = canvas.getContext('2d');
     let imageData = null;   // reused ImageData, reallocated only when size changes
+    let imgW = 0, imgH = 0; // last image dims, for the fit math
+    let rollDeg = 0;        // residual gravity roll, CCW-positive degrees
+
+    // Size + rotate the canvas so the rotated image is inscribed in the square
+    // frame. Fit the unrotated image first (its long side spans the frame), then
+    // shrink by however much the rotation grows the bounding box.
+    function layout() {
+        if (!frame || !imgW || !imgH) return;
+        const side = frame.clientWidth;         // square, so width == height
+        if (!side) return;                      // card hidden: nothing to lay out
+        const base = side / Math.max(imgW, imgH);
+        const cssW = imgW * base, cssH = imgH * base;
+        const rad = Math.abs(rollDeg) * Math.PI / 180;
+        const c = Math.abs(Math.cos(rad)), s = Math.abs(Math.sin(rad));
+        const boxW = cssW * c + cssH * s;       // rotated bounding box
+        const boxH = cssW * s + cssH * c;
+        const k = side / Math.max(boxW, boxH, 1e-6);
+        canvas.style.width = cssW + 'px';
+        canvas.style.height = cssH + 'px';
+        // translate(-50%,-50%) centres it; the frame's own CSS pins top/left to 50%.
+        canvas.style.transform =
+            `translate(-50%, -50%) rotate(${-rollDeg}deg) scale(${k})`;
+    }
+
+    // The residual roll rides the `sensor` message (the orientation message), not
+    // the IR binary, so no binary tag had to change. Silent on a ToF-only session.
+    hub.on('sensor', (msg) => {
+        const r = (msg && typeof msg.ir_roll_deg === 'number') ? msg.ir_roll_deg : 0;
+        if (r === rollDeg) return;              // avoid needless style writes at 30 Hz
+        rollDeg = r;
+        layout();
+    });
+
+    // The frame is a % of the card, so a resize changes `side`.
+    try { new ResizeObserver(layout).observe(frame); } catch (e) { /* older browser */ }
 
     hub.on('ir_image', (buffer) => {
         const view = new DataView(buffer);
@@ -39,10 +87,10 @@ export function createIr(hub) {
             canvas.width = width;
             canvas.height = height;
             imageData = ctx.createImageData(width, height);
-            // Follow the incoming aspect rather than the CSS default: the server
-            // rolls the pane to gravity, so a 90°/270° turn arrives portrait
-            // (42x54) and the fixed 4/3 rule would squash it.
-            canvas.style.aspectRatio = width + ' / ' + height;
+            // Dims swap on a 90°/270° server-side snap (54x42 -> 42x54), so the
+            // fit math has to re-run; never assume landscape.
+            imgW = width; imgH = height;
+            layout();
         }
         const out = imageData.data;   // RGBA
         for (let i = 0, j = 0; i < width * height; i++) {
