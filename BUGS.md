@@ -41,6 +41,8 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-027 | fixed   | firmware      | SFLP quaternion decimated 480 Hz → 30 Hz by keeping one sample of ~16, aliasing the whole noise band into the output |
 | BUG-028 | fixed   | firmware      | Ethernet hot-plug replug wedges board (LD2 freezes) — lwIP double-add assertion on `mdns_resp_add_netif` |
 | BUG-029 | fixed   | host/sources  | `UdpSource` stream recovery fails due to `255.255.255.255` fallback keepalives not routing on some Linux network configs |
+| BUG-030 | open    | host/sensors  | Magnetometer calibration is direction-dependent: |B| ranges 47→85 µT with tilt, heading errors up to ~90° |
+| BUG-031 | open    | firmware      | ToF frame timestamp and IMU FIFO drain skewed ~0.9 ms (dominates handheld orientation error) |
 
 ---
 
@@ -809,10 +811,34 @@ part is ≈2δ of angle → ~0.056° per step. Dithered over 16 samples that pre
 0.0118 measured, and the residual's directional coherence is **0.14** — *below* the ~0.32 of white noise
 at window 10, i.e. anti-correlated, the signature of quantization dither rather than sensor noise or
 tripod vibration. AN5763 §6.5: SFLP data is readable **from the FIFO only**, so there is no
-higher-precision register path. Because fp16 is floating point the floor should **vary with
+higher-precision register path. ~~Because fp16 is floating point the floor should **vary with
 orientation** (finer near identity) — an untested prediction. Beating it means leaving the SFLP FIFO
-format (batch raw XL/GY and fuse host-side); **open, not attempted.** Analysis + method in
+format (batch raw XL/GY and fuse host-side); **open, not attempted.**~~ Analysis + method in
 `docs/iks4a1-stacking.md` → "Orientation-noise pass"; measure with `host/tools/orientation_probe.py`.
+
+**Superseded 2026-07-29 — both open items above were closed:**
+
+*Orientation dependence: **CONFIRMED**.* Two-point test (owner rotated the rig ~90°). Old pose fp16
+step RMS 0.03956°, k_eff 4.85, model 0.01797° vs **measured 0.01782° (ratio 0.99)**; new pose step
+0.04846°, k_eff 4.84, model 0.02202° vs measured 0.02670° (ratio 1.21). Step ratio new/old 1.225,
+measured ratio 1.498 — right direction, ~21% under-predicted at the coarser pose.
+
+*The floor is **dither-limited**, not step-limited — a quieter board measures WORSE.* Averaging 16
+samples only buys √16 if input noise keeps the quantizer toggling. Measured k_eff ≈ **5 of 16**
+(tie fractions 14–28%, holds up to 18 consecutive frames), corroborated independently by the 1.85×
+excess of measured over naive model under √k scaling → k_eff ≈ 4.7. This explained an apparent
+0.0118 → 0.0183 "regression" after a power cycle that was **not** a regression: last session
+back-solves to k_eff ≈ 16 (well dithered). Nothing had broken.
+
+*Escaping fp16: **shipped as stream 11** (`RS_STREAM_IMU_RAW`) — 480 Hz raw FIFO pass-through of
+GY/XL/timestamp/SFLP-gravity/SFLP-gbias, all 16-bit fixed point. Verified on-target: 100.01% of
+samples delivered, 0 gaps, median tick delta exactly 96 ticks = 480.0 Hz. Host complementary filter
+`roomscan.imufusion` built and **gated OFF by default** (SLAM non-regression guarded by test);
+synthetic gain 6.2× on tilt in the under-dithered regime. **Not yet wired into the live display —
+that is the resume point.**
+
+*Also note (2026-07-29): the fp16 floor turned out **not** to be what the owner was actually seeing.
+The visible noise is the eCompass — see BUG-030.*
 
 ## BUG-028 — Ethernet hot-plug replug wedges board (lwIP double-add assertion)
 
@@ -831,3 +857,65 @@ When the Ethernet cable is unplugged and plugged back in, the firmware wedged. T
 Even after the firmware crash (BUG-028) was fixed, the `UdpSource` stream would not recover after a replug until the python server was restarted. The source was correctly detecting a stream timeout (>2s) but was falling back to sending its keepalive wake datagram to `255.255.255.255`. On many Linux/Docker host setups, raw broadcasts to `255.255.255.255` fail to route out of the physical Ethernet interface and instead go to a virtual bridge, meaning the board never received the keepalives.
 
 **Fix:** Updated `_maybe_keepalive` to actively re-query the board's IP via mDNS (`_resolve_target`) every keepalive interval when the stream is dead. This learns the new (or same) IP and resumes unicast wake packets, gracefully restoring the stream.
+
+## BUG-030 — Magnetometer calibration is direction-dependent: |B| ranges 47→85 µT with tilt
+
+- **Status:** **open** · **Reported:** 2026-07-29 (owner: "most of the noise I see in the UI is in the
+  eCompass") · **Area:** host/sensors (calibration data, not code)
+- **Where:** `host/mag_cal.json` (fitted 2026-07-15, `field_ut = 49.87`); consumed via
+  `host/src/roomscan/magcal.py` → `MagCalibration.apply()`
+
+A correctly calibrated magnetometer reports a **constant** field magnitude at every orientation —
+that is the defining property. Ours does not. Measured on a deliberate braced tilt sweep
+(2026-07-29, `captures/web_20260729_061440.bin`, 8 stationary holds, current calibration applied):
+
+| tilt from vertical | 0.3° | 0.2° | 30.5° | 60.6° | 80.0° | 90.6° | 30.6° | 2.8° |
+|---|---|---|---|---|---|---|---|---|
+| heading | 147.0° | 144.4° | 157.9° | 149.7° | **79.6°** | **239.6°** | 158.1° | 146.2° |
+| **\|B\| µT** | 50.5 | 47.4 | 58.7 | 76.5 | 81.1 | 85.1 | 62.8 | 50.7 |
+
+Accurate at ceiling-facing (≈ the fitted 49.87 µT) and degrading monotonically to ~1.7× toward
+horizontal — the signature of an **incomplete calibration tumble**: good coverage in one attitude
+family, poor everywhere else. Consequence is not noise but **systematic heading error up to ~90°**,
+and it occurs precisely in the horizontal wall-scanning attitude the device is actually used in.
+(An earlier near-vertical tripod pose read ~107–109 µT, i.e. a 2.15× anomaly — consistent story.)
+That deviation also exceeds `YawFusion.anomaly_frac` (0.3 → ±15 µT), so yaw fusion is silently
+**gated off** at those poses while the displayed `heading` — which ignores the gates — keeps showing
+the biased value.
+
+**The compass noise is magnetometer-dominated, not orientation-dominated.** Holding the quaternion
+fixed and varying only the magnetometer reproduces essentially all of the heading jitter at every
+attitude (mag-only 1.297° of 1.299° total at 0°; 0.780° of 0.779° at 30°; 1.185° of 1.187° at 60°).
+Tilt-error propagation contributes 0.004–0.05° below 60°, rising to 0.182° at 80° and 0.944° at
+90.6° (the DT0058 gimbal blow-up — real, but an order of magnitude below the calibration error).
+Orientation-estimate jitter itself is excellent throughout: p95 0.006–0.079°/frame.
+
+**Fix (needs the owner — physical):** re-run the tumble with **full-sphere coverage**, spending real
+time in the horizontal attitudes where the current fit is worst. The web calibration modal built
+2026-07-29 exists to make missing coverage visible during collection and to gate acceptance on
+|B| consistency rather than a bare fit residual. Sources: DT0058 (tilt-compensated eCompass),
+DT0059 (ellipsoid fit), DT0103, AN5069 §5/§8.
+
+## BUG-031 — ToF frame timestamp and IMU FIFO drain are skewed ~0.9 ms
+
+- **Status:** **open** (partially mitigated 2026-07-29) · **Reported:** 2026-07-29 (analysis) ·
+  **Area:** firmware
+- **Where:** `firmware/scanner-stream/Src/vl53l9_app.c` (frame stamp) vs `Src/rs_lsm.c` (FIFO drain)
+
+For a **handheld** scanner, timing error between a depth frame and the IMU sample used to orient it
+dominates the orientation-noise floor: at 100 °/s, 1 ms of skew is 0.1° of misalignment — ~10× the
+stationary quantization floor. Measured against the LSM's own FIFO timestamps: **1.9 ms RMS /
+3.4 ms p95 / 6.2 ms max**. Two causes — `rs_time_us()` was `HAL_GetTick() * 1000` (1 ms granular),
+and the stamp was taken at *send* time, so variable processing/transmit latency folded in.
+
+**Mitigated 2026-07-29** by a TIM2-based microsecond clock and moving the stamp to the sensor's
+FRAME_READY edge (end of integration). **Measured after: 1072 µs RMS** — better, but far from the
+predicted "tens of µs". Note the measurement itself has a ~600 µs floor (it compares against the
+*last* IMU sample of each batch, whose phase varies by up to one 2.083 ms sample period), implying
+~890 µs of genuine residual.
+
+**Remaining root cause (hypothesis, not yet fixed):** the IMU FIFO is drained *later* in the loop
+than the ToF frame-ready stamp, so the offset between them still breathes with processing load. The
+principled fix is to capture the LSM timestamp **at the frame-ready moment** rather than inferring it
+from whichever FIFO words happen to be present at drain time. Verification requires **real motion** —
+both defects are invisible on a stationary rig.

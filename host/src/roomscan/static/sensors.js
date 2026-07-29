@@ -8,13 +8,51 @@
 //     the desktop render_compass convention.
 //   - pressure / temperature sparklines: min/max-autoscaled polyline over the
 //     history arrays + a live value readout.
-// Plus a fusion-status line. All draws are guarded so a null-field message (a
-// ToF-only or pre-calibration session) renders placeholders and never throws.
+// Plus a fusion-status line, and (owner ask, 2026-07-28) two more readouts:
+//   - Raw Orientation: `orientation_raw` — the fused quat + Euler roll/pitch/yaw
+//     + heading at FULL PRECISION, pre-OrientationSmoother (same raw signal as
+//     `rot`/`heading` above, just not rounded for a gizmo/compass draw). ALWAYS
+//     ZYX Tait-Bryan, regardless of the Orientation View mode below.
+//   - Jitter: `jitter` — server-computed rolling-window frame-to-frame noise
+//     (p95 headline / mean secondary, deg/frame) for roll/pitch/yaw/heading and
+//     the overall orientation step. Computed server-side from full precision —
+//     never re-derive this client-side from the rounded `rot`/`heading` fields.
+//     roll/pitch/yaw follow the selected Orientation View mode; heading/orientation
+//     are always the same (convention-independent) regardless of mode.
+//   - Orientation View: `orientation_view` — the SELECTED decomposition mode
+//     (mode picker + 3 renamable axis-label inputs, both sent via `set_orientation`
+//     and echoed back through `state`) plus a near-singularity warning and, in
+//     World mode, a mag-validity/motion warning. Presentation-only: this never
+//     changes what's rendered in the 3D view, only how the Sensors card reads out
+//     the SAME orientation. See docs/web-protocol.md "Orientation decomposition
+//     modes" for the math + where each mode's singularity sits.
+//   - Zero Yaw Here (owner ask, 2026-07-29): the SFLP yaw has no magnetometer
+//     input, so its zero is an arbitrary power-on attitude that free-runs with
+//     gyro drift. "Zero Yaw Here" sends `zero_yaw`, which captures the CURRENT
+//     attitude as the new relative-yaw reference (server-side, via
+//     `sensors.graft_yaw` -- see docs/web-protocol.md); "Clear" sends
+//     `clear_yaw_offset` to go back to raw. Both echo through `state`'s
+//     `yaw_offset_deg`. Disabled/no-op in World mode: that mode's yaw slot is
+//     the ABSOLUTE magnetic heading, not offsettable.
+// All draws/writes are guarded so a null-field message (a ToF-only or
+// pre-calibration session, or before the jitter window has 2+ samples) renders
+// placeholders and never throws.
 //
-// Everything is read-only, so this lives in the pointer-events:none left rail.
+// Everything else is read-only (pointer-events:none left rail); the mode
+// select + label inputs + yaw-offset buttons are the exceptions
+// (pointer-events:auto, see index.html's .sensor-select/.sensor-label-input/
+// .sensor-btn rules).
 //
 // Public surface:  createSensors(hub) -> {}
-// Hub events:  subscribes "sensor"
+// Hub events:  subscribes "sensor", "state"; sends "set_orientation",
+//   "zero_yaw", "clear_yaw_offset"
+
+const ORIENT_MODE_DESC = {
+    zyx: 'ZYX Tait-Bryan. Singularity: pitch to +-90 deg (body Up axis to vertical — device aimed steeply up/down).',
+    zxy: 'Alt Euler (ZXY). Singularity: pitch to +-90 deg (body Right axis to vertical — device rolled onto its side).',
+    boresight: 'ToF optical axis az/el/roll — meaningful under any grip. Singularity: elevation to +-90 deg (pointing at ceiling/floor).',
+    world: 'Gravity+magnetometer reference (drift-free, grip-independent, but degrades while moving). Singularity: tilt to +-90 deg.',
+};
 
 const D = (m, l) => { try { window.__diag && window.__diag('sensors.js: ' + m, l); } catch (e) {} };
 
@@ -164,6 +202,18 @@ function drawSparkline(canvas, values) {
     ctx.stroke();
 }
 
+// null/undefined -> em dash; else fixed-point degrees.
+function fmtDeg(v, decimals) {
+    return (v === null || v === undefined) ? '—' : v.toFixed(decimals) + '°';
+}
+
+// A jitter signal's {mean_deg, p95_deg, n} -> "p95 0.032° · mean 0.021° (n=74)",
+// or "—" before the window has 2+ samples (mean_deg/p95_deg null).
+function fmtJitter(stat) {
+    if (!stat || stat.p95_deg === null || stat.p95_deg === undefined) return '—';
+    return `p95 ${stat.p95_deg.toFixed(3)}° · mean ${stat.mean_deg.toFixed(3)}°`;
+}
+
 export function createSensors(hub) {
     const $ = (id) => document.getElementById(id);
     const gizmo = $('sensor-gizmo');
@@ -175,7 +225,28 @@ export function createSensors(hub) {
     const tempSpark = $('sensor-temp-spark');
     const tempVal = $('sensor-temp-val');
     const resetBtn = $('sensor-reset-heading');
-    const magCalBtn = $('sensor-mag-cal');
+    const rollEl = $('sensor-roll');
+    const pitchEl = $('sensor-pitch');
+    const yawEl = $('sensor-yaw');
+    const headingRawEl = $('sensor-heading-raw');
+    const quatEl = $('sensor-quat');
+    const jitterEls = {
+        roll: $('jitter-roll'), pitch: $('jitter-pitch'), yaw: $('jitter-yaw'),
+        heading: $('jitter-heading'), orientation: $('jitter-orientation'),
+    };
+    const jitterLabelEls = {
+        roll: $('jitter-label-roll'), pitch: $('jitter-label-pitch'), yaw: $('jitter-label-yaw'),
+    };
+    const modeSelect = $('orient-mode-select');
+    const modeDesc = $('orient-mode-desc');
+    const labelInputs = [$('orient-label-0'), $('orient-label-1'), $('orient-label-2')];
+    const valEls = [$('orient-val-0'), $('orient-val-1'), $('orient-val-2')];
+    const singularityWarn = $('orient-singularity-warn');
+    const worldWarn = $('orient-world-warn');
+    const worldNote = $('orient-world-note');
+    const yawOffsetVal = $('orient-yaw-offset');
+    const zeroYawBtn = $('orient-zero-yaw');
+    const clearYawBtn = $('orient-clear-yaw-offset');
     if (!gizmo || !compass) { D('sensor DOM missing — skipping', 'error'); return {}; }
 
     // prime placeholders
@@ -190,11 +261,82 @@ export function createSensors(hub) {
         });
     }
 
-    if (magCalBtn) {
-        magCalBtn.addEventListener('click', () => {
-            // TODO: open mag-calibration modal
+    // #sensor-mag-cal is owned by magcal.js (it enables the button and opens the
+    // calibration modal); nothing to bind here.
+
+    // --- Orientation View: mode select + renamable axis labels -----------
+    // One-way state flow (same as controls.js): a change here just SENDS
+    // set_orientation; the displayed mode/labels are driven from the
+    // server's `state` echo below, not from local click state, so every
+    // open tab stays in sync.
+    modeSelect?.addEventListener('change', () => {
+        hub.send({ type: 'set_orientation', mode: modeSelect.value });
+    });
+    labelInputs.forEach((input, i) => {
+        if (!input) return;
+        const commit = () => {
+            const labels = labelInputs.map((el, j) => (el ? el.value : ['Roll', 'Pitch', 'Yaw'][j]));
+            hub.send({ type: 'set_orientation', labels });
+        };
+        input.addEventListener('change', commit);   // blur / Enter
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') input.blur(); });
+    });
+
+    // --- Zero Yaw Here / Clear (owner ask, 2026-07-29) --------------------
+    // One-way flow, same as the mode select above: just send the command,
+    // let the `state` echo below drive the displayed offset/button state.
+    if (zeroYawBtn) {
+        zeroYawBtn.addEventListener('click', () => {
+            hub.send({ type: 'zero_yaw' });
         });
     }
+    if (clearYawBtn) {
+        clearYawBtn.addEventListener('click', () => {
+            hub.send({ type: 'clear_yaw_offset' });
+        });
+    }
+
+    hub.on('state', (msg) => {
+        if (modeSelect && msg.orientation_mode && document.activeElement !== modeSelect) {
+            modeSelect.value = msg.orientation_mode;
+        }
+        if (modeDesc && msg.orientation_mode) {
+            modeDesc.textContent = ORIENT_MODE_DESC[msg.orientation_mode] || '';
+        }
+        if (Array.isArray(msg.orientation_labels)) {
+            msg.orientation_labels.forEach((lbl, i) => {
+                const input = labelInputs[i];
+                if (input && document.activeElement !== input) input.value = lbl;
+            });
+            msg.orientation_labels.forEach((lbl, i) => {
+                const keys = ['roll', 'pitch', 'yaw'];
+                const el = jitterLabelEls[keys[i]];
+                if (el) el.textContent = lbl;
+            });
+        }
+
+        // Yaw offset readout + button state. World mode's heading is
+        // ABSOLUTE (magnetic north) -- "Zero Yaw Here" is disabled there
+        // rather than silently doing nothing, per the owner's requirement
+        // that the exception be explicit in the UI, not just the code.
+        const isWorld = msg.orientation_mode === 'world';
+        const offset = msg.yaw_offset_deg;
+        const hasOffset = typeof offset === 'number' && Math.abs(offset) > 1e-6;
+        if (yawOffsetVal) {
+            yawOffsetVal.textContent = isWorld
+                ? 'n/a (absolute)'
+                : (hasOffset ? offset.toFixed(2) + '°' : 'none');
+        }
+        if (zeroYawBtn) {
+            zeroYawBtn.disabled = isWorld;
+            zeroYawBtn.title = isWorld
+                ? "World mode's heading is absolute magnetic north -- not offsettable"
+                : 'Zero the displayed yaw at the current attitude';
+        }
+        if (clearYawBtn) {
+            clearYawBtn.disabled = isWorld || !hasOffset;
+        }
+    });
 
     hub.on('sensor', (msg) => {
         try {
@@ -210,6 +352,47 @@ export function createSensors(hub) {
             drawSparkline(pressSpark, msg.pressure_hist);
             drawSparkline(tempSpark, msg.temp_hist);
             if (resetBtn) resetBtn.disabled = (msg.fusion_key === 'off');
+
+            // Raw orientation (full precision, pre-smoothing) + jitter.
+            const or = msg.orientation_raw || {};
+            if (rollEl) rollEl.textContent = fmtDeg(or.roll_deg, 3);
+            if (pitchEl) pitchEl.textContent = fmtDeg(or.pitch_deg, 3);
+            if (yawEl) yawEl.textContent = fmtDeg(or.yaw_deg, 3);
+            if (headingRawEl) headingRawEl.textContent = fmtDeg(or.heading_deg, 3);
+            if (quatEl) quatEl.textContent = Array.isArray(or.quat)
+                ? or.quat.map((v) => v.toFixed(4)).join(', ') : '—';
+
+            const j = msg.jitter || {};
+            for (const [signal, el] of Object.entries(jitterEls)) {
+                if (el) el.textContent = fmtJitter(j[signal]);
+            }
+
+            // Orientation View: selected-mode readout + labels + warnings.
+            const ov = msg.orientation_view || {};
+            const labels = Array.isArray(ov.labels) ? ov.labels : ['Roll', 'Pitch', 'Yaw'];
+            const vals = [ov.roll_deg, ov.pitch_deg, ov.yaw_deg];
+            valEls.forEach((el, i) => { if (el) el.textContent = fmtDeg(vals[i], 3); });
+            labelInputs.forEach((input, i) => {
+                if (input && document.activeElement !== input && labels[i] !== undefined) {
+                    input.value = labels[i];
+                }
+            });
+            if (singularityWarn) {
+                const margin = ov.singularity_margin_deg;
+                singularityWarn.classList.toggle('hidden', !ov.near_singularity);
+                if (ov.near_singularity && margin !== null && margin !== undefined) {
+                    singularityWarn.textContent =
+                        `⚠ Near singularity — margin ${margin.toFixed(1)}°. Values unreliable.`;
+                }
+            }
+            const isWorld = ov.mode === 'world';
+            if (worldNote) worldNote.classList.toggle('hidden', !isWorld);
+            if (worldWarn) {
+                const showWarn = isWorld && ov.valid === false;
+                worldWarn.classList.toggle('hidden', !showWarn);
+                if (showWarn) worldWarn.textContent = '⚠ ' + (ov.reason || 'World mode invalid');
+            }
+
             if (!window.__gotSensor) { window.__gotSensor = true; D('first sensor frame'); }
         } catch (e) {
             D('sensor draw threw: ' + (e && e.message), 'error');

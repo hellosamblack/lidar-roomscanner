@@ -13,6 +13,7 @@ import { createHud } from './hud.js';
 import { createLog } from './log.js';
 import { createControls } from './controls.js';
 import { createSensors } from './sensors.js';
+import { createMagcal } from './magcal.js';
 import { createCapture } from './capture.js';
 import { createSlam } from './slam.js';
 
@@ -27,6 +28,7 @@ createHud(hub);
 createLog(hub);
 createControls(hub);
 createSensors(hub);
+createMagcal(hub);      // magnetometer-calibration modal (opened from the Sensors card)
 createCapture(hub);
 createIr(hub);
 // scene.js returns a handle (Three.js context + follow-camera hooks); slam.js

@@ -241,6 +241,21 @@
         .sensor-btn:disabled { opacity: 0.35; cursor: not-allowed; }
         .sensor-btn--secondary { border-style: dashed; }
 
+        /* Orientation decomposition mode + labels (owner ask, 2026-07-28). */
+        .sensor-select, .sensor-label-input {
+            pointer-events: auto !important; background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.15); border-radius: 4px;
+            color: var(--text-main); font-size: 0.72rem; font-family: inherit;
+        }
+        .sensor-select { padding: 2px 4px; }
+        .sensor-label-input { width: 68px; padding: 1px 4px; }
+        .hud-note { font-size: 0.68rem; color: var(--text-muted); line-height: 1.3; margin: 2px 0; }
+        .hud-warn {
+            font-size: 0.72rem; font-weight: 700; color: #ffb020;
+            background: rgba(255,176,32,0.12); border: 1px solid rgba(255,176,32,0.4);
+            border-radius: 4px; padding: 4px 6px; margin: 3px 0; line-height: 1.3;
+        }
+
         /* ---- component: control-group (collapsible card in the right dock) ---- */
         .control-group {
             display: flex; flex-direction: column; gap: 12px;
@@ -313,6 +328,77 @@
 
         /* generic hide utility (shared by the transport block + IR card) */
         .hidden { display: none !important; }
+
+        /* ---- component: modal (magnetometer calibration, owner ask 2026-07-29) ----
+         * A modal is the ONE block that legitimately sits outside the docks: it
+         * is a full-viewport overlay with its own backdrop, so it can't collide
+         * with a dock child by construction. The backdrop is deliberately only
+         * lightly tinted -- the live point cloud keeps streaming and rendering
+         * underneath, which is the requirement (calibrating must not interrupt
+         * the instrument). */
+        .modal-backdrop {
+            position: fixed; inset: 0; z-index: 40;
+            background: rgba(3, 4, 8, 0.55);
+            display: flex; align-items: center; justify-content: center;
+            padding: 24px;
+        }
+        .modal {
+            width: min(980px, 96vw); max-height: 90vh;
+            display: flex; flex-direction: column;
+            padding: 0; overflow: hidden;
+        }
+        .modal__header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 14px 20px; border-bottom: 1px solid var(--panel-border);
+        }
+        .modal__title { margin: 0; font-size: 0.95rem; font-weight: 600; letter-spacing: -0.01em; }
+        .modal__close {
+            background: none; border: none; color: var(--text-muted);
+            font-size: 1.3rem; line-height: 1; padding: 0 6px; width: auto;
+        }
+        .modal__close:hover { color: var(--text-main); background: none; }
+        .modal__body { padding: 16px 20px 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+        .modal__intro { margin: 0; font-size: 0.78rem; line-height: 1.45; color: var(--text-muted); }
+        .modal__intro strong { color: var(--text-main); font-weight: 600; }
+
+        /* ---- magnetometer calibration modal ---- */
+        .magcal-grid { display: grid; grid-template-columns: 470px minmax(0, 1fr); gap: 18px; align-items: start; }
+        @media (max-width: 900px) { .magcal-grid { grid-template-columns: 1fr; } }
+        .magcal-mapwrap { position: relative; }
+        .magcal-mapwrap canvas { display: block; }
+        .magcal-tip {
+            position: absolute; z-index: 2; pointer-events: none;
+            background: rgba(11, 12, 16, 0.94); border: 1px solid var(--panel-border);
+            border-radius: 6px; padding: 4px 7px; white-space: nowrap;
+            font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: var(--text-main);
+        }
+        .magcal-progress { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--text-main); }
+        .magcal-progress-track { height: 6px; border-radius: 3px; background: rgba(255,255,255,0.08); overflow: hidden; margin: 5px 0 2px; }
+        .magcal-progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width 0.25s ease; }
+        .magcal-guidance {
+            font-size: 0.78rem; line-height: 1.4; color: var(--text-main);
+            background: rgba(59,130,246,0.10); border: 1px solid rgba(59,130,246,0.35);
+            border-radius: 6px; padding: 7px 9px;
+        }
+        .magcal-note { font-size: 0.68rem; color: var(--text-muted); line-height: 1.35; }
+        .magcal-col { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+        .magcal-row {
+            display: flex; justify-content: space-between; gap: 14px;
+            font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--text-muted);
+        }
+        .magcal-row__val { color: var(--text-main); font-weight: 700; text-align: right; }
+        .magcal-verdict { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; flex-wrap: wrap; }
+        .magcal-badge {
+            border: 1px solid; border-radius: 4px; padding: 1px 6px;
+            font-family: 'JetBrains Mono', monospace; font-size: 0.66rem; font-weight: 700; letter-spacing: 0.04em;
+        }
+        .magcal-verdict__why { font-size: 0.7rem; color: var(--text-muted); }
+        .magcal-empty { font-size: 0.72rem; color: var(--text-muted); font-style: italic; }
+        .magcal-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        .magcal-actions button { padding: 7px 14px; font-size: 0.78rem; }
+        .magcal-actions button:disabled { opacity: 0.35; cursor: not-allowed; }
+        .magcal-spacer { flex: 1; }
+        .magcal-status { font-size: 0.74rem; color: var(--text-muted); min-height: 1.1em; }
 
         /* Shared slider (range input) style */
         .slider { width: 100%; accent-color: var(--accent); cursor: pointer; }
@@ -505,9 +591,66 @@
                 <canvas id="sensor-press-spark" class="sensor-spark" width="1" height="1"></canvas>
                 <div class="hud-row"><span>Temp</span><span class="hud-val" id="sensor-temp-val">—</span></div>
                 <canvas id="sensor-temp-spark" class="sensor-spark" width="1" height="1"></canvas>
+
+                <!-- Orientation decomposition mode + custom axis labels + singularity
+                     warning (owner ask, 2026-07-28; world-mode follow-up same day).
+                     Presentation-only view of the SAME fused quat as Raw Orientation
+                     below -- see docs/web-protocol.md "Orientation decomposition modes"
+                     for the math + where each mode's singularity sits. -->
+                <div class="hud-section-label">Orientation View</div>
+                <div class="hud-row">
+                    <span>Mode</span>
+                    <select id="orient-mode-select" class="sensor-select" title="Which decomposition of the orientation quaternion to display">
+                        <option value="zyx">Roll-Pitch-Yaw (ZYX)</option>
+                        <option value="zxy">Alt Euler (ZXY)</option>
+                        <option value="boresight">Boresight (Az/El/Roll)</option>
+                        <option value="world">World (Gravity + North)</option>
+                    </select>
+                </div>
+                <div id="orient-mode-desc" class="hud-note">ZYX Tait-Bryan. Singularity: pitch to +-90 deg (device aimed steeply up/down).</div>
+                <div class="hud-row"><span><input id="orient-label-0" class="sensor-label-input" maxlength="24" value="Roll" title="Rename this axis"></span><span class="hud-val" id="orient-val-0">—</span></div>
+                <div class="hud-row"><span><input id="orient-label-1" class="sensor-label-input" maxlength="24" value="Pitch" title="Rename this axis"></span><span class="hud-val" id="orient-val-1">—</span></div>
+                <div class="hud-row"><span><input id="orient-label-2" class="sensor-label-input" maxlength="24" value="Yaw" title="Rename this axis"></span><span class="hud-val" id="orient-val-2">—</span></div>
+                <div id="orient-singularity-warn" class="hud-warn hidden">⚠ Near singularity — values unreliable</div>
+                <div id="orient-world-warn" class="hud-warn hidden">⚠ World mode invalid</div>
+                <div id="orient-world-note" class="hud-note hidden">Gravity+mag reference: drift-free but degrades while the device is moving (accel ≈ gravity tilt).</div>
+
+                <!-- "Zero yaw here" (owner ask, 2026-07-29): the SFLP yaw has no
+                     magnetometer input, so its zero point is an arbitrary power-on
+                     attitude that free-runs with gyro drift -- unlike roll/pitch,
+                     which are gravity-referenced and absolute. This offset is
+                     presentation-only (see docs/web-protocol.md) and applies to
+                     zyx/zxy/boresight's yaw-like slot ONLY: World mode's heading is
+                     ABSOLUTE magnetic north, so the button is disabled there
+                     (sensors.js's `isWorld` guard) rather than silently no-op'd. -->
+                <div class="hud-row"><span>Yaw offset</span><span class="hud-val" id="orient-yaw-offset">none</span></div>
+                <div class="sensor-actions">
+                    <button id="orient-zero-yaw" class="sensor-btn" title="Zero the displayed yaw at the current attitude (relative modes only -- World mode's heading is absolute magnetic north)">Zero Yaw Here</button>
+                    <button id="orient-clear-yaw-offset" class="sensor-btn sensor-btn--secondary" title="Clear the yaw offset -- back to the raw SFLP yaw" disabled>Clear</button>
+                </div>
+
+                <!-- Raw orientation numerics + jitter (owner ask, 2026-07-28): full-
+                     precision, pre-OrientationSmoother -- honest sensor noise, not the
+                     rounded/smoothed rot+heading above. -->
+                <div class="hud-section-label">Raw Orientation</div>
+                <div class="hud-row"><span>Roll</span><span class="hud-val" id="sensor-roll">—</span></div>
+                <div class="hud-row"><span>Pitch</span><span class="hud-val" id="sensor-pitch">—</span></div>
+                <div class="hud-row"><span>Yaw</span><span class="hud-val" id="sensor-yaw">—</span></div>
+                <div class="hud-row"><span>Heading</span><span class="hud-val" id="sensor-heading-raw">—</span></div>
+                <div class="hud-row"><span>Quat (w,x,y,z)</span><span class="hud-val" id="sensor-quat">—</span></div>
+
+                <div class="hud-section-label" title="Frame-to-frame change, raw (unsmoothed) signal, p95 headline / mean secondary. Roll/Pitch/Yaw follow the Orientation View mode above; Heading/Orientation are always the same regardless of mode.">Jitter (deg/frame, raw)</div>
+                <div class="hud-row"><span id="jitter-label-roll">Roll</span><span class="hud-val" id="jitter-roll">—</span></div>
+                <div class="hud-row"><span id="jitter-label-pitch">Pitch</span><span class="hud-val" id="jitter-pitch">—</span></div>
+                <div class="hud-row"><span id="jitter-label-yaw">Yaw</span><span class="hud-val" id="jitter-yaw">—</span></div>
+                <div class="hud-row"><span>Heading</span><span class="hud-val" id="jitter-heading">—</span></div>
+                <div class="hud-row"><span>Orientation (always trustworthy)</span><span class="hud-val" id="jitter-orientation">—</span></div>
+
                 <div class="sensor-actions">
                     <button id="sensor-reset-heading" class="sensor-btn" title="Reset heading fusion — snaps to magnetometer on next valid sample">Reset Heading</button>
-                    <button id="sensor-mag-cal" class="sensor-btn sensor-btn--secondary" disabled title="Magnetometer calibration (coming soon)">Calibrate Mag</button>
+                    <!-- Enabled by magcal.js once the modal is wired, so a broken
+                         module graph leaves a disabled button rather than a dead one. -->
+                    <button id="sensor-mag-cal" class="sensor-btn sensor-btn--secondary" disabled title="Magnetometer calibration: sweep coverage + quality">Calibrate Mag</button>
                 </div>
             </div>
         </div>
@@ -686,6 +829,77 @@
 
     <!-- Toast layer (§7.1): floats above the console, visible even collapsed. -->
     <div id="toast-layer"></div>
+
+    <!-- Magnetometer Calibration modal (owner ask, 2026-07-29). Outside the
+         docks by design: a backdrop overlay can't collide with a dock child.
+         The live point cloud keeps streaming and rendering underneath — the
+         modal is a diagnostic, it never pauses the instrument.
+         See magcal.js for the projection/colour rationale and
+         docs/web-protocol.md for the `magcal` message + actions. -->
+    <div id="magcal-modal" class="modal-backdrop hidden">
+        <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="magcal-title">
+            <div class="modal__header">
+                <h2 class="modal__title" id="magcal-title">Magnetometer Calibration</h2>
+                <button id="magcal-close" class="modal__close" title="Close (Esc)">&times;</button>
+            </div>
+            <div class="modal__body">
+                <p class="modal__intro">
+                    A correct calibration reports the <strong>same field magnitude in every orientation</strong>.
+                    Fitting one needs samples from the <strong>whole sphere of directions</strong> — a tumble that
+                    only covers one attitude family produces a fit that looks fine there and is badly wrong
+                    everywhere else. Every ring below is a direction the fit needs: <strong>hollow rings are the
+                    angles you are still missing</strong>. Press Start and rotate the device slowly through every
+                    orientation you can reach, watching the <em>field now</em> marker hunt the gaps.
+                </p>
+
+                <div class="magcal-grid">
+                    <div class="magcal-col">
+                        <div class="magcal-mapwrap">
+                            <canvas id="magcal-map" width="1" height="1"></canvas>
+                            <div id="magcal-tip" class="magcal-tip hidden"></div>
+                        </div>
+                        <canvas id="magcal-legend" width="1" height="1"></canvas>
+                        <div class="magcal-progress" id="magcal-progress">Coverage — · 0 samples</div>
+                        <div class="magcal-progress-track"><div class="magcal-progress-fill" id="magcal-progress-bar"></div></div>
+                        <div class="magcal-guidance" id="magcal-guidance">—</div>
+                        <div class="magcal-note" id="magcal-binning"></div>
+                        <div class="magcal-note">
+                            Equal-area projection: a gap's size on screen is its true share of the sphere,
+                            wherever it sits. Both discs are seen from the same side (screen-up = the device's
+                            Front, screen-right = its Right); the rims are the same equator.
+                        </div>
+                    </div>
+
+                    <div class="magcal-col">
+                        <div class="hud-section-label" style="margin-top:0">Saved calibration</div>
+                        <div class="magcal-note" id="magcal-path"></div>
+                        <div class="magcal-col" id="magcal-current"></div>
+                        <div class="hud-section-label">Candidate fit (not saved)</div>
+                        <div class="magcal-col" id="magcal-candidate"></div>
+                        <div class="hud-section-label">Colour the map by</div>
+                        <div class="segmented segmented--sm" id="magcal-view-seg">
+                            <button data-cal="current" class="active">Saved cal</button>
+                            <button data-cal="candidate">Candidate</button>
+                        </div>
+                        <div class="magcal-note">
+                            Colouring by the saved calibration turns the map into a diagnostic: a hue that
+                            changes with direction <em>is</em> a direction-dependent calibration error.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="magcal-actions">
+                    <button id="magcal-start" class="primary">Start</button>
+                    <button id="magcal-stop" disabled>Stop &amp; Fit</button>
+                    <span class="magcal-spacer"></span>
+                    <button id="magcal-discard" disabled title="Reject the candidate but KEEP the samples, so you can keep tumbling into the same cloud">Discard fit</button>
+                    <button id="magcal-clear" disabled title="Throw away every collected sample and start over">Clear samples</button>
+                    <button id="magcal-save" class="primary" disabled title="Write the candidate to the calibration file and apply it live">Save &amp; apply</button>
+                </div>
+                <div class="magcal-status" id="magcal-status">Press Start, then rotate the device through every orientation you can reach.</div>
+            </div>
+        </div>
+    </div>
 
     <!-- Dock layout manager + diagnostics collapse. A CLASSIC script on purpose:
          it must keep working (and the diag panel must stay readable) even when

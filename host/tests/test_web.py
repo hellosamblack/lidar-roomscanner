@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import socket
 import struct
 import threading
@@ -41,6 +42,7 @@ from roomscan.sensors import (
     SensorState,
     T_CV_TO_BODY,
     T_WORLD_TO_CV,
+    boresight_view_deg,
     quat_to_matrix,
 )
 from roomscan.sources import FileSource
@@ -572,6 +574,149 @@ def test_build_sensor_message_none_when_empty():
     assert web.build_sensor_message(SensorState(), None) is None
 
 
+def test_build_sensor_message_orientation_raw_null_without_quat():
+    # Env-only (pressure/temp before the first stream-9 sample): orientation_raw
+    # fields are all None, not missing/raising.
+    ss = SensorState()
+    ss.feed(_sframe(StreamId.ENV, struct.pack("<5f", 101000.0, 1.0, 2.0, 3.0, 22.0)))
+    msg = web.build_sensor_message(ss, None)
+    assert msg is not None
+    assert msg["orientation_raw"] == {
+        "quat": None, "roll_deg": None, "pitch_deg": None, "yaw_deg": None, "heading_deg": None,
+    }
+    json.dumps(msg)
+
+
+def test_build_sensor_message_orientation_raw_full_precision():
+    # rot/heading are rounded (5dp/1dp) for the wire; orientation_raw must NOT
+    # be -- it exists precisely so sub-rounding-threshold changes are visible.
+    from roomscan.sensors import quat_pitch_deg, quat_roll_deg, quat_yaw_deg
+
+    ss = SensorState()
+    q = (0.92387953, 0.38268343, 0.0001234, 0.0)   # deliberately not a "clean" 5dp value
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *q)))
+    msg = web.build_sensor_message(ss, None)
+    got = msg["orientation_raw"]
+    assert got["quat"] == pytest.approx(list(q), abs=1e-6)
+    assert got["roll_deg"] == pytest.approx(quat_roll_deg(q), abs=1e-4)
+    assert got["pitch_deg"] == pytest.approx(quat_pitch_deg(q), abs=1e-4)
+    assert got["yaw_deg"] == pytest.approx(quat_yaw_deg(q), abs=1e-4)
+    assert got["heading_deg"] is None   # no env/mag yet
+    json.dumps(msg)
+
+
+def test_build_sensor_message_jitter_defaults_to_empty_when_no_tracker():
+    # No jitter tracker passed (default None) -> every signal reports "not
+    # enough samples yet", not zero and not a crash.
+    ss = SensorState()
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", 1.0, 0.0, 0.0, 0.0)))
+    msg = web.build_sensor_message(ss, None)
+    j = msg["jitter"]
+    assert j["window_s"] == pytest.approx(web.SENSOR_JITTER_WINDOW_S)
+    for sig in ("roll", "pitch", "yaw", "heading", "orientation"):
+        assert j[sig] == {"mean_deg": None, "p95_deg": None, "n": 0}
+    json.dumps(msg)
+
+
+def test_build_sensor_message_wires_a_jitter_tracker():
+    # With a real tracker, consecutive calls accumulate history and jitter
+    # reflects the actual frame-to-frame change.
+    ss = SensorState()
+    jit = web.OrientationJitter()
+    q0 = (1.0, 0.0, 0.0, 0.0)
+    q1 = _perturb(q0, 1.0, axis=(0.0, 0.0, 1.0))   # 1 deg yaw step
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *q0)))
+    web.build_sensor_message(ss, None, jit)
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *q1)))
+    msg = web.build_sensor_message(ss, None, jit)
+    j = msg["jitter"]
+    assert j["yaw"]["n"] == 1
+    assert j["yaw"]["mean_deg"] == pytest.approx(1.0, abs=0.05)
+    assert j["yaw"]["p95_deg"] == pytest.approx(1.0, abs=0.05)
+    assert j["orientation"]["n"] == 1
+    assert j["orientation"]["mean_deg"] == pytest.approx(1.0, abs=0.05)
+    json.dumps(msg)
+
+
+# ---------------------------------------------------------------------------
+# OrientationJitter -- rolling-window frame-to-frame noise stats (pure, no server).
+# ---------------------------------------------------------------------------
+
+def test_jitter_reports_none_before_two_samples():
+    jit = web.OrientationJitter()
+    out = jit.update(_Q_UPRIGHT, heading_deg=10.0, now=0.0)
+    for sig in ("roll", "pitch", "yaw", "heading", "orientation"):
+        assert out[sig] == {"mean_deg": None, "p95_deg": None, "n": 0}
+
+
+def test_jitter_yaw_step_is_measured():
+    # Identity baseline so a body-Z perturbation IS a pure Euler-yaw change
+    # (with a non-trivial base quat like _Q_UPRIGHT, body Z isn't world Z).
+    jit = web.OrientationJitter()
+    q = (1.0, 0.0, 0.0, 0.0)
+    jit.update(q, heading_deg=None, now=0.0)
+    q = _perturb(q, 2.0, axis=(0.0, 0.0, 1.0))
+    out = jit.update(q, heading_deg=None, now=0.1)
+    assert out["yaw"]["n"] == 1
+    assert out["yaw"]["mean_deg"] == pytest.approx(2.0, abs=0.05)
+    assert out["yaw"]["p95_deg"] == pytest.approx(2.0, abs=0.05)
+
+
+def test_jitter_heading_wraps_at_360():
+    # 359 deg -> 1 deg is a 2 deg step through the wrap, not a 358 deg jump.
+    jit = web.OrientationJitter()
+    jit.update(None, heading_deg=359.0, now=0.0)
+    out = jit.update(None, heading_deg=1.0, now=0.1)
+    assert out["heading"]["n"] == 1
+    assert out["heading"]["mean_deg"] == pytest.approx(2.0, abs=1e-6)
+
+
+def test_jitter_orientation_uses_normalized_dot_product():
+    # A near-unit but not-exactly-unit float32 quat pair with a genuinely
+    # small angle between them must NOT report zero (the clip-to-1.0 bug).
+    jit = web.OrientationJitter()
+    q0 = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    tiny = math.radians(0.05) / 2.0
+    q1 = np.array([math.cos(tiny), 0.0, 0.0, math.sin(tiny)], dtype=np.float32)
+    # Perturb both off exact unit norm, as a real float32 stream would.
+    q0 = q0 * np.float32(1.00003)
+    q1 = q1 * np.float32(0.99997)
+    jit.update(tuple(q0), heading_deg=None, now=0.0)
+    out = jit.update(tuple(q1), heading_deg=None, now=0.1)
+    assert out["orientation"]["n"] == 1
+    assert out["orientation"]["mean_deg"] == pytest.approx(0.05, abs=0.01)
+    assert out["orientation"]["mean_deg"] > 0.0   # NOT clipped to zero
+
+
+def test_jitter_p95_and_mean_over_several_steps():
+    jit = web.OrientationJitter()
+    q = (1.0, 0.0, 0.0, 0.0)
+    jit.update(q, heading_deg=None, now=0.0)
+    steps = [0.1, 0.1, 0.1, 0.1, 1.0]   # one outlier -> p95 should catch it, mean should be pulled less
+    t = 0.0
+    for s in steps:
+        t += 0.1
+        q = _perturb(q, s, axis=(0.0, 0.0, 1.0))
+        out = jit.update(q, heading_deg=None, now=t)
+    assert out["yaw"]["n"] == 5
+    assert out["yaw"]["mean_deg"] == pytest.approx(np.mean(steps), abs=0.05)
+    assert out["yaw"]["p95_deg"] == pytest.approx(np.percentile(steps, 95), abs=0.05)
+    assert out["yaw"]["p95_deg"] > out["yaw"]["mean_deg"]   # the outlier shows up in p95
+
+
+def test_jitter_window_expires_old_samples():
+    jit = web.OrientationJitter(window_s=1.0)
+    q = (1.0, 0.0, 0.0, 0.0)
+    jit.update(q, heading_deg=None, now=0.0)
+    q = _perturb(q, 5.0, axis=(0.0, 0.0, 1.0))
+    jit.update(q, heading_deg=None, now=0.1)   # one sample, inside the window
+    q = _perturb(q, 0.2, axis=(0.0, 0.0, 1.0))
+    out = jit.update(q, heading_deg=None, now=5.0)   # far past window_s=1.0
+    # The 5 deg step from t=0.1 has aged out; only the fresh 0.2 deg step remains.
+    assert out["yaw"]["n"] == 1
+    assert out["yaw"]["mean_deg"] == pytest.approx(0.2, abs=0.05)
+
+
 def test_build_sensor_message_rot_is_display_transform():
     ss = SensorState()
     q = (0.92388, 0.38268, 0.0, 0.0)   # ~45 deg about x
@@ -602,6 +747,471 @@ def test_build_sensor_message_env_fields_and_history():
     assert len(msg["pressure_hist"]) == 3 and len(msg["temp_hist"]) == 3
     assert msg["pressure_hist"][0] == pytest.approx(101000.0, abs=0.5)
     json.dumps(msg)
+
+
+# ---------------------------------------------------------------------------
+# Orientation decomposition modes + labels + singularity warning (owner ask,
+# 2026-07-28), and the world-referenced gravity+mag mode (owner follow-up).
+# ---------------------------------------------------------------------------
+
+_Q_86_PITCH = None  # set below: a quat at ~86 deg ZYX pitch, the live-rig scenario
+
+
+def _zyx_pitch_quat(pitch_deg: float):
+    """A quat with the given ZYX pitch and zero roll/yaw (pure rotation about
+    the ZYX pitch axis), for exercising near-singularity behavior."""
+    from roomscan.sensors import quat_pitch_deg as _qp
+    a = math.radians(pitch_deg) / 2.0
+    q = (math.cos(a), 0.0, math.sin(a), 0.0)
+    assert _qp(q) == pytest.approx(pitch_deg, abs=1e-6)
+    return q
+
+
+_Q_86_PITCH = _zyx_pitch_quat(86.0)
+
+
+def test_orientation_view_none_without_quat():
+    v = web.orientation_view("zyx", None)
+    assert v == {"roll_deg": None, "pitch_deg": None, "yaw_deg": None,
+                 "singularity_margin_deg": None, "near_singularity": False,
+                 "valid": False, "reason": "no orientation yet"}
+
+
+def test_orientation_view_zyx_matches_existing_helpers():
+    from roomscan.sensors import quat_pitch_deg, quat_roll_deg, quat_yaw_deg
+    q = (0.92388, 0.38268, 0.0, 0.0)
+    v = web.orientation_view("zyx", q)
+    assert v["roll_deg"] == pytest.approx(quat_roll_deg(q))
+    assert v["pitch_deg"] == pytest.approx(quat_pitch_deg(q))
+    assert v["yaw_deg"] == pytest.approx(quat_yaw_deg(q))
+
+
+def test_orientation_view_zyx_fires_near_singularity_at_86_deg_pitch():
+    # The exact scenario that motivated this feature: rig at ~86 deg pitch.
+    v = web.orientation_view("zyx", _Q_86_PITCH)
+    assert v["singularity_margin_deg"] == pytest.approx(4.0, abs=1e-6)
+    assert v["near_singularity"] is True
+
+
+def test_orientation_view_zyx_not_near_singularity_at_45_deg():
+    q = _zyx_pitch_quat(45.0)
+    v = web.orientation_view("zyx", q)
+    assert v["near_singularity"] is False
+
+
+def test_orientation_view_zxy_disagrees_with_zyx_singularity():
+    # At the ZYX mode's singularity, the ZXY mode must be clear -- that's the
+    # entire point of offering it as an alternative.
+    v_zyx = web.orientation_view("zyx", _Q_86_PITCH)
+    v_zxy = web.orientation_view("zxy", _Q_86_PITCH)
+    assert v_zyx["near_singularity"] is True
+    assert v_zxy["near_singularity"] is False
+
+
+def test_orientation_view_boresight_mode():
+    az, el, roll = boresight_view_deg(_Q_86_PITCH)
+    v = web.orientation_view("boresight", _Q_86_PITCH)
+    assert v["yaw_deg"] == pytest.approx(az)
+    assert v["pitch_deg"] == pytest.approx(el)
+    assert v["roll_deg"] == pytest.approx(roll)
+    assert v["near_singularity"] == (90.0 - abs(el) < web.ORIENTATION_SINGULARITY_MARGIN_DEG)
+
+
+def test_orientation_view_world_mode_falls_back_to_quat_gravity_without_imu_raw():
+    q = (1.0, 0.0, 0.0, 0.0)
+    v = web.orientation_view("world", q, mag_ut_raw=None, heading_full=None,
+                              mag_cal=None, imu_raw_batch=None)
+    assert v["gravity_source"] == "quat"
+    assert v["pitch_deg"] == pytest.approx(90.0, abs=1e-4)   # tilt, matches boresight elevation at identity
+    assert v["valid"] is False   # no mag_cal at all
+    assert v["reason"] == "no magnetometer calibration"
+
+
+def test_orientation_view_world_mode_prefers_imu_raw_gravity():
+    from roomscan.protocol import ImuRawBatch
+    batch = ImuRawBatch(
+        gyro_dps=np.zeros((0, 3)), gyro_cnt=np.zeros(0, dtype=np.uint8),
+        accel_g=np.zeros((0, 3)), accel_cnt=np.zeros(0, dtype=np.uint8),
+        gravity_g=np.array([[1.0, 0.0, 0.0]]), gravity_cnt=np.zeros(1, dtype=np.uint8),
+        gbias_dps=np.zeros((0, 3)), gbias_cnt=np.zeros(0, dtype=np.uint8),
+        timestamp_ticks=np.zeros(0, dtype=np.uint32), timestamp_cnt=np.zeros(0, dtype=np.uint8),
+        n_records=1)
+    q = (1.0, 0.0, 0.0, 0.0)
+    v = web.orientation_view("world", q, imu_raw_batch=batch)
+    assert v["gravity_source"] == "imu_raw"
+
+
+def test_orientation_view_world_mode_mag_anomaly_flags_invalid():
+    from roomscan.magcal import MagCalibration
+    cal = MagCalibration(offset=(0.0, 0.0, 0.0),
+                         matrix=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+                         field_ut=49.87)
+    q = (1.0, 0.0, 0.0, 0.0)
+    # Raw mag magnitude ~107 uT against a 49.87 uT fit -- the live-rig anomaly
+    # from the owner's report (~2.15x off).
+    v = web.orientation_view("world", q, mag_ut_raw=(107.0, 0.0, 0.0), heading_full=12.3,
+                              mag_cal=cal, imu_raw_batch=None)
+    assert v["valid"] is False
+    assert v["mag_norm_ut"] == pytest.approx(107.0, abs=0.5)
+    assert v["mag_expected_ut"] == pytest.approx(49.87)
+    assert "mag field" in v["reason"]
+    assert v["yaw_deg"] == pytest.approx(12.3)   # heading is still reported, just flagged invalid
+
+
+def test_orientation_view_world_mode_valid_within_anomaly_frac():
+    from roomscan.magcal import MagCalibration
+    cal = MagCalibration(offset=(0.0, 0.0, 0.0),
+                         matrix=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+                         field_ut=50.0)
+    q = (1.0, 0.0, 0.0, 0.0)
+    v = web.orientation_view("world", q, mag_ut_raw=(50.0, 0.0, 0.0), heading_full=0.0, mag_cal=cal)
+    assert v["valid"] is True
+    assert v["reason"] is None
+
+
+def test_orientation_view_world_mode_motion_flag_from_imu_raw_accel():
+    from roomscan.magcal import MagCalibration
+    from roomscan.protocol import ImuRawBatch
+    cal = MagCalibration(offset=(0.0, 0.0, 0.0),
+                         matrix=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+                         field_ut=50.0)
+    moving = ImuRawBatch(
+        gyro_dps=np.zeros((0, 3)), gyro_cnt=np.zeros(0, dtype=np.uint8),
+        accel_g=np.array([[1.5, 0.0, 0.0]]), accel_cnt=np.zeros(1, dtype=np.uint8),
+        gravity_g=np.zeros((0, 3)), gravity_cnt=np.zeros(0, dtype=np.uint8),
+        gbias_dps=np.zeros((0, 3)), gbias_cnt=np.zeros(0, dtype=np.uint8),
+        timestamp_ticks=np.zeros(0, dtype=np.uint32), timestamp_cnt=np.zeros(0, dtype=np.uint8),
+        n_records=1)
+    q = (1.0, 0.0, 0.0, 0.0)
+    v = web.orientation_view("world", q, mag_ut_raw=(50.0, 0.0, 0.0), heading_full=0.0,
+                              mag_cal=cal, imu_raw_batch=moving)
+    assert v["motion_stable"] is False
+    assert v["valid"] is False
+    assert "accelerating" in v["reason"]
+
+
+def test_orientation_view_unknown_mode_falls_back_to_zyx():
+    from roomscan.sensors import quat_pitch_deg
+    v = web.orientation_view("bogus", _Q_86_PITCH)
+    assert v["pitch_deg"] == pytest.approx(quat_pitch_deg(_Q_86_PITCH))
+
+
+# --- axis label sanitization + persistence ----------------------------------
+
+def test_sanitize_axis_labels_defaults_on_bad_input():
+    assert web._sanitize_axis_labels(None) == web.DEFAULT_AXIS_LABELS
+    assert web._sanitize_axis_labels(["", "  ", "Pan"]) == ("Roll", "Pitch", "Pan")
+    assert web._sanitize_axis_labels(["Tilt", "Swing", "Twist"]) == ("Tilt", "Swing", "Twist")
+
+
+def test_sanitize_axis_labels_truncates_long_strings():
+    long = "x" * 100
+    out = web._sanitize_axis_labels([long, "Pitch", "Yaw"])
+    assert len(out[0]) == web._MAX_LABEL_LEN
+
+
+def test_ui_from_config_maps_orientation_mode_and_labels():
+    cfg = ViewerConfig(orientation_mode="boresight", orientation_labels="Tilt,Pan,Twist")
+    ui = web.ui_from_config(cfg)
+    assert ui.orientation_mode == "boresight"
+    assert ui.orientation_labels == ("Tilt", "Pan", "Twist")
+
+
+def test_ui_from_config_rejects_bad_orientation_mode():
+    cfg = ViewerConfig(orientation_mode="nonsense")
+    ui = web.ui_from_config(cfg)
+    assert ui.orientation_mode == web.UiState().orientation_mode
+
+
+def test_apply_ui_to_config_orientation_round_trips():
+    cfg = ViewerConfig()
+    ui = web.UiState(orientation_mode="world", orientation_labels=("A", "B", "C"))
+    web.apply_ui_to_config(ui, cfg)
+    assert cfg.orientation_mode == "world"
+    assert cfg.orientation_labels == "A,B,C"
+    back = web.ui_from_config(cfg)
+    assert back.orientation_mode == "world"
+    assert back.orientation_labels == ("A", "B", "C")
+
+
+def test_set_orientation_handler_persists(tmp_path):
+    import types
+    import roomscan.config as config_mod
+    p = tmp_path / "roomscan.toml"
+    cfg = ViewerConfig()
+    state = types.SimpleNamespace(config=cfg, ui_state=web.UiState(),
+                                  clients=set(), controller=None)
+    orig = config_mod.config_path
+    config_mod.config_path = lambda: p
+    try:
+        asyncio.run(web._handle_inbound(state, {"type": "set_orientation",
+                                                "mode": "zxy", "labels": ["A", "B", "C"]}))
+    finally:
+        config_mod.config_path = orig
+    assert state.ui_state.orientation_mode == "zxy"
+    assert state.ui_state.orientation_labels == ("A", "B", "C")
+    loaded = ViewerConfig.load(p)
+    assert loaded.orientation_mode == "zxy"
+    assert loaded.orientation_labels == "A,B,C"
+
+
+def test_set_orientation_handler_rejects_bad_mode():
+    import types
+    ui = web.UiState()
+    state = types.SimpleNamespace(config=None, ui_state=ui, clients=set(), controller=None)
+    asyncio.run(web._handle_inbound(state, {"type": "set_orientation", "mode": "bogus"}))
+    assert ui.orientation_mode == "zyx"   # unchanged
+
+
+# --- jitter follows the selected mode; orientation/heading stay independent ---
+
+def test_jitter_roll_pitch_yaw_reset_on_mode_switch():
+    jit = web.OrientationJitter()
+    q0 = (1.0, 0.0, 0.0, 0.0)
+    jit.update(q0, heading_deg=None, now=0.0, mode="zyx", roll_deg=0.0, pitch_deg=0.0, yaw_deg=0.0)
+    q1 = _perturb(q0, 2.0, axis=(1.0, 0.0, 0.0))
+    out = jit.update(q1, heading_deg=None, now=0.1, mode="zyx", roll_deg=2.0, pitch_deg=0.0, yaw_deg=0.0)
+    assert out["roll"]["n"] == 1
+
+    # Switch mode with a WILDLY different roll number for the "same" instant
+    # -- if not reset, this would register as a giant bogus jitter spike.
+    q2 = _perturb(q1, 0.1, axis=(1.0, 0.0, 0.0))
+    out = jit.update(q2, heading_deg=None, now=0.2, mode="boresight",
+                      roll_deg=170.0, pitch_deg=5.0, yaw_deg=88.0)
+    assert out["roll"]["n"] == 0   # reset: no prior sample under the new mode yet
+    assert out["orientation"]["n"] == 2   # quat-angle jitter is convention-independent, unaffected
+
+
+def test_jitter_orientation_and_heading_survive_mode_switch():
+    jit = web.OrientationJitter()
+    q0 = (1.0, 0.0, 0.0, 0.0)
+    jit.update(q0, heading_deg=10.0, now=0.0, mode="zyx", roll_deg=0.0, pitch_deg=0.0, yaw_deg=0.0)
+    q1 = _perturb(q0, 1.0, axis=(0.0, 0.0, 1.0))
+    jit.update(q1, heading_deg=11.0, now=0.1, mode="world", roll_deg=99.0, pitch_deg=1.0, yaw_deg=11.0)
+    out = jit.update(q1, heading_deg=12.0, now=0.2, mode="world", roll_deg=99.0, pitch_deg=1.0, yaw_deg=11.0)
+    assert out["heading"]["n"] == 2   # never reset by the mode switch
+    assert out["orientation"]["n"] == 2
+
+
+def test_build_sensor_message_includes_orientation_view_and_labels():
+    ss = SensorState()
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *_Q_86_PITCH)))
+    msg = web.build_sensor_message(ss, None, orientation_mode="zxy",
+                                    axis_labels=("Tilt", "Swing", "Twist"))
+    ov = msg["orientation_view"]
+    assert ov["mode"] == "zxy"
+    assert ov["labels"] == ["Tilt", "Swing", "Twist"]
+    assert ov["roll_deg"] is not None
+
+
+def test_build_sensor_message_orientation_view_null_without_quat():
+    ss = SensorState()
+    msg = web.build_sensor_message(ss, None)   # env-only path isn't reached; use ENV frame
+    assert msg is None   # confirm baseline: truly empty state stays silent (existing contract)
+
+
+def test_build_sensor_message_default_mode_matches_orientation_raw():
+    # Default mode ("zyx") must report numbers identical to the always-present
+    # orientation_raw fields -- "nothing changes unless a mode is chosen".
+    ss = SensorState()
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *_Q_86_PITCH)))
+    msg = web.build_sensor_message(ss, None)
+    ov = msg["orientation_view"]
+    raw = msg["orientation_raw"]
+    assert ov["mode"] == "zyx"
+    assert ov["roll_deg"] == pytest.approx(raw["roll_deg"], abs=1e-3)
+    assert ov["pitch_deg"] == pytest.approx(raw["pitch_deg"], abs=1e-3)
+    assert ov["yaw_deg"] == pytest.approx(raw["yaw_deg"], abs=1e-3)
+
+
+def test_build_sensor_message_display_path_unaffected_by_orientation_mode():
+    """The whole feature is presentation-only: `rot` (the display/point-cloud
+    rotation) and `heading` must be byte-identical regardless of which
+    orientation_view mode is selected."""
+    ss = SensorState()
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *_Q_86_PITCH)))
+    ss.feed(_sframe(StreamId.ENV, struct.pack("<5f", 101000.0, 20.0, -5.0, 40.0, 22.0)))
+    baseline = web.build_sensor_message(ss, None, orientation_mode="zyx")
+    for mode in ("zxy", "boresight", "world"):
+        msg = web.build_sensor_message(ss, None, orientation_mode=mode)
+        assert msg["rot"] == baseline["rot"]
+        assert msg["heading"] == baseline["heading"]
+        assert msg["orientation_raw"] == baseline["orientation_raw"]
+        # And the display_rotation/fused_quat helpers themselves take no mode
+        # argument at all -- there is no code path for a mode to reach them.
+    assert "orientation_mode" not in web.display_rotation.__code__.co_varnames
+
+
+# --- "Zero yaw here" (owner ask, 2026-07-29) --------------------------------
+
+def _yaw_quat(pitch_deg: float, yaw_deg: float):
+    """A quat at the given ZYX pitch with the given ZYX yaw grafted on (roll
+    stays 0) -- built from the already-trusted `_zyx_pitch_quat` + `graft_yaw`
+    primitives, exactly like `graft_yaw` itself composes a heading change."""
+    from roomscan.sensors import graft_yaw
+    return graft_yaw(_zyx_pitch_quat(pitch_deg), yaw_deg)
+
+
+def test_build_sensor_message_display_path_unaffected_by_yaw_offset():
+    """Mirrors the orientation_mode guard above: the offset is presentation-
+    only and must not touch `rot`/`heading`/`orientation_raw` (the
+    display/point-cloud/SLAM path), regardless of its value."""
+    ss = SensorState()
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *_yaw_quat(20.0, 40.0))))
+    ss.feed(_sframe(StreamId.ENV, struct.pack("<5f", 101000.0, 20.0, -5.0, 40.0, 22.0)))
+    baseline = web.build_sensor_message(ss, None, yaw_offset_deg=0.0)
+    for offset in (37.5, -120.0, 180.0):
+        msg = web.build_sensor_message(ss, None, yaw_offset_deg=offset)
+        assert msg["rot"] == baseline["rot"]
+        assert msg["heading"] == baseline["heading"]
+        assert msg["orientation_raw"] == baseline["orientation_raw"]
+    assert "yaw_offset_deg" not in web.display_rotation.__code__.co_varnames
+    assert "yaw_offset_deg" not in SensorState.fused_quat.__code__.co_varnames
+
+
+@pytest.mark.parametrize("mode", ["zyx", "zxy", "boresight"])
+def test_yaw_offset_zeroes_the_active_mode_at_capture(mode):
+    """The core "Zero yaw here" contract: capture the current attitude's
+    active-mode yaw via `_YAW_GRAFT_SIGN`, feed it back as `yaw_offset_deg`,
+    and the SAME attitude must now report ~0 for that mode's yaw slot."""
+    ss = SensorState()
+    quat = _yaw_quat(25.0, 63.0)
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *quat)))
+    raw = web.orientation_view(mode, quat)
+    offset = web._YAW_GRAFT_SIGN[mode] * raw["yaw_deg"]
+    msg = web.build_sensor_message(ss, None, orientation_mode=mode, yaw_offset_deg=offset)
+    assert msg["orientation_view"]["yaw_deg"] == pytest.approx(0.0, abs=1e-3)
+    # roll/pitch (tilt) must be untouched by the graft -- only yaw shifts.
+    # wrap180 the roll diff: an angle that lands exactly on the +-180 seam
+    # (as boresight's roll does for this fixture) is the same physical roll
+    # whichever side of the seam it's reported on.
+    assert web.wrap180(msg["orientation_view"]["roll_deg"] - raw["roll_deg"]) == pytest.approx(0.0, abs=1e-6)
+    assert msg["orientation_view"]["pitch_deg"] == pytest.approx(raw["pitch_deg"], abs=1e-6)
+
+
+def test_yaw_offset_not_applied_to_world_absolute_heading():
+    """World mode's yaw slot is the absolute magnetic heading -- a nonzero
+    offset must be a hard no-op there (both the applied value and the echoed
+    `yaw_offset_deg` are forced to 0), unlike the relative modes."""
+    ss = SensorState()
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *_yaw_quat(10.0, 50.0))))
+    ss.feed(_sframe(StreamId.ENV, struct.pack("<5f", 101000.0, 20.0, -5.0, 40.0, 22.0)))
+    baseline = web.build_sensor_message(ss, None, orientation_mode="world", yaw_offset_deg=0.0)
+    offset_msg = web.build_sensor_message(ss, None, orientation_mode="world", yaw_offset_deg=77.0)
+    assert offset_msg["orientation_view"]["yaw_deg"] == baseline["orientation_view"]["yaw_deg"]
+    assert offset_msg["orientation_view"]["yaw_offset_deg"] == 0.0
+
+
+def test_yaw_offset_does_not_change_jitter_magnitude():
+    """A constant yaw offset must not change the jitter STATISTICS (mean/p95)
+    -- it cancels exactly in any frame-to-frame diff. Feed the identical
+    two-frame sequence through two independent trackers, one with an offset
+    and one without, and require byte-identical yaw jitter."""
+    q0 = _yaw_quat(15.0, 10.0)
+    q1 = _yaw_quat(15.0, 10.6)   # a small yaw-only step
+
+    def _feed_and_jitter(offset: float) -> dict:
+        ss = SensorState()
+        jit = web.OrientationJitter()
+        ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *q0)))
+        web.build_sensor_message(ss, None, jitter=jit, yaw_offset_deg=offset)
+        ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *q1)))
+        return web.build_sensor_message(ss, None, jitter=jit, yaw_offset_deg=offset)["jitter"]
+
+    j_plain = _feed_and_jitter(0.0)
+    j_offset = _feed_and_jitter(145.0)
+    assert j_plain["yaw"]["n"] == 1 and j_offset["yaw"]["n"] == 1
+    # A generous-looking but still tight tolerance: the offset is exact in
+    # theory (it cancels algebraically in the diff) but going through
+    # `graft_yaw`'s quat multiply + re-decomposition is floating-point, not
+    # symbolic, so a ~1e-6 deg residual from a 145 deg graft is roundoff, not
+    # a real magnitude change -- three orders of magnitude below the smallest
+    # jitter this project measures (~0.01 deg/frame, see the orientation-
+    # noise-floor work).
+    assert j_offset["yaw"]["p95_deg"] == pytest.approx(j_plain["yaw"]["p95_deg"], abs=1e-4)
+    assert j_offset["yaw"]["mean_deg"] == pytest.approx(j_plain["yaw"]["mean_deg"], abs=1e-4)
+
+
+def test_ui_from_config_maps_yaw_offset():
+    cfg = ViewerConfig(yaw_offset_deg=12.5)
+    ui = web.ui_from_config(cfg)
+    assert ui.yaw_offset_deg == pytest.approx(12.5)
+
+
+def test_apply_ui_to_config_yaw_offset_round_trips():
+    cfg = ViewerConfig()
+    ui = web.UiState(yaw_offset_deg=-33.25)
+    web.apply_ui_to_config(ui, cfg)
+    assert cfg.yaw_offset_deg == pytest.approx(-33.25)
+    back = web.ui_from_config(cfg)
+    assert back.yaw_offset_deg == pytest.approx(-33.25)
+
+
+def test_zero_yaw_handler_zeroes_zyx_and_persists(tmp_path):
+    import types
+    import roomscan.config as config_mod
+    p = tmp_path / "roomscan.toml"
+    cfg = ViewerConfig()
+    quat = _yaw_quat(5.0, -43.0)
+    ss = SensorState()
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *quat)))
+    state = types.SimpleNamespace(config=cfg, ui_state=web.UiState(), clients=set(),
+                                   controller=None, sensor_state=ss)
+    orig = config_mod.config_path
+    config_mod.config_path = lambda: p
+    try:
+        asyncio.run(web._handle_inbound(state, {"type": "zero_yaw"}))
+    finally:
+        config_mod.config_path = orig
+    assert state.ui_state.yaw_offset_deg != 0.0
+    msg = web.build_sensor_message(ss, None, orientation_mode="zyx",
+                                    yaw_offset_deg=state.ui_state.yaw_offset_deg)
+    assert msg["orientation_view"]["yaw_deg"] == pytest.approx(0.0, abs=1e-3)
+    loaded = ViewerConfig.load(p)
+    assert loaded.yaw_offset_deg == pytest.approx(state.ui_state.yaw_offset_deg)
+
+
+def test_zero_yaw_handler_noop_in_world_mode():
+    import types
+    ss = SensorState()
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *_yaw_quat(5.0, -43.0))))
+    ui = web.UiState(orientation_mode="world")
+    state = types.SimpleNamespace(config=None, ui_state=ui, clients=set(),
+                                   controller=None, sensor_state=ss)
+    asyncio.run(web._handle_inbound(state, {"type": "zero_yaw"}))
+    assert ui.yaw_offset_deg == 0.0
+
+
+def test_zero_yaw_handler_noop_without_orientation():
+    import types
+    ui = web.UiState(orientation_mode="zyx")
+    state = types.SimpleNamespace(config=None, ui_state=ui, clients=set(),
+                                   controller=None, sensor_state=SensorState())
+    asyncio.run(web._handle_inbound(state, {"type": "zero_yaw"}))
+    assert ui.yaw_offset_deg == 0.0
+
+
+def test_clear_yaw_offset_handler_resets_and_persists(tmp_path):
+    import types
+    import roomscan.config as config_mod
+    p = tmp_path / "roomscan.toml"
+    cfg = ViewerConfig()
+    state = types.SimpleNamespace(config=cfg, ui_state=web.UiState(yaw_offset_deg=99.0),
+                                   clients=set(), controller=None, sensor_state=SensorState())
+    orig = config_mod.config_path
+    config_mod.config_path = lambda: p
+    try:
+        asyncio.run(web._handle_inbound(state, {"type": "clear_yaw_offset"}))
+    finally:
+        config_mod.config_path = orig
+    assert state.ui_state.yaw_offset_deg == 0.0
+    loaded = ViewerConfig.load(p)
+    assert loaded.yaw_offset_deg == pytest.approx(0.0)
+
+
+def test_state_message_carries_yaw_offset():
+    m = web._state_message(web.UiState(yaw_offset_deg=8.0))
+    assert m["yaw_offset_deg"] == 8.0
 
 
 def _make_sensor_capture(path: Path, n: int = 6) -> None:
@@ -986,6 +1596,44 @@ def _drain_depth_mean(slot, timeout):
         except queue.Empty:
             continue
     return None
+
+
+def _fake_imu_raw_batch():
+    from roomscan.protocol import ImuRawBatch
+    return ImuRawBatch(
+        gyro_dps=np.zeros((0, 3)), gyro_cnt=np.zeros(0, dtype=np.uint8),
+        accel_g=np.zeros((0, 3)), accel_cnt=np.zeros(0, dtype=np.uint8),
+        gravity_g=np.array([[1.0, 0.0, 0.0]]), gravity_cnt=np.zeros(1, dtype=np.uint8),
+        gbias_dps=np.zeros((0, 3)), gbias_cnt=np.zeros(0, dtype=np.uint8),
+        timestamp_ticks=np.zeros(0, dtype=np.uint32), timestamp_cnt=np.zeros(0, dtype=np.uint8),
+        n_records=1)
+
+
+def test_switch_to_replay_clears_stale_imu_raw(tmp_path):
+    # A source swap must not let the World orientation mode silently inherit
+    # a gravity vector from whatever source was active before (owner-visible
+    # bug found during browser verification, 2026-07-28: replaying a capture
+    # with no stream 11 kept reporting the PRIOR live session's stale gravity
+    # batch, producing a physically unrelated tilt reading).
+    cap = tmp_path / "a.bin"
+    _make_depth_capture_flat(cap, n_frames=4, base=1000.0)
+    ctrl, _slot = _make_controller(tmp_path, replay_path=str(cap))
+    ctrl.sensor_state._imu_raw = _fake_imu_raw_batch()
+    assert ctrl.sensor_state.latest_imu_raw() is not None
+    ctrl.switch_to_replay(str(cap))
+    assert ctrl.sensor_state.latest_imu_raw() is None
+    ctrl.close()
+
+
+def test_switch_to_live_clears_stale_imu_raw(tmp_path):
+    cap = tmp_path / "a.bin"
+    _make_depth_capture_flat(cap, n_frames=4, base=1000.0)
+    live = FileSource(str(cap))   # stand-in "live" source
+    ctrl, _slot = _make_controller(tmp_path, live_source=live, replay_path=str(cap))
+    ctrl.sensor_state._imu_raw = _fake_imu_raw_batch()
+    ctrl.switch_to_live()
+    assert ctrl.sensor_state.latest_imu_raw() is None
+    ctrl.close()
 
 
 def test_controller_switch_to_replay_changes_stream(tmp_path):

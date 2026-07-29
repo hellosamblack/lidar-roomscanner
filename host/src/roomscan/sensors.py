@@ -6,11 +6,23 @@ import math
 import threading
 from collections import deque
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
+if TYPE_CHECKING:   # import-only: imufusion imports the quaternion helpers from here
+    from .imufusion import ImuFusion
+
 from .magcal import MagCalibration
-from .protocol import Frame, FrameType, StreamId, decode_env, decode_imu_quat
+from .protocol import (
+    Frame,
+    FrameType,
+    ImuRawBatch,
+    StreamId,
+    decode_env,
+    decode_imu_quat,
+    decode_imu_raw,
+)
 
 
 @dataclass(frozen=True)
@@ -23,8 +35,16 @@ class EnvSample:
 
 class SensorState:
     def __init__(self, history: int = 256, fusion: "YawFusion | None" = None,
-                 env_spark_interval_s: float = 2.0, env_spark_depth: int = 300):
+                 env_spark_interval_s: float = 2.0, env_spark_depth: int = 300,
+                 imu_raw_history: int = 64, imu_fusion: "ImuFusion | None" = None):
         self._lock = threading.Lock()
+        # stream 11: latest raw-FIFO batch + a short rolling window of them. Consumed by
+        # the optional `imu_fusion` stage (roomscan.imufusion) — which is OFF unless a
+        # filter is passed in, so the default fused_quat() path is byte-for-byte the
+        # stream-9/YawFusion behaviour SLAM already depends on.
+        self._imu_raw: ImuRawBatch | None = None
+        self._imu_raw_hist: deque[tuple[int, ImuRawBatch]] = deque(maxlen=imu_raw_history)
+        self._imu_fusion = imu_fusion
         self._quat: tuple[float, float, float, float] | None = None
         self._env: EnvSample | None = None
         self._pressure = deque(maxlen=history)
@@ -59,20 +79,69 @@ class SensorState:
                     self._pressure_spark.append(pressure)
                     self._temp_spark.append(temp)
                     self._last_spark_t = frame.header.t_us
+        elif sid == StreamId.IMU_RAW:
+            batch = decode_imu_raw(frame.payload)
+            with self._lock:
+                self._imu_raw = batch
+                self._imu_raw_hist.append((frame.header.t_us, batch))
+                if self._imu_fusion is not None:
+                    # yaw anchor = whatever the pre-existing path would have returned
+                    # (YawFusion output if attached and settled, else the SFLP quat).
+                    self._imu_fusion.update(batch, yaw_ref=self._legacy_quat_locked())
+
+    def clear_imu_raw(self) -> None:
+        """Drop the stream-11 batch + history (owner ask, 2026-07-28: the
+        World orientation mode prefers this over the quat-derived gravity
+        fallback). Callers that SWAP the frame source (live<->replay, or one
+        replay to another) must call this -- otherwise a replay capture with
+        no stream 11 silently inherits a stale gravity vector from whatever
+        source was active before it, reporting a real-looking but physically
+        unrelated tilt/roll. `SensorState` has no other notion of "this data
+        belongs to the old source", so this is an explicit reset, not
+        automatic."""
+        with self._lock:
+            self._imu_raw = None
+            self._imu_raw_hist.clear()
+
+    def latest_imu_raw(self) -> ImuRawBatch | None:
+        """Newest stream-11 raw-FIFO batch, or None if the device isn't sending them."""
+        with self._lock:
+            return self._imu_raw
+
+    def imu_raw_history(self) -> list[tuple[int, ImuRawBatch]]:
+        """Rolling window of (frame t_us, batch), oldest first."""
+        with self._lock:
+            return list(self._imu_raw_hist)
 
     def latest_quat(self) -> tuple[float, float, float, float] | None:
         with self._lock:
             return self._quat
 
+    def _legacy_quat_locked(self) -> tuple[float, float, float, float] | None:
+        """The pre-stream-11 orientation: YawFusion output if attached and settled,
+        else the raw SFLP quaternion. Caller must hold ``self._lock``."""
+        if self._fusion is not None:
+            fused = self._fusion.fused_quat()
+            if fused is not None:
+                return fused
+        return self._quat
+
     def fused_quat(self) -> tuple[float, float, float, float] | None:
-        """Yaw-drift-corrected orientation if a fusion filter is attached and has
-        produced a result; otherwise the raw SFLP quaternion (today's behavior)."""
+        """Best available orientation.
+
+        Precedence: the optional stream-11 high-rate ``ImuFusion`` (only when one was
+        explicitly attached AND it has converged), then the yaw-drift-corrected
+        ``YawFusion`` output, then the raw SFLP quaternion.
+
+        With ``imu_fusion=None`` (the default, and what SLAM gets today) this is
+        exactly the previous two-way behaviour — see test_imu_fusion.py's
+        ``test_slam_non_regression_*`` guards."""
         with self._lock:
-            if self._fusion is not None:
-                fused = self._fusion.fused_quat()
-                if fused is not None:
-                    return fused
-            return self._quat
+            if self._imu_fusion is not None:
+                high_rate = self._imu_fusion.fused_quat()
+                if high_rate is not None:
+                    return high_rate
+            return self._legacy_quat_locked()
 
     def fusion_status(self) -> str:
         with self._lock:
@@ -104,6 +173,8 @@ class SensorState:
         with self._lock:
             if self._fusion is not None:
                 self._fusion.reset()
+            if self._imu_fusion is not None:
+                self._imu_fusion.reset()
 
 
 def quat_to_matrix(w: float, x: float, y: float, z: float) -> np.ndarray:
@@ -147,6 +218,152 @@ def quat_pitch_deg(quat) -> float:
     w, x, y, z = quat
     s = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
     return math.degrees(math.asin(s))
+
+
+def quat_roll_deg(quat) -> float:
+    """ZYX roll (bank about the forward axis) of a [w,x,y,z] quaternion, in
+    degrees, [-180, 180). Same Tait-Bryan convention as `quat_yaw_deg`/
+    `quat_pitch_deg` (yaw-pitch-roll = Z-Y-X)."""
+    w, x, y, z = quat
+    return math.degrees(math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y)))
+
+
+# --- Alternate orientation decompositions (owner ask, 2026-07-28) -----------
+#
+# The default roll/pitch/yaw above is ZYX Tait-Bryan (R = Rz(yaw) Ry(pitch)
+# Rx(roll)); its gimbal lock is at pitch = +-90 deg, i.e. the world-Z
+# projection of body X (Up) -> +-1. A handheld scanner has no fixed "forward",
+# so those names mislead depending on grip, AND the singularity bites whenever
+# the device is aimed steeply up/down -- exactly the ~86 deg-pitch case that
+# motivated this. Two remedies, both presentation-only (never touch
+# `display_rotation`/`fused_quat()`): (1) user-relabelable axis names, (2) more
+# than one decomposition, so a different grip/aim can pick whichever mode keeps
+# its singularity out of the way.
+
+
+def quat_yaw_alt_deg(quat) -> float:
+    """Alternate Tait-Bryan decomposition (R = Rz(a) Rx(b) Ry(c)): the outer
+    (Z-ish) component. Paired with `quat_pitch_alt_deg`/`quat_roll_alt_deg`;
+    see `quat_pitch_alt_deg` for where this decomposition's gimbal lock sits."""
+    r = quat_to_matrix(*quat)
+    return math.degrees(math.atan2(-r[0, 1], r[1, 1]))
+
+
+def quat_pitch_alt_deg(quat) -> float:
+    """Alternate Tait-Bryan decomposition's singular component: the world-Z
+    projection of body Y (Right), i.e. `asin(R[2,1])`. Unlike the default
+    `quat_pitch_deg` (gimbal lock when body X/Up -> vertical, i.e. the device
+    aimed steeply up/down), THIS decomposition locks when body Y/Right ->
+    vertical -- the device rolled onto its side. The two modes' singularities
+    are disjoint attitudes: whichever one degenerates, the other is likely
+    still well-conditioned."""
+    r = quat_to_matrix(*quat)
+    s = max(-1.0, min(1.0, r[2, 1]))
+    return math.degrees(math.asin(s))
+
+
+def quat_roll_alt_deg(quat) -> float:
+    """Alternate Tait-Bryan decomposition: the inner (Y-ish) component."""
+    r = quat_to_matrix(*quat)
+    return math.degrees(math.atan2(-r[2, 0], r[2, 2]))
+
+
+def boresight_view_deg(quat) -> tuple[float, float, float]:
+    """(azimuth_deg [0,360), elevation_deg [-90,90], roll_deg [-180,180)) of
+    the ToF optical axis -- the one decomposition that stays meaningful
+    however the device is gripped, because it reports where the SENSOR points
+    rather than an arbitrary body "forward".
+
+    The boresight is body +Z: `docs/coordinate-frames.md` "The four frames"
+    lists the SFLP body frame as X=Up, Y=Right, **Z=Forward**, and separately
+    the ToF (CV) frame as Z=Forward with `T_CV_TO_BODY: Z_body = Z_cv` -- the
+    CV camera's forward axis maps onto body Z unchanged, so body Z IS the
+    optical axis under both frames' own definitions.
+
+    azimuth: compass bearing the sensor points at (0=North, 90=East; SFLP
+    world is X=North, Y=West, so East = -Y).
+    elevation: angle of the boresight above (+) / below (-) horizontal.
+    roll: twist about the boresight, referenced to world "up" projected into
+    the plane perpendicular to the boresight -- 0 when the device's structural
+    Up axis (body X) points as close to true vertical as the aim allows.
+
+    Singularity: elevation -> +-90 deg (pointing straight at the ceiling/floor)
+    -- azimuth and roll both become an ill-defined split of the same rotation
+    about a now-vertical boresight. `roll` is returned as 0.0 in that regime;
+    callers must consult the singularity margin, not trust the value."""
+    r = quat_to_matrix(*quat)
+    boresight = r[:, 2]          # body Z column: pointing direction in world
+    up_ref = r[:, 0]             # body X column: structural "up" reference
+    elevation = math.degrees(math.asin(max(-1.0, min(1.0, float(boresight[2])))))
+    azimuth = math.degrees(math.atan2(-float(boresight[1]), float(boresight[0]))) % 360.0
+    world_up = np.array([0.0, 0.0, 1.0])
+    perp = world_up - float(np.dot(world_up, boresight)) * boresight
+    up_perp = up_ref - float(np.dot(up_ref, boresight)) * boresight
+    pn, un = float(np.linalg.norm(perp)), float(np.linalg.norm(up_perp))
+    if pn < 1e-6 or un < 1e-6:
+        roll = 0.0     # near-singular: undefined -- caller must consult the margin
+    else:
+        perp_n, up_n = perp / pn, up_perp / un
+        cross = np.cross(perp_n, up_n)
+        roll = math.degrees(math.atan2(float(np.dot(cross, boresight)), float(np.dot(perp_n, up_n))))
+    return azimuth, elevation, roll
+
+
+def gravity_body_from_imu_raw(batch) -> tuple[float, float, float] | None:
+    """Body-frame DOWN unit vector from the stream-11 SFLP gravity FIFO tag
+    (0x17, mean of the batch's samples) -- fixed +-2g scale at 0.061 mg/LSB,
+    ~16x finer in tilt than the fp16-encoded SFLP quaternion step
+    (`docs/iks4a1-stacking.md` "Orientation-noise pass"). None if the batch
+    carries no gravity samples (stream 11 not enabled, or a batch that only
+    had gyro/accel/timestamp words) -- callers must fall back to the
+    quat-derived down vector (`quat_to_matrix(*quat).T @ [0,0,-1]`, the same
+    computation `ir_gravity_rot` uses) in that case.
+
+    Sign: the SFLP gravity tag reports the sensed reaction (+g on the axis
+    pointing "up" when the device sits still, same convention as the raw
+    accelerometer) -- negated here so the return value points the direction
+    gravity itself pulls, matching `ir_gravity_rot`'s `g_body` convention."""
+    if batch is None or batch.gravity_g.shape[0] == 0:
+        return None
+    v = np.asarray(batch.gravity_g, dtype=np.float64).mean(axis=0)
+    n = float(np.linalg.norm(v))
+    if n < 1e-9:
+        return None
+    return tuple((-v / n).tolist())
+
+
+def tilt_from_down_deg(down_body, axis_body=(0.0, 0.0, 1.0)) -> float:
+    """Angle in degrees of `axis_body` (default: the boresight, body +Z) from
+    horizontal, given only the body-frame DOWN unit vector: 0=horizontal,
+    +90=axis points straight up, -90=straight down. Needs just the 2 DoF of
+    tilt that gravity alone supplies -- no heading, no full attitude."""
+    axis = np.asarray(axis_body, dtype=np.float64)
+    down = np.asarray(down_body, dtype=np.float64)
+    dot = max(-1.0, min(1.0, float(np.dot(axis, down))))
+    return -math.degrees(math.asin(dot))
+
+
+def triad_roll_deg(down_body, axis_body=(0.0, 0.0, 1.0),
+                    up_ref_body=(1.0, 0.0, 0.0)) -> float | None:
+    """Roll of `up_ref_body` (default: body X / the structural Up axis) about
+    `axis_body` (default: the boresight), referenced to true vertical --
+    computed ENTIRELY from the body-frame down vector: the gravity-only half
+    of a TRIAD/eCompass construction, no magnetometer and no gyro-integrated
+    quaternion involved. None when `axis_body` is within ~0.1 deg of vertical
+    (parallel to `down_body`), where the perpendicular reference collapses and
+    roll is undefined -- the gravity-tilt singularity."""
+    axis = np.asarray(axis_body, dtype=np.float64)
+    down = np.asarray(down_body, dtype=np.float64)
+    true_up = -down
+    perp = true_up - float(np.dot(true_up, axis)) * axis
+    ref = np.asarray(up_ref_body, dtype=np.float64)
+    ref_perp = ref - float(np.dot(ref, axis)) * axis
+    pn, rn = float(np.linalg.norm(perp)), float(np.linalg.norm(ref_perp))
+    if pn < 1e-6 or rn < 1e-6:
+        return None
+    perp_n, ref_n = perp / pn, ref_perp / rn
+    cross = np.cross(perp_n, ref_n)
+    return math.degrees(math.atan2(float(np.dot(cross, axis)), float(np.dot(perp_n, ref_n))))
 
 
 def graft_yaw(quat, delta_deg: float) -> tuple[float, float, float, float]:

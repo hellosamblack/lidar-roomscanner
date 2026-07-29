@@ -843,6 +843,43 @@ channel, barometer as soft 1-DoF Z constraint.
 > **6.G** (GPU-memory OOM on long scans), and the on-rig flat-field capture (Phase 2.5 follow-up)
 > gating reflectance-quality work.
 
+> **Orientation accuracy for handheld use (2026-07-29)** — a full pass on the orientation path,
+> triggered by BUG-027's leftover "beat the fp16 floor" item and then **re-prioritised by the owner's
+> note that this is a handheld device** ("maximum accuracy even over short timeframes"). Ranked by
+> contribution during a 100 °/s pan, the error budget turned out to be the inverse of where the work
+> started:
+>
+> | source | contribution | status |
+> |---|---|---|
+> | magnetometer calibration, direction-dependent | up to **~90°** heading error | **open — BUG-030**, needs an owner tumble |
+> | LSM tick uncalibrated (2.98% scale) | ~2.7° on a 90° pan | **fixed** — stream 12 `IMU_CAL` |
+> | ToF↔IMU frame-stamp skew | 0.19° → 0.107° RMS | **partly fixed** — BUG-031 |
+> | fp16 SFLP quantization | 0.018–0.027°/frame | transport shipped (stream 11); fusion built, **not wired in** |
+>
+> **Shipped:** **stream 11 `RS_STREAM_IMU_RAW`** — 480 Hz verbatim FIFO pass-through (GY 0x01 / XL 0x02 /
+> TIMESTAMP 0x04 / SFLP-gbias 0x16 / SFLP-gravity 0x17, 8-byte records, tag byte rebuilt as
+> `TAG_SENSOR<<3 | TAG_CNT<<1`, count in `width`); **stream 12 `IMU_CAL`** carrying `INTERNAL_FREQ_FINE`
+> on the 64-frame CALIB cadence (host applies `t = 1/(46080·(1+0.0013·freq_fine))`); a **TIM2
+> microsecond clock** replacing `HAL_GetTick()*1000`, with the ToF stamp moved to the sensor's
+> FRAME_READY edge; **sensor-hub averaging** (mag/baro/temp were keeping 1 of ~2 samples per drain —
+> same defect class as BUG-027, milder). On-target: **freq_fine = −20**, clock ratio **29790 → 3345 ppm**
+> (residual is the MCU's HSI, not the LSM), stream 11 at **100.01% delivery / 0 gaps / exactly 480.0 Hz**,
+> streams 7/9/10/11 at 30.3 fps (interval convention), 0 CRC, 0 drops, 0 gaps.
+>
+> **Host:** `roomscan.imufusion` — complementary filter (gyro propagation on LSM timestamps with gbias
+> subtracted, gravity tilt correction, stream-9 yaw anchor), **gated OFF by default** with an explicit
+> SLAM non-regression test. Synthetic gain 6.2× on tilt in the under-dithered regime. UI gained raw
+> orientation readouts, per-signal p95/mean jitter, **four orientation decomposition modes**
+> (zyx / zxy / boresight / world = gravity+mag) with renamable labels and a near-singularity warning,
+> a **zero-yaw** control (SFLP yaw has an arbitrary origin — no magnetic input), and a **magnetometer
+> calibration modal** with sphere-coverage visualisation.
+>
+> **Measurement method matters here** — three plausible readings were wrong before the right one
+> emerged; see the `orientation-noise-floor` memory for the five traps (notably: use **p95**, never the
+> median, on this signal; and normalise quaternions for angles but NOT for tie counting).
+>
+> **Resume point:** `docs/superpowers/plans/2026-07-29-orientation-resume.md`.
+
 > **Live-view rendering (2026-07-14)** — the "rendering-first for live view" step (live view ≥30 fps,
 > ideally 120+, flat as the map grows; the fps goal is architecture-bound, not compute-bound). Shipped
 > per `docs/superpowers/plans/2026-07-13-live-view-fps.md` (subagent-driven, 12 tasks + 2 review fixes,

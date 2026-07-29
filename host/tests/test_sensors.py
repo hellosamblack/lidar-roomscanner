@@ -10,17 +10,34 @@ from roomscan.protocol import (
     FrameType,
     StreamId,
 )
+from roomscan.protocol import ImuRawBatch
 from roomscan.sensors import (
     SensorState,
+    boresight_view_deg,
     graft_yaw,
+    gravity_body_from_imu_raw,
     ir_gravity_rot,
     quat_mul,
+    quat_pitch_alt_deg,
     quat_pitch_deg,
+    quat_roll_alt_deg,
+    quat_roll_deg,
     quat_to_matrix,
+    quat_yaw_alt_deg,
     quat_yaw_deg,
     tilt_compensated_heading,
+    tilt_from_down_deg,
+    triad_roll_deg,
     wrap180,
 )
+
+
+def _axis_angle_quat(axis, deg):
+    """Test helper: unit quat [w,x,y,z] for a rotation of `deg` about `axis`."""
+    axis = np.asarray(axis, dtype=np.float64)
+    axis = axis / np.linalg.norm(axis)
+    a = math.radians(deg) / 2.0
+    return (math.cos(a), *(math.sin(a) * axis))
 
 
 def _frame(stream_id: int, payload: bytes) -> Frame:
@@ -115,6 +132,17 @@ def test_quat_yaw_of_z_rotation():
     assert quat_yaw_deg((s, 0.0, 0.0, s)) == pytest.approx(90.0, abs=1e-4)
 
 
+def test_quat_roll_of_x_rotation():
+    s = np.sqrt(0.5)  # 90 deg about +X -- pure roll, no pitch/yaw
+    assert quat_roll_deg((s, s, 0.0, 0.0)) == pytest.approx(90.0, abs=1e-4)
+    assert quat_pitch_deg((s, s, 0.0, 0.0)) == pytest.approx(0.0, abs=1e-4)
+    assert quat_yaw_deg((s, s, 0.0, 0.0)) == pytest.approx(0.0, abs=1e-4)
+
+
+def test_quat_roll_identity_is_zero():
+    assert quat_roll_deg((1.0, 0.0, 0.0, 0.0)) == pytest.approx(0.0, abs=1e-9)
+
+
 def test_graft_yaw_adds_heading_preserves_tilt():
     import math
     a = math.radians(30.0) / 2  # 30 deg pitch about +Y, no yaw
@@ -206,3 +234,160 @@ def test_ir_gravity_rot_roll_90_ccw():
     theta = math.radians(90.0) / 2
     q = (math.cos(theta), math.sin(theta), 0.0, 0.0)
     assert ir_gravity_rot(q) == 3
+
+
+# =============================================================================
+# Alternate orientation decompositions (owner ask, 2026-07-28)
+# =============================================================================
+
+def test_alt_euler_identity_is_zero():
+    q = (1.0, 0.0, 0.0, 0.0)
+    assert quat_roll_alt_deg(q) == pytest.approx(0.0, abs=1e-6)
+    assert quat_pitch_alt_deg(q) == pytest.approx(0.0, abs=1e-6)
+    assert quat_yaw_alt_deg(q) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_alt_euler_singularity_is_body_y_axis_not_body_x():
+    """The default ZYX mode locks when body X (Up) -> world vertical
+    (quat_pitch_deg -> +-90). The alt (ZXY) decomposition must NOT lock at
+    that same attitude -- and must instead lock when body Y (Right) ->
+    vertical, a disjoint attitude."""
+    # Rotate -90 deg about Y: sends body X ([1,0,0]) to world Z ([0,0,1]).
+    q_default_lock = _axis_angle_quat((0.0, 1.0, 0.0), -90.0)
+    assert quat_pitch_deg(q_default_lock) == pytest.approx(-90.0, abs=1e-3)
+    assert abs(quat_pitch_alt_deg(q_default_lock)) < 45.0   # alt mode nowhere near its lock
+
+    # Rotate 90 deg about X: sends body Y ([0,1,0]) to world Z ([0,0,1]).
+    q_alt_lock = _axis_angle_quat((1.0, 0.0, 0.0), 90.0)
+    assert quat_pitch_alt_deg(q_alt_lock) == pytest.approx(90.0, abs=1e-3)
+    assert abs(quat_pitch_deg(q_alt_lock)) < 45.0            # default mode nowhere near its lock
+
+
+def test_alt_euler_recovers_a_known_rotation_away_from_lock():
+    # Compose R = Rz(a) Rx(b) Ry(c) directly and confirm quat_to_matrix(q)
+    # reconstructs the same matrix from the same quat, i.e. the extraction
+    # functions are reading the matrix elements they claim to.
+    def rz(a):
+        c, s = math.cos(a), math.sin(a)
+        return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+
+    def rx(a):
+        c, s = math.cos(a), math.sin(a)
+        return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+
+    def ry(a):
+        c, s = math.cos(a), math.sin(a)
+        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+
+    a, b, c = 20.0, 10.0, -35.0
+    r = rz(math.radians(a)) @ rx(math.radians(b)) @ ry(math.radians(c))
+    # Build the equivalent quat via composed axis-angle multiplication.
+    from roomscan.sensors import quat_mul as _mul
+    qz = _axis_angle_quat((0, 0, 1), a)
+    qx = _axis_angle_quat((1, 0, 0), b)
+    qy = _axis_angle_quat((0, 1, 0), c)
+    q = _mul(_mul(qz, qx), qy)
+    assert np.allclose(quat_to_matrix(*q), r, atol=1e-5)
+    assert quat_yaw_alt_deg(q) == pytest.approx(a, abs=1e-3)
+    assert quat_pitch_alt_deg(q) == pytest.approx(b, abs=1e-3)
+    assert quat_roll_alt_deg(q) == pytest.approx(c, abs=1e-3)
+
+
+def test_boresight_view_identity_points_along_world_z():
+    # Body Z (the boresight, per docs/coordinate-frames.md) = world Z at
+    # identity -- elevation 90, azimuth/roll undefined-but-zero at the pole.
+    az, el, roll = boresight_view_deg((1.0, 0.0, 0.0, 0.0))
+    assert el == pytest.approx(90.0, abs=1e-6)
+
+
+def test_boresight_view_horizontal_has_zero_elevation():
+    # Rotate -90 about Y: body Z ([0,0,1]) -> world [-1,0,0] -- horizontal,
+    # pointing South (azimuth 180 -- world X=North per coordinate-frames.md),
+    # elevation 0, far from the singularity.
+    q = _axis_angle_quat((0.0, 1.0, 0.0), -90.0)
+    az, el, roll = boresight_view_deg(q)
+    assert el == pytest.approx(0.0, abs=1e-3)
+    assert az == pytest.approx(180.0, abs=1e-3)
+
+
+def test_boresight_view_roll_tracks_twist_about_boresight():
+    # Start horizontal (as above), then twist by an extra 30 deg roll about
+    # the (now-horizontal) boresight -- roll should read ~30 deg while
+    # azimuth/elevation stay put.
+    base = _axis_angle_quat((0.0, 1.0, 0.0), -90.0)
+    boresight_axis = quat_to_matrix(*base)[:, 2]
+    from roomscan.sensors import quat_mul as _mul
+    twist = _axis_angle_quat(boresight_axis, 30.0)
+    q = _mul(twist, base)
+    az, el, roll = boresight_view_deg(q)
+    assert el == pytest.approx(0.0, abs=1e-2)
+    assert az == pytest.approx(180.0, abs=1e-2)
+    assert abs(roll) == pytest.approx(30.0, abs=1e-1)
+
+
+def test_boresight_view_near_pole_roll_is_defined_as_zero_not_raising():
+    az, el, roll = boresight_view_deg((1.0, 0.0, 0.0, 0.0))   # exactly at the pole
+    assert roll == 0.0
+
+
+# --- gravity-only (World mode) helpers --------------------------------------
+
+def _imu_raw_batch(gravity_rows=None, accel_rows=None) -> ImuRawBatch:
+    gravity = np.asarray(gravity_rows if gravity_rows is not None else [], dtype=np.float64).reshape(-1, 3)
+    accel = np.asarray(accel_rows if accel_rows is not None else [], dtype=np.float64).reshape(-1, 3)
+    return ImuRawBatch(
+        gyro_dps=np.zeros((0, 3)), gyro_cnt=np.zeros(0, dtype=np.uint8),
+        accel_g=accel, accel_cnt=np.zeros(len(accel), dtype=np.uint8),
+        gravity_g=gravity, gravity_cnt=np.zeros(len(gravity), dtype=np.uint8),
+        gbias_dps=np.zeros((0, 3)), gbias_cnt=np.zeros(0, dtype=np.uint8),
+        timestamp_ticks=np.zeros(0, dtype=np.uint32), timestamp_cnt=np.zeros(0, dtype=np.uint8),
+        n_records=len(gravity) + len(accel))
+
+
+def test_sensor_state_clear_imu_raw():
+    ss = SensorState()
+    batch = _imu_raw_batch(gravity_rows=[[1.0, 0.0, 0.0]])
+    ss._imu_raw = batch
+    ss._imu_raw_hist.append((0, batch))
+    assert ss.latest_imu_raw() is not None
+    ss.clear_imu_raw()
+    assert ss.latest_imu_raw() is None
+    assert ss.imu_raw_history() == []
+
+
+def test_gravity_body_from_imu_raw_none_when_no_samples():
+    assert gravity_body_from_imu_raw(None) is None
+    assert gravity_body_from_imu_raw(_imu_raw_batch()) is None
+
+
+def test_gravity_body_from_imu_raw_averages_and_normalizes():
+    # Device sitting still: SFLP gravity tag reads ~+1g "up" reaction on body
+    # X (Up) -- negated, the returned down vector should point -X.
+    batch = _imu_raw_batch(gravity_rows=[[1.0, 0.0, 0.0], [0.98, 0.02, 0.0]])
+    down = gravity_body_from_imu_raw(batch)
+    assert down is not None
+    assert np.allclose(down, (-1.0, 0.0, 0.0), atol=0.02)
+    assert np.linalg.norm(down) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_tilt_from_down_horizontal_and_vertical():
+    assert tilt_from_down_deg((0.0, 1.0, 0.0), axis_body=(0.0, 0.0, 1.0)) == pytest.approx(0.0, abs=1e-6)
+    assert tilt_from_down_deg((0.0, 0.0, -1.0), axis_body=(0.0, 0.0, 1.0)) == pytest.approx(90.0, abs=1e-6)
+    assert tilt_from_down_deg((0.0, 0.0, 1.0), axis_body=(0.0, 0.0, 1.0)) == pytest.approx(-90.0, abs=1e-6)
+
+
+def test_triad_roll_none_at_the_pole():
+    # axis parallel to down -> perpendicular reference collapses.
+    assert triad_roll_deg((0.0, 0.0, 1.0), axis_body=(0.0, 0.0, 1.0)) is None
+
+
+def test_triad_roll_zero_when_up_ref_points_true_up():
+    # Down = -Z, boresight = +Z (horizontal-ish reference), up_ref = +X:
+    # true "up" is +Z, which has no component in the plane perpendicular to
+    # the boresight when boresight is along Y instead -- construct a case
+    # where up_ref_body is already the perpendicular projection of true up.
+    down = (0.0, 1.0, 0.0)          # gravity pulls along +Y in body frame
+    axis = (0.0, 0.0, 1.0)          # boresight along body Z, perpendicular to down
+    up_ref = (0.0, -1.0, 0.0)       # points exactly at true "up" (-down)
+    roll = triad_roll_deg(down, axis_body=axis, up_ref_body=up_ref)
+    assert roll == pytest.approx(0.0, abs=1e-6)

@@ -87,6 +87,17 @@ class ViewerConfig:
     yaw_anomaly_frac: float = 0.3           # |mag| deviation from field to reject
     yaw_motion_rate_dps: float = 40.0       # quat angular rate above which to freeze
     yaw_gimbal_margin_deg: float = 15.0     # freeze within this of |pitch|=90
+    orientation_mode: str = "zyx"           # selected orientation decomposition (owner ask,
+                                            # 2026-07-28): "zyx" | "zxy" | "boresight" | "world"
+    orientation_labels: str = "Roll,Pitch,Yaw"  # user-renamable axis labels, comma-joined (the
+                                            # flat-TOML writer is scalar-only -- no list/array
+                                            # support, see the module docstring)
+    yaw_offset_deg: float = 0.0             # "Zero yaw here" (owner ask, 2026-07-29): a
+                                            # user-set world-Z graft applied to the relative
+                                            # yaw-like slot of zyx/zxy/boresight ONLY -- World
+                                            # mode's heading is absolute (magnetic) and is never
+                                            # offset. Presentation-only, scalar so it fits this
+                                            # writer -- see web.py's `build_sensor_message`.
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "ViewerConfig":

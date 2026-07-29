@@ -49,6 +49,7 @@ from .deproject import Deprojector
 from .ir_image import ir_range, reflectance_to_rgb
 from .logbus import LogBus
 from .magcal import MagCalibration
+from .magsweep import MagSweepSession, build_report as build_magcal_report
 from .metrics import MetricsRegistry, MetricsSnapshot
 from .flatfield import FlatField
 from .pipeline import TransformStage
@@ -70,9 +71,21 @@ from .sensors import (
     T_WORLD_TO_CV,
     YawFusion,
     absolute_heading,
+    boresight_view_deg,
+    graft_yaw,
+    gravity_body_from_imu_raw,
     ir_gravity_rot,
     quat_mul,
+    quat_pitch_alt_deg,
+    quat_pitch_deg,
+    quat_roll_alt_deg,
+    quat_roll_deg,
     quat_to_matrix,
+    quat_yaw_alt_deg,
+    quat_yaw_deg,
+    tilt_from_down_deg,
+    triad_roll_deg,
+    wrap180,
 )
 from .motion import coherence
 from .sources import FileSource, Recorder, SerialSource, UdpSource, get_best_source
@@ -97,6 +110,14 @@ METRICS_INTERVAL = 1.0 / 4.0
 # and well above the ~4 Hz sparkline need. History rides every message so a
 # late-joining tab's sparklines are instantly full (Phase-1 late-joiner rule).
 SENSOR_INTERVAL = 1.0 / 15.0
+# Rolling window for the orientation jitter stats (roll/pitch/yaw/heading/overall):
+# ~5s of `sensor` messages at SENSOR_INTERVAL (15 Hz) => ~75 frame-to-frame samples.
+SENSOR_JITTER_WINDOW_S = 5.0
+# Magnetometer-sweep (`magcal` modal) report cadence. 4 Hz is fast enough to
+# feel live while tumbling and keeps the whole-cloud re-bin in `build_report`
+# (an O(samples x cells) matmul) to a low duty cycle. Sent ONLY to tabs that
+# have the modal open -- see `state.magcal_clients`.
+MAGCAL_INTERVAL = 1.0 / 4.0
 MISSING_PLANE_LOG_INTERVAL = 3.0   # debounce for missing-plane bus lines
 
 # Recording & playback (web Phase 3).
@@ -116,6 +137,44 @@ _VALID_IR_COLORMAPS = ("gray", "turbo")
 _VALID_VIEW_COLORMAPS = ("turbo", "gray")
 _VALID_SURFACE_MODES = ("grid", "spatial")
 _VALID_IDLE_LEVELS = ("soft", "hard")
+
+# --- orientation decomposition modes (owner ask, 2026-07-28) -----------------
+# Presentation-only: every mode is a different VIEW of the same
+# `sensor_state.fused_quat()` -- none of this feeds `display_rotation`, the
+# point-cloud rotation path, or SLAM. See `sensors.py`'s
+# "Alternate orientation decompositions" section for the per-mode math and
+# exactly where each one's gimbal lock sits.
+_VALID_ORIENTATION_MODES = ("zyx", "zxy", "boresight", "world")
+DEFAULT_AXIS_LABELS = ("Roll", "Pitch", "Yaw")
+_MAX_LABEL_LEN = 24
+
+# "Zero yaw here" (owner ask, 2026-07-29): which modes have a free-running,
+# SFLP-derived yaw-like slot that a user offset even applies to. "world" is
+# deliberately absent -- its yaw slot is `heading_full`, an ABSOLUTE magnetic
+# bearing computed independently of the fused quat's own yaw (see
+# `absolute_heading`), so grafting it would corrupt its meaning rather than
+# just re-zero a drifting reference. `_YAW_GRAFT_SIGN` is the sign to apply
+# when CAPTURING an offset from a given mode's current `yaw_deg` (i.e. the
+# multiplier `s` such that `graft_yaw(quat, s * yaw_deg)` reports that mode's
+# yaw-like slot as ~0 immediately after capture): zyx/zxy report MORE positive
+# as `graft_yaw`'s delta grows (so capturing needs the negative), boresight's
+# azimuth is a compass bearing with the opposite handedness and reports LESS
+# positive for the same delta (so capturing needs the positive) -- verified
+# numerically against the actual decompositions, not derived by hand, because
+# ZYX/ZXY/boresight are three genuinely different functions of the same
+# rotation, not sign-flipped copies of one formula.
+_YAW_GRAFT_SIGN = {"zyx": -1.0, "zxy": -1.0, "boresight": 1.0}
+# Precedent: `YawFusion.gimbal_margin_deg=15.0` gates the yaw-fusion filter
+# near its own gimbal lock; reused verbatim as the "near singularity" warning
+# threshold for every decomposition mode below.
+ORIENTATION_SINGULARITY_MARGIN_DEG = 15.0
+# Precedent: `YawFusion.anomaly_frac=0.3` gates its heading update on the
+# calibrated mag magnitude; reused verbatim for the World mode's validity
+# indicator (owner ask: "reuse that notion rather than inventing a new one").
+WORLD_MODE_MAG_ANOMALY_FRAC = 0.3
+# World mode's gravity reference is corrupted by linear acceleration; flag it
+# when the stream-11 accel batch's mean norm strays this far from 1 g.
+WORLD_MODE_ACCEL_TOL_G = 0.15
 
 
 def idle_standby_level(name: str) -> int:
@@ -167,6 +226,20 @@ class UiState:
     surface_threshold_pct: float = 4.0 # grid: max depth gap %; spatial: % of mean depth -> metres
     idle_enabled: bool = True
     idle_level: str = "soft"           # "soft" | "hard"
+    # Orientation decomposition (owner ask, 2026-07-28): which VIEW of the
+    # orientation quaternion the Sensors panel reports, plus user-renamable
+    # axis labels applied positionally (slot 1/2/3) whichever mode is active.
+    # Presentation-only -- see the `_VALID_ORIENTATION_MODES` comment above.
+    orientation_mode: str = "zyx"
+    orientation_labels: tuple[str, str, str] = DEFAULT_AXIS_LABELS
+    # "Zero yaw here" (owner ask, 2026-07-29): a world-Z `graft_yaw` delta
+    # applied to the relative yaw-like slot of zyx/zxy/boresight ONLY, so the
+    # Sensors card can read 0 at whatever attitude the user pressed the
+    # button. World mode's `yaw_deg` is the absolute magnetic heading and is
+    # NEVER offset -- see `_YAW_GRAFT_SIGN` and `build_sensor_message`.
+    # Presentation-only, same guarantee as `orientation_mode` above: never
+    # touches `fused_quat()`/`display_rotation`/the point-cloud rotation/SLAM.
+    yaw_offset_deg: float = 0.0
 
 
 # --- pure helpers (no socket, no async) -------------------------------------
@@ -359,6 +432,261 @@ class OrientationSmoother:
         self._held = quat_slerp(self._held, quat,
                                 self._alpha(quat_angle_deg(self._held, quat)))
         return self._held
+
+
+def _sanitize_axis_labels(labels) -> tuple[str, str, str]:
+    """Coerce an inbound labels value to exactly 3 short, non-empty strings,
+    falling back to `DEFAULT_AXIS_LABELS` slot-by-slot on anything malformed
+    (wrong length/type, empty/whitespace-only entry, absurdly long) -- a
+    stray WS message must never leave a blank or runaway-length label stuck
+    in the UI (or persisted to disk)."""
+    out = list(DEFAULT_AXIS_LABELS)
+    if isinstance(labels, (list, tuple)):
+        for i, v in enumerate(labels[:3]):
+            if isinstance(v, str) and v.strip():
+                out[i] = v.strip()[:_MAX_LABEL_LEN]
+    return (out[0], out[1], out[2])
+
+
+def _mag_validity(mag_ut, mag_cal: MagCalibration | None):
+    """(valid, reason, measured_ut, expected_ut) for the World mode's heading
+    component. `valid` gates on the calibrated+axis-corrected mag magnitude
+    matching the fitted field strength within `WORLD_MODE_MAG_ANOMALY_FRAC` --
+    the same anomaly notion `YawFusion` already gates its heading update on
+    (owner ask: reuse it, don't invent a second threshold). No calibration at
+    all is reported as invalid with its own reason, not silently "valid"."""
+    if mag_cal is None or mag_ut is None:
+        return False, "no magnetometer calibration", None, None
+    cal_mag = AXIS_CONVENTION @ mag_cal.apply(mag_ut)
+    measured = float(np.linalg.norm(cal_mag))
+    expected = float(mag_cal.field_ut)
+    ok = abs(measured - expected) <= WORLD_MODE_MAG_ANOMALY_FRAC * expected
+    reason = None if ok else (
+        f"mag field {measured:.1f} uT vs calibrated {expected:.1f} uT "
+        f"(>{WORLD_MODE_MAG_ANOMALY_FRAC:.0%} off -- local magnetic interference?)")
+    return ok, reason, measured, expected
+
+
+def _accel_motion_flag(batch) -> bool | None:
+    """True if the stream-11 accel batch's mean norm strays more than
+    `WORLD_MODE_ACCEL_TOL_G` from 1 g -- a cheap "is the device accelerating"
+    proxy. Linear acceleration is indistinguishable from gravity tilt to a
+    3-axis accelerometer, so this is precisely when the World mode's
+    gravity-only tilt/roll degrade (that dynamic weakness is the whole reason
+    the gyro + complementary filter exist for the primary orientation).
+    None when no IMU_RAW batch is available -- motion state is simply
+    unknown, not "assumed stationary"."""
+    if batch is None or batch.accel_g.shape[0] == 0:
+        return None
+    norm = float(np.linalg.norm(batch.accel_g.mean(axis=0)))
+    return abs(norm - 1.0) > WORLD_MODE_ACCEL_TOL_G
+
+
+def orientation_view(mode: str, quat, mag_ut_raw=None, heading_full: float | None = None,
+                      mag_cal: MagCalibration | None = None, imu_raw_batch=None) -> dict:
+    """Decompose `quat` into the selected presentation MODE's three named
+    slots (`roll_deg`/`pitch_deg`/`yaw_deg` -- generic positional names; what
+    each one physically means depends on `mode`, see `sensors.py`), plus how
+    close the CURRENT attitude is to that mode's own singularity.
+
+    Presentation-only: reads `sensor_state.fused_quat()` (passed in as
+    `quat`) and never writes anything back -- `display_rotation`/
+    `fused_quat()`/the SLAM path are untouched by which mode is selected.
+
+    Returns a dict always shaped {roll_deg, pitch_deg, yaw_deg,
+    singularity_margin_deg, near_singularity, valid, reason, ...mode extras}.
+    `valid`/`reason` gate the MAG-dependent yaw slot only (World mode); the
+    gravity-only roll/pitch slots are reported regardless (their own
+    trustworthiness is `near_singularity`, not `valid`)."""
+    if quat is None:
+        return {"roll_deg": None, "pitch_deg": None, "yaw_deg": None,
+                "singularity_margin_deg": None, "near_singularity": False,
+                "valid": False, "reason": "no orientation yet"}
+
+    if mode == "zxy":
+        roll = quat_roll_alt_deg(quat)
+        pitch = quat_pitch_alt_deg(quat)
+        yaw = quat_yaw_alt_deg(quat)
+        margin = 90.0 - abs(pitch)
+        return {"roll_deg": roll, "pitch_deg": pitch, "yaw_deg": yaw,
+                "singularity_margin_deg": margin,
+                "near_singularity": margin < ORIENTATION_SINGULARITY_MARGIN_DEG,
+                "valid": True, "reason": None}
+
+    if mode == "boresight":
+        azimuth, elevation, roll = boresight_view_deg(quat)
+        margin = 90.0 - abs(elevation)
+        return {"roll_deg": roll, "pitch_deg": elevation, "yaw_deg": azimuth,
+                "singularity_margin_deg": margin,
+                "near_singularity": margin < ORIENTATION_SINGULARITY_MARGIN_DEG,
+                "valid": True, "reason": None}
+
+    if mode == "world":
+        raw_down = gravity_body_from_imu_raw(imu_raw_batch)
+        gravity_source = "imu_raw"
+        if raw_down is None:
+            r = quat_to_matrix(*quat)
+            raw_down = tuple((r.T @ np.array([0.0, 0.0, -1.0])).tolist())
+            gravity_source = "quat"
+        tilt = tilt_from_down_deg(raw_down)
+        roll = triad_roll_deg(raw_down)
+        heading = heading_full   # reuse the caller's absolute_heading(quat, calibrated_mag)
+        mag_valid, mag_reason, mag_norm, mag_expected = _mag_validity(mag_ut_raw, mag_cal)
+        motion_flag = _accel_motion_flag(imu_raw_batch)
+        reasons = [r for r in (mag_reason,) if r]
+        if motion_flag:
+            reasons.append("device is accelerating -- gravity tilt reference degraded")
+        margin = 90.0 - abs(tilt)
+        return {"roll_deg": roll, "pitch_deg": tilt, "yaw_deg": heading,
+                "singularity_margin_deg": margin,
+                "near_singularity": margin < ORIENTATION_SINGULARITY_MARGIN_DEG,
+                "valid": mag_valid and not motion_flag,
+                "reason": "; ".join(reasons) if reasons else None,
+                "gravity_source": gravity_source,
+                "mag_norm_ut": mag_norm, "mag_expected_ut": mag_expected,
+                "motion_stable": (None if motion_flag is None else not motion_flag)}
+
+    # default: "zyx" (and any unrecognized value -- fail safe to the original,
+    # always-on-by-default decomposition rather than raising)
+    roll = quat_roll_deg(quat)
+    pitch = quat_pitch_deg(quat)
+    yaw = quat_yaw_deg(quat)
+    margin = 90.0 - abs(pitch)
+    return {"roll_deg": roll, "pitch_deg": pitch, "yaw_deg": yaw,
+            "singularity_margin_deg": margin,
+            "near_singularity": margin < ORIENTATION_SINGULARITY_MARGIN_DEG,
+            "valid": True, "reason": None}
+
+
+def _unit_quat(q) -> tuple[float, float, float, float]:
+    """Re-normalize a [w,x,y,z] quaternion to unit length (float64).
+
+    Device quats are float32 and not always exactly unit-norm. Skipping this
+    before a dot product lets `|a . b|` exceed 1.0, get clamped to exactly
+    1.0 by the acos guard, and silently report a ZERO angle for the smallest
+    real steps -- the bug that produced a bogus zero-jitter reading on
+    2026-07-28. Only needed for the dot-product angle; `quat_yaw_deg` /
+    `quat_pitch_deg` / `quat_roll_deg` tolerate the float32 slop fine."""
+    arr = np.asarray(q, dtype=np.float64)
+    n = float(np.linalg.norm(arr))
+    if n < 1e-12:
+        return (1.0, 0.0, 0.0, 0.0)
+    return tuple(arr / n)
+
+
+_JITTER_SIGNALS = ("roll", "pitch", "yaw", "heading", "orientation")
+
+
+def _jitter_stats(samples: list[dict[str, float]]) -> dict:
+    """[{signal: abs frame-to-frame delta_deg}, ...] -> per-signal {mean_deg,
+    p95_deg, n}. mean/p95 of the ABSOLUTE step, not the signed value (a jitter
+    magnitude, not a drift). p95 is the headline statistic (measured CV 1.45%,
+    the most stable of mean/median/p95 on this signal); mean is secondary.
+    MEDIAN is deliberately not reported: quantization ties pile up at
+    near-zero steps and make it the least stable (CV 4.41%). `n == 0` (no diff computed yet --
+    fewer than two raw samples fed) reports None, not 0.0 -- a flat line is not the same claim
+    as "no data". A single diff (n=1) is a well-defined mean/p95 of one value."""
+    out = {}
+    for key in _JITTER_SIGNALS:
+        vals = [s[key] for s in samples if key in s]
+        if not vals:
+            out[key] = {"mean_deg": None, "p95_deg": None, "n": 0}
+        else:
+            arr = np.asarray(vals, dtype=np.float64)
+            out[key] = {
+                "mean_deg": float(arr.mean()),
+                "p95_deg": float(np.percentile(arr, 95)),
+                "n": len(vals),
+            }
+    return out
+
+
+class OrientationJitter:
+    """Rolling-window frame-to-frame noise stats for the RAW (unsmoothed)
+    fused orientation -- roll/pitch/yaw/heading plus the overall angular step
+    between consecutive quaternions (the quaternion dot-product angle).
+
+    Computed server-side from FULL-PRECISION internal values, fed once per
+    `sensor` message (never from the rounded wire fields -- `rot` is rounded
+    to 5dp / ~0.0006 deg, which would censor exactly the noise floor this
+    exists to measure). Feeds off `sensor_state.fused_quat()` directly, the
+    same pre-`OrientationSmoother` signal SLAM sees -- this reports real
+    sensor noise, not the display-smoothed shimmer-suppressed one.
+
+    Angular signals (roll/yaw/heading) diff with `wrap180` so a heading
+    crossing 360->0 doesn't register as a 360 deg jump; pitch is bounded
+    already but wrapped too for uniformity. The overall-orientation angle
+    re-normalizes both quats first (`_unit_quat`) -- see its docstring.
+
+    `orientation` (the quat dot-product angle) and `heading` (magnetic, via
+    `absolute_heading`) are convention-INDEPENDENT -- they mean the same thing
+    regardless of the selected decomposition mode, so they are always tracked
+    and are the trustworthy signals when comparing across a mode switch.
+    `roll`/`pitch`/`yaw`, by contrast, are whatever the ACTIVE mode's slots
+    report (owner ask, 2026-07-28: "jitter must follow the selected mode") --
+    on a mode change those three are reset (history purged, not just the
+    running `_prev_*`) so a diff is never taken across two incompatible
+    labelings of the same rotation."""
+
+    def __init__(self, window_s: float = SENSOR_JITTER_WINDOW_S):
+        self.window_s = float(window_s)
+        self._samples: deque[tuple[float, dict[str, float]]] = deque()
+        self._prev_quat: tuple[float, float, float, float] | None = None
+        self._prev_roll: float | None = None
+        self._prev_pitch: float | None = None
+        self._prev_yaw: float | None = None
+        self._prev_heading: float | None = None
+        self._mode: str = "zyx"
+
+    def update(self, quat, heading_deg: float | None, now: float | None = None,
+               mode: str = "zyx", roll_deg: float | None = None,
+               pitch_deg: float | None = None, yaw_deg: float | None = None) -> dict:
+        """Feed the newest RAW quat (+ full-precision heading, or None before
+        env/mag data arrives). `roll_deg`/`pitch_deg`/`yaw_deg`, when given,
+        are the ACTIVE `mode`'s decomposition of `quat` (from
+        `orientation_view`); omitted, they default to the ZYX Tait-Bryan
+        values (`quat_roll_deg` etc.) for backward compatibility with direct
+        callers that don't care about mode. Returns `{"window_s": ..,
+        <signal>: {mean_deg, p95_deg, n}, ...}` for
+        roll/pitch/yaw/heading/orientation."""
+        now = time.monotonic() if now is None else now
+        if mode != self._mode:
+            # Mode switch: the numeric MEANING of roll/pitch/yaw just changed,
+            # so a frame-to-frame diff spanning the switch is nonsense -- purge
+            # only those three signals (orientation/heading are mode-agnostic
+            # and stay valid) from both the running "previous value" state and
+            # the buffered window.
+            self._samples = deque(
+                (t, {k: v for k, v in d.items() if k not in ("roll", "pitch", "yaw")})
+                for t, d in self._samples)
+            self._prev_roll = self._prev_pitch = self._prev_yaw = None
+            self._mode = mode
+        diffs: dict[str, float] = {}
+        if quat is not None:
+            quat = tuple(float(v) for v in quat)
+            roll = quat_roll_deg(quat) if roll_deg is None else float(roll_deg)
+            pitch = quat_pitch_deg(quat) if pitch_deg is None else float(pitch_deg)
+            yaw = quat_yaw_deg(quat) if yaw_deg is None else float(yaw_deg)
+            if self._prev_roll is not None:
+                diffs["roll"] = abs(wrap180(roll - self._prev_roll))
+                diffs["pitch"] = abs(wrap180(pitch - self._prev_pitch))
+                diffs["yaw"] = abs(wrap180(yaw - self._prev_yaw))
+            self._prev_roll, self._prev_pitch, self._prev_yaw = roll, pitch, yaw
+            if self._prev_quat is not None:
+                diffs["orientation"] = quat_angle_deg(_unit_quat(self._prev_quat), _unit_quat(quat))
+            self._prev_quat = quat
+        if heading_deg is not None:
+            if self._prev_heading is not None:
+                diffs["heading"] = abs(wrap180(heading_deg - self._prev_heading))
+            self._prev_heading = float(heading_deg)
+        if diffs:
+            self._samples.append((now, diffs))
+        cutoff = now - self.window_s
+        while self._samples and self._samples[0][0] < cutoff:
+            self._samples.popleft()
+        out = _jitter_stats([d for _, d in self._samples])
+        out["window_s"] = self.window_s
+        return out
 
 
 def select_colors(outputs: dict, deproj: Deprojector, color_mode: str,
@@ -611,7 +939,11 @@ _FUSION_LABELS = {
 }
 
 
-def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | None) -> dict | None:
+def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | None,
+                          jitter: OrientationJitter | None = None,
+                          orientation_mode: str = "zyx",
+                          axis_labels=DEFAULT_AXIS_LABELS,
+                          yaw_offset_deg: float = 0.0) -> dict | None:
     """SensorState -> `sensor` JSON dict (streams 9/10), or None when there is no
     sensor data at all (so the broadcaster stays silent on a ToF-only session).
 
@@ -621,6 +953,42 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
     `absolute_heading` over the calibrated mag (panel.py:3172-3178). Computing
     them here keeps the sign/permutation matrices in exactly one place (Python),
     so the frontend never re-derives them.
+
+    `orientation_raw` and `jitter` are additive fields (owner ask, 2026-07-28):
+    the RAW numeric orientation (quat + Euler + heading, un-rounded relative to
+    `rot`/`heading` above -- those are rounded for the wire and would censor
+    the very noise `jitter` measures) and rolling-window frame-to-frame jitter
+    stats (mean_deg/p95_deg/n) for roll/pitch/yaw/heading/orientation. Both are
+    computed off `sensor_state.fused_quat()` -- pre-`OrientationSmoother`, the
+    same raw signal SLAM sees -- never off the smoothed display quat, so they
+    read real sensor noise. `jitter` is None-safe: pass no tracker (e.g. from a
+    test) and every signal reports `n=0` / `None` stats rather than raising.
+
+    `orientation_view` (owner ask, 2026-07-28) adds the SELECTED decomposition
+    mode's own take on the same quat -- ZYX Tait-Bryan by default (identical
+    numbers to `orientation_raw`), or an alternate Euler sequence / boresight
+    az-el-roll / gravity+mag "world" reference when `orientation_mode` picks
+    one (see `orientation_view()` and `sensors.py`'s "Alternate orientation
+    decompositions" section for the math + where each mode's singularity
+    sits). `axis_labels` are carried through verbatim for the frontend to use
+    instead of hardcoded "Roll"/"Pitch"/"Yaw" strings. This is purely
+    presentation: `orientation_raw`/`rot`/`heading` above are computed exactly
+    as before, unaffected by `orientation_mode`.
+
+    `yaw_offset_deg` ("Zero yaw here", owner ask, 2026-07-29) is a further
+    presentation-only graft applied ONLY to the decomposition fed into
+    `orientation_view` -- never to `quat` itself, so `rot`/`heading`/
+    `orientation_raw`/`jitter`'s "orientation" signal above are computed from
+    the untouched quat exactly as before. It is applied via `graft_yaw`
+    (a world-Z rotation that provably preserves roll/pitch/tilt -- see its
+    docstring) rather than by adding/subtracting degrees from a Euler
+    component, so the decomposition it feeds is still a valid rotation. It is
+    skipped entirely for World mode: that mode's `yaw_deg` is the absolute
+    magnetic `heading_full` computed above, not a function of this graft, so
+    applying it would be a no-op at best and confusing at worst -- the skip
+    just documents that explicitly. A constant offset cancels exactly in any
+    frame-to-frame diff, so `jitter`'s roll/pitch/yaw magnitudes are
+    unaffected by it (see `test_yaw_offset_does_not_change_jitter_magnitude`).
     """
     quat = sensor_state.fused_quat()
     env = sensor_state.latest_env()
@@ -635,6 +1003,7 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
         rot = [round(float(v), 5) for v in r.reshape(-1)]   # row-major 9
 
     heading = None
+    heading_full = None
     mag_out = None
     if env is not None:
         mag = env.mag_ut
@@ -642,7 +1011,41 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
             mag = tuple(float(v) for v in AXIS_CONVENTION @ mag_cal.apply(mag))
         mag_out = [round(float(v), 2) for v in mag]
         if quat is not None:
-            heading = round(absolute_heading(quat, tuple(mag)), 1)
+            heading_full = absolute_heading(quat, tuple(mag))
+            heading = round(heading_full, 1)
+
+    orientation_raw = {
+        "quat": [round(float(v), 6) for v in quat] if quat is not None else None,
+        "roll_deg": round(quat_roll_deg(quat), 4) if quat is not None else None,
+        "pitch_deg": round(quat_pitch_deg(quat), 4) if quat is not None else None,
+        "yaw_deg": round(quat_yaw_deg(quat), 4) if quat is not None else None,
+        "heading_deg": round(heading_full, 4) if heading_full is not None else None,
+    }
+
+    mode = orientation_mode if orientation_mode in _VALID_ORIENTATION_MODES else "zyx"
+    # "Zero yaw here": graft the user's offset onto a DISPLAY-ONLY copy of the
+    # quat, never `quat` itself -- World mode is excluded, its yaw slot is the
+    # absolute `heading_full` above, not a function of this quat's yaw.
+    display_quat = quat
+    if quat is not None and mode != "world" and yaw_offset_deg:
+        display_quat = graft_yaw(quat, float(yaw_offset_deg))
+    view = orientation_view(mode, display_quat,
+                             mag_ut_raw=(env.mag_ut if env is not None else None),
+                             heading_full=heading_full, mag_cal=mag_cal,
+                             imu_raw_batch=sensor_state.latest_imu_raw())
+    orientation_view_out = {
+        **{k: (round(v, 4) if isinstance(v, float) else v) for k, v in view.items()},
+        "mode": mode,
+        "labels": list(axis_labels),
+        # Echoed for the frontend to show/hide "Clear offset" -- 0.0 (not the
+        # raw setting) whenever mode == "world", since it never applied there.
+        "yaw_offset_deg": round(float(yaw_offset_deg), 2) if mode != "world" else 0.0,
+    }
+
+    jitter_out = (jitter.update(quat, heading_full, mode=mode, roll_deg=view["roll_deg"],
+                                 pitch_deg=view["pitch_deg"], yaw_deg=view["yaw_deg"])
+                  if jitter is not None
+                  else _jitter_stats([]) | {"window_s": SENSOR_JITTER_WINDOW_S})
 
     raw_status = sensor_state.fusion_status()
     return {
@@ -658,6 +1061,9 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
         "has_mag_cal": mag_cal is not None,
         "pressure_hist": [round(float(v), 1) for v in press_spark.tolist()],
         "temp_hist": [round(float(v), 2) for v in temp_spark.tolist()],
+        "orientation_raw": orientation_raw,
+        "orientation_view": orientation_view_out,
+        "jitter": jitter_out,
     }
 
 
@@ -690,7 +1096,10 @@ def _state_message(ui: UiState) -> dict:
             "surface_threshold_pct": ui.surface_threshold_pct,
             "mode": ui.mode, "slam_trajectory": ui.slam_trajectory,
             "slam_walls": ui.slam_walls, "slam_follow": ui.slam_follow,
-            "idle_enabled": ui.idle_enabled, "idle_level": ui.idle_level}
+            "idle_enabled": ui.idle_enabled, "idle_level": ui.idle_level,
+            "orientation_mode": ui.orientation_mode,
+            "orientation_labels": list(ui.orientation_labels),
+            "yaw_offset_deg": ui.yaw_offset_deg}
 
 
 # --- settings persistence (Web Phase 5) -------------------------------------
@@ -734,6 +1143,13 @@ def ui_from_config(cfg: ViewerConfig) -> UiState:
     ui.idle_enabled = bool(cfg.sensor_idle_enabled)
     if cfg.sensor_idle_level in _VALID_IDLE_LEVELS:
         ui.idle_level = cfg.sensor_idle_level
+    if cfg.orientation_mode in _VALID_ORIENTATION_MODES:
+        ui.orientation_mode = cfg.orientation_mode
+    ui.orientation_labels = _sanitize_axis_labels(cfg.orientation_labels.split(","))
+    try:
+        ui.yaw_offset_deg = float(cfg.yaw_offset_deg)
+    except (TypeError, ValueError):
+        pass   # keep the UiState default (0.0) on a corrupt config value
     return ui
 
 
@@ -755,6 +1171,9 @@ def apply_ui_to_config(ui: UiState, cfg: ViewerConfig) -> None:
     cfg.slam_follow = bool(ui.slam_follow)
     cfg.sensor_idle_enabled = bool(ui.idle_enabled)
     cfg.sensor_idle_level = ui.idle_level
+    cfg.orientation_mode = ui.orientation_mode
+    cfg.orientation_labels = ",".join(ui.orientation_labels)
+    cfg.yaw_offset_deg = float(ui.yaw_offset_deg)
 
 
 def _persist_ui(state) -> None:
@@ -1207,6 +1626,11 @@ class SessionController:
             self._stop_reader()
             if self.recorder.active:
                 self.recorder.stop()                      # never record a replay
+            # Drop any stream-11 batch from whatever source was active before
+            # (owner ask, 2026-07-28 "World" orientation mode) -- a capture
+            # with no stream 11 must fall back to the quat-derived gravity
+            # vector, not silently inherit the old source's real one.
+            self.sensor_state.clear_imu_raw()
             self.mode = "replay"
             self.replay_path = str(path)
             self.index = build_capture_index(self.replay_path)
@@ -1229,6 +1653,7 @@ class SessionController:
                     ser.reset_input_buffer()
             except Exception:
                 pass
+            self.sensor_state.clear_imu_raw()              # see switch_to_replay's comment
             self.mode = "live"
             self.replay_path = None
             self.index = None
@@ -1519,6 +1944,73 @@ async def _reset_slam(state) -> None:
         await asyncio.to_thread(slam.reset)
 
 
+# --- magnetometer sweep / calibration modal (owner ask, 2026-07-29) ---------
+#
+# Additive diagnostic layer: nothing here touches `display_rotation`, the
+# point-cloud path, `fused_quat()`, or anything SLAM reads. The ONE thing that
+# reaches into the live system is `install_mag_calibration`, and only on an
+# explicit user Save -- which is the whole point of the feature. Collecting,
+# fitting and previewing are pure observation (guarded by
+# `test_magcal_preview_does_not_touch_display_path`).
+
+
+def _magcal_session(state) -> MagSweepSession:
+    """Lazily-created sweep session, same pattern as `orientation_smoother` --
+    a hand-built `app.state` (tests) needn't know about it."""
+    session = getattr(state, "magcal_session", None)
+    if session is None:
+        session = state.magcal_session = MagSweepSession()
+    return session
+
+
+def _magcal_clients(state) -> set:
+    clients = getattr(state, "magcal_clients", None)
+    if clients is None:
+        clients = state.magcal_clients = set()
+    return clients
+
+
+def _magcal_report(state) -> dict:
+    return build_magcal_report(
+        _magcal_session(state), getattr(state, "mag_cal", None),
+        view=getattr(state, "magcal_view", "current"),
+        saved_path=getattr(state, "mag_cal_path", "mag_cal.json"))
+
+
+async def _broadcast_magcal(state) -> None:
+    """Push a fresh `magcal` to the tabs with the modal open, right after a
+    state-changing action rather than waiting for the next 4 Hz tick."""
+    clients = _magcal_clients(state)
+    if clients:
+        await _broadcast_text(clients, json.dumps(_magcal_report(state)))
+
+
+def install_mag_calibration(state, cal: MagCalibration) -> None:
+    """Adopt a newly-saved calibration WITHOUT a server restart.
+
+    Three consumers hold a reference to the calibration and all three are
+    updated here, which is what makes hot-reload real rather than partial:
+      * `state.mag_cal` -- read every tick by `build_sensor_message` /
+        `_mag_validity` / `orientation_view`'s World mode (heading, mag-validity
+        gate, the mag readout);
+      * the `YawFusion` filter's own `cal` -- it captured the object at
+        construction, so reassigning `state.mag_cal` alone would leave the
+        FUSED heading running on the old calibration indefinitely;
+      * the accumulated yaw offset, cleared via `reset_fusion()` so the filter
+        re-snaps to the new calibration's heading instead of low-passing from a
+        delta computed under the old one over the next ~20 s time constant.
+
+    Deliberately does NOT touch `display_rotation`/the point cloud/SLAM: those
+    consume `fused_quat()`'s tilt, which is SFLP gravity, not magnetic."""
+    state.mag_cal = cal
+    fusion = getattr(state, "fusion", None)
+    if fusion is not None:
+        fusion.cal = cal
+    sensor_state = getattr(state, "sensor_state", None)
+    if sensor_state is not None:
+        sensor_state.reset_fusion()
+
+
 def _log_debounced(state, bus: LogBus, key: str, message: str) -> None:
     """Publish `message` at most once per MISSING_PLANE_LOG_INTERVAL for a given
     key, so a persistently-missing plane doesn't spam the log (§7.2/§7.3)."""
@@ -1548,9 +2040,16 @@ async def _broadcaster() -> None:
     smoother = getattr(state, "orientation_smoother", None)
     if smoother is None:
         smoother = state.orientation_smoother = OrientationSmoother()
+    # Frame-to-frame jitter stats (owner ask, 2026-07-28) -- same lazy-create
+    # pattern as the smoother above, off the RAW quat (fused_quat(), never the
+    # smoothed display one).
+    jitter = getattr(state, "orientation_jitter", None)
+    if jitter is None:
+        jitter = state.orientation_jitter = OrientationJitter()
     last_ir = 0.0
     last_metrics = 0.0
     last_sensor = 0.0
+    last_magcal = 0.0
     next_pc = time.monotonic()   # deadline-based pacing: sleep to the next tick,
 
     while True:
@@ -1671,9 +2170,29 @@ async def _broadcaster() -> None:
         # Sensor (streams 9/10) on its own cadence; silent until 9/10 arrives.
         if now - last_sensor >= SENSOR_INTERVAL:
             last_sensor = now
-            smsg = build_sensor_message(state.sensor_state, state.mag_cal)
+            smsg = build_sensor_message(state.sensor_state, state.mag_cal, jitter,
+                                         orientation_mode=state.ui_state.orientation_mode,
+                                         axis_labels=state.ui_state.orientation_labels,
+                                         yaw_offset_deg=state.ui_state.yaw_offset_deg)
             if smsg is not None:
                 await _broadcast_text(clients, json.dumps(smsg))
+
+        # Magnetometer sweep (owner ask, 2026-07-29). Feed at the full loop
+        # rate so a tumble is sampled as densely as the env stream allows, but
+        # only while a tab has the modal open or a collection is running -- a
+        # normal session does no work here at all. The feed POLLS
+        # `latest_env()` (de-duplicated on `t_us`) rather than tapping the
+        # reader thread, so the shared sensor path is untouched; at 30 Hz loop
+        # vs ~28 Hz env that captures effectively every sample.
+        mag_session = getattr(state, "magcal_session", None)
+        magcal_clients = getattr(state, "magcal_clients", None) or set()
+        if mag_session is not None and (magcal_clients or mag_session.collecting):
+            env = state.sensor_state.latest_env()
+            if env is not None:
+                mag_session.add(env.mag_ut, env.t_us)
+            if magcal_clients and now - last_magcal >= MAGCAL_INTERVAL:
+                last_magcal = now
+                await _broadcast_text(magcal_clients, json.dumps(_magcal_report(state)))
 
         # Metrics + session + bus drain on the slowest cadence.
         if now - last_metrics >= METRICS_INTERVAL:
@@ -1714,7 +2233,7 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             data = await websocket.receive_text()
             try:
-                await _handle_inbound(state, json.loads(data))
+                await _handle_inbound(state, json.loads(data), websocket)
             except Exception as exc:  # a malformed inbound message must never kill the loop (§9)
                 log.warning("bad inbound ws message: %r (%s)", data[:200], exc)
     except WebSocketDisconnect:
@@ -1723,11 +2242,16 @@ async def websocket_endpoint(websocket: WebSocket):
         log.warning("ws receive loop error: %r", exc)
     finally:
         clients.discard(websocket)
+        _magcal_clients(state).discard(websocket)   # stop paying for a closed modal
         await _viewer_left(state)   # arm the debounced sensor idle if that was the last tab
 
 
-async def _handle_inbound(state, msg: dict) -> None:
-    """Route one decoded inbound JSON message by `type` (§5.4)."""
+async def _handle_inbound(state, msg: dict, ws=None) -> None:
+    """Route one decoded inbound JSON message by `type` (§5.4).
+
+    `ws` is the originating socket, needed only by `magcal` (whose report
+    stream is per-tab, not a global broadcast). Optional so every existing
+    caller/test that routes a message without one keeps working."""
     mtype = msg.get("type")
     ui: UiState = state.ui_state
 
@@ -1895,6 +2419,54 @@ async def _handle_inbound(state, msg: dict) -> None:
                 _cancel_idle_timer(state)   # a pending idle must not fire once disabled
             await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
 
+    elif mtype == "set_orientation":
+        # Orientation decomposition mode + custom axis labels (owner ask,
+        # 2026-07-28). Presentation-only -- see `orientation_view()`.
+        changed = False
+        if "mode" in msg:
+            if msg["mode"] not in _VALID_ORIENTATION_MODES:
+                log.warning("invalid set_orientation mode: %r", msg.get("mode"))
+                return
+            ui.orientation_mode = msg["mode"]
+            changed = True
+        if "labels" in msg:
+            ui.orientation_labels = _sanitize_axis_labels(msg["labels"])
+            changed = True
+        if changed:
+            _persist_ui(state)
+            await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+
+    elif mtype == "zero_yaw":
+        # "Zero yaw here" (owner ask, 2026-07-29): the SFLP-derived yaw has an
+        # arbitrary power-on origin and free-runs with gyro drift (no mag
+        # input -- unlike roll/pitch, which are gravity-referenced and
+        # absolute). Capture the CURRENTLY DISPLAYED mode's yaw-like slot at
+        # THIS attitude and store the `graft_yaw` delta that zeroes it, so the
+        # Sensors card reads 0 here and tracks relative motion from this pose
+        # afterward. No-op in World mode: its yaw slot is the absolute
+        # magnetic `heading_full`, not a function of the quat's own yaw, so
+        # there is nothing sensible to zero (also disabled client-side; see
+        # sensors.js's `isWorld` guard on the button).
+        if ui.orientation_mode == "world":
+            log.warning("zero_yaw ignored: World mode's heading is absolute magnetic north")
+            return
+        quat = state.sensor_state.fused_quat()
+        if quat is None:
+            log.warning("zero_yaw ignored: no orientation yet")
+            return
+        raw_yaw = orientation_view(ui.orientation_mode, quat).get("yaw_deg")
+        if raw_yaw is None:
+            return
+        ui.yaw_offset_deg = _YAW_GRAFT_SIGN[ui.orientation_mode] * float(raw_yaw)
+        _persist_ui(state)
+        await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+
+    elif mtype == "clear_yaw_offset":
+        # Explicit reset back to the raw (un-offset) SFLP yaw.
+        ui.yaw_offset_deg = 0.0
+        _persist_ui(state)
+        await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+
     elif mtype == "save":
         slam = getattr(state, "slam_runner", None)
         if slam is None or ui.mode != "slam":
@@ -1915,8 +2487,99 @@ async def _handle_inbound(state, msg: dict) -> None:
         state.sensor_state.reset_fusion()
         state.bus.publish("heading fusion reset")
 
+    elif mtype == "magcal":
+        await _handle_magcal(state, msg, ws)
+
     else:
         log.warning("unknown inbound message type: %r", mtype)
+
+
+_MAGCAL_ACTIONS = ("open", "close", "start", "stop", "reset", "save", "discard", "view")
+
+
+async def _handle_magcal(state, msg: dict, ws=None) -> None:
+    """Route one `{"type": "magcal", "action": ...}` request.
+
+    The workflow is deliberately two-stage — a fit is only ever a CANDIDATE
+    until `save`, and `save` refuses a candidate that doesn't exist — so the
+    saved calibration can never be replaced by a fit the user hasn't seen the
+    quality of. That is the process failure this feature is fixing: the
+    2026-07-15 calibration was accepted with no measurement of its
+    field-magnitude consistency and stayed in production for two weeks.
+    """
+    action = msg.get("action")
+    if action not in _MAGCAL_ACTIONS:
+        log.warning("unknown/invalid magcal action: %r", action)
+        return
+    session = _magcal_session(state)
+    clients = _magcal_clients(state)
+
+    if action == "open":
+        if ws is not None:
+            clients.add(ws)
+        # Answer this tab immediately rather than making it wait up to 250 ms
+        # for the next broadcaster tick (Phase-1 late-joiner rule).
+        if ws is not None:
+            await ws.send_text(json.dumps(_magcal_report(state)))
+        return
+
+    if action == "close":
+        if ws is not None:
+            clients.discard(ws)
+        return
+
+    if action == "start":
+        session.start()
+        state.bus.publish("mag calibration: collecting")
+    elif action == "stop":
+        session.stop()          # fits a candidate; never raises
+        if session.candidate is not None:
+            q = quality_report_verdict(session, state)
+            state.bus.publish(f"mag calibration: fit {q}")
+        else:
+            state.bus.publish(f"mag calibration: fit failed ({session.fit_error})")
+    elif action == "reset":
+        session.reset()
+        state.bus.publish("mag calibration: samples cleared")
+    elif action == "discard":
+        # Keep the samples: the usual reason to reject a candidate is "not
+        # enough coverage yet", and the fix is to tumble MORE into the same
+        # cloud, not to throw away what's already there.
+        session.candidate = None
+        session.fit_error = None
+        state.magcal_view = "current"
+        state.bus.publish("mag calibration: candidate discarded")
+    elif action == "view":
+        state.magcal_view = msg.get("cal") if msg.get("cal") in ("current", "candidate") else "current"
+    elif action == "save":
+        cal = session.candidate
+        if cal is None:
+            state.bus.publish("mag calibration: nothing to save (stop collection first)")
+        else:
+            path = Path(getattr(state, "mag_cal_path", "mag_cal.json"))
+            try:
+                cal.save(path)
+            except OSError as exc:
+                state.bus.publish(f"mag calibration: save FAILED {exc}")
+            else:
+                install_mag_calibration(state, cal)
+                session.candidate = None
+                state.magcal_view = "current"
+                state.bus.publish(
+                    f"mag calibration: saved -> {path} (field {cal.field_ut:.2f} uT), applied live")
+    await _broadcast_magcal(state)
+
+
+def quality_report_verdict(session: MagSweepSession, state) -> str:
+    """Short human summary of the candidate for the event log."""
+    report = _magcal_report(state)
+    cand = report.get("candidate") or {}
+    field = cand.get("field") or {}
+    std = field.get("std_pct")
+    cov = (cand.get("coverage") or {}).get("fraction")
+    return (f"{cand.get('verdict', '?')} — |B| spread "
+            f"{'?' if std is None else f'{std:.1f}%'}, coverage "
+            f"{'?' if cov is None else f'{100 * cov:.0f}%'}")
 
 
 # --- CLI entry point --------------------------------------------------------
@@ -1965,9 +2628,11 @@ def main(argv=None) -> int:
     # flags; a missing mag_cal.json just leaves fusion in gated:no-cal.
     mag_cal = None
     fusion = None
+    # Resolved ONCE so the web calibration modal saves to exactly the file the
+    # loader (and panel.py:440) reads -- same expression, no second convention.
+    mag_cal_path = getattr(args, "mag_cal_path", "mag_cal.json") or "mag_cal.json"
     if getattr(args, "yaw_fusion", True):
-        mag_cal = MagCalibration.load(
-            getattr(args, "mag_cal_path", "mag_cal.json") or "mag_cal.json")
+        mag_cal = MagCalibration.load(mag_cal_path)
         fusion = YawFusion(
             tau_s=float(getattr(args, "yaw_fusion_tau", 20.0) or 20.0),
             calibration=mag_cal,
@@ -2015,9 +2680,18 @@ def main(argv=None) -> int:
     app.state.ui_state = ui_from_config(config)
     app.state.sensor_state = sensor_state
     app.state.mag_cal = mag_cal
+    # Magnetometer sweep modal (owner ask, 2026-07-29). `fusion` is held so a
+    # Save can hot-reload the filter's calibration too (install_mag_calibration);
+    # `magcal_clients` is the per-tab subscriber set (empty => zero cost).
+    app.state.mag_cal_path = mag_cal_path
+    app.state.fusion = fusion
+    app.state.magcal_session = MagSweepSession()
+    app.state.magcal_clients = set()
+    app.state.magcal_view = "current"
     app.state.slam_runner = slam_runner
     app.state.deproj = None
     app.state.orientation_smoother = OrientationSmoother()
+    app.state.orientation_jitter = OrientationJitter()
     app.state.clients = set()
     app.state.command_labels = set()
     app.state.debounce = {}
