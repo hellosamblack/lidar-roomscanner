@@ -94,6 +94,27 @@ _Static_assert(sizeof(rs_lsm_raw_word_t) == RS_IMU_RAW_REC_SIZE, "IMU_RAW record
 #define RS_LSM_GY_LPF1_ON   (1)
 #define RS_LSM_GY_LPF1_BW   LSM6DSV16X_GY_AGGRESSIVE  /* 110b -> 28.4 Hz @ ODR 480 Hz */
 
+/* ---- Sensor-hub averaging (2026-07-28, same class of defect as RS_LSM_SFLP_AVERAGE) -------
+ * The sensor-hub master reads ALL connected slaves (baro/mag/temp, see rs_lsm_shub_init) once
+ * per hub cycle at LSM6DSV16X_SH_60Hz -- one shared rate, not per-slave -- and every enabled
+ * slave is FIFO-batched at that same 60 Hz. The FIFO is drained once per ToF frame (~28-30 Hz),
+ * so each drain sees ~2 FIFO words per slave (60 / 30), and rs_lsm_shub_demux used to just
+ * overwrite out->{pressure_pa,mag_ut,temp_c} on every word, keeping only the last of that ~2 and
+ * throwing the other away -- a milder version of the same point-sampling defect BUG-027 fixed
+ * for SFLP (17:1 there vs ~2:1 here). Accumulate-and-divide is the correct decimation; averaging
+ * white noise over 2 samples is worth ~sqrt(2) = 1.4x.
+ *
+ * All three slaves share one hub cycle, so the same ~2-words-per-drain arithmetic applies to
+ * all of them mechanically -- there's no structural reason to average mag but not baro/temp.
+ * (Whether each of the ~2 hub reads is a genuinely new physical conversion depends on the
+ * individual slave's own ODR vs. the 60 Hz hub rate -- LPS22DF is configured well below 60 Hz,
+ * so some of its pairs may be duplicate reads of the same conversion; STTS22H free-run AVG=4 is
+ * close to 60 Hz. Either way averaging is safe: the mean of two identical duplicate reads is
+ * that same value, so a slave with no new sample yet just costs a few flops for zero effect,
+ * while a slave that did convert twice gets the same 1.4x. Averaging all three keeps the demux
+ * uniform instead of special-casing by (unmeasured, config-dependent) per-slave update rate. */
+#define RS_LSM_SHUB_AVERAGE (1)   /* average each slave's FIFO batch instead of keeping the last sample */
+
 #define LSM_ADDR 0x50u           /* LSM6DSV16X dynamic I3C address (rs_assign_dynamic_addresses) */
 
 extern I3C_HandleTypeDef hi3c1;
@@ -299,26 +320,61 @@ static int rs_lsm_shub_init(void) {
     return 0;
 }
 
-static void rs_lsm_shub_demux(const lsm6dsv16x_fifo_out_raw_t *w, rs_lsm_sample_t *out) {
+#if RS_LSM_SHUB_AVERAGE
+/* Accumulator for one drain's worth of sensor-hub samples -- see RS_LSM_SHUB_AVERAGE. Mirrors
+ * quat_acc/quat_n in rs_lsm_read_latest_raw, just three independent scalar/vector channels
+ * instead of one quaternion (no hemisphere alignment needed, these aren't rotations). */
+typedef struct {
+    float press_acc;     uint16_t press_n;
+    float mag_acc[3];    uint16_t mag_n;
+    float temp_acc;      uint16_t temp_n;
+} rs_lsm_shub_acc_t;
+#endif
+
+static void rs_lsm_shub_demux(const lsm6dsv16x_fifo_out_raw_t *w, rs_lsm_sample_t *out
+#if RS_LSM_SHUB_AVERAGE
+                              , rs_lsm_shub_acc_t *acc
+#endif
+                              ) {
     switch (w->tag) {
     case LSM6DSV16X_SENSORHUB_SLAVE0_TAG: {  /* LPS22DF pressure, 24-bit LE */
         uint32_t raw = (uint32_t)w->data[0] | ((uint32_t)w->data[1] << 8) |
                        ((uint32_t)w->data[2] << 16);
-        out->pressure_pa = (float)raw * (100.0f / 4096.0f);  /* hPa=raw/4096 -> Pa */
+        float pa = (float)raw * (100.0f / 4096.0f);  /* hPa=raw/4096 -> Pa */
+#if RS_LSM_SHUB_AVERAGE
+        acc->press_acc += pa;
+        acc->press_n++;
+#else
+        out->pressure_pa = pa;
+#endif
         out->have_env = 1;
         break;
     }
     case LSM6DSV16X_SENSORHUB_SLAVE1_TAG: {  /* LIS2MDL mag x,y,z int16 LE */
         for (int i = 0; i < 3; i++) {
             int16_t raw = (int16_t)(w->data[2 * i] | (w->data[2 * i + 1] << 8));
-            out->mag_ut[i] = (float)raw * 0.15f;  /* 1.5 mgauss/LSB * 0.1 µT/mgauss */
+            float ut = (float)raw * 0.15f;  /* 1.5 mgauss/LSB * 0.1 µT/mgauss */
+#if RS_LSM_SHUB_AVERAGE
+            acc->mag_acc[i] += ut;
+#else
+            out->mag_ut[i] = ut;
+#endif
         }
+#if RS_LSM_SHUB_AVERAGE
+        acc->mag_n++;
+#endif
         out->have_env = 1;
         break;
     }
     case LSM6DSV16X_SENSORHUB_SLAVE2_TAG: {  /* STTS22H temp int16 LE */
         int16_t raw = (int16_t)(w->data[0] | (w->data[1] << 8));
-        out->temp_c = (float)raw * 0.01f;
+        float c = (float)raw * 0.01f;
+#if RS_LSM_SHUB_AVERAGE
+        acc->temp_acc += c;
+        acc->temp_n++;
+#else
+        out->temp_c = c;
+#endif
         out->have_env = 1;
         break;
     }
@@ -444,6 +500,11 @@ int rs_lsm_read_latest_raw(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_
     float quat_acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     uint16_t quat_n = 0;
 #endif
+#if RS_LSM_ENABLE_SHUB && RS_LSM_SHUB_AVERAGE
+    /* Accumulate each shub slave's batch rather than keeping its last sample -- see
+     * RS_LSM_SHUB_AVERAGE. */
+    rs_lsm_shub_acc_t shub_acc = { 0 };
+#endif
 
     lsm6dsv16x_fifo_status_t status;
     if (lsm6dsv16x_fifo_status_get(&g_ctx, &status) != 0) {
@@ -516,7 +577,11 @@ int rs_lsm_read_latest_raw(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_
         case LSM6DSV16X_SENSORHUB_SLAVE0_TAG:   /* LPS22DF pressure */
         case LSM6DSV16X_SENSORHUB_SLAVE1_TAG:   /* LIS2MDL mag */
         case LSM6DSV16X_SENSORHUB_SLAVE2_TAG:   /* STTS22H temp */
-            rs_lsm_shub_demux(&word, out);
+            rs_lsm_shub_demux(&word, out
+#if RS_LSM_SHUB_AVERAGE
+                              , &shub_acc
+#endif
+                              );
             break;
 #endif
         default:
@@ -533,6 +598,19 @@ int rs_lsm_read_latest_raw(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_
             }
             out->have_quat = 1;
         }
+    }
+#endif
+#if RS_LSM_ENABLE_SHUB && RS_LSM_SHUB_AVERAGE
+    if (shub_acc.press_n != 0) {
+        out->pressure_pa = shub_acc.press_acc / (float)shub_acc.press_n;
+    }
+    if (shub_acc.mag_n != 0) {
+        for (int k = 0; k < 3; k++) {
+            out->mag_ut[k] = shub_acc.mag_acc[k] / (float)shub_acc.mag_n;
+        }
+    }
+    if (shub_acc.temp_n != 0) {
+        out->temp_c = shub_acc.temp_acc / (float)shub_acc.temp_n;
     }
 #endif
     if (raw_count != NULL) {
