@@ -49,7 +49,15 @@ from .deproject import Deprojector
 from .ir_image import ir_range, reflectance_to_rgb
 from .logbus import LogBus
 from .magcal import MagCalibration
-from .magsweep import MagSweepSession, build_report as build_magcal_report
+from .magsweep import (
+    MagSweepSession,
+    assign_cells,
+    build_report as build_magcal_report,
+    calibrated_directions,
+    calibrated_norms,
+    motion_state,
+    view_calibration,
+)
 from .metrics import MetricsRegistry, MetricsSnapshot
 from .flatfield import FlatField
 from .pipeline import TransformStage
@@ -98,6 +106,7 @@ TAG_POINT_CLOUD = 1
 TAG_IR_IMAGE = 2
 TAG_MESH = 3               # SLAM reconstruction mesh (web Phase 4)
 TAG_SURFACE = 4            # surface-interpolated point cloud (grid + triangles)
+TAG_MAGPOSE = 5            # 30 Hz magcal pose/field sample (magcal 3D feedback)
 
 # Broadcast cadences (seconds). Point cloud paces the outer loop at a 30 Hz
 # target (owner, 2026-07-16) -- the cap must sit at or above the source rate so
@@ -113,11 +122,14 @@ SENSOR_INTERVAL = 1.0 / 15.0
 # Rolling window for the orientation jitter stats (roll/pitch/yaw/heading/overall):
 # ~5s of `sensor` messages at SENSOR_INTERVAL (15 Hz) => ~75 frame-to-frame samples.
 SENSOR_JITTER_WINDOW_S = 5.0
-# Magnetometer-sweep (`magcal` modal) report cadence. 4 Hz is fast enough to
-# feel live while tumbling and keeps the whole-cloud re-bin in `build_report`
-# (an O(samples x cells) matmul) to a low duty cycle. Sent ONLY to tabs that
-# have the modal open -- see `state.magcal_clients`.
-MAGCAL_INTERVAL = 1.0 / 4.0
+# Magnetometer-sweep (`magcal` modal) TRUTH cadence -- the JSON report: cell
+# counts, verdicts, coverage, guidance. 5 Hz (raised from 4 when `cell_dirs`
+# stopped riding every message: 4490 B -> 1982 B, so the raise is still ~2x
+# cheaper than before). This is data that changes at HUMAN speed; the 30 Hz
+# render payload rides the binary MAGPOSE channel instead (docs/web-protocol.md
+# "Framing": high-rate render payloads are tagged binary, human-rate state is
+# JSON). Sent ONLY to tabs that have the modal open -- `state.magcal_clients`.
+MAGCAL_INTERVAL = 1.0 / 5.0
 MISSING_PLANE_LOG_INTERVAL = 3.0   # debounce for missing-plane bus lines
 
 # Recording & playback (web Phase 3).
@@ -1970,19 +1982,142 @@ def _magcal_clients(state) -> set:
     return clients
 
 
-def _magcal_report(state) -> dict:
+def _magcal_report(state, full: bool = False) -> dict:
+    """The slow TRUTH channel. `full=True` (only on `open`) adds the two
+    deterministic constants the client caches -- `cell_dirs` + `t_world_to_cv`."""
     return build_magcal_report(
         _magcal_session(state), getattr(state, "mag_cal", None),
         view=getattr(state, "magcal_view", "current"),
-        saved_path=getattr(state, "mag_cal_path", "mag_cal.json"))
+        saved_path=getattr(state, "mag_cal_path", "mag_cal.json"),
+        full=full)
 
 
 async def _broadcast_magcal(state) -> None:
     """Push a fresh `magcal` to the tabs with the modal open, right after a
-    state-changing action rather than waiting for the next 4 Hz tick."""
+    state-changing action rather than waiting for the next 5 Hz tick."""
     clients = _magcal_clients(state)
     if clients:
         await _broadcast_text(clients, json.dumps(_magcal_report(state)))
+
+
+# --- MAGPOSE (binary tag 5): the fast half of the magcal channel -------------
+#
+# WHY A SECOND CHANNEL. The `magcal` JSON is 1982 B; at 30 Hz that would be
+# 60 kB/s and 30 x JSON.parse per second on the UI thread, to move data (cell
+# counts, verdicts, coverage) that changes at HUMAN speed. Split by rate of
+# change instead, exactly as the rest of the app does: high-rate render payloads
+# are tagged binary, human-rate state is JSON.
+#
+# `filled_cell` is the trick that keeps the JSON slow: the 30 Hz channel carries
+# the DELTA ("this sample just lit cell 47"), so a cell goes solid the instant it
+# fills, while the 5 Hz JSON remains the truth that reconciles counts and
+# verdicts (and corrects the delta -- `MagSweepSession.sync_occupied`).
+#
+# Binary rather than a small 30 Hz JSON because orientation must not be measured
+# off a rounded decimal (`sensor.rot` is 5 dp); f32 avoids inventing a second
+# rounding policy and matches `pack_point_cloud`'s precedent.
+MAGPOSE_COLLECTING = 1 << 0
+MAGPOSE_STATIONARY = 1 << 1
+MAGPOSE_ANOMALY = 1 << 2        # reserved: anomalous-sample detection is Phase 2
+MAGPOSE_HAVE_QUAT = 1 << 3
+MAGPOSE_PROVISIONAL = 1 << 4    # binning on a provisional/raw estimate, not a real cal
+MAGPOSE_REJECTED = 1 << 5
+
+# u32 tag - u32 seq - f32[4] quat(w,x,y,z) - f32[3] field_dir_body -
+# f32[3] gravity_body - f32 field_ut - f32 dev_pct - f32 dip_deg -
+# i16 live_cell - i16 filled_cell - u16 flags - u16 pad   => 68 bytes.
+_MAGPOSE = struct.Struct("<II13fhhHH")
+MAGPOSE_SIZE = _MAGPOSE.size
+
+
+def pack_magpose(seq: int, quat, field_dir, gravity, field_ut: float,
+                 dev_pct: float, dip_deg: float, live_cell: int,
+                 filled_cell: int, flags: int) -> bytes:
+    """Pack one MAGPOSE frame. Pure; every value already resolved by
+    `build_magpose`. `live_cell`/`filled_cell` use -1 for "none"."""
+    return _MAGPOSE.pack(
+        TAG_MAGPOSE, int(seq) & 0xFFFFFFFF,
+        float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3]),
+        float(field_dir[0]), float(field_dir[1]), float(field_dir[2]),
+        float(gravity[0]), float(gravity[1]), float(gravity[2]),
+        float(field_ut), float(dev_pct), float(dip_deg),
+        int(live_cell), int(filled_cell), int(flags) & 0xFFFF, 0)
+
+
+def build_magpose(session: MagSweepSession, current, sensor_state, seq: int,
+                  view: str = "current", stored: bool = False) -> bytes | None:
+    """One 30 Hz pose+field sample for the open magcal modals, or None when
+    there is no magnetometer sample to report (a ToF-only source, or a replay
+    with no stream 10 -- the modal then says *nothing is arriving* rather than
+    animating a convincingly empty sphere).
+
+    ISOLATION: reads `fused_quat()` / `latest_imu_raw()` and writes nothing to
+    them. The only mutation is `session.mark_occupied`, which is the magcal
+    session's own state. Guarded by
+    `test_magcal_preview_does_not_touch_display_path`."""
+    raw = session.live_raw
+    if raw is None:
+        return None
+    bin_cal = session.binning_calibration(current)
+    dirs = calibrated_directions([raw], bin_cal)
+    if dirs.shape[0] == 0:
+        return None
+    d = dirs[0]
+    live_cell = int(assign_cells(dirs, session.n)[0])
+
+    view_cal, _ = view_calibration(session, current, view)
+    if view_cal is not None:
+        field_ut = float(calibrated_norms([raw], view_cal)[0])
+        expected = float(view_cal.field_ut)
+        dev_pct = 100.0 * (field_ut - expected) / expected if expected > 1e-9 else math.nan
+    else:
+        # No calibration at all: |B| of the raw vector is a meaningless number
+        # to plot against a ramp, so say "unknown" rather than draw a colour.
+        field_ut = float(np.linalg.norm(np.asarray(raw, dtype=np.float64)))
+        dev_pct = math.nan
+
+    quat = sensor_state.fused_quat() if sensor_state is not None else None
+    have_quat = quat is not None
+    if not have_quat:
+        quat = (1.0, 0.0, 0.0, 0.0)
+
+    # Gravity: stream-11 SFLP gravity when the device streams it (~16x finer in
+    # tilt than the fp16 quaternion), else the quat-derived down vector -- the
+    # same order `build_sensor_message` already uses. Do not re-derive.
+    gravity = None
+    if sensor_state is not None:
+        gravity = gravity_body_from_imu_raw(sensor_state.latest_imu_raw())
+    if gravity is None and have_quat:
+        gravity = tuple(float(v) for v in
+                        (quat_to_matrix(*quat).T @ np.array([0.0, 0.0, -1.0])))
+    if gravity is None:
+        gravity = (0.0, 0.0, 0.0)
+        dip_deg = math.nan
+    else:
+        # The dip arc: angle(B, g). For a CORRECT calibration this is a constant
+        # of the location (90 deg + magnetic dip) -- both vectors are fixed in
+        # the world, so their mutual angle cannot depend on attitude. It is also
+        # immune to scale error, so it catches the soft-iron / axis-misalignment
+        # faults a self-consistent-but-wrong-magnitude calibration sails past.
+        dip_deg = math.degrees(math.acos(
+            float(np.clip(np.dot(d, np.asarray(gravity, dtype=np.float64)), -1.0, 1.0))))
+
+    filled = live_cell if (stored and session.mark_occupied(live_cell)) else -1
+
+    flags = 0
+    if session.collecting:
+        flags |= MAGPOSE_COLLECTING
+    if have_quat:
+        flags |= MAGPOSE_HAVE_QUAT
+    if bin_cal is None or (session.candidate is None and current is None):
+        flags |= MAGPOSE_PROVISIONAL
+    if session.last_rejected:
+        flags |= MAGPOSE_REJECTED
+    if motion_state(session.recent, bin_cal)["stationary"]:
+        flags |= MAGPOSE_STATIONARY
+
+    return pack_magpose(seq, quat, d, gravity, field_ut, dev_pct, dip_deg,
+                        live_cell, filled, flags)
 
 
 def install_mag_calibration(state, cal: MagCalibration) -> None:
@@ -2050,6 +2185,7 @@ async def _broadcaster() -> None:
     last_metrics = 0.0
     last_sensor = 0.0
     last_magcal = 0.0
+    magpose_seq = 0
     next_pc = time.monotonic()   # deadline-based pacing: sleep to the next tick,
 
     while True:
@@ -2188,8 +2324,20 @@ async def _broadcaster() -> None:
         magcal_clients = getattr(state, "magcal_clients", None) or set()
         if mag_session is not None and (magcal_clients or mag_session.collecting):
             env = state.sensor_state.latest_env()
+            stored = False
             if env is not None:
-                mag_session.add(env.mag_ut, env.t_us)
+                stored = mag_session.add(env.mag_ut, env.t_us)
+            if magcal_clients:
+                # MAGPOSE every tick (30 Hz): the render payload. `stored` gates
+                # the newly-filled-cell delta so a de-duplicated env sample can
+                # never claim to have filled anything.
+                pose = build_magpose(mag_session, getattr(state, "mag_cal", None),
+                                     state.sensor_state, magpose_seq,
+                                     view=getattr(state, "magcal_view", "current"),
+                                     stored=stored)
+                if pose is not None:
+                    magpose_seq += 1
+                    await _broadcast_bytes(magcal_clients, pose)
             if magcal_clients and now - last_magcal >= MAGCAL_INTERVAL:
                 last_magcal = now
                 await _broadcast_text(magcal_clients, json.dumps(_magcal_report(state)))
@@ -2517,10 +2665,12 @@ async def _handle_magcal(state, msg: dict, ws=None) -> None:
     if action == "open":
         if ws is not None:
             clients.add(ws)
-        # Answer this tab immediately rather than making it wait up to 250 ms
-        # for the next broadcaster tick (Phase-1 late-joiner rule).
+        # Answer this tab immediately rather than making it wait up to 200 ms
+        # for the next broadcaster tick (Phase-1 late-joiner rule). This is the
+        # ONE report that carries `cell_dirs` + `t_world_to_cv`; the client
+        # caches them and every later tick omits them.
         if ws is not None:
-            await ws.send_text(json.dumps(_magcal_report(state)))
+            await ws.send_text(json.dumps(_magcal_report(state, full=True)))
         return
 
     if action == "close":

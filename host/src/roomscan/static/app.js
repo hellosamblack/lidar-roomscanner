@@ -28,13 +28,16 @@ createHud(hub);
 createLog(hub);
 createControls(hub);
 createSensors(hub);
-createMagcal(hub);      // magnetometer-calibration modal (opened from the Sensors card)
 createCapture(hub);
 createIr(hub);
 // scene.js returns a handle (Three.js context + follow-camera hooks); slam.js
 // renders the SLAM mesh/trajectory into that same scene (web Phase 4).
 const sceneApi = createScene(hub);
 createSlam(hub, sceneApi);
+// Magnetometer-calibration modal (opened from the Sensors card). It takes the
+// scene handle only to PAUSE the main render while the modal occludes it — it
+// never draws into scene.js's context (it owns its own; see magcal3d.js §8.3).
+createMagcal(hub, sceneApi);
 
 hub.connect();
 D('all modules instantiated; socket connecting');

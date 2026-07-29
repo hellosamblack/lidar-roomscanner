@@ -10,6 +10,7 @@
 //   ArrayBuffer                     -> LE uint32 tag in bytes[0..4)
 //                                        tag 1 -> emit("point_cloud", buffer)
 //                                        tag 2 -> emit("ir_image",    buffer)
+//                                        tag 5 -> emit("magpose",     buffer)
 //                                        else  -> console.warn + drop (never throw)
 // The RAW buffer (header included) is handed to subscribers so each parses its
 // own fixed layout; ws.js never needs to know point/pixel counts.
@@ -20,11 +21,13 @@
 
 const D = (m, l) => { try { window.__diag && window.__diag('ws.js: ' + m, l); } catch (e) {} };
 
-// Binary message type tags — mirror web.py TAG_POINT_CLOUD / TAG_IR_IMAGE / TAG_MESH / TAG_SURFACE.
+// Binary message type tags — mirror web.py TAG_POINT_CLOUD / TAG_IR_IMAGE /
+// TAG_MESH / TAG_SURFACE / TAG_MAGPOSE.
 const TAG_POINT_CLOUD = 1;
 const TAG_IR_IMAGE = 2;
 const TAG_MESH = 3;
 const TAG_SURFACE = 4;
+const TAG_MAGPOSE = 5;
 
 const RECONNECT_MS = 2000;
 
@@ -104,6 +107,7 @@ export function createHub() {
             else if (tag === TAG_IR_IMAGE) emit('ir_image', buffer);
             else if (tag === TAG_MESH) emit('mesh', buffer);
             else if (tag === TAG_SURFACE) emit('surface_cloud', buffer);
+            else if (tag === TAG_MAGPOSE) emit('magpose', buffer);
             else console.warn('[ws] unrecognized binary tag ' + tag + ', dropped');
         };
     }

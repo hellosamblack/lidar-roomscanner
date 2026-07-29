@@ -21,8 +21,9 @@ transformed, and *re-encoded* into these `/ws` messages.
 One socket, two encodings, distinguished by WS frame opcode:
 
 - **Binary frames** — high-rate render payloads. First 4 bytes are a little-endian `u32` **tag**;
-  the frontend switches on it (`app.js`). Tags: `TAG_POINT_CLOUD = 1`, `TAG_IR_IMAGE = 2`,
-  `TAG_MESH = 3`, `TAG_SURFACE = 4` (`web.py`). Add new binary tags here and keep them contiguous.
+  the frontend switches on it (`ws.js`). Tags: `TAG_POINT_CLOUD = 1`, `TAG_IR_IMAGE = 2`,
+  `TAG_MESH = 3`, `TAG_SURFACE = 4`, `TAG_MAGPOSE = 5` (`web.py`). Add new binary tags here and keep
+  them contiguous, and in lockstep across `web.py` / `ws.js` / this table (the `protocol-change` skill).
 - **Text frames** — JSON objects, always with a `"type"` string field. Everything that isn't a
   per-frame render payload (metrics, sensors, UI state, control echoes, logs) is JSON.
 
@@ -39,6 +40,7 @@ for display (units, precision).
 | 2 | `IR_IMAGE` | `u32 tag · u16 width · u16 height · u8[w*h*3] RGB` | `pack_ir_image` `web.py:212` |
 | 3 | `MESH` | `9×u32 header (tag, mesh_seq, flags, then 6 counts) · per-submesh f32 pos·f32 col·u32 idx · floor f32 pos·u32 line-idx` | `pack_mesh` (web Phase 4) — a SLAM `MeshPacket`; flags bit0=decimated, bit1=walls_split; emitted on the mesh-throttle cadence only |
 | 4 | `SURFACE` | `u32 tag · u16 w · u16 h · u32 n_tris · f32[3·W·H] positions · f32[3·W·H] colors · u8[W·H] valid · u32[3·T] tri_indices · u8[W·H] covered` | `pack_surface_cloud` — grid-ordered positions+colors + triangulated mesh indices; sent instead of POINT_CLOUD when `surface_enabled` is true |
+| 5 | `MAGPOSE` | `u32 tag · u32 seq · f32[4] quat(w,x,y,z) · f32[3] field_dir_body · f32[3] gravity_body · f32 field_ut · f32 dev_pct · f32 dip_deg · i16 live_cell · i16 filled_cell · u16 flags · u16 pad` — **68 bytes**, ~2.0 kB/s at 30 Hz | `pack_magpose` / `build_magpose` (magcal 3D feedback, 2026-07-29) — sent **only to `state.magcal_clients`** on the 30 Hz broadcaster tick. `live_cell`/`filled_cell` are `-1` for none; `dev_pct`/`dip_deg` may be `NaN` (no calibration / no gravity). `flags`: bit0 collecting, bit1 stationary, bit2 mag_anomaly *(reserved, Phase 2)*, bit3 have_quat, bit4 provisional_binning, bit5 sample_rejected. See "Magnetometer sweep" below |
 
 `POINT_CLOUD` (or `SURFACE` in surface mode) goes out every broadcast tick (so late joiners see data within ~36 ms);
 `IR_IMAGE` rides a slower cadence (`web.py:855`, `:869`).
@@ -231,10 +233,42 @@ delta re-snaps instead of low-passing a stale one. No server restart is needed. 
 is refused, so the saved calibration can never be replaced by a fit nobody previewed; `discard` keeps the
 samples so the user can keep tumbling into the same cloud.
 
-*Isolation.* Everything except `save` is pure observation. Collecting/fitting/previewing/discarding leave
-`display_rotation`, the point-cloud bytes, `fused_quat()` and the loaded calibration bit-identical —
-guarded by `tests/test_magsweep.py::test_magcal_preview_does_not_touch_display_path`. The live view keeps
-streaming while the modal is open (the modal is an overlay, not a mode).
+*Isolation.* Everything except `save` is pure observation. Collecting/fitting/previewing/discarding —
+**including the 30 Hz `MAGPOSE` stream** — leave `display_rotation`, the point-cloud bytes, `fused_quat()`
+and the loaded calibration bit-identical; guarded by
+`tests/test_magsweep.py::test_magcal_preview_does_not_touch_display_path`, which drives a full
+open → pose-stream → close cycle. The live view keeps streaming while the modal is open (the modal is an
+overlay, not a mode).
+
+**3D feedback — the two-channel split (owner ask, 2026-07-29; design
+`docs/superpowers/specs/2026-07-29-magcal-3d-feedback-design.md`, Phase 1).** The modal's hero is now a
+WebGL "coverage shell" (`static/magcal3d.js`), with the 2D Lambert disc pair kept as the **fallback**
+renderer. Two things follow for this protocol:
+
+*The split.* Raising the `magcal` JSON to 30 Hz would be ~60 kB/s and 30 × `JSON.parse` per second of
+UI-thread work for data (cell counts, verdicts, coverage) that changes at **human** speed — the wrong axis
+to scale. Instead the channel is split by rate of change, exactly as the rest of the app splits it:
+the **binary `MAGPOSE` tag 5** carries pose + field direction + gravity + live cell at 30 Hz (68 B), and
+the **`magcal` JSON** stays the 5 Hz truth. `filled_cell` is what lets the JSON stay slow: the fast channel
+carries the *delta* ("this sample just lit cell 47") so a cell goes solid the instant it fills, while the
+slow channel reconciles the counts (`MagSweepSession.sync_occupied`). Binary rather than a small 30 Hz
+JSON because orientation must not be measured off a rounded decimal — `sensor.rot` is 5 dp; f32 avoids
+inventing a second rounding policy.
+
+*Frames — what the client is allowed to compute.* Per `docs/coordinate-frames.md` and the "server-side
+math stays server-side" invariant, **no sign or permutation matrix is ever written in JS**. The body-fixed
+hero needs **no transform at all** (`cell_dirs`, `field_dir_body`, `gravity_body` are already SFLP-body
+unit vectors — which is also why it renders correctly on a session with no stream 9). The world-fixed
+Steering widget maps a body vector to the renderer's world as `T_WORLD_TO_CV · R · v_body` — note **not**
+the `T_WORLD_TO_CV · R · T_CV_TO_BODY` sandwich, which maps *CV* points; ours are already body points, so
+the `T_CV_TO_BODY` leg is absent. `T_WORLD_TO_CV` is shipped once as `t_world_to_cv[9]` (row-major) on
+`open` and applied as a static matrix; the only per-frame client math is `quat → Quaternion` and a slerp.
+The steering rotation likewise arrives as an explicit body `guidance_axis.axis` + `angle_deg`
+(`axis = unit(t × d)`, `angle = acos(t·d)`, `magsweep.rotation_to`), so the client never re-derives it.
+
+*Guidance has no dip or compass assumption.* The old text ("point the Top face toward magnetic north and
+downward") assumed northern-hemisphere dip *and* that the user knows where north is. It is replaced by the
+exact body-axis rotation above, plus a countdown of the cells left in the gap being steered at.
 
 ### JSON (`type` → shape)
 
@@ -247,7 +281,7 @@ streaming while the modal is open (the modal is an overlay, not a mode).
 | `captures` | `items[]{name,bytes,mtime}` (newest first) | `build_captures_message` `web.py:354` | on connect, on `list_captures`, after a recording stops |
 | `slam` | `pose`[16], `follow{eye,center,up}`, `traj_tail[][3]`, `traj_len`, `fitness`, `rmse`, `tracking_lost`, `slam_ms`, `frames_integrated`, `mesh_seq`, `mesh_verts` | `build_slam_message` (web Phase 4) | every processed frame in SLAM mode; follow eye/center/up computed server-side; traj downsampled to ≤256 |
 | `saved` | `items[]{name,bytes,mtime}` (newest first) | `build_saved_message` (web Phase 4) | `results/*.ply`; on connect and after a Save completes |
-| `magcal` | `collecting`, `sample_count`, `elapsed_s`, `cells`(92), `cell_dirs`[92][3], `cell_counts`[92], `cell_dev_pct`[92] (null = empty cell), `view`(current\|candidate), `live_cell`, `live_dir`[3], `gaps[]{size,fraction,centroid[3],face}`, `guidance`, `has_current`, `has_candidate`, `binning`(candidate\|current\|provisional\|raw), `fit_error`, `current`/`candidate`→{samples,samples_verdict,field{mean_ut,std_ut,std_pct,min_ut,max_ut,ratio,residual_rms_ut,expected_ut,bias_pct,spread_verdict,bias_verdict,verdict},coverage{cells,occupied,empty,fraction,verdict},verdict,limited_by,reason}, `current_field_ut`, `candidate_field_ut`, `saved_path` | `magsweep.build_report` via `web._magcal_report` | **Per-tab, not broadcast**: sent at `MAGCAL_INTERVAL` (4 Hz) only to sockets in `state.magcal_clients` (i.e. tabs that sent `magcal/open`), plus immediately on `open` and after every state-changing action. A session with the modal closed everywhere costs nothing. See "Magnetometer sweep" below |
+| `magcal` | `collecting`, `sample_count`, `elapsed_s`, `cells`(92), `cell_counts`[92], `cell_dev_pct`[92] (null = empty cell), `view`(current\|candidate), `live_cell`, `live_dir`[3], `gaps[]{size,fraction,centroid[3],face}`, `guidance`, `guidance_axis`{axis[3],angle_deg,text,target[3],target_cell,region_size,from_face,to_face}, `live_fit`{samples,used,field_ut,std_pct,bias_pct,residual_rms_ut,spread_verdict,bias_verdict,verdict,error}, `motion`{stationary,spread_deg,window_s,n}, `has_current`, `has_candidate`, `binning`(candidate\|current\|provisional\|raw), `fit_error`, `current`/`candidate`→{samples,samples_verdict,field{mean_ut,std_ut,std_pct,min_ut,max_ut,ratio,residual_rms_ut,expected_ut,bias_pct,spread_verdict,bias_verdict,verdict},coverage{cells,occupied,empty,fraction,verdict},verdict,limited_by,reason}, `current_field_ut`, `candidate_field_ut`, `saved_path`; **on `open` only**: `cell_dirs`[92][3], `t_world_to_cv`[9] (row-major) | `magsweep.build_report` via `web._magcal_report` | **Per-tab, not broadcast**: sent at `MAGCAL_INTERVAL` (**5 Hz**) only to sockets in `state.magcal_clients` (i.e. tabs that sent `magcal/open`), plus immediately on `open` and after every state-changing action. A session with the modal closed everywhere costs nothing. `cell_dirs`/`t_world_to_cv` are deterministic constants and ride the `open` report ONLY (4490 B → 1982 B per tick, a 56% cut); the client caches them. The 30 Hz render payload is the binary `MAGPOSE` channel, not this one. See "Magnetometer sweep" below |
 | `event` | `code`, `detail`, `msg` | `classify_bus_line` `web.py:142` | from a device EVENT bus line |
 | `cmd` | `label`, `status`(ok\|busy\|timeout\|error), `detail` | `classify_bus_line` `web.py:151` | command-result echo; `status` via `_cmd_status` `web.py:156` |
 | `log` | `line` | `classify_bus_line` `web.py:145,153` | catch-all bus line |

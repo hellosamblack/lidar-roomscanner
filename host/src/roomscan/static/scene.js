@@ -10,7 +10,8 @@
 // Public surface:
 //   createScene(hub) -> { resetCamera, THREE, scene, camera,
 //                         setPointsVisible(bool), setFollow(bool),
-//                         setFollowTarget(eye, center, up) }
+//                         setFollowTarget(eye, center, up),
+//                         setRenderActive(bool) }
 // slam.js (web Phase 4) uses the returned handle to add its mesh/trajectory
 // group to the same scene and to drive the follow camera (which must coordinate
 // with OrbitControls — only one may own the camera per frame).
@@ -245,8 +246,15 @@ export function createScene(hub) {
     // Render loop + VIEW-fps measurement (browser paint rate, published ~1/s).
     let framesRendered = 0;
     let lastFpsTime = performance.now();
+    // The magcal modal fully occludes this scene while it is open, so rendering
+    // it is pure waste (and, under software WebGL, the thing that starves the
+    // modal's own view). Additive: default true, nothing else touches it.
+    let renderActive = true;
+    function setRenderActive(on) { renderActive = !!on; }
+
     function animate() {
         requestAnimationFrame(animate);
+        if (!renderActive) { controls.update(); return; }
         if (followOn && haveFollowTarget) {
             controls.enabled = false;
             // Velocity-adaptive lerp: fast when the sensor moves, steady when still.
@@ -271,5 +279,6 @@ export function createScene(hub) {
     }
     animate();
 
-    return { resetCamera, THREE, scene, camera, setPointsVisible, setFollow, setFollowTarget };
+    return { resetCamera, THREE, scene, camera, setPointsVisible, setFollow,
+             setFollowTarget, setRenderActive };
 }

@@ -62,11 +62,12 @@ from __future__ import annotations
 
 import math
 import time
+from collections import deque
 
 import numpy as np
 
 from .magcal import MagCalibration, fit_ellipsoid
-from .sensors import AXIS_CONVENTION
+from .sensors import AXIS_CONVENTION, T_WORLD_TO_CV
 
 # Cell count of the Fibonacci sphere lattice -- see the module docstring for
 # why 92 (cell radius ~12 deg, fillable by hand, gap-legible).
@@ -96,6 +97,36 @@ SAMPLES_MARGINAL = 100
 MIN_FIT_SAMPLES = 20
 
 _VERDICT_RANK = {"good": 0, "marginal": 1, "bad": 2}
+
+# --- guidance / live-fit / motion tuning (3D feedback, 2026-07-29) -----------
+#
+# Steer at the largest connected empty region rather than the nearest stray
+# cell -- chasing a singleton is busywork. Below this size the region structure
+# has stopped meaning anything and the nearest empty cell is the better target
+# (a nearly-finished sphere with scattered misses).
+MIN_GUIDANCE_REGION = 3
+
+# Below this rotation the "from face -> to face" half of the guidance sentence is
+# dropped: two directions a few degrees apart can straddle a face boundary and
+# name two opposite faces for a nudge, which reads as a much bigger instruction
+# than it is.
+FACE_HINT_MIN_DEG = 25.0
+
+# The rolling provisional fit refits the WHOLE cloud on every report tick, so it
+# is capped: measured on this box `fit_ellipsoid` costs 0.29 ms at 1200 samples
+# and 3.18 ms at 20 000, and the report runs at 5 Hz. Above the cap the cloud is
+# decimated (evenly, not truncated -- truncating would drop the newest samples'
+# coverage, which is exactly what the user is watching).
+LIVE_FIT_MAX_SAMPLES = 4000
+
+# "The device isn't turning" detection, off the field DIRECTION rather than a
+# gyro: a device whose calibrated field direction has not moved is a device that
+# cannot be filling new cells, which is the only thing this view cares about.
+# Window and threshold are deliberately generous -- the point is to catch "the
+# board is sitting on the desk", not to measure motion.
+STATIONARY_WINDOW_S = 2.0
+STATIONARY_MIN_SAMPLES = 8
+STATIONARY_SPREAD_DEG = 4.0
 
 # Body-frame faces (SFLP body: X = Up, Y = Right, Z = Forward/boresight -- see
 # docs/coordinate-frames.md). Used to name WHERE a coverage gap is, so the
@@ -385,15 +416,169 @@ def nearest_face(direction) -> str:
     return max(FACES, key=lambda f: float(np.dot(v, f[1])))[0]
 
 
+def axis_pair_name(axis) -> str:
+    """Name a body AXIS (not a direction) by the face pair it runs through --
+    "Top–Bottom", "Right–Left", "Front–Back". An axis is signless for the
+    purpose of naming a spin, so both ends are named."""
+    v = unit(axis)
+    if v is None:
+        return "?"
+    face = nearest_face(v)
+    opposite = {"Top": "Bottom", "Bottom": "Top", "Right": "Left",
+                "Left": "Right", "Front": "Back", "Back": "Front"}
+    other = opposite.get(face)
+    if other is None:
+        return "?"
+    # Always name the pair in a fixed order so the same physical axis reads the
+    # same however the device happens to be held.
+    canonical = {"Top": ("Top", "Bottom"), "Bottom": ("Top", "Bottom"),
+                 "Right": ("Right", "Left"), "Left": ("Right", "Left"),
+                 "Front": ("Front", "Back"), "Back": ("Front", "Back")}[face]
+    return f"{canonical[0]}–{canonical[1]}"
+
+
+def rotation_to(d, t) -> tuple[np.ndarray, float] | None:
+    """The exact device rotation that moves the body-frame field direction `d`
+    onto the target cell direction `t`, as a BODY-frame (axis, angle_rad).
+
+    Derivation (do not re-derive it in the client -- this is the one place):
+    the body-frame field direction is `d = R^T . b_world`. Rotating the device
+    body by `dR` (applied in body axes, `R' = R . dR`) gives `d' = dR^T . d`.
+    We want `d' = t`, so `dR^T` is the rotation carrying `d -> t`, i.e.
+    `dR^T = Rot(unit(d x t), theta)` and therefore
+
+        axis  n = unit(t x d)          # a BODY axis -- drawable on the model
+        angle th = acos(clamp(t . d))  # the minimal rotation
+
+    `n` being a body axis is the whole point: it can be drawn as a curved arrow
+    literally around the device model, and the ghost target attitude is
+    `R_ghost = R . dR`. No dip assumption, no compass, no hemisphere -- which is
+    what the old "point the Top face toward magnetic north and downward" text
+    silently assumed (northern hemisphere, and that the user knows where north
+    is).
+
+    None if either vector is degenerate. Exactly antiparallel `d`/`t` has a
+    one-parameter family of 180-degree answers; an arbitrary perpendicular axis
+    is returned rather than NaN, because any of them is correct."""
+    dv = unit(d)
+    tv = unit(t)
+    if dv is None or tv is None:
+        return None
+    dot = float(np.clip(np.dot(tv, dv), -1.0, 1.0))
+    angle = math.acos(dot)
+    axis = np.cross(tv, dv)
+    norm = float(np.linalg.norm(axis))
+    if norm < 1e-9:
+        if dot > 0.0:                       # already on target
+            return np.array([1.0, 0.0, 0.0]), 0.0
+        seed = np.array([1.0, 0.0, 0.0]) if abs(dv[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        axis = np.cross(dv, seed)
+        return axis / float(np.linalg.norm(axis)), math.pi
+    return axis / norm, angle
+
+
+def axis_angle_matrix(axis, angle_rad: float) -> np.ndarray:
+    """Rodrigues rotation matrix for `rotation_to`'s output. Used by the tests
+    (and by nothing on the hot path) to assert the round trip
+    `dR^T . d == t`."""
+    k = unit(axis)
+    if k is None:
+        return np.eye(3)
+    kx = np.array([[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]])
+    return np.eye(3) + math.sin(angle_rad) * kx + (1.0 - math.cos(angle_rad)) * (kx @ kx)
+
+
+def select_target(regions: list[dict], live_dir=None,
+                  n: int = SPHERE_CELLS) -> tuple[int, np.ndarray, int] | None:
+    """Which empty cell to steer at: `(cell_index, direction, region_size)`.
+
+        target = argmin over cells of the LARGEST empty region of angle(c, d)
+                                                        if |region| >= MIN_GUIDANCE_REGION
+               = argmin over ALL empty cells of angle(c, d)          otherwise
+
+    Chasing the biggest hole is right (it is the one that will actually move the
+    coverage number); chasing the nearest singleton is not. The size guard means
+    a nearly-finished sphere with only scattered misses still gets pointed at
+    the nearest one instead of being marched across the sphere. With no live
+    direction the region's own centroid stands in for "here"."""
+    if not regions:
+        return None
+    lat = sphere_lattice(n)
+    top = regions[0]
+    if top["size"] >= MIN_GUIDANCE_REGION:
+        pool = [(c, top["size"]) for c in top["cells"]]
+    else:
+        pool = [(c, r["size"]) for r in regions for c in r["cells"]]
+    if not pool:
+        return None
+    ref = unit(live_dir) if live_dir is not None else None
+    if ref is None:
+        ref = unit(top["centroid"])
+    if ref is None:
+        cell, size = pool[0]
+        return cell, lat[cell], size
+    cell, size = max(pool, key=lambda cs: float(np.dot(lat[cs[0]], ref)))
+    return cell, lat[cell], size
+
+
+def guidance_axis(regions: list[dict], live_dir=None, n: int = SPHERE_CELLS) -> dict | None:
+    """The structured steering instruction: `{axis[3], angle_deg, text,
+    target[3], target_cell, region_size, from_face, to_face}`.
+
+    Shipped alongside the prose `guidance` so the client draws the curved wrist
+    arrow and the ghost attitude FROM NUMBERS rather than parsing a sentence,
+    and so no sign/permutation convention is ever written in JS (the
+    "server-side math stays server-side" invariant). None when there is nothing
+    left to steer at."""
+    sel = select_target(regions, live_dir, n)
+    if sel is None:
+        return None
+    cell, target, region_size = sel
+    out = {
+        "target_cell": int(cell),
+        "target": [round(float(v), 5) for v in target],
+        "region_size": int(region_size),
+        "to_face": nearest_face(target),
+        "axis": None,
+        "angle_deg": None,
+        "from_face": None,
+        "text": f"Bring the field round to the device's {nearest_face(target)} face.",
+    }
+    rot = rotation_to(live_dir, target) if live_dir is not None else None
+    if rot is None:
+        return out
+    axis, angle = rot
+    deg = math.degrees(angle)
+    from_face = nearest_face(live_dir)
+    out["axis"] = [round(float(v), 5) for v in axis]
+    out["angle_deg"] = round(deg, 1)
+    out["from_face"] = from_face
+    pair = axis_pair_name(axis)
+    if deg < 1.0:
+        out["text"] = "You are on the target cell — hold it for a sample, then move on."
+    elif from_face == out["to_face"] or deg < FACE_HINT_MIN_DEG:
+        # Below ~25 deg the "from face -> to face" clause is noise or worse: two
+        # directions a few degrees apart can straddle a face boundary and read as
+        # "Front -> Bottom" for a 14 deg nudge, which is actively misleading.
+        out["text"] = f"Turn ≈{deg:.0f}° about the device's {pair} axis."
+    else:
+        out["text"] = (f"Turn ≈{deg:.0f}° about the device's {pair} axis "
+                       f"— bring the field from the {from_face} face round to "
+                       f"the {out['to_face']} face.")
+    return out
+
+
 def guidance_text(regions: list[dict], live_dir=None, n: int = SPHERE_CELLS) -> str:
     """One actionable sentence: where the biggest hole is and how to fill it.
 
-    The instruction is in terms of the device's own faces because that is what
-    the user can act on. "Aim <face> toward magnetic north and downward" is the
-    concrete attitude that puts the field along that body axis in the northern
-    hemisphere (the field dips downward there); the angle, when a live sample
-    is available, says how far the current attitude is from that target so the
-    user can steer with the live marker on the map."""
+    The instruction is the EXACT body-axis rotation from `guidance_axis` -- it
+    needs no dip assumption, no compass, and no hemisphere. The old text ("aim
+    the Top face toward magnetic north and downward") assumed all three, and was
+    unusable to anyone who does not already know where north is.
+
+    The trailing cell count is a countdown the user can watch tick down as they
+    move, which is the difference between waving the thing around and doing a
+    task."""
     if not regions:
         return "Full sphere covered — every orientation has samples."
     top = regions[0]
@@ -408,20 +593,105 @@ def guidance_text(regions: list[dict], live_dir=None, n: int = SPHERE_CELLS) -> 
         f"Biggest gap: {top['size']} of {n} cells ({pct:.0f}% of the sphere) "
         f"around the device's {top['face']} face."
     ]
-    live = unit(live_dir) if live_dir is not None else None
-    if live is not None:
-        cos = float(np.clip(np.dot(live, np.asarray(top["centroid"], dtype=np.float64)), -1.0, 1.0))
-        parts.append(
-            f"Turn the device so its {top['face']} face points toward magnetic north "
-            f"and downward — about {math.degrees(math.acos(cos)):.0f}° of rotation from here."
-        )
-    else:
-        parts.append(
-            f"Turn the device so its {top['face']} face points toward magnetic north and downward."
-        )
+    axis = guidance_axis(regions, live_dir, n)
+    if axis is not None:
+        parts.append(axis["text"])
+        parts.append(f"{axis['region_size']} cell{'s' if axis['region_size'] != 1 else ''} "
+                     "left in this gap.")
     if len(regions) > 1:
         parts.append(f"({len(regions) - 1} smaller gap{'s' if len(regions) > 2 else ''} remain.)")
     return " ".join(parts)
+
+
+def rolling_fit(samples) -> dict | None:
+    """The PROVISIONAL fit of everything collected so far, refit on every report
+    tick while collecting.
+
+    This is the single best progress signal the tool has. Today the quality
+    numbers only become meaningful after `Stop & Fit`, which is the wrong time:
+    the user wants to know *while tumbling* whether they can stop. Watching
+    `|B| spread` fall through 5% -> 2% while coverage climbs past 85% is a
+    continuous answer to "am I done yet".
+
+    `bias_pct` is near zero by construction (the fit chooses `field_ut` as the
+    mean calibrated radius), so it is a degeneracy canary rather than an
+    independent measurement -- unlike the SAVED calibration's bias, which is the
+    x2.04 trap. Reported anyway because a non-zero value means the solve went
+    somewhere strange.
+
+    None with no samples at all; otherwise always a dict, with `error` set when
+    the cloud is not yet fittable (never raises -- a premature look is a message
+    in the UI, not a 500)."""
+    x = np.asarray(samples, dtype=np.float64).reshape(-1, 3)
+    total = int(x.shape[0])
+    if total == 0:
+        return None
+    if total > LIVE_FIT_MAX_SAMPLES:
+        # Decimate EVENLY, never truncate: the newest samples carry the coverage
+        # the user is actively adding, and dropping them would make the live
+        # readout lag exactly the motion it is meant to reward.
+        keep = np.linspace(0, total - 1, LIVE_FIT_MAX_SAMPLES).astype(np.int64)
+        x = x[keep]
+    used = int(x.shape[0])
+    base = {"samples": total, "used": used, "field_ut": None, "std_pct": None,
+            "bias_pct": None, "residual_rms_ut": None, "spread_verdict": None,
+            "bias_verdict": None, "verdict": None, "error": None}
+    if used < MIN_FIT_SAMPLES:
+        base["error"] = f"need at least {MIN_FIT_SAMPLES} samples, have {used}"
+        return base
+    try:
+        cal = fit_ellipsoid(x)
+    except ValueError as exc:
+        base["error"] = str(exc)
+        return base
+    field = field_consistency(x, cal)
+    if field is None:
+        base["error"] = "degenerate cloud"
+        return base
+    base.update({
+        "field_ut": round(float(cal.field_ut), 3),
+        "std_pct": round(field["std_pct"], 3),
+        "bias_pct": round(field["bias_pct"], 3),
+        "residual_rms_ut": round(field["residual_rms_ut"], 3),
+        "spread_verdict": field["spread_verdict"],
+        "bias_verdict": field["bias_verdict"],
+        "verdict": field["verdict"],
+    })
+    return base
+
+
+def motion_state(recent, cal: MagCalibration | None) -> dict:
+    """Is the device actually turning? `{stationary, spread_deg, window_s, n}`.
+
+    Measured off the CALIBRATED FIELD DIRECTION, not a gyro -- deliberately.
+    The only motion this view cares about is motion that fills cells, and a
+    device whose body-frame field direction has not moved is not filling any,
+    whatever its gyro says. (A pure spin about the field axis is the one motion
+    this calls stationary while the board does turn; it is also a motion that
+    genuinely adds no coverage, so the call is right for the purpose and the UI
+    copy says "the field direction isn't moving", not "you aren't moving".)
+
+    This exists because of the recorded trap where 255 STATIONARY samples scored
+    `std_pct 0.22%` against a x2.04-biased calibration: a still device can make
+    every quality number look excellent."""
+    rows = list(recent or ())
+    out = {"stationary": False, "spread_deg": None, "window_s": 0.0, "n": len(rows)}
+    if len(rows) < STATIONARY_MIN_SAMPLES:
+        return out
+    span = float(rows[-1][0] - rows[0][0])
+    out["window_s"] = round(span, 2)
+    if span < STATIONARY_WINDOW_S * 0.5:
+        return out
+    dirs = calibrated_directions([r[1] for r in rows], cal)
+    mean = unit(dirs.mean(axis=0))
+    if mean is None:                      # directions cancelled: that IS motion
+        out["spread_deg"] = 180.0
+        return out
+    cos = np.clip(dirs @ mean, -1.0, 1.0)
+    spread = float(np.degrees(np.arccos(cos)).max())
+    out["spread_deg"] = round(spread, 2)
+    out["stationary"] = spread < STATIONARY_SPREAD_DEG
+    return out
 
 
 def quality_report(samples, cell_idx, cal: MagCalibration | None,
@@ -502,6 +772,17 @@ class MagSweepSession:
         self.fit_error: str | None = None
         self.last_t_us: int | None = None
         self.live_raw: tuple[float, float, float] | None = None
+        # Short rolling history of the LIVE raw vector (stored whether or not we
+        # are collecting), used only by `motion_state`. Sized for the 30 Hz pose
+        # tick over STATIONARY_WINDOW_S with headroom.
+        self._recent: deque[tuple[float, tuple[float, float, float]]] = deque(maxlen=128)
+        self.last_rejected = False
+        # Cells already known occupied. Reconciled from the authoritative counts
+        # on every JSON report (`sync_occupied`) and advanced one cell at a time
+        # by the 30 Hz pose channel (`mark_occupied`) -- that delta is what lets
+        # the client paint a cell solid the INSTANT it fills while the truth
+        # channel stays slow. See docs/web-protocol.md, MAGPOSE `filled_cell`.
+        self.occupied: set[int] = set()
 
     # -- collection --
     def start(self) -> None:
@@ -529,6 +810,7 @@ class MagSweepSession:
         self.candidate = None
         self.fit_error = None
         self.last_t_us = None
+        self.occupied.clear()
 
     def add(self, mag_ut, t_us: int | None = None) -> bool:
         """Record one raw sample. `t_us` de-duplicates: the broadcaster polls
@@ -537,8 +819,15 @@ class MagSweepSession:
         be seen on consecutive ticks. Returns True if it was stored."""
         v = np.asarray(mag_ut, dtype=np.float64).reshape(-1)
         if v.size != 3 or not np.all(np.isfinite(v)):
+            self.last_rejected = True
             return False
+        self.last_rejected = False
         self.live_raw = (float(v[0]), float(v[1]), float(v[2]))
+        # Motion history tracks the LIVE vector regardless of collection state:
+        # "is the board sitting still" is a question the modal answers before
+        # you press Start, not only after.
+        if not self._recent or self._recent[-1][1] != self.live_raw:
+            self._recent.append((time.monotonic(), self.live_raw))
         if not self.collecting:
             return False
         if t_us is not None and t_us == self.last_t_us:
@@ -549,10 +838,35 @@ class MagSweepSession:
             del self._samples[0:len(self._samples) - self.max_samples]
         return True
 
+    # -- occupancy delta (the 30 Hz pose channel's half of the split) --
+    def mark_occupied(self, cell: int) -> bool:
+        """True iff `cell` was not already known occupied -- i.e. THIS sample
+        just filled it. False (and no state change) otherwise."""
+        c = int(cell)
+        if c in self.occupied:
+            return False
+        self.occupied.add(c)
+        return True
+
+    def sync_occupied(self, counts) -> None:
+        """Reconcile against the authoritative per-cell counts. Called from
+        `build_report`, so the slow truth channel always corrects whatever the
+        fast delta channel guessed (e.g. after the binning calibration changed
+        and every direction moved)."""
+        self.occupied = {i for i, c in enumerate(counts) if c}
+
     # -- derived --
     @property
     def samples(self) -> np.ndarray:
         return np.asarray(self._samples, dtype=np.float64).reshape(-1, 3)
+
+    @property
+    def recent(self) -> list[tuple[float, tuple[float, float, float]]]:
+        """The live-vector history inside `STATIONARY_WINDOW_S`."""
+        if not self._recent:
+            return []
+        cutoff = self._recent[-1][0] - STATIONARY_WINDOW_S
+        return [row for row in self._recent if row[0] >= cutoff]
 
     def elapsed(self) -> float:
         base = self.elapsed_s
@@ -587,15 +901,36 @@ class MagSweepSession:
         return provisional_calibration(self.samples)
 
 
+def view_calibration(session: MagSweepSession, current: MagCalibration | None,
+                     view: str = "current") -> tuple[MagCalibration | None, str]:
+    """Resolve the `view` selector to an actual calibration + the name that was
+    honoured. Asking for one that doesn't exist yet falls back rather than
+    reporting nothing -- shared by `build_report` and the MAGPOSE packer so the
+    fast and slow channels can never disagree about which calibration `dev_pct`
+    is measured against."""
+    view = view if view in ("current", "candidate") else "current"
+    cal = session.candidate if view == "candidate" else current
+    if cal is None:
+        cal = current if current is not None else session.candidate
+        view = "candidate" if (current is None and session.candidate is not None) else "current"
+    return cal, view
+
+
 def build_report(session: MagSweepSession, current: MagCalibration | None,
-                 view: str = "current", saved_path: str = "mag_cal.json") -> dict:
+                 view: str = "current", saved_path: str = "mag_cal.json",
+                 full: bool = True) -> dict:
     """The whole `magcal` wire message: coverage map, both calibrations'
     quality blocks, gaps + guidance, and the live "you are here" cell.
 
     `view` picks which calibration colours the map ("current" | "candidate");
     both quality blocks are always sent so the saved calibration's defect stays
     on screen next to the candidate's, which is the comparison that makes a
-    regression obvious before saving."""
+    regression obvious before saving.
+
+    `full` gates the two DETERMINISTIC CONSTANTS -- `cell_dirs` (a pure function
+    of `SPHERE_CELLS`) and `t_world_to_cv` -- which the client caches. They are
+    sent on `open` and omitted from every subsequent tick: measured 4490 B ->
+    1982 B per report, a 56% cut, which is what pays for raising the cadence."""
     n = session.n
     x = session.samples
     bin_cal = session.binning_calibration(current)
@@ -603,6 +938,7 @@ def build_report(session: MagSweepSession, current: MagCalibration | None,
     cell_idx = assign_cells(dirs, n)
     cov = coverage_stats(cell_idx, n)
     regions = empty_regions(cov["counts"], n)
+    session.sync_occupied(cov["counts"])
 
     live_dir = None
     live_cell = None
@@ -612,20 +948,15 @@ def build_report(session: MagSweepSession, current: MagCalibration | None,
             live_dir = [round(float(v), 4) for v in ld[0]]
             live_cell = int(assign_cells(ld, n)[0])
 
-    view = view if view in ("current", "candidate") else "current"
-    view_cal = session.candidate if view == "candidate" else current
-    if view_cal is None:      # asked for a calibration that doesn't exist yet
-        view_cal = current if current is not None else session.candidate
-        view = "candidate" if (current is None and session.candidate is not None) else "current"
+    view_cal, view = view_calibration(session, current, view)
 
     lat = sphere_lattice(n)
-    return {
+    report = {
         "type": "magcal",
         "collecting": session.collecting,
         "sample_count": int(x.shape[0]),
         "elapsed_s": round(session.elapsed(), 1),
         "cells": n,
-        "cell_dirs": [[round(float(c), 4) for c in row] for row in lat],
         "cell_counts": cov["counts"],
         "cell_dev_pct": [None if v is None else round(v, 2)
                          for v in cell_deviation_pct(x, cell_idx, view_cal, n)],
@@ -635,6 +966,12 @@ def build_report(session: MagSweepSession, current: MagCalibration | None,
         "gaps": [{k: (round(v, 4) if isinstance(v, float) else v)
                   for k, v in r.items() if k != "cells"} for r in regions[:5]],
         "guidance": guidance_text(regions, live_dir, n),
+        # The same instruction as NUMBERS, so the client draws the curved wrist
+        # arrow, the ghost attitude and the geodesic from the server's math
+        # instead of parsing the prose above (§5 of the design).
+        "guidance_axis": guidance_axis(regions, live_dir, n),
+        "live_fit": rolling_fit(x),
+        "motion": motion_state(session.recent, bin_cal),
         "has_current": current is not None,
         "has_candidate": session.candidate is not None,
         "binning": ("candidate" if session.candidate is not None
@@ -654,3 +991,12 @@ def build_report(session: MagSweepSession, current: MagCalibration | None,
                                if session.candidate is not None else None),
         "saved_path": str(saved_path),
     }
+    if full:
+        # Deterministic constants -- sent once on `open`, cached by the client.
+        report["cell_dirs"] = [[round(float(c), 4) for c in row] for row in lat]
+        # SFLP world -> Open3D CV world, row-major. Shipped so the 3D view
+        # composes frames from a SERVER-supplied matrix; no sign or permutation
+        # convention is ever written in JS (docs/coordinate-frames.md).
+        report["t_world_to_cv"] = [float(v) for v in
+                                   np.asarray(T_WORLD_TO_CV, dtype=np.float64).reshape(-1)]
+    return report

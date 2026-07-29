@@ -59,6 +59,25 @@ Web-Phase-4 SLAM controls `#seg-mode button[data-mode=realtime|slam]`,
 `chk-slam-traj`, `chk-slam-follow`, `#seg-walls button[data-walls=split|solid]`,
 `btn-save`, `#saved-list .cap-row a`, and the diagnostics toggle `diag-toggle`).
 
+**The magnetometer-calibration modal has two renderers, and both must be shot.**
+Open it with `sensor-mag-cal`; drive it with `magcal-start` / `magcal-stop` /
+`magcal-clear`. The 3D "Shell & Steering" view (`magcal3d.js`) publishes a 1 Hz
+diag line and `window.__magcal3d = {renderer, frames, cells, covered, lastPoseMs,
+poseHz, reason}` — assert `renderer=="webgl"` and `poseHz≈30` rather than merely
+that a canvas exists. **`?magcal2d=1` forces the 2D Lambert fallback**, so one run
+covers both paths; `window.__magcal3d.renderer` reads `"2d"` and
+`#magcal-fallback-note` says why. Context loss is reachable from a step:
+`document.getElementById('magcal-hero').getContext('webgl2')
+.getExtension('WEBGL_lose_context').loseContext()` — it must degrade to the 2D map,
+not hang. **Reading the coverage number is the honesty check**: with the board
+sitting still on the desk the shell must be almost entirely dashed hollow rings and
+the gauge must say so (measured on-rig 2026-07-29: 2 / 92 cells after 600 samples,
+plus a `STATIONARY` chip). If it looks flattering while nothing moves, the view is
+lying. No capture in `captures/` contains a full tumble — `tilt_sweep_20260729.bin`
+is a 1-D tilt and bins into 2 cells — so a *covered* shell shot needs a synthetic
+fixture (rewrite a capture's stream-10 mag payloads along a continuous spherical
+spiral; `roomscan.protocol.pack_frame` re-encodes the frames unchanged).
+
 **SLAM verification needs a stream-9 capture.** SLAM builds nothing from a capture
 with no IMU_QUAT (stream 9) — the mapper gets no rotation prior and loses tracking
 (`recordings/2026-07-08-room-scan.bin` predates IMU → empty map). Use

@@ -394,6 +394,41 @@
         }
         .magcal-verdict__why { font-size: 0.7rem; color: var(--text-muted); }
         .magcal-empty { font-size: 0.72rem; color: var(--text-muted); font-style: italic; }
+        /* --- 3D "Shell & Steering" view (magcal3d.js) --------------------- *
+         * The hero is body-fixed and its camera never moves, which is what    *
+         * makes a hole stay where it was. The 2D Lambert pair below it is the  *
+         * FALLBACK renderer, not a deleted view — it needs no orientation and  *
+         * no WebGL.                                                            */
+        .magcal-hero { position: relative; width: 470px; height: 340px; }
+        .magcal-hero canvas { display: block; width: 100%; height: 100%; }
+        .magcal-progress-row { display: flex; gap: 12px; align-items: center; }
+        .magcal-gauge-wrap { flex: 0 0 auto; width: 116px; text-align: center; }
+        .magcal-gauge-sub {
+            font-family: 'JetBrains Mono', monospace; font-size: 0.62rem;
+            color: var(--text-muted); margin-top: -4px; white-space: nowrap;
+        }
+        .magcal-steerrow { display: flex; gap: 12px; align-items: flex-start; }
+        .magcal-steer { position: relative; width: 176px; flex: 0 0 auto; }
+        .magcal-steer canvas { display: block; width: 176px; height: 152px; }
+        .magcal-steer__note {
+            position: absolute; inset: 0; display: flex; align-items: center;
+            justify-content: center; text-align: center; padding: 10px;
+            font-size: 0.66rem; color: var(--text-muted); line-height: 1.3;
+            border: 1px dashed var(--panel-border); border-radius: 8px;
+        }
+        .magcal-steertext { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+        .magcal-fallback {
+            font-size: 0.68rem; color: var(--warning); line-height: 1.35;
+        }
+        .magcal-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+        .magcal-chip {
+            display: inline-flex; align-items: center; gap: 5px;
+            border: 1px solid var(--panel-border); border-radius: 999px;
+            padding: 2px 9px; font-size: 0.64rem; letter-spacing: 0.03em;
+            font-family: 'JetBrains Mono', monospace; color: var(--text-muted);
+            white-space: nowrap;
+        }
+        .magcal-chip__icon { font-size: 0.72rem; line-height: 1; }
         .magcal-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
         .magcal-actions button { padding: 7px 14px; font-size: 0.78rem; }
         .magcal-actions button:disabled { opacity: 0.35; cursor: not-allowed; }
@@ -844,34 +879,88 @@
             </div>
             <div class="modal__body">
                 <p class="modal__intro">
-                    A correct calibration reports the <strong>same field magnitude in every orientation</strong>.
-                    Fitting one needs samples from the <strong>whole sphere of directions</strong> — a tumble that
-                    only covers one attitude family produces a fit that looks fine there and is badly wrong
-                    everywhere else. Every ring below is a direction the fit needs: <strong>hollow rings are the
-                    angles you are still missing</strong>. Press Start and rotate the device slowly through every
-                    orientation you can reach, watching the <em>field now</em> marker hunt the gaps.
+                    A correct calibration reports the <strong>same field magnitude in every orientation</strong>, so
+                    fitting one needs samples from the <strong>whole sphere of directions</strong>. The shell below
+                    is that sphere, drawn <strong>in the device's own frame</strong> — it does not move, so a gap
+                    stays where you last saw it. <strong>Dashed hollow rings are the angles you are still
+                    missing</strong>; a solid disc's <em>size</em> is how many samples it holds. Press Start and turn
+                    the device to sweep the bright marker over the holes.
                 </p>
 
                 <div class="magcal-grid">
                     <div class="magcal-col">
-                        <div class="magcal-mapwrap">
+                        <!-- 3D hero (magcal3d.js). Hidden and replaced by the 2D
+                             Lambert pair below when WebGL is unavailable or
+                             ?magcal2d=1 is set. -->
+                        <div class="magcal-hero" id="magcal-hero-wrap">
+                            <canvas id="magcal-hero"></canvas>
+                        </div>
+
+                        <!-- 2D Lambert equal-area fallback: needs no orientation
+                             and no WebGL, and is already CVD-validated. -->
+                        <div class="magcal-mapwrap hidden" id="magcal-map-wrap">
                             <canvas id="magcal-map" width="1" height="1"></canvas>
                             <div id="magcal-tip" class="magcal-tip hidden"></div>
                         </div>
+                        <div class="magcal-fallback hidden" id="magcal-fallback-note"></div>
                         <canvas id="magcal-legend" width="1" height="1"></canvas>
+
+                        <div class="magcal-steerrow">
+                            <div class="magcal-steer">
+                                <canvas id="magcal-steer"></canvas>
+                                <div class="magcal-steer__note hidden" id="magcal-steer-note">
+                                    no orientation — connect the IMU
+                                </div>
+                                <div class="sensor-cap">STEERING — turn the board into the ghost</div>
+                            </div>
+                            <div class="magcal-steertext">
+                                <div class="magcal-guidance" id="magcal-guidance">—</div>
+                                <div class="magcal-chips" id="magcal-state-chips"></div>
+                                <div class="magcal-note" id="magcal-binning"></div>
+                            </div>
+                        </div>
+
                         <div class="magcal-progress" id="magcal-progress">Coverage — · 0 samples</div>
                         <div class="magcal-progress-track"><div class="magcal-progress-fill" id="magcal-progress-bar"></div></div>
-                        <div class="magcal-guidance" id="magcal-guidance">—</div>
-                        <div class="magcal-note" id="magcal-binning"></div>
-                        <div class="magcal-note">
-                            Equal-area projection: a gap's size on screen is its true share of the sphere,
-                            wherever it sits. Both discs are seen from the same side (screen-up = the device's
-                            Front, screen-right = its Right); the rims are the same equator.
+                        <div class="magcal-note" title="Hue is reserved for |B| deviation so that coverage never
+depends on seeing colour. Far-side cells are dimmed rather than hidden — a gap behind the board still has to be
+findable.">
+                            Hue means one thing only: <strong>|B| deviation</strong>. Coverage is a <em>shape</em>,
+                            sample density a <em>size</em>; far-side cells are dimmed, not hidden.
                         </div>
                     </div>
 
                     <div class="magcal-col">
-                        <div class="hud-section-label" style="margin-top:0">Saved calibration</div>
+                        <div class="hud-section-label" style="margin-top:0">Progress</div>
+                        <!-- The ring gauge lives OUTSIDE the WebGL hero on purpose: it is
+                             DOM/SVG, so it keeps working on the 2D fallback path. "How
+                             close am I" is a position relative to the drawn 60%/85%
+                             ticks, not a naked percentage. -->
+                        <div class="magcal-progress-row">
+                            <div class="magcal-gauge-wrap">
+                                <svg id="magcal-gauge" width="104" height="104" viewBox="0 0 120 120"
+                                     role="img" aria-label="sphere coverage gauge">
+                                    <circle cx="60" cy="60" r="47" fill="none"
+                                            stroke="rgba(255,255,255,0.09)" stroke-width="9"></circle>
+                                    <circle id="magcal-gauge-arc" cx="60" cy="60" r="47" fill="none"
+                                            stroke="#e2e8f0" stroke-width="9" stroke-linecap="round"
+                                            transform="rotate(-90 60 60)"
+                                            stroke-dasharray="0 295.3"></circle>
+                                    <g id="magcal-gauge-ticks" stroke="#94a3b8" stroke-width="1.5"></g>
+                                    <text id="magcal-gauge-pct" x="60" y="59" text-anchor="middle"
+                                          font-family="Inter, sans-serif" font-size="21" font-weight="700"
+                                          fill="#e2e8f0">—</text>
+                                    <text id="magcal-gauge-lbl" x="60" y="74" text-anchor="middle"
+                                          font-family="Inter, sans-serif" font-size="9"
+                                          fill="#94a3b8">COVERAGE</text>
+                                </svg>
+                                <div class="magcal-gauge-sub" id="magcal-gauge-cells">— / — cells</div>
+                            </div>
+                            <div class="magcal-chips" id="magcal-verdict-chips"></div>
+                        </div>
+                        <div class="hud-section-label">Live fit (rolling)</div>
+                        <div class="magcal-col" id="magcal-livefit"></div>
+                        <div class="hud-section-label">Saved calibration</div>
                         <div class="magcal-note" id="magcal-path"></div>
                         <div class="magcal-col" id="magcal-current"></div>
                         <div class="hud-section-label">Candidate fit (not saved)</div>

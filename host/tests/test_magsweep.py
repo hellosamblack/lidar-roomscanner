@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import struct
 import types
 
 import numpy as np
@@ -343,14 +345,27 @@ def test_provisional_calibration_needs_samples():
     assert ms.provisional_calibration(np.zeros((10, 3))) is None
 
 
-def test_guidance_names_the_face_and_the_angle():
+def test_guidance_names_the_face_the_axis_and_the_countdown():
     body = _sphere()
     raw = _raw_from_body(body[body[:, 0] > 0.4])       # covered the Top face only
     regions = ms.empty_regions(ms.coverage_stats(_cells(raw, _cal()))["counts"])
     text = ms.guidance_text(regions, live_dir=[1.0, 0.0, 0.0])
-    assert "Bottom" in text
-    assert "175" in text          # the hole is (near-)antipodal to where we are
+    assert "Bottom" in text                   # the gap's face
+    assert "axis" in text                     # the body axis to turn about
+    assert "cells left in this gap" in text   # the countdown
     assert ms.guidance_text([]) == "Full sphere covered — every orientation has samples."
+
+
+def test_guidance_makes_no_dip_or_compass_assumption():
+    """The old text ("point the Top face toward magnetic north and downward")
+    assumed northern-hemisphere dip AND that the user knows where north is.
+    Both are gone: the instruction is an exact body-axis rotation (§5)."""
+    body = _sphere()
+    raw = _raw_from_body(body[body[:, 0] > 0.4])
+    regions = ms.empty_regions(ms.coverage_stats(_cells(raw, _cal()))["counts"])
+    text = ms.guidance_text(regions, live_dir=[1.0, 0.0, 0.0])
+    for banned in ("north", "North", "downward", "magnetic"):
+        assert banned not in text
 
 
 def test_nearest_face_names_all_six():
@@ -707,11 +722,16 @@ def test_open_and_close_manage_the_subscriber_set(tmp_path):
 # =============================================================================
 
 def test_magcal_preview_does_not_touch_display_path(tmp_path):
-    """Collecting, fitting, previewing and discarding are pure observation:
-    the gravity-alignment rotation, the point-cloud bytes, `fused_quat()` and
-    the loaded calibration must all be bit-identical afterwards. (Save is the
-    one deliberate exception -- covered by
-    `test_install_mag_calibration_hot_reloads_every_consumer`.)"""
+    """Collecting, fitting, previewing, STREAMING POSE and discarding are pure
+    observation: the gravity-alignment rotation, the point-cloud bytes,
+    `fused_quat()` and the loaded calibration must all be bit-identical
+    afterwards. (Save is the one deliberate exception -- covered by
+    `test_install_mag_calibration_hot_reloads_every_consumer`.)
+
+    Extended 2026-07-29 over the 30 Hz MAGPOSE channel: it reads `fused_quat()`
+    and `latest_imu_raw()` every tick, which is exactly the kind of "harmless"
+    read that acquires a side effect the moment someone adds smoothing to it.
+    Drives a full open -> pose-stream -> close cycle."""
     from roomscan.deproject import Deprojector
     from roomscan.sensors import SensorState, YawFusion
 
@@ -730,14 +750,29 @@ def test_magcal_preview_does_not_touch_display_path(tmp_path):
     pts, colors, _ = web.select_colors(outputs, deproj, "depth", "turbo")
     before_bytes = web.pack_point_cloud(web.rotate_points(pts, before_rot), colors)
 
+    class _Ws:
+        def __init__(self):
+            self.sent = []
+
+        async def send_text(self, text):
+            self.sent.append(text)
+
+    ws = _Ws()
     state = _ws_state(tmp_path, mag_cal=existing, sensor_state=sensor_state)
     state.fusion = fusion
+    asyncio.run(web._handle_inbound(state, {"type": "magcal", "action": "open"}, ws))
     _route(state, {"type": "magcal", "action": "start"})
     _fill(state)
+    # The pose channel, driven exactly as the broadcaster drives it.
+    poses = [web.build_magpose(state.magcal_session, existing, sensor_state, i, stored=True)
+             for i in range(30)]
+    assert all(p is not None and len(p) == web.MAGPOSE_SIZE for p in poses)
     _route(state, {"type": "magcal", "action": "stop"})
     assert state.magcal_session.candidate is not None            # a real fit happened
     ms.build_report(state.magcal_session, existing, view="candidate")
+    web.build_magpose(state.magcal_session, existing, sensor_state, 99, view="candidate")
     _route(state, {"type": "magcal", "action": "discard"})
+    asyncio.run(web._handle_inbound(state, {"type": "magcal", "action": "close"}, ws))
 
     after_quat = sensor_state.fused_quat()
     after_rot = web.display_rotation(after_quat)
@@ -774,3 +809,399 @@ def test_build_sensor_message_unchanged_by_an_open_sweep_session():
     after = web.build_sensor_message(sensor_state, _cal())
     for key in ("rot", "heading", "orientation_raw", "orientation_view", "has_mag_cal"):
         assert after[key] == before[key]
+
+
+# =============================================================================
+# 8. The exact-rotation guidance (3D feedback, 2026-07-29)
+# =============================================================================
+
+def _unit(v):
+    v = np.asarray(v, dtype=np.float64)
+    return v / np.linalg.norm(v)
+
+
+@pytest.mark.parametrize("d,t", [
+    ([0, 0, 1], [1, 0, 0]),
+    ([1, 0, 0], [0, 1, 0]),
+    ([0.3, -0.5, 0.81], [-0.7, 0.2, 0.68]),
+    ([1, 0, 0], [1, 0, 0]),            # already there
+    ([1, 0, 0], [-1, 0, 0]),           # exactly antipodal: any perpendicular axis
+])
+def test_rotation_to_round_trips_d_onto_t(d, t):
+    """THE guidance invariant: applying the returned body rotation `dR` moves
+    the body-frame field direction `d` exactly onto the target `t`.
+
+    `dR^T . d == t` because rotating the device body by `dR` (`R' = R.dR`) gives
+    `d' = dR^T . d`. If this ever silently flips sign the arrow points the user
+    the wrong way round the sphere, which is worse than no arrow at all."""
+    d, t = _unit(d), _unit(t)
+    axis, angle = ms.rotation_to(d, t)
+    assert abs(np.linalg.norm(axis) - 1.0) < 1e-12
+    moved = ms.axis_angle_matrix(axis, angle).T @ d
+    assert np.allclose(moved, t, atol=1e-9)
+
+
+def test_rotation_to_is_the_minimal_rotation():
+    d, t = _unit([0, 0, 1]), _unit([1, 1, 0])
+    axis, angle = ms.rotation_to(d, t)
+    assert angle <= math.pi + 1e-12
+    assert math.degrees(angle) == pytest.approx(90.0, abs=1e-6)
+    # axis = unit(t x d): perpendicular to BOTH, per the design's derivation.
+    assert abs(float(np.dot(axis, d))) < 1e-12
+    assert abs(float(np.dot(axis, t))) < 1e-12
+
+
+def test_rotation_to_rejects_degenerate_input():
+    assert ms.rotation_to([0, 0, 0], [1, 0, 0]) is None
+    assert ms.rotation_to([1, 0, 0], [0, 0, 0]) is None
+
+
+def test_axis_pair_names_are_signless():
+    assert ms.axis_pair_name([1, 0, 0]) == ms.axis_pair_name([-1, 0, 0]) == "Top–Bottom"
+    assert ms.axis_pair_name([0, 1, 0]) == ms.axis_pair_name([0, -1, 0]) == "Right–Left"
+    assert ms.axis_pair_name([0, 0, 1]) == ms.axis_pair_name([0, 0, -1]) == "Front–Back"
+
+
+def test_target_selection_prefers_the_biggest_region_over_the_nearest_singleton():
+    """Chasing a stray singleton is busywork; the big hole is the one that moves
+    the coverage number. Guarded because it is the whole reason `empty_regions`
+    exists rather than a flat list of empty cells."""
+    lat = ms.sphere_lattice()
+    counts = np.ones(ms.SPHERE_CELLS, dtype=np.int64)
+    live = _unit([0.0, 0.0, 1.0])
+    # A singleton right next to `live`...
+    near = int(np.argmax(lat @ live))
+    counts[near] = 0
+    # ...and a big connected region on the far side.
+    far = int(np.argmin(lat @ live))
+    adj = ms.cell_neighbours()
+    region = {far, *adj[far]}
+    for c in adj[far]:
+        region.update(adj[c])
+    for c in region:
+        counts[c] = 0
+    regions = ms.empty_regions(counts)
+    cell, direction, size = ms.select_target(regions, live)
+    assert size >= ms.MIN_GUIDANCE_REGION
+    assert cell in region and cell != near
+
+
+def test_target_selection_falls_back_to_the_nearest_cell_for_scattered_misses():
+    lat = ms.sphere_lattice()
+    counts = np.ones(ms.SPHERE_CELLS, dtype=np.int64)
+    live = _unit([0.0, 0.0, 1.0])
+    near = int(np.argmax(lat @ live))
+    far = int(np.argmin(lat @ live))
+    counts[near] = 0
+    counts[far] = 0
+    regions = ms.empty_regions(counts)
+    assert max(r["size"] for r in regions) < ms.MIN_GUIDANCE_REGION
+    cell, _, _ = ms.select_target(regions, live)
+    assert cell == near                       # nearest wins when nothing is big
+
+
+def test_guidance_axis_shape_and_target_agreement():
+    body = _sphere()
+    raw = _raw_from_body(body[body[:, 0] > 0.4])
+    regions = ms.empty_regions(ms.coverage_stats(_cells(raw, _cal()))["counts"])
+    live = [0.0, 0.0, 1.0]
+    ga = ms.guidance_axis(regions, live)
+    assert set(ga) == {"target_cell", "target", "region_size", "to_face", "axis",
+                       "angle_deg", "from_face", "text"}
+    json.dumps(ga)
+    # The shipped axis/angle really do carry the live direction onto the target.
+    moved = ms.axis_angle_matrix(ga["axis"], math.radians(ga["angle_deg"])).T @ _unit(live)
+    assert np.allclose(moved, ga["target"], atol=1e-3)
+    assert ga["to_face"] == ms.nearest_face(ga["target"])
+
+
+def test_guidance_axis_without_a_live_direction_still_names_a_target():
+    counts = np.ones(ms.SPHERE_CELLS, dtype=np.int64)
+    counts[:10] = 0
+    ga = ms.guidance_axis(ms.empty_regions(counts), None)
+    assert ga["axis"] is None and ga["angle_deg"] is None
+    assert ga["target_cell"] is not None
+    assert ga["region_size"] >= 1
+
+
+def test_guidance_axis_is_none_on_a_full_sphere():
+    assert ms.guidance_axis([], [0, 0, 1]) is None
+
+
+# =============================================================================
+# 9. Rolling provisional fit + stationary detection
+# =============================================================================
+
+def test_rolling_fit_recovers_the_calibration_from_a_full_tumble():
+    raw = _raw_from_body(_sphere(800, seed=4))
+    lf = ms.rolling_fit(raw)
+    assert lf["error"] is None
+    assert lf["field_ut"] == pytest.approx(FIELD, rel=0.02)
+    assert lf["std_pct"] < ms.FIELD_GOOD_PCT
+    assert lf["spread_verdict"] == "good"
+    assert lf["samples"] == 800 and lf["used"] == 800
+    json.dumps(lf)
+
+
+def test_rolling_fit_reports_not_yet_fittable_instead_of_raising():
+    lf = ms.rolling_fit(_raw_from_body(_sphere(5)))
+    assert lf["error"] and lf["std_pct"] is None
+    assert ms.rolling_fit(np.zeros((0, 3))) is None
+
+
+def test_rolling_fit_decimates_rather_than_truncating():
+    """Truncating would drop the NEWEST samples -- exactly the coverage the user
+    is actively adding -- so the live readout would lag the motion it rewards."""
+    n = ms.LIVE_FIT_MAX_SAMPLES + 2500
+    raw = _raw_from_body(_sphere(n, seed=11))
+    lf = ms.rolling_fit(raw)
+    assert lf["samples"] == n
+    assert lf["used"] == ms.LIVE_FIT_MAX_SAMPLES
+    assert lf["error"] is None
+    assert lf["field_ut"] == pytest.approx(FIELD, rel=0.02)
+
+
+def test_rolling_fit_of_a_cap_only_cloud_is_read_next_to_coverage():
+    """The 2026-07-15 defect was a self-consistent fit through a CAP of the
+    sphere: the spread alone can look fine there, which is exactly why the UI
+    never shows it without coverage beside it. Assert the pair."""
+    body = _sphere(1500, seed=5)
+    raw = _raw_from_body(body[body[:, 0] > 0.55])
+    lf = ms.rolling_fit(raw)
+    cov = ms.coverage_stats(_cells(raw, _cal()))
+    assert lf is not None
+    assert cov["verdict"] == "bad"
+
+
+def test_motion_state_calls_a_still_device_stationary():
+    cal = _cal()
+    raw = _raw_from_body([[0.0, 0.0, 1.0]])[0]
+    hist = [(t * 0.033, tuple(raw)) for t in range(60)]
+    m = ms.motion_state(hist, cal)
+    assert m["stationary"] is True
+    assert m["spread_deg"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_motion_state_calls_a_turning_device_moving():
+    cal = _cal()
+    body = [[math.cos(a), math.sin(a), 0.0] for a in np.linspace(0.0, 1.2, 60)]
+    raw = _raw_from_body(body)
+    hist = [(i * 0.033, tuple(v)) for i, v in enumerate(raw)]
+    m = ms.motion_state(hist, cal)
+    assert m["stationary"] is False
+    assert m["spread_deg"] > ms.STATIONARY_SPREAD_DEG
+
+
+def test_motion_state_says_nothing_without_enough_history():
+    assert ms.motion_state([], _cal())["stationary"] is False
+    assert ms.motion_state([(0.0, (1.0, 2.0, 3.0))], _cal())["n"] == 1
+
+
+def test_session_tracks_the_live_vector_even_while_not_collecting():
+    """"Is the board sitting still" is a question the modal answers BEFORE you
+    press Start, not only after."""
+    s = ms.MagSweepSession()
+    for i in range(20):
+        s.add((10.0 + i, 2.0, 3.0), t_us=i)
+    assert s.samples.shape[0] == 0        # nothing stored
+    assert len(s.recent) >= 10            # but the motion history is live
+
+
+# =============================================================================
+# 10. The report split: the deterministic constants ride `open` only
+# =============================================================================
+
+def test_report_omits_the_deterministic_constants_unless_full():
+    s = _filled_session()
+    lean = ms.build_report(s, _cal(), full=False)
+    full = ms.build_report(s, _cal(), full=True)
+    assert "cell_dirs" not in lean and "t_world_to_cv" not in lean
+    assert len(full["cell_dirs"]) == ms.SPHERE_CELLS
+    assert len(full["t_world_to_cv"]) == 9
+    # Everything the renderers need per tick is still in the lean message.
+    for key in ("cell_counts", "cell_dev_pct", "live_cell", "live_dir",
+                "guidance", "guidance_axis", "live_fit", "motion"):
+        assert key in lean
+    assert len(json.dumps(lean)) < len(json.dumps(full))
+    json.dumps(full)
+
+
+def test_t_world_to_cv_is_the_shared_constant_not_a_local_redefinition():
+    from roomscan.sensors import T_WORLD_TO_CV
+    rep = ms.build_report(ms.MagSweepSession(), _cal(), full=True)
+    assert np.array_equal(np.asarray(rep["t_world_to_cv"]).reshape(3, 3),
+                          np.asarray(T_WORLD_TO_CV))
+
+
+def test_open_sends_the_constants_and_later_ticks_do_not(tmp_path):
+    class FakeWs:
+        def __init__(self):
+            self.sent = []
+
+        async def send_text(self, text):
+            self.sent.append(text)
+
+    ws = FakeWs()
+    state = _ws_state(tmp_path, mag_cal=_cal())
+    asyncio.run(web._handle_inbound(state, {"type": "magcal", "action": "open"}, ws))
+    first = json.loads(ws.sent[0])
+    assert "cell_dirs" in first and "t_world_to_cv" in first
+    assert "cell_dirs" not in web._magcal_report(state)
+
+
+# =============================================================================
+# 11. MAGPOSE (binary tag 5)
+# =============================================================================
+
+def _decode_magpose(blob):
+    f = struct.unpack("<II13fhhHH", blob)
+    return {
+        "tag": f[0], "seq": f[1], "quat": f[2:6], "dir": f[6:9], "gravity": f[9:12],
+        "field_ut": f[12], "dev_pct": f[13], "dip_deg": f[14],
+        "live_cell": f[15], "filled_cell": f[16], "flags": f[17], "pad": f[18],
+    }
+
+
+def test_magpose_golden_byte_layout():
+    """The wire layout, pinned. 68 bytes, tag 5 first, LE throughout -- if this
+    changes, `magcal3d.decodeMagpose` and docs/web-protocol.md change with it
+    (the `protocol-change` skill)."""
+    blob = web.pack_magpose(
+        seq=7, quat=(1.0, 0.0, 0.0, 0.0), field_dir=(0.0, 0.0, 1.0),
+        gravity=(-1.0, 0.0, 0.0), field_ut=50.0, dev_pct=-2.5, dip_deg=114.25,
+        live_cell=47, filled_cell=-1, flags=0b1001)
+    assert len(blob) == 68 == web.MAGPOSE_SIZE
+    got = _decode_magpose(blob)
+    assert got["tag"] == web.TAG_MAGPOSE == 5
+    assert got["seq"] == 7
+    assert got["quat"] == (1.0, 0.0, 0.0, 0.0)
+    assert got["dir"] == (0.0, 0.0, 1.0)
+    assert got["gravity"] == (-1.0, 0.0, 0.0)
+    assert got["field_ut"] == pytest.approx(50.0)
+    assert got["dev_pct"] == pytest.approx(-2.5)
+    assert got["dip_deg"] == pytest.approx(114.25)
+    assert got["live_cell"] == 47
+    assert got["filled_cell"] == -1          # -1 = none, and SIGNED, not 65535
+    assert got["flags"] == 0b1001
+    assert got["pad"] == 0
+    # Field offsets, spelled out so a reordering can't pass silently.
+    assert blob[0:4] == b"\x05\x00\x00\x00"
+    assert blob[4:8] == b"\x07\x00\x00\x00"
+
+
+def _pose_session(quat=(1.0, 0.0, 0.0, 0.0)):
+    from roomscan.sensors import SensorState
+    sensor_state = SensorState()
+    if quat is not None:
+        sensor_state.feed(_sframe(StreamId.IMU_QUAT,
+                                  np.asarray(quat, dtype="<f4").tobytes()))
+    session = ms.MagSweepSession()
+    session.start()
+    for i, v in enumerate(_raw_from_body(_sphere(300, seed=3))):
+        session.add(v, t_us=i)
+    return session, sensor_state
+
+
+def test_magpose_reports_the_live_cell_and_the_dev_pct_of_the_viewed_cal():
+    session, sensor_state = _pose_session()
+    cal = _cal()
+    got = _decode_magpose(web.build_magpose(session, cal, sensor_state, 1))
+    dirs = ms.calibrated_directions([session.live_raw], cal)
+    assert got["live_cell"] == int(ms.assign_cells(dirs)[0])
+    assert np.allclose(got["dir"], dirs[0], atol=1e-6)
+    assert abs(got["dev_pct"]) < 1.0            # a clean synthetic cloud
+    assert got["flags"] & web.MAGPOSE_HAVE_QUAT
+    assert got["flags"] & web.MAGPOSE_COLLECTING
+
+
+def test_magpose_filled_cell_is_a_one_shot_delta():
+    """The trick that keeps the JSON slow: the fast channel reports a cell the
+    FIRST time a stored sample lights it, and never again."""
+    from roomscan.sensors import SensorState
+    session = ms.MagSweepSession()
+    session.start()
+    sensor_state = SensorState()
+    cal = _cal()
+    raw = _raw_from_body([[0.0, 0.0, 1.0]])[0]
+    session.add(raw, t_us=1)
+    a = _decode_magpose(web.build_magpose(session, cal, sensor_state, 1, stored=True))
+    b = _decode_magpose(web.build_magpose(session, cal, sensor_state, 2, stored=True))
+    assert a["filled_cell"] == a["live_cell"] >= 0
+    assert b["filled_cell"] == -1
+    # An un-stored (de-duplicated) sample can never claim to have filled anything.
+    session.occupied.clear()
+    c = _decode_magpose(web.build_magpose(session, cal, sensor_state, 3, stored=False))
+    assert c["filled_cell"] == -1
+
+
+def test_magpose_survives_a_tof_only_session():
+    """No stream 9 -> `have_quat` clear, so the client shows the Steering
+    placeholder. The HERO is unaffected, which is the whole reason it is the
+    hero: it needs no orientation at all."""
+    session, sensor_state = _pose_session(quat=None)
+    got = _decode_magpose(web.build_magpose(session, _cal(), sensor_state, 1))
+    assert not (got["flags"] & web.MAGPOSE_HAVE_QUAT)
+    assert got["quat"] == (1.0, 0.0, 0.0, 0.0)      # identity placeholder
+    assert math.isnan(got["dip_deg"])               # no gravity -> unknown, not a lie
+    assert got["live_cell"] >= 0                    # the shell still works
+
+
+def test_magpose_is_none_when_no_magnetometer_data_is_arriving():
+    """The modal is a diagnostic: it must say *nothing is arriving* rather than
+    animate a convincingly empty sphere."""
+    from roomscan.sensors import SensorState
+    assert web.build_magpose(ms.MagSweepSession(), _cal(), SensorState(), 1) is None
+
+
+def test_magpose_marks_a_provisional_binning():
+    from roomscan.sensors import SensorState
+    session = ms.MagSweepSession()
+    session.start()
+    for i, v in enumerate(_raw_from_body(_sphere(80, seed=6))):
+        session.add(v, t_us=i)
+    got = _decode_magpose(web.build_magpose(session, None, SensorState(), 1))
+    assert got["flags"] & web.MAGPOSE_PROVISIONAL
+    assert math.isnan(got["dev_pct"])       # no calibration -> no colour claim
+
+
+def test_magpose_flags_a_stationary_board(monkeypatch):
+    """A board on the desk must SAY so. The recorded trap: 255 stationary
+    samples scored `std_pct 0.22%` against a x2.04-biased calibration, i.e. a
+    still device can make every quality number look excellent."""
+    from roomscan.sensors import SensorState
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(ms.time, "monotonic", lambda: clock["t"])
+    session = ms.MagSweepSession()
+    session.start()
+    raw = _raw_from_body([[0.0, 0.0, 1.0]])[0]
+    for i in range(40):
+        clock["t"] += 0.033           # ~1.3 s of real time at the 30 Hz pose tick
+        session.add(tuple(raw + np.array([1e-6 * i, 0.0, 0.0])), t_us=i)
+    got = _decode_magpose(web.build_magpose(session, _cal(), SensorState(), 1))
+    assert got["flags"] & web.MAGPOSE_STATIONARY
+
+
+def test_magpose_does_not_call_a_board_stationary_before_the_window_fills():
+    """Two samples 30 ms apart prove nothing; the flag must stay clear until
+    there is a real window to judge over."""
+    from roomscan.sensors import SensorState
+    session = ms.MagSweepSession()
+    session.start()
+    raw = _raw_from_body([[0.0, 0.0, 1.0]])[0]
+    for i in range(40):
+        session.add(tuple(raw + np.array([1e-9 * i, 0.0, 0.0])), t_us=i)
+    got = _decode_magpose(web.build_magpose(session, _cal(), SensorState(), 1))
+    assert not (got["flags"] & web.MAGPOSE_STATIONARY)
+
+
+def test_magpose_dip_is_the_angle_between_field_and_gravity():
+    """The scale-immune diagnostic: for a correct calibration this angle is a
+    constant of the location, because both vectors are fixed in the room."""
+    from roomscan.sensors import SensorState, quat_to_matrix
+    session, sensor_state = _pose_session()
+    got = _decode_magpose(web.build_magpose(session, _cal(), sensor_state, 1))
+    g = quat_to_matrix(1.0, 0.0, 0.0, 0.0).T @ np.array([0.0, 0.0, -1.0])
+    expect = math.degrees(math.acos(float(np.clip(np.dot(got["dir"], g), -1.0, 1.0))))
+    assert got["dip_deg"] == pytest.approx(expect, abs=1e-3)
+    assert np.allclose(got["gravity"], g, atol=1e-6)
+    assert isinstance(sensor_state, SensorState)

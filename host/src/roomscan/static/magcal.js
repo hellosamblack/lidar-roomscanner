@@ -21,8 +21,20 @@
 //   2. measures |B| consistency of the result and makes you accept it before it
 //      can overwrite the saved file.
 //
-// THE MAP
-// -------
+// TWO RENDERERS, ONE OWNER
+// ------------------------
+// Since 2026-07-29 this module owns the report / quality / actions DOM and
+// delegates *drawing* to whichever renderer is live:
+//   * `magcal3d.js` — the "Shell & Steering" WebGL view (the hero);
+//   * the 2D Lambert disc pair below — the FALLBACK, kept alive and unmodified.
+// The fallback is not a degraded stub. It needs no orientation and no WebGL,
+// and it is the best view in the app for *counting* what is left. It takes over
+// when `getContext('webgl2')`/three throws, when the context is lost, or when
+// `?magcal2d=1` forces it (which is how both paths get screenshotted in one
+// headless run — docs/web-ui-testing.md).
+//
+// THE 2D MAP (the fallback)
+// -------------------------
 // Two Lambert azimuthal EQUAL-AREA discs — the sphere of body-frame field
 // directions split at the device's Up axis. Equal-area matters: the whole point
 // is judging how much of the sphere is missing, and any non-equal-area
@@ -52,8 +64,11 @@
 // SAVED calibration is how the defect above becomes a picture rather than a
 // table.
 //
-// Public surface:  createMagcal(hub) -> {}
-// Hub events:  subscribes "magcal"; sends {"type":"magcal","action":...}
+// Public surface:  createMagcal(hub, sceneApi?) -> {}
+// Hub events:  subscribes "magcal" (5 Hz JSON truth) + "magpose" (30 Hz binary
+//              pose/field); sends {"type":"magcal","action":...}
+
+import { createMagcal3d, decodeMagpose, POSE_STATIONARY } from './magcal3d.js';
 
 const D = (m, l) => { try { window.__diag && window.__diag('magcal.js: ' + m, l); } catch (e) {} };
 
@@ -268,6 +283,96 @@ function badge(verdict) {
     return b;
 }
 
+// Status colours are at the CVD floor (all-pairs ΔE 8.1, deutan), which is legal
+// ONLY with a secondary encoding. The label carries it, and an icon reinforces
+// it — never ship one of these as a bare colour swatch.
+const VERDICT_ICON = { good: '●', marginal: '▲', bad: '✕' };
+
+function chip(label, verdict, hint) {
+    const c = document.createElement('span');
+    c.className = 'magcal-chip';
+    if (hint) c.title = hint;
+    const icon = document.createElement('span');
+    icon.className = 'magcal-chip__icon';
+    icon.textContent = VERDICT_ICON[verdict] || '·';
+    const text = document.createElement('span');
+    text.textContent = label;
+    if (verdict && VERDICT_COLORS[verdict]) {
+        icon.style.color = VERDICT_COLORS[verdict];
+        c.style.borderColor = VERDICT_COLORS[verdict];
+        c.style.color = INK;
+    }
+    c.append(icon, text);
+    return c;
+}
+
+// The coverage ring gauge. "How close am I" is a POSITION relative to a drawn
+// line, not a naked percentage — hence the 60% / 85% ticks, which are the same
+// COVERAGE_MARGINAL / COVERAGE_GOOD bars the verdict uses.
+const GAUGE_R = 47;
+const GAUGE_C = 2 * Math.PI * GAUGE_R;
+const GAUGE_TICKS = [0.60, 0.85];
+
+function drawGauge(arcEl, ticksEl, pctEl, cellsEl, occupied, cells) {
+    const frac = cells ? Math.max(0, Math.min(1, occupied / cells)) : 0;
+    if (arcEl) arcEl.setAttribute('stroke-dasharray', `${(frac * GAUGE_C).toFixed(1)} ${GAUGE_C.toFixed(1)}`);
+    if (pctEl) pctEl.textContent = cells ? `${Math.round(100 * frac)} %` : '—';
+    if (cellsEl) cellsEl.textContent = cells ? `${occupied} / ${cells} cells` : '— / — cells';
+    if (ticksEl && !ticksEl.childElementCount) {
+        for (const t of GAUGE_TICKS) {
+            const a = -Math.PI / 2 + t * 2 * Math.PI;
+            const l = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            l.setAttribute('x1', (60 + Math.cos(a) * (GAUGE_R - 6)).toFixed(2));
+            l.setAttribute('y1', (60 + Math.sin(a) * (GAUGE_R - 6)).toFixed(2));
+            l.setAttribute('x2', (60 + Math.cos(a) * (GAUGE_R + 6)).toFixed(2));
+            l.setAttribute('y2', (60 + Math.sin(a) * (GAUGE_R + 6)).toFixed(2));
+            ticksEl.appendChild(l);
+            const tx = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            tx.setAttribute('x', (60 + Math.cos(a) * (GAUGE_R + 13)).toFixed(2));
+            tx.setAttribute('y', (60 + Math.sin(a) * (GAUGE_R + 13) + 3).toFixed(2));
+            tx.setAttribute('text-anchor', 'middle');
+            tx.setAttribute('font-size', '8');
+            tx.setAttribute('font-family', 'Inter, sans-serif');
+            tx.setAttribute('fill', '#94a3b8');
+            tx.setAttribute('stroke', 'none');
+            tx.textContent = `${Math.round(t * 100)}%`;
+            ticksEl.appendChild(tx);
+        }
+    }
+}
+
+// The rolling provisional fit. This is what turns the quality numbers from a
+// post-mortem into a progress bar: the user watches |B| spread fall through
+// 5% -> 2% and stops when it and coverage are both green, instead of pressing
+// Stop & Fit to find out.
+function renderLiveFit(el, lf) {
+    el.textContent = '';
+    if (!lf) {
+        const p = document.createElement('div');
+        p.className = 'magcal-empty';
+        p.textContent = 'No samples yet.';
+        el.append(p);
+        return;
+    }
+    if (lf.error) {
+        const p = document.createElement('div');
+        p.className = 'magcal-empty';
+        p.textContent = lf.error;
+        el.append(p);
+        return;
+    }
+    el.append(row('|B| spread (std/mean)', num(lf.std_pct, 2, '%'),
+        'Refit from everything collected so far, on every report tick — the would-be '
+        + 'quality if you stopped now. good < 2%, marginal < 5%.'));
+    el.append(row('|B| bias vs its own fit', (lf.bias_pct >= 0 ? '+' : '') + num(lf.bias_pct, 2, '%'),
+        'Near zero by construction (the fit picks field_ut as the mean radius); a non-zero '
+        + 'value here means the solve went somewhere strange.'));
+    el.append(row('Fit residual (RMS)', num(lf.residual_rms_ut, 2, ' µT')));
+    el.append(row('Fitted field', num(lf.field_ut, 2, ' µT')));
+    el.append(row('Samples in fit', lf.used === lf.samples ? String(lf.samples)
+        : `${lf.used} of ${lf.samples} (decimated)`));
+}
+
 // Render one calibration's quality block. Components are ALWAYS shown next to
 // the headline verdict — a single opaque score is what let the bad calibration
 // through, so the breakdown is not optional here.
@@ -315,13 +420,26 @@ function renderQuality(el, q, emptyText) {
         'good ≥ 300, marginal ≥ 100. The ellipsoid fit needs at least 20 to be solvable.'));
 }
 
-export function createMagcal(hub) {
+export function createMagcal(hub, sceneApi) {
     const $ = (id) => document.getElementById(id);
     const modal = $('magcal-modal');
     const openBtn = $('sensor-mag-cal');
     if (!modal || !openBtn) { D('magcal DOM missing — skipping', 'error'); return {}; }
 
     const mapCanvas = $('magcal-map');
+    const mapWrap = $('magcal-map-wrap');
+    const heroWrap = $('magcal-hero-wrap');
+    const heroCanvas = $('magcal-hero');
+    const steerCanvas = $('magcal-steer');
+    const steerNote = $('magcal-steer-note');
+    const fallbackNote = $('magcal-fallback-note');
+    const gaugeArc = $('magcal-gauge-arc');
+    const gaugeTicks = $('magcal-gauge-ticks');
+    const gaugePct = $('magcal-gauge-pct');
+    const gaugeCells = $('magcal-gauge-cells');
+    const verdictChips = $('magcal-verdict-chips');
+    const stateChips = $('magcal-state-chips');
+    const liveFitEl = $('magcal-livefit');
     const legendCanvas = $('magcal-legend');
     const tip = $('magcal-tip');
     const guidanceEl = $('magcal-guidance');
@@ -343,10 +461,53 @@ export function createMagcal(hub) {
     let open = false;
     let last = null;
     let hits = [];
+    let three = null;          // the 3D renderer handle, built lazily on first open
+    let use3d = false;
+    let livePose = null;
 
     // The button was a disabled placeholder until now.
     openBtn.disabled = false;
     openBtn.title = 'Magnetometer calibration: sweep coverage + quality';
+
+    // `?magcal2d=1` forces the fallback renderer, so BOTH paths get screenshotted
+    // in one headless run (docs/web-ui-testing.md).
+    const force2d = new URLSearchParams(window.location.search).get('magcal2d') === '1';
+
+    function ensureRenderer() {
+        if (three) return;
+        try {
+            three = createMagcal3d({
+                heroCanvas, steerCanvas, steerNote, force2d,
+                onDegrade: (why) => { showFallback(why); },
+            });
+        } catch (e) {
+            D('3D renderer construction threw: ' + (e && e.message), 'error');
+            three = null;
+        }
+        use3d = !!(three && three.ok);
+        if (use3d) {
+            heroWrap.classList.remove('hidden');
+            mapWrap.classList.add('hidden');
+            fallbackNote.classList.add('hidden');
+            if (last) three.setReport(last);
+        } else {
+            showFallback((three && three.reason) || 'WebGL unavailable');
+        }
+    }
+
+    // One destination for all three failure paths (§8.5): the 2D Lambert pair,
+    // which is a real view, not a stub.
+    function showFallback(why) {
+        use3d = false;
+        heroWrap.classList.add('hidden');
+        mapWrap.classList.remove('hidden');
+        fallbackNote.classList.remove('hidden');
+        fallbackNote.textContent = force2d
+            ? '3D disabled by ?magcal2d=1 — showing the flat coverage map.'
+            : `3D unavailable (${why}) — showing the flat coverage map.`;
+        if (steerNote) steerNote.classList.remove('hidden');
+        D('renderer=2d fallback: ' + why);
+    }
 
     function setOpen(on) {
         open = on;
@@ -354,7 +515,17 @@ export function createMagcal(hub) {
         // The server only pays for (and only sends) reports while a tab has the
         // modal open, so the live view/SLAM path is untouched when it's closed.
         hub.send({ type: 'magcal', action: on ? 'open' : 'close' });
-        if (on) { drawLegend(legendCanvas); redraw(); }
+        // The modal fully occludes the main scene, so rendering it while open is
+        // pure waste. Additive handle; a missing sceneApi is fine.
+        if (sceneApi && sceneApi.setRenderActive) sceneApi.setRenderActive(!on);
+        if (on) {
+            ensureRenderer();
+            if (three) three.start();
+            drawLegend(legendCanvas);
+            redraw();
+        } else if (three) {
+            three.stop();          // keep the context, so reopening is instant
+        }
     }
 
     openBtn.addEventListener('click', () => setOpen(true));
@@ -401,13 +572,16 @@ export function createMagcal(hub) {
     mapCanvas.addEventListener('mouseleave', () => tip.classList.add('hidden'));
 
     function redraw() {
-        hits = drawMap(mapCanvas, last);
+        if (!use3d) hits = drawMap(mapCanvas, last);
         if (!last) return;
-        const cov = ((last.current || last.candidate || {}).coverage) || {};
-        const occupied = cov.occupied !== undefined ? cov.occupied
-            : (last.cell_counts || []).filter((v) => v > 0).length;
-        const cells = last.cells || 0;
+        // Coverage is counted off the authoritative per-cell counts, NOT off a
+        // quality block that may be null before anything is collected — with the
+        // board sitting still this has to read 0%, loudly, not "—".
+        const counts = last.cell_counts || [];
+        const occupied = counts.filter((v) => v > 0).length;
+        const cells = last.cells || counts.length || 0;
         const pct = cells ? (100 * occupied / cells) : 0;
+        drawGauge(gaugeArc, gaugeTicks, gaugePct, gaugeCells, occupied, cells);
         if (progressEl) {
             progressEl.textContent =
                 `Coverage ${occupied} / ${cells} cells (${pct.toFixed(0)}%) · `
@@ -415,6 +589,9 @@ export function createMagcal(hub) {
         }
         if (progressBar) progressBar.style.width = pct.toFixed(1) + '%';
         if (guidanceEl) guidanceEl.textContent = last.guidance || '';
+        renderLiveFit(liveFitEl, last.live_fit);
+        renderVerdictChips(occupied, cells);
+        renderStateChips();
         if (binningEl) {
             const b = last.binning;
             binningEl.textContent = b === 'provisional'
@@ -457,9 +634,76 @@ export function createMagcal(hub) {
         }
     }
 
+    // The four verdict chips, visible DURING collection rather than only in the
+    // post-fit block — the whole point is knowing when you can stop.
+    function renderVerdictChips(occupied, cells) {
+        if (!verdictChips) return;
+        verdictChips.textContent = '';
+        const frac = cells ? occupied / cells : 0;
+        verdictChips.append(chip(`coverage ${Math.round(100 * frac)}%`,
+            frac >= 0.85 ? 'good' : frac >= 0.60 ? 'marginal' : 'bad',
+            'Fraction of equal-area sphere cells with at least one sample. good ≥ 85%, marginal ≥ 60%.'));
+        const n = last.sample_count || 0;
+        verdictChips.append(chip(`samples ${n}`,
+            n >= 300 ? 'good' : n >= 100 ? 'marginal' : 'bad',
+            'good ≥ 300, marginal ≥ 100; the ellipsoid fit needs at least 20 to be solvable.'));
+        const lf = last.live_fit;
+        if (lf && !lf.error && lf.std_pct !== null) {
+            verdictChips.append(chip(`spread ${lf.std_pct.toFixed(1)}%`, lf.spread_verdict,
+                'Rolling provisional fit: |B| std/mean if you stopped now.'));
+            verdictChips.append(chip(`bias ${lf.bias_pct >= 0 ? '+' : ''}${lf.bias_pct.toFixed(1)}%`,
+                lf.bias_verdict, 'Rolling provisional fit: |B| mean vs its own fitted field.'));
+        } else {
+            verdictChips.append(chip('spread —', null, 'Not enough samples to fit yet.'));
+            verdictChips.append(chip('bias —', null, 'Not enough samples to fit yet.'));
+        }
+    }
+
+    // Honesty chips: what the picture is NOT claiming right now.
+    function renderStateChips() {
+        if (!stateChips) return;
+        stateChips.textContent = '';
+        const motion = last.motion || {};
+        if (motion.stationary) {
+            stateChips.append(chip('STATIONARY', 'marginal',
+                'The calibrated field direction has not moved for ~2 s. The sphere only fills '
+                + 'while the device turns — a still device can make every quality number look '
+                + 'excellent and still be badly calibrated.'));
+        }
+        if (last.binning === 'provisional' || last.binning === 'raw') {
+            stateChips.append(chip('PROVISIONAL GEOMETRY', 'marginal',
+                'No saved calibration yet: cell positions come from a rough hard-iron estimate '
+                + 'and will settle as the fit improves.'));
+        }
+        if (livePose && isFinite(livePose.dipDeg)) {
+            stateChips.append(chip(`B∠g ${livePose.dipDeg.toFixed(1)}°`, null,
+                'Angle between the field and gravity. For a CORRECT calibration this is a constant '
+                + 'of your location (90° + magnetic dip) — both vectors are fixed in the room, so '
+                + 'their mutual angle cannot depend on how you hold the board. If it wobbles as you '
+                + 'tumble, the calibration is wrong. Unlike |B| it is immune to scale error.'));
+        }
+        if (livePose && isFinite(livePose.fieldUt)) {
+            stateChips.append(chip(`|B| ${livePose.fieldUt.toFixed(1)} µT`, null,
+                'Live field magnitude under the calibration the map is coloured by.'));
+        }
+        if (!last.sample_count && !(last.motion || {}).n) {
+            stateChips.append(chip('NO MAG DATA', 'bad',
+                'Nothing is arriving on stream 10 from this source.'));
+        }
+    }
+
+    // --- the 5 Hz TRUTH channel -------------------------------------------
+    // `cell_dirs` + `t_world_to_cv` ride only the `open` report (they are
+    // deterministic constants). Merge them forward so every later tick is a
+    // complete message to both renderers.
     hub.on('magcal', (msg) => {
         try {
+            if (last) {
+                if (!msg.cell_dirs && last.cell_dirs) msg.cell_dirs = last.cell_dirs;
+                if (!msg.t_world_to_cv && last.t_world_to_cv) msg.t_world_to_cv = last.t_world_to_cv;
+            }
             last = msg;
+            if (use3d && three) three.setReport(msg);
             if (open) redraw();
             if (!window.__gotMagcal) { window.__gotMagcal = true; D('first magcal report'); }
         } catch (e) {
@@ -467,6 +711,32 @@ export function createMagcal(hub) {
         }
     });
 
-    D('modal wired');
+    // --- the 30 Hz POSE channel (binary tag 5) ----------------------------
+    // Carries the render payload AND the newly-filled-cell delta, so a cell goes
+    // solid the instant it fills rather than up to 200 ms later.
+    hub.on('magpose', (buffer) => {
+        try {
+            const p = decodeMagpose(buffer);
+            if (!p) { D('MAGPOSE wrong size, dropped', 'error'); return; }
+            livePose = p;
+            if (use3d && three) three.setPose(p);
+            if (last && p.filledCell >= 0 && Array.isArray(last.cell_counts)) {
+                // Paint it now; the next JSON tick reconciles the real count.
+                if (!last.cell_counts[p.filledCell]) {
+                    last.cell_counts[p.filledCell] = 1;
+                    if (use3d && three) three.setReport(last);
+                    else if (open) redraw();
+                }
+            }
+            if (last) {
+                last.motion = last.motion || {};
+                last.motion.stationary = (p.flags & POSE_STATIONARY) !== 0;
+            }
+        } catch (e) {
+            D('magpose handler threw: ' + (e && e.message), 'error');
+        }
+    });
+
+    D('modal wired' + (force2d ? ' (?magcal2d=1 — 2D fallback forced)' : ''));
     return {};
 }
