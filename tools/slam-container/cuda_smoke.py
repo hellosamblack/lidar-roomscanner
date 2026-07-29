@@ -36,15 +36,18 @@ from roomscan.slam.synthscene import SyntheticWalk
 W, H = 54, 42
 
 # ---- 6.G memory-ceiling budget ------------------------------------------------
-# Steady state for this run is ~520-650 MiB above baseline (the 40k-block VBG is
-# ~410 MB of it, allocated up front at construction). 1500 MiB leaves generous
-# headroom for driver/allocator variation while still being ~3.5x below where the
-# unfixed run sits at the same frame count -- so the guard fires on a real
-# regression long before it becomes an OOM, and does not flap.
+# The ceiling is deliberately LOOSE and the growth check is the sharp one.
+# `used_bytes` is device-wide and the baseline is sampled after the two mode
+# runs above, so how much of their state the allocator still holds shifts the
+# measured delta a lot: this run reports ~64 MiB here, where the same workload
+# from a cold process reports ~520-650 MiB (the 40k-block VBG is ~410 MB of it,
+# allocated up front). A tight ceiling would flap on that alone. 1500 MiB still
+# trips decisively on a real regression -- unfixed growth over MEM_FRAMES is
+# ~6 GiB.
 MEM_CEILING_MIB = 1500.0
-# Tail growth must be essentially flat. The fixed run measures 0.005-0.04
-# MiB/frame; unfixed is 5.1. Anything above 0.5 is a regression, and the gap
-# between 0.04 and 5.1 is wide enough that this threshold needs no tuning.
+# Tail growth is the precise signal, and it is baseline-independent. Fixed
+# measures 0.005-0.04 MiB/frame; unfixed is 5.13. Anything above 0.5 is a
+# regression, and that gap is wide enough that the threshold needs no tuning.
 MAX_GROWTH_MIB_PER_FRAME = 0.5
 MEM_FRAMES = 1200
 MESH_EVERY = 5              # matches slam/worker.py _MESH_EVERY
