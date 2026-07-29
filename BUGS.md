@@ -798,6 +798,37 @@ cloud uses. **Caught in review:** `build_sensor_message` already had a *local* `
 yaw-offset orientation view), so the new parameter of that name was silently clobbered and the residual
 was being taken from the raw fused quat — renamed `ir_display_quat`.
 
+**Follow-up 2 (2026-07-29, owner: "it's also rotating the contents — if a target is upright in one
+orientation it should remain upright at all orientations").** The roll was applied in the **wrong
+direction**, a sign inversion inherited from `panel.py`. `atan2(gx, gy)` measures *where gravity sits*;
+the correction is its **negative**. Applying `+angle` turned the content the wrong way, so rather than
+holding still it counter-rotated at **2x** the board's rate — worse than doing nothing.
+
+Why the first round missed it: both verifications were **sign-blind**. The upside-down check used 180°,
+where a sign flip is a no-op (−180 ≡ +180), and the 90° check only asserted the width/height swap, which
+happens either way. Fixed by one negation in `ir_gravity_angle_deg` (so `ir_gravity_rot`,
+`ir_gravity_residual_deg` and the CSS transform all follow).
+
+The trap that caused it: `T_WORLD_TO_CV @ R @ T_CV_TO_BODY` rotates points in the **CV frame, where Y
+points down**, so a positive rotation there is *clockwise* on screen — while `np.rot90` is
+*counter-clockwise*. The intended angle was right all along and matched the cloud exactly; only the
+application flipped.
+
+**Proven two independent ways, neither of which is a restatement of the formula.** (1) Exact geometry: the
+IR image and the cloud come off the same 54x42 grid, so wherever the *verified* aligned cloud puts the
+image's +u axis on screen is where the rotated image must put it — that came out as exactly the negative of
+what the code applied, at every angle tested. This is now the regression test
+`test_ir_gravity_angle_matches_the_point_cloud_rotation`, plus
+`test_applied_rotation_stabilises_rather_than_doubling` which asserts the 2x failure mode directly.
+(2) Real data: on `captures/web_20260729_174331.bin` (a physical boresight roll over a 179° span, so the
+scene genuinely co-rotates), the dominant edge orientation of the raw reflectance plus the applied rotation
+has a spread of **15-18°** under the fix versus **24-48°** inverted and **46-60°** uncorrected — i.e. the old
+convention was *worse than applying no correction at all*, the signature of double rotation. The ~15° floor
+is the structure-tensor metric's own resolution on a 54x42 image, not residual error (it does not tighten as
+edge quality rises). Owner confirmed visually on the same recording. Two tests that had *encoded* the
+inversion (`test_sensors.py::test_ir_gravity_rot_roll_90_cw`/`_ccw`, asserting 1 and 3) were corrected to 3
+and 1 with the reasoning written down.
+
 ## BUG-027 — SFLP quaternion aliased by unfiltered 480 Hz → 30 Hz decimation
 
 - **Status:** **fixed** 2026-07-28 · **Reported:** 2026-07-28 (owner, after BUG-026: "the point cloud

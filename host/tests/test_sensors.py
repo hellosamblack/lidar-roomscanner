@@ -223,17 +223,27 @@ def test_ir_gravity_rot_level():
 
 
 def test_ir_gravity_rot_roll_90_cw():
-    """Gravity projects to image-right -> 1 CCW quarter-turn."""
+    """Gravity projects to image-right -> 3 CCW quarter-turns.
+
+    Gravity sitting at image-right is 90 deg CCW of image-down on screen, so the
+    content must turn 90 deg CLOCKWISE to bring it back down -- three CCW
+    quarter-turns, not one. This test previously asserted 1, encoding the sign
+    inversion inherited from panel.py (BUG-026 follow-up, 2026-07-29): the pane
+    rotated the wrong way, so content counter-rotated at 2x the board's rate
+    instead of holding still. The sign is now pinned independently, against the
+    verified point-cloud path, by
+    test_web.py::test_ir_gravity_angle_matches_the_point_cloud_rotation.
+    """
     theta = math.radians(-90.0) / 2
     q = (math.cos(theta), math.sin(theta), 0.0, 0.0)
-    assert ir_gravity_rot(q) == 1
+    assert ir_gravity_rot(q) == 3
 
 
 def test_ir_gravity_rot_roll_90_ccw():
-    """Gravity projects to image-left -> 3 CCW quarter-turns."""
+    """Gravity projects to image-left -> 1 CCW quarter-turn (was 3; see above)."""
     theta = math.radians(90.0) / 2
     q = (math.cos(theta), math.sin(theta), 0.0, 0.0)
-    assert ir_gravity_rot(q) == 3
+    assert ir_gravity_rot(q) == 1
 
 
 # =============================================================================

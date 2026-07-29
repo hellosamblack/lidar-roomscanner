@@ -62,6 +62,16 @@ and the client finishes the job with a CSS transform, so the 54×42 image is nev
 pixel-crisp. Unlike the cloud, the IR client *must* apply that residual — it is the other half of the
 rotation, not a duplicate.
 
+`ir_roll_deg` is the rotation to **apply**, not where gravity sits — the two differ by a sign, and getting
+that backwards is the bug that shipped first (BUG-026 follow-up, 2026-07-29): the pane turned the wrong way,
+so instead of holding still the content counter-rotated at **twice** the board's rate. `ir_gravity_angle_deg`
+negates `atan2` for exactly this reason. **Do not "simplify" that negation away** — it is invisible in the
+two checks you would naturally reach for (a 180° flip is its own inverse; a 90° turn swaps width/height
+either way), and the sign is pinned instead by
+`test_ir_gravity_angle_matches_the_point_cloud_rotation`, which derives the expected rotation from the
+verified cloud path. The trap: `T_WORLD_TO_CV @ R @ T_CV_TO_BODY` rotates points in the CV frame where **Y
+points down**, so a positive rotation there is *clockwise* on screen, while `np.rot90` is *counter-clockwise*.
+
 `ir_roll_deg` is **CCW-positive** (`np.rot90`'s sense, which is also counter-clockwise on screen since
 row 0 renders at the top), so a CSS `rotate()` — which turns clockwise — needs the **negated** value.
 It is computed from the *smoothed* display quat, the same one the snap uses; deriving it from the raw

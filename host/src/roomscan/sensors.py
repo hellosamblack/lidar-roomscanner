@@ -454,26 +454,41 @@ def gizmo_pose(quat: tuple[float, float, float, float], scale: float,
 
 
 def ir_gravity_angle_deg(quat: tuple[float, float, float, float]) -> float:
-    """In-plane rotation, in degrees, needed to put the IR image's "down" along
-    physical gravity. **Continuous** (not snapped), CCW-positive, [-180, 180).
+    """In-plane rotation to APPLY to the IR image so its content stands upright
+    against gravity. **Continuous** (not snapped), in degrees, [-180, 180),
+    CCW-positive **as seen on screen** — i.e. `np.rot90`'s sense (row 0 renders at
+    the top), so a CSS `transform: rotate()` needs the NEGATED value because CSS
+    rotates clockwise.
 
     Method:
       1. Rotate the world-gravity vector [0, 0, -1] (SFLP Z-up world frame)
          into the sensor body frame: g_body = R.T @ [0, 0, -1].
       2. The image plane is the CV XY plane. CV Right = SFLP Y. CV Down = SFLP -X.
       3. The in-plane gravity components are gx = g_body[1] and gy = -g_body[0].
-      4. The in-plane roll angle is atan2(gx, gy) — 0° when gravity is along
-         +image-down, increasing CCW.
+      4. `atan2(gx, gy)` is **where gravity currently sits**, 0° when it already
+         points at +image-down and increasing counter-clockwise on screen.
+      5. **Negate it** — that is the correction, not the measurement. Gravity
+         sitting φ CCW of down means the content must turn φ CLOCKWISE to bring
+         it back down.
 
-    CCW-positive is `np.rot90`'s sense, which is also **counter-clockwise on
-    screen** (row 0 renders at the top) — so a CSS `transform: rotate()` applying
-    the same turn needs the NEGATED value, since CSS rotates clockwise.
+    That negation is the fix for a sign inversion inherited from `panel.py`
+    (BUG-026 follow-up, 2026-07-29): the pane rotated the wrong way, so instead of
+    holding still the content counter-rotated at **twice** the board's rate.
+
+    Beware how easily this hides. Returning `+atan2` instead is invisible in the
+    two checks you would naturally reach for: at 180° a sign flip is a no-op
+    (−180 ≡ +180), and a 90° turn swaps the image's width/height either way. It
+    is pinned now by `test_ir_gravity_angle_matches_the_point_cloud_rotation`,
+    which derives the expected value from the *verified* cloud path — note that
+    `T_WORLD_TO_CV @ R @ T_CV_TO_BODY` rotates points in the CV frame where **Y
+    points down**, so a positive rotation there is CLOCKWISE on screen, the exact
+    trap that produced the inversion.
     """
     r = quat_to_matrix(*quat)   # body → world
     gravity_world = np.array([0.0, 0.0, -1.0])
     g_body = r.T @ gravity_world   # sensor body frame gravity vector
     gx, gy = float(g_body[1]), float(-g_body[0])   # in-plane components
-    return wrap180(math.degrees(math.atan2(gx, gy)))
+    return wrap180(-math.degrees(math.atan2(gx, gy)))
 
 
 def ir_gravity_rot(quat: tuple[float, float, float, float]) -> int:

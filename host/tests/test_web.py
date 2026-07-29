@@ -595,7 +595,49 @@ def test_residual_is_what_the_snap_alone_would_miss():
     from roomscan.sensors import ir_gravity_residual_deg, ir_gravity_rot
     q = _rolled(40.0)
     assert ir_gravity_rot(q) == 0
-    assert ir_gravity_residual_deg(q) == pytest.approx(40.0, abs=1e-3)
+    assert ir_gravity_residual_deg(q) == pytest.approx(-40.0, abs=1e-3)
+
+
+@pytest.mark.parametrize("roll", [0.0, 15.0, 30.0, 45.0, 90.0, 120.0, -30.0, -90.0])
+def test_ir_gravity_angle_matches_the_point_cloud_rotation(roll):
+    """THE sign guard. Derives the expected image rotation from the *verified*
+    cloud path instead of restating the formula, so an inverted convention fails
+    here even though it survives the obvious checks (a 180 deg flip is its own
+    inverse; a 90 deg turn swaps width/height either way).
+
+    Ground truth: the IR image and the cloud come off the same 54x42 grid, so
+    wherever the aligned cloud puts the image's +u axis on screen is where the
+    rotated image must put it too.
+    """
+    from roomscan.deproject import Deprojector
+    from roomscan.sensors import ir_gravity_angle_deg
+
+    q = _rolled(roll)
+    r_disp = web.display_rotation(q)
+    grid, _ = Deprojector(54, 42, 60.0, 45.0).grid(
+        np.full((42, 54), 1000.0, dtype=np.float32))       # flat wall at 1 m
+    a0 = r_disp @ grid[21, 20]
+    a1 = r_disp @ grid[21, 33]                              # same row, +13 px in u
+    # Screen angle of the image's +u axis, CCW-positive (screen Y points down).
+    expect_ccw = np.degrees(np.arctan2(-(a1[1] - a0[1]), a1[0] - a0[0]))
+
+    from roomscan.sensors import wrap180
+    assert wrap180(ir_gravity_angle_deg(q) - expect_ccw) == pytest.approx(0.0, abs=0.05)
+
+
+@pytest.mark.parametrize("roll", [15.0, 30.0, 45.0, 90.0, 120.0, -30.0, -90.0])
+def test_applied_rotation_stabilises_rather_than_doubling(roll):
+    """The user-visible failure mode, asserted directly: with the sign inverted
+    the content does not hold still, it counter-rotates at 2x the board rate.
+    Total applied (rot90 turns + CSS residual) must cancel the roll, not double it.
+    """
+    from roomscan.sensors import ir_gravity_residual_deg, ir_gravity_rot, wrap180
+    q = _rolled(roll)
+    applied_ccw = 90.0 * ir_gravity_rot(q) + ir_gravity_residual_deg(q)
+    # Rolling the board +roll turns the content -roll on screen, so a correct
+    # correction is -roll; the inverted one would be +roll (a 2*roll error).
+    assert wrap180(applied_ccw + roll) == pytest.approx(0.0, abs=0.05)
+    assert abs(wrap180(applied_ccw - roll)) > 1.0 or abs(roll) % 180.0 < 1e-9
 
 
 def test_ir_roll_rides_the_sensor_message_from_the_display_quat():
@@ -607,7 +649,8 @@ def test_ir_roll_rides_the_sensor_message_from_the_display_quat():
     # Supplied -> the residual for THAT quat, not for the raw fused one, so it
     # agrees with the snap the IR pane was rendered with.
     msg = web.build_sensor_message(ss, None, ir_display_quat=_rolled(40.0))
-    assert msg["ir_roll_deg"] == pytest.approx(40.0, abs=0.01)
+    # Negative: a +40 deg board roll needs a 40 deg CLOCKWISE content correction.
+    assert msg["ir_roll_deg"] == pytest.approx(-40.0, abs=0.01)
     json.dumps(msg)
 
 
