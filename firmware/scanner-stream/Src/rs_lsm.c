@@ -244,10 +244,27 @@ static int rs_lsm_shub_init(void) {
      * pulses so the AMR bridge's own offset is cancelled sample-to-sample (AN5069 §8) instead of
      * drifting under the host's static mag_cal.json hard-iron fit. 25 Hz of bandwidth is still
      * ~10x what a 20 s yaw-fusion time constant can use. */
-    static const struct { uint8_t addr, reg, val; } inits[4] = {
+    /* LIS2MDL BDU (CFG_REG_C bit4), added 2026-07-29 -- we were the exact case AN5069 6.4 warns
+     * about: "If reading the magnetometer data is not synchronized with either the Zyxda event bit
+     * ... or with the data-ready signal ... it is strongly recommended to set the BDU bit to 1."
+     * The sensor hub polls the mag on ITS OWN 60 Hz cadence against the mag's 100 Hz ODR, so reads
+     * are unsynchronised by construction and an output-register refresh can land mid-burst. Without
+     * BDU that yields a TORN sample -- MSB from one measurement, LSB from the next -- and at
+     * 1.5 mG/LSB a torn low byte is worth up to 255 LSB = 382 mG = 38 uT, i.e. comparable to Earth's
+     * whole field. Those are exactly the outliers a least-squares ellipsoid fit (fit_ellipsoid) has
+     * no defence against, so they can skew a hard/soft-iron calibration -- a candidate contributor
+     * to BUG-030. BDU blocks the refresh of an axis pair only until both its bytes are read, and the
+     * hub reads all 6 bytes in one burst, so nothing stalls.
+     * AN5069's own recommended init (section 13 flow) is "COMP_TEMP_EN, BDU, Continuous mode, enable
+     * offset cancellation, ODR = 100 Hz" -- we had every item except BDU.
+     * Caveat per the same section: BDU guarantees LSB/MSB coherence per axis, NOT that X, Y and Z
+     * come from one sample; that residual needs a read fast relative to the ODR, which a single
+     * 6-byte hub burst is. */
+    static const struct { uint8_t addr, reg, val; } inits[5] = {
         { 0x5D, 0x10, 0x20 },  /* LPS22DF CTRL_REG1: ODR 25 Hz continuous */
         { 0x1E, 0x60, 0x8C },  /* LIS2MDL CFG_REG_A: temp-comp, 100 Hz, continuous */
         { 0x1E, 0x61, 0x03 },  /* LIS2MDL CFG_REG_B: OFF_CANC | LPF -> 25 Hz BW, 3.0 mG RMS */
+        { 0x1E, 0x62, 0x10 },  /* LIS2MDL CFG_REG_C: BDU (only) -- I2C_DIS/BLE/4WSPI/self-test off */
         { 0x38, 0x04, 0x3C },  /* STTS22H CTRL: free-run + auto-inc + BDU */
     };
     /* We never software-reset the LSM (would drop the I3C dynamic address), so the sensor-hub
