@@ -559,6 +559,19 @@
         .cap-status { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--text-muted); min-height: 1em; }
         .cap-status.rec { color: var(--danger); }
         .cap-list { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow-y: auto; }
+
+        /* ---- record-name modal (post-recording naming prompt) ---- */
+        #record-name-modal .modal { width: min(440px, 96vw); }
+        .record-name-row { display: flex; align-items: center; gap: 8px; }
+        .record-name-row input[type="text"] {
+            flex: 1; min-width: 0;
+            background: rgba(255, 255, 255, 0.05); border: 1px solid var(--panel-border);
+            color: var(--text-main); padding: 9px 10px; border-radius: 8px;
+            font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;
+        }
+        .record-name-row input[type="text"]:focus { outline: none; border-color: var(--accent); }
+        .record-name-suffix { color: var(--text-muted); font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; }
+        .record-name-error { font-size: 0.72rem; color: var(--danger); min-height: 1em; }
         .cap-row {
             display: flex; justify-content: space-between; gap: 8px; align-items: baseline;
             padding: 6px 8px; border-radius: 6px; cursor: pointer;
@@ -1139,6 +1152,30 @@ findable.">
                     <button id="magcal-save" class="primary" disabled title="Write the candidate to the calibration file and apply it live">Save &amp; apply</button>
                 </div>
                 <div class="magcal-status" id="magcal-status">Press Start, then rotate the device through every orientation you can reach.</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Record-name modal: pops once per stopped take (capture.js), prefilled
+         with the auto timestamp name. Skip/Esc/backdrop-click keeps that name;
+         Save sends `rename_capture`. Never blocks — recording already stopped
+         and the file is on disk either way. -->
+    <div id="record-name-modal" class="modal-backdrop hidden">
+        <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="record-name-title">
+            <div class="modal__header">
+                <h2 class="modal__title" id="record-name-title">Name Recording</h2>
+                <button id="record-name-close" class="modal__close" title="Skip (Esc)">&times;</button>
+            </div>
+            <div class="modal__body">
+                <div class="record-name-row">
+                    <input type="text" id="record-name-input" autocomplete="off" spellcheck="false">
+                    <span class="record-name-suffix">.bin</span>
+                </div>
+                <div class="record-name-error" id="record-name-error"></div>
+                <div class="btn-row">
+                    <button id="record-name-skip">Skip</button>
+                    <button id="record-name-save" class="primary">Save</button>
+                </div>
             </div>
         </div>
     </div>

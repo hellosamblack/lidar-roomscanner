@@ -1577,6 +1577,19 @@ def test_sanitize_capture_name(tmp_path):
     assert web.sanitize_capture_name(None, tmp_path) is None
 
 
+def test_sanitize_new_capture_name(tmp_path):
+    (tmp_path / "taken.bin").write_bytes(b"x")
+    assert web.sanitize_new_capture_name("my take", tmp_path) == "my take.bin"
+    assert web.sanitize_new_capture_name("my take.bin", tmp_path) == "my take.bin"
+    assert web.sanitize_new_capture_name("  padded  ", tmp_path) == "padded.bin"
+    assert web.sanitize_new_capture_name("taken.bin", tmp_path) is None      # collision
+    assert web.sanitize_new_capture_name("", tmp_path) is None
+    assert web.sanitize_new_capture_name("   ", tmp_path) is None
+    assert web.sanitize_new_capture_name(None, tmp_path) is None
+    assert web.sanitize_new_capture_name("../escape.bin", tmp_path) is None  # traversal
+    assert web.sanitize_new_capture_name("sub/name.bin", tmp_path) is None   # separator
+
+
 def test_list_captures_newest_first(tmp_path):
     (tmp_path / "a.bin").write_bytes(b"aa")
     (tmp_path / "b.bin").write_bytes(b"bbbb")
@@ -1665,8 +1678,10 @@ def test_build_session_message_shape():
     m = web.build_session_message(
         "replay", "Replay · x.bin", False, rec_active=False, rec_path=None,
         rec_elapsed_s=0.0, rec_bytes=0, is_replay=True, capture_name="x.bin",
-        paused=True, speed_fps=30.0, loop=True, position=0.5, total_frames=42)
+        paused=True, speed_fps=30.0, loop=True, position=0.5, total_frames=42,
+        rec_last_name="web_20260101_000000.bin")
     assert m["type"] == "session" and m["mode"] == "replay"
+    assert m["recording"]["last_name"] == "web_20260101_000000.bin"
     assert m["playback"]["is_replay"] and m["playback"]["position"] == 0.5
     assert m["playback"]["total_frames"] == 42 and m["playback"]["loop"] is True
     assert json.loads(json.dumps(m)) == m                     # JSON-round-trips
@@ -1809,8 +1824,53 @@ def test_controller_records_live_bytes(tmp_path):
         assert not ctrl.recorder.active
         rec = Path(path).read_bytes()
         assert len(rec) >= len(raw) and rec.startswith(raw)   # verbatim tee
+
+        # Post-stop naming modal: rename the just-finished take.
+        old_name = _os.path.basename(path)
+        assert ctrl.session_message(None, time.time())["recording"]["last_name"] == old_name
+        renamed = ctrl.rename_last_recording("my great scan")
+        assert renamed == "my great scan.bin"
+        assert not Path(path).exists()
+        assert (Path(path).parent / "my great scan.bin").exists()
+        assert ctrl.session_message(None, time.time())["recording"]["last_name"] == renamed
+
+        # Renaming to a name that collides with an existing file is rejected,
+        # leaving the current name in place.
+        (Path(path).parent / "clash.bin").write_bytes(b"x")
+        assert ctrl.rename_last_recording("clash") is None
+        assert ctrl.session_message(None, time.time())["recording"]["last_name"] == renamed
+
+        # Starting a new take clears the previous take's "just finished" name.
+        ctrl.start_record()
+        assert ctrl.session_message(None, time.time())["recording"]["last_name"] is None
+        assert ctrl.rename_last_recording("too late") is None
+        ctrl.stop_record()
     finally:
         ctrl.close()
+
+
+def test_handle_inbound_rename_capture(tmp_path):
+    import types
+
+    (tmp_path / "web_20260101_000000.bin").write_bytes(b"x")
+    ctrl, _slot = _make_controller(tmp_path, captures_dir=tmp_path)
+    ctrl._last_recorded_name = "web_20260101_000000.bin"
+    bus = _LogBus()
+    handle = bus.subscribe()
+    state = types.SimpleNamespace(controller=ctrl, clients=set(), bus=bus, ui_state=web.UiState())
+
+    asyncio.run(web._handle_inbound(state, {"type": "rename_capture", "name": "renamed take"}))
+    assert not (tmp_path / "web_20260101_000000.bin").exists()
+    assert (tmp_path / "renamed take.bin").exists()
+    assert ctrl._last_recorded_name == "renamed take.bin"
+    assert bus.drain(handle) == []                            # no error published
+
+    # Renaming again onto an existing name is rejected and reported on the bus.
+    (tmp_path / "clash.bin").write_bytes(b"x")
+    asyncio.run(web._handle_inbound(state, {"type": "rename_capture", "name": "clash"}))
+    assert len(bus.drain(handle)) == 1
+    assert ctrl._last_recorded_name == "renamed take.bin"   # unchanged
+    ctrl.close()
 
 
 def test_controller_session_message_live_vs_replay(tmp_path):

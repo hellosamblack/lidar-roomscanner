@@ -1249,6 +1249,24 @@ def sanitize_capture_name(name, captures_dir) -> Path | None:
     return p if p.is_file() else None
 
 
+def sanitize_new_capture_name(name, captures_dir) -> str | None:
+    """User-typed rename target (post-recording naming modal) -> a safe basename
+    ending in `.bin`, or None if empty/traversal/separator/already-exists.
+    `.bin` is appended if the user didn't type it. Does not check the source
+    file exists — that is the caller's job (it knows which file it's renaming)."""
+    if not isinstance(name, str):
+        return None
+    stripped = name.strip()
+    if not stripped:
+        return None
+    base = stripped if stripped.endswith(".bin") else stripped + ".bin"
+    if os.path.basename(base) != base:
+        return None                        # path separators / traversal
+    if (Path(captures_dir) / base).exists():
+        return None
+    return base
+
+
 def list_captures(captures_dir) -> list[dict]:
     """`captures/*.bin` as [{name, bytes, mtime}], newest first. Missing dir -> []."""
     d = Path(captures_dir)
@@ -1313,7 +1331,8 @@ def build_capture_index(path) -> dict:
 
 def build_session_message(mode, source_label, has_live, *, rec_active, rec_path,
                           rec_elapsed_s, rec_bytes, is_replay, capture_name,
-                          paused, speed_fps, loop, position, total_frames) -> dict:
+                          paused, speed_fps, loop, position, total_frames,
+                          rec_last_name=None) -> dict:
     """Assemble the `session` message (§4) from primitives (pure, unit-tested)."""
     return {
         "type": "session",
@@ -1325,6 +1344,7 @@ def build_session_message(mode, source_label, has_live, *, rec_active, rec_path,
             "path": rec_path,
             "elapsed_s": rec_elapsed_s,
             "bytes": rec_bytes,
+            "last_name": rec_last_name,
         },
         "playback": {
             "is_replay": is_replay,
@@ -1579,6 +1599,7 @@ class SessionController:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._record_started = 0.0
+        self._last_recorded_name = None
         self._seek_prefix = b""
         self._seek_offset = 0
         self.loop = False
@@ -1754,6 +1775,7 @@ class SessionController:
         path = str(Path(self.captures_dir) / f"web_{time.strftime('%Y%m%d_%H%M%S')}.bin")
         self.recorder.start(path)
         self._record_started = time.monotonic()
+        self._last_recorded_name = None    # clear the previous take's "just finished" name
         self.bus.publish(f"recording -> {path}")
 
     def stop_record(self) -> None:
@@ -1761,7 +1783,27 @@ class SessionController:
             return
         path = self.recorder.path
         self.recorder.stop()
+        self._last_recorded_name = os.path.basename(path) if path else None
         self.bus.publish(f"recording stopped -> {path}")
+
+    def rename_last_recording(self, new_name: str) -> str | None:
+        """Rename the just-finished recording (the Web UI's post-stop naming
+        modal) to `new_name` under `captures_dir`. Returns the resolved
+        basename on success, None if there is nothing to rename or the target
+        name is invalid/already taken."""
+        old_name = self._last_recorded_name
+        if not old_name:
+            return None
+        new_base = sanitize_new_capture_name(new_name, self.captures_dir)
+        if new_base is None:
+            return None
+        old_path = Path(self.captures_dir) / old_name
+        new_path = Path(self.captures_dir) / new_base
+        if not old_path.is_file() or new_path.exists():
+            return None
+        old_path.rename(new_path)
+        self._last_recorded_name = new_base
+        return new_base
 
     def close(self) -> None:
         self._stop_reader()
@@ -1794,6 +1836,7 @@ class SessionController:
             self.mode, self.source_label, self.has_live,
             rec_active=rec_active, rec_path=rec_path,
             rec_elapsed_s=round(rec_elapsed, 1), rec_bytes=rec_bytes,
+            rec_last_name=self._last_recorded_name,
             is_replay=is_replay,
             capture_name=(os.path.basename(self.replay_path) if self.replay_path else None),
             paused=self.pacer.paused.is_set(), speed_fps=self.speed_fps, loop=self.loop,
@@ -2447,6 +2490,13 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         await _broadcast_text(state.clients, json.dumps(build_captures_message(ctrl.captures_dir)))
 
     elif mtype == "list_captures" and ctrl is not None:
+        await _broadcast_text(state.clients, json.dumps(build_captures_message(ctrl.captures_dir)))
+
+    elif mtype == "rename_capture" and ctrl is not None:
+        new_name = await asyncio.to_thread(ctrl.rename_last_recording, msg.get("name"))
+        if new_name is None:
+            state.bus.publish("rename -> invalid name or already exists")
+        await _broadcast_session(state)
         await _broadcast_text(state.clients, json.dumps(build_captures_message(ctrl.captures_dir)))
 
     elif mtype == "load_capture" and ctrl is not None:

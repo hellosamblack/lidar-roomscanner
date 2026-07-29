@@ -642,6 +642,13 @@ desktop-parity: the app runs remotely on the headless box, so the operator brows
 - **`/ws` protocol reference:** the full app protocol (binary tags + JSON messages, in/out) across Web Phases 1–3
   is now indexed in `docs/web-protocol.md` — Phase 4's trajectory/mesh messages hook in there (it also lists the
   invariants: one-way echo, validate untrusted inbound, server-side math, off-loop blocking work).
+- **Post-recording naming (owner ask, 2026-07-29):** every stopped take now pops a skippable "Name Recording"
+  modal in `capture.js`, prefilled with the auto `web_<ts>.bin` name. Save sends a new inbound `rename_capture`
+  (`SessionController.rename_last_recording` / `sanitize_new_capture_name` in `web.py`); success/failure is read
+  back off a new `session.recording.last_name` field rather than a dedicated ack, since the server already owns
+  collision/validity checks. Skip/Esc/backdrop-click leaves the auto name — never blocking, the file is on disk
+  either way. Verified end-to-end in headless Chrome (open-on-stop, save, collision rejection, skip); full host
+  suite 961 passed, 1 skipped.
 
 #### Web Phase 4 — SLAM mode  ← **✅ Complete (2026-07-16)**
 

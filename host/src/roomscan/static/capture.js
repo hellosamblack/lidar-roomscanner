@@ -7,8 +7,16 @@
 // echo — one-way flow (§5), so every open tab stays in sync and a control
 // fired mid-swap can't desync the UI.
 //
+// Post-recording naming: every falling edge of `recording.active` (seen once,
+// via the `recPrompted` latch below) opens a small modal prefilled with the
+// auto `web_<timestamp>.bin` name. Skip/Esc/backdrop-click leaves that name in
+// place (the file is already on disk either way — this is never blocking).
+// Save sends `rename_capture`; success/failure is read back off the next
+// `session` echo (`recording.last_name`) rather than guessed locally, since
+// the server owns collision/validity checks.
+//
 // Hub events:  subscribes "session", "captures";
-//              sends record / list_captures / load_capture / go_live / transport.
+//              sends record / list_captures / load_capture / go_live / transport / rename_capture.
 
 export function createCapture(hub) {
     const $ = (id) => document.getElementById(id);
@@ -25,9 +33,20 @@ export function createCapture(hub) {
     const seek = $('seek');
     const posStatus = $('pos-status');
 
+    const recNameModal = $('record-name-modal');
+    const recNameInput = $('record-name-input');
+    const recNameError = $('record-name-error');
+    const recNameSave = $('record-name-save');
+    const recNameSkip = $('record-name-skip');
+    const recNameClose = $('record-name-close');
+
     let session = null;      // latest server session snapshot
     let captures = [];       // latest capture library
     let dragging = false;    // true while the user drags the seek slider
+    let prevRecActive = null; // recording.active as of the previous session message
+    let recPrompted = false;  // already opened (or skipped opening) the modal for the CURRENT stopped take
+    let renameTarget = null;  // the name the modal is currently offering to rename FROM
+    let renamePending = null; // the sanitized name we just asked the server to rename TO, until echoed back
 
     // ---- formatting helpers ----
     const fmtBytes = (n) => {
@@ -68,6 +87,46 @@ export function createCapture(hub) {
     });
     chkLoop?.addEventListener('change', () => hub.send({ type: 'transport', action: 'loop', value: chkLoop.checked ? 1 : 0 }));
 
+    // ---- outbound + wiring: post-recording naming modal ----
+    recNameSkip?.addEventListener('click', closeRenameModal);
+    recNameClose?.addEventListener('click', closeRenameModal);
+    recNameModal?.addEventListener('click', (e) => { if (e.target === recNameModal) closeRenameModal(); });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && recNameModal && !recNameModal.classList.contains('hidden')) closeRenameModal();
+    });
+    recNameInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitRename(); });
+    recNameSave?.addEventListener('click', submitRename);
+
+    function openRenameModal(currentName) {
+        renameTarget = currentName;
+        renamePending = null;
+        if (recNameInput) {
+            recNameInput.value = currentName.endsWith('.bin') ? currentName.slice(0, -4) : currentName;
+        }
+        if (recNameError) recNameError.textContent = '';
+        if (recNameSave) recNameSave.disabled = false;
+        recNameModal?.classList.remove('hidden');
+        recNameInput?.focus();
+        recNameInput?.select();
+    }
+
+    function closeRenameModal() {
+        recNameModal?.classList.add('hidden');
+        renameTarget = null;
+        renamePending = null;
+    }
+
+    function submitRename() {
+        const typed = (recNameInput?.value || '').trim();
+        if (!typed) { closeRenameModal(); return; }           // blank -> keep the auto name
+        const sanitized = typed.endsWith('.bin') ? typed : typed + '.bin';
+        if (sanitized === renameTarget) { closeRenameModal(); return; }  // unchanged -> no-op
+        renamePending = sanitized;
+        if (recNameSave) recNameSave.disabled = true;
+        if (recNameError) recNameError.textContent = '';
+        hub.send({ type: 'rename_capture', name: typed });
+    }
+
     // Seek: preview locally while dragging (don't fight server position echoes),
     // commit on release. `input` fires continuously, `change` on release.
     seek?.addEventListener('input', () => {
@@ -81,7 +140,30 @@ export function createCapture(hub) {
 
     // ---- inbound: render from server state ----
     hub.on('captures', (msg) => { captures = Array.isArray(msg.items) ? msg.items : []; renderList(); });
-    hub.on('session', (msg) => { session = msg; renderSession(); });
+    hub.on('session', (msg) => {
+        session = msg;
+        renderSession();
+
+        const rec = session.recording || {};
+        if (rec.active) {
+            recPrompted = false;                        // re-arm for this take's eventual stop
+        } else if (prevRecActive === true && !recPrompted && rec.last_name) {
+            recPrompted = true;
+            openRenameModal(rec.last_name);
+        }
+        prevRecActive = !!rec.active;
+
+        if (renamePending) {
+            if (rec.last_name === renamePending) {
+                closeRenameModal();                      // server confirmed the rename
+            } else if (rec.last_name === renameTarget) {
+                // server rejected it (collision/invalid name) -- unchanged, let the user retry.
+                if (recNameError) recNameError.textContent = 'That name is taken or invalid — try another.';
+                if (recNameSave) recNameSave.disabled = false;
+                renamePending = null;
+            }
+        }
+    });
 
     function renderSession() {
         if (!session) return;
