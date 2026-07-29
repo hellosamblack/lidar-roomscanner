@@ -97,6 +97,22 @@ reappearance before reopening; reuse it rather than re-deriving the wait loop.
 
 ## Capture / monitor
 
+> **⚠ `capture.py --udp` and `roomscan-web` both bind the device stream — running `capture.py`
+> starves the live web UI** (point cloud and sensor readouts freeze). This broke a live session on
+> 2026-07-29 while the owner was physically positioning the device and needed the on-screen
+> roll/pitch. **When the owner needs the UI live, record through the server instead** — it records
+> from the already-decoded stream, so there is no contention:
+>
+> ```python
+> {"type": "record", "on": True}    # over /ws -> captures/web_<YYYYmmdd_HHMMSS>.bin
+> {"type": "record", "on": False}
+> ```
+>
+> Confirm by watching the file grow (`session.recording.active` can lag the first broadcast).
+> `capture.py --udp` remains right for unattended/headless captures. Related: `pkill -f 'capture.py …'`
+> **matches its own shell** and kills the wrapper (exit 144) or spins forever in a wait-for-exit
+> guard — use a bracket class, `pgrep -f 'captur[e].py'`.
+
 `host/tools/capture.py` is THE tool — it consolidates the whole ritual (optional SWD reset,
 CDC port discovery by VID/PID, boot-hang retry, timed raw capture, decode-and-report) that used to be
 rebuilt from prose by every `[HW]` task:
