@@ -36,14 +36,16 @@ SENSOR_LABELS: dict[int, str] = {
     StreamId.DEPTH_ZF32: "ToF",
     StreamId.RAW_3DMD: "ToF",
     StreamId.IMU_QUAT: "IMU",
+    StreamId.IMU_RAW: "IMUraw",
     StreamId.ENV: "Env",
 }
-# fixed display order (ToF, IMU, Env); anything else sorts last
+# fixed display order (ToF, IMU, IMU raw, Env); anything else sorts last
 _SENSOR_ORDER: dict[int, int] = {
     StreamId.DEPTH_ZF32: 0,
     StreamId.RAW_3DMD: 0,
     StreamId.IMU_QUAT: 1,
-    StreamId.ENV: 2,
+    StreamId.IMU_RAW: 2,
+    StreamId.ENV: 3,
 }
 
 

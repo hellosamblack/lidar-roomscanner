@@ -18,6 +18,22 @@ typedef struct {
     uint8_t have_env;    /* 1 if env fields were updated this call */
 } rs_lsm_sample_t;
 
+/* One verbatim LSM6DSV16X FIFO word, laid out exactly as stream 11 (RS_STREAM_IMU_RAW)
+ * puts it on the wire — see docs/protocol.md. `tag` is the FIFO_DATA_OUT_TAG *register*
+ * byte, reconstructed as (tag_sensor << 3) | (tag_cnt << 1): the ST driver's
+ * lsm6dsv16x_fifo_out_raw_get() decodes the register into a bitfield and drops bit0
+ * (not_used0), so bit0 is always 0 here. `data` is the 6 payload bytes untouched
+ * (little-endian, sensor encoding). sizeof == RS_IMU_RAW_REC_SIZE (8), no padding, so an
+ * array of these is memcpy-free wire payload. */
+typedef struct {
+    uint8_t tag;
+    uint8_t data[6];
+    uint8_t reserved;   /* always 0 */
+} rs_lsm_raw_word_t;
+
+/* FIFO depth in words (LSM6DSV16X): the largest batch one drain can ever produce. */
+#define RS_LSM_RAW_FIFO_MAX (256u)
+
 /* Configure the LSM (SFLP + sensor-hub). Returns 0 on success, <0 on failure.
  * Must run after the ToF bring-up has assigned the LSM its dynamic address (0x50). */
 int rs_lsm_init(void);
@@ -26,5 +42,21 @@ int rs_lsm_init(void);
  * Never blocks. Returns 0 if any data was obtained, <0 if the FIFO yielded nothing
  * usable. Fields are only meaningful when the matching have_* flag is set. */
 int rs_lsm_read_latest(rs_lsm_sample_t *out);
+
+/* As rs_lsm_read_latest, but additionally copies out the raw FIFO words this drain saw
+ * for the stream-11 tags (GY_NC 0x01, XL_NC 0x02, TIMESTAMP 0x04, SFLP gbias 0x16, SFLP
+ * gravity 0x17) — the game-rotation word (0x13) stays on stream 9 and the sensor-hub
+ * words stay on stream 10. `raw` may be NULL (then raw_max/raw_count are ignored and the
+ * behaviour is byte-for-byte rs_lsm_read_latest). Words beyond raw_max are dropped, the
+ * FIFO is still fully drained. Returns 0 if any quat/env/raw data was obtained. */
+int rs_lsm_read_latest_raw(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_t raw_max,
+                           uint16_t *raw_count);
+
+/* INTERNAL_FREQ_FINE (register 0x4F), latched once by rs_lsm_init(). Factory trim of the
+ * internal oscillator that clocks the ODRs and the FIFO timestamp counter; the true tick
+ * period is 1 / (46080 * (1 + 0.0013 * freq_fine)) seconds (AN5763 6.4), NOT the nominal
+ * 21.7 us. `valid` is 0 until a successful read — the wire (stream 12) carries both. */
+extern int8_t  g_lsm_freq_fine;
+extern uint8_t g_lsm_freq_fine_valid;
 
 #endif /* RS_LSM_H */

@@ -37,6 +37,7 @@ class StreamId(IntEnum):
     IMU_QUAT = 9
     ENV = 10
     IMU_RAW = 11
+    IMU_CAL = 12
 
 
 class EventCode(IntEnum):
@@ -106,6 +107,20 @@ IMU_RAW_XL_MG_PER_LSB = 0.122      # ±4 g
 IMU_RAW_GRAVITY_MG_PER_LSB = 0.061    # SFLP gravity vector, fixed ±2 g
 IMU_RAW_GBIAS_MDPS_PER_LSB = 4.375    # SFLP gyro-bias vector, fixed ±125 dps
 IMU_RAW_TICK_US = 21.7             # LSM timestamp counter LSB, nominal (DS13510 rev 4)
+
+# --- stream 12 (IMU_CAL): the LSM's own clock trim -----------------------------------
+# IMU_RAW_TICK_US above is only correct for a part whose internal oscillator landed exactly
+# on nominal. Real parts are trimmed, and the trim is readable: INTERNAL_FREQ_FINE (register
+# 0x4F) gives the deviation in 0.13% steps, and AN5763 6.4 turns it into the true period
+#
+#     t_tick = 1 / (46080 * (1 + 0.0013 * freq_fine))   [seconds]
+#
+# Measured on this rig 2026-07-28: the host clock ran 1.029790x the LSM's, i.e. ~29790 ppm
+# of pure scale error, because the host was integrating gyro against the nominal tick. That
+# turns a 90 deg pan into ~87.3 deg — far worse than any quantisation floor.
+IMU_CAL_SIZE = 4                   # int8 freq_fine, uint8 valid, uint16 reserved
+IMU_TICK_BASE_HZ = 46080.0         # nominal timestamp-counter frequency (AN5763 6.4)
+IMU_TICK_FREQ_FINE_STEP = 0.0013   # 0.13% per FREQ_FINE LSB
 
 
 class ProtocolError(Exception):
@@ -211,22 +226,27 @@ class ImuRawBatch:
     gravity_cnt: "np.ndarray"
     gbias_dps: "np.ndarray"       # (N, 3) float64, deg/s — SFLP gyro bias estimate
     gbias_cnt: "np.ndarray"
-    timestamp_ticks: "np.ndarray"  # (N,) uint32, LSM timestamp counter (IMU_RAW_TICK_US per LSB)
+    timestamp_ticks: "np.ndarray"  # (N,) uint32, LSM timestamp counter (`tick_us` per LSB)
     timestamp_cnt: "np.ndarray"
     n_records: int                # total words in the payload, including unknown tags
+    tick_us: float = IMU_RAW_TICK_US  # timestamp LSB actually applied (see decode_imu_raw)
 
     @property
     def timestamp_us(self) -> "np.ndarray":
-        """Timestamp words in microseconds on the LSM's own clock (nominal tick)."""
-        return self.timestamp_ticks.astype(np.float64) * IMU_RAW_TICK_US
+        """Timestamp words in microseconds on the LSM's own clock."""
+        return self.timestamp_ticks.astype(np.float64) * self.tick_us
 
 
-def decode_imu_raw(payload: bytes) -> ImuRawBatch:
+def decode_imu_raw(payload: bytes, tick_us: float = IMU_RAW_TICK_US) -> ImuRawBatch:
     """Decode a stream 11 IMU_RAW payload (N × 8-byte verbatim FIFO records).
 
     Record layout: byte 0 = the FIFO_DATA_OUT_TAG register byte, `TAG_SENSOR << 3 |
     TAG_CNT << 1` (bit 0 is the register's not_used0 and is always 0 — the ST driver
     discards it); bytes 1-6 = the FIFO data bytes untouched; byte 7 = reserved zero.
+
+    `tick_us` is the timestamp-counter LSB to scale the TIMESTAMP words by. It defaults to
+    the nominal 21.7 µs, which is what a recording made before stream 12 existed can offer;
+    pass `imu_tick_us(freq_fine)` from a stream-12 frame to get the part's real tick.
     """
     if len(payload) == 0 or len(payload) % IMU_RAW_REC_SIZE != 0:
         raise ProtocolError(
@@ -252,7 +272,37 @@ def decode_imu_raw(payload: bytes) -> ImuRawBatch:
     ticks = np.ascontiguousarray(data[ts_sel][:, :4]).view("<u4").reshape(-1)
 
     return ImuRawBatch(gyro, gyro_cnt, accel, accel_cnt, gravity, gravity_cnt,
-                       gbias, gbias_cnt, ticks, cnt[ts_sel], rec.shape[0])
+                       gbias, gbias_cnt, ticks, cnt[ts_sel], rec.shape[0], tick_us)
+
+
+def imu_tick_us(freq_fine: int) -> float:
+    """LSM timestamp-counter LSB in µs for a given INTERNAL_FREQ_FINE (AN5763 6.4)."""
+    return 1e6 / (IMU_TICK_BASE_HZ * (1.0 + IMU_TICK_FREQ_FINE_STEP * freq_fine))
+
+
+@dataclass(frozen=True)
+class ImuClockCal:
+    """One stream-12 payload: the LSM6DSV16X's factory oscillator trim."""
+    freq_fine: int    # INTERNAL_FREQ_FINE (register 0x4F), signed, 0.13% per LSB
+    valid: bool       # False => the device could not read the register; use the nominal tick
+
+    @property
+    def tick_us(self) -> float:
+        """True timestamp-counter LSB, falling back to nominal when `valid` is False."""
+        return imu_tick_us(self.freq_fine) if self.valid else IMU_RAW_TICK_US
+
+
+def decode_imu_cal(payload: bytes) -> ImuClockCal:
+    """Decode a stream 12 IMU_CAL payload -> ImuClockCal.
+
+    Layout: int8 freq_fine, uint8 valid, uint16 reserved (0). The device only emits this
+    stream at all once it has read the register successfully, so `valid` is 1 in practice;
+    it exists so the field can never be silently mistaken for a legitimate freq_fine of 0.
+    """
+    if len(payload) != IMU_CAL_SIZE:
+        raise ProtocolError(f"IMU_CAL payload must be {IMU_CAL_SIZE} bytes, got {len(payload)}")
+    freq_fine, valid, _reserved = struct.unpack("<bBH", payload)
+    return ImuClockCal(freq_fine, bool(valid))
 
 
 def decode_env(payload: bytes) -> tuple[float, tuple[float, float, float], float]:

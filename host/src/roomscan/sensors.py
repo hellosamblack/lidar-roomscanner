@@ -15,11 +15,13 @@ if TYPE_CHECKING:   # import-only: imufusion imports the quaternion helpers from
 
 from .magcal import MagCalibration
 from .protocol import (
+    IMU_RAW_TICK_US,
     Frame,
     FrameType,
     ImuRawBatch,
     StreamId,
     decode_env,
+    decode_imu_cal,
     decode_imu_quat,
     decode_imu_raw,
 )
@@ -45,6 +47,10 @@ class SensorState:
         self._imu_raw: ImuRawBatch | None = None
         self._imu_raw_hist: deque[tuple[int, ImuRawBatch]] = deque(maxlen=imu_raw_history)
         self._imu_fusion = imu_fusion
+        # stream 12: the LSM's own oscillator trim, which sets what a stream-11 timestamp
+        # tick is actually worth. Starts nominal — recordings made before stream 12 existed
+        # never carry one, and nominal is exactly the behaviour they were decoded with.
+        self._imu_tick_us: float = IMU_RAW_TICK_US
         self._quat: tuple[float, float, float, float] | None = None
         self._env: EnvSample | None = None
         self._pressure = deque(maxlen=history)
@@ -80,7 +86,9 @@ class SensorState:
                     self._temp_spark.append(temp)
                     self._last_spark_t = frame.header.t_us
         elif sid == StreamId.IMU_RAW:
-            batch = decode_imu_raw(frame.payload)
+            with self._lock:
+                tick_us = self._imu_tick_us
+            batch = decode_imu_raw(frame.payload, tick_us)
             with self._lock:
                 self._imu_raw = batch
                 self._imu_raw_hist.append((frame.header.t_us, batch))
@@ -88,6 +96,17 @@ class SensorState:
                     # yaw anchor = whatever the pre-existing path would have returned
                     # (YawFusion output if attached and settled, else the SFLP quat).
                     self._imu_fusion.update(batch, yaw_ref=self._legacy_quat_locked())
+        elif sid == StreamId.IMU_CAL:
+            cal = decode_imu_cal(frame.payload)
+            with self._lock:
+                self._imu_tick_us = cal.tick_us
+
+    @property
+    def imu_tick_us(self) -> float:
+        """LSM timestamp-counter LSB in µs — the trimmed value once a stream-12 frame has
+        arrived, the nominal 21.7 µs before that (and forever, on an older recording)."""
+        with self._lock:
+            return self._imu_tick_us
 
     def clear_imu_raw(self) -> None:
         """Drop the stream-11 batch + history (owner ask, 2026-07-28: the
