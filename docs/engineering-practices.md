@@ -78,6 +78,12 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
   and regression datasets come for free.
 - **Logging**: The app writes automatic rotating logs to `logs/app.log` (Python tracebacks, UI actions) and 
   `logs/firmware.log` (ST-Link VCOM output). Always check these when diagnosing crashes or hangs.
+- **Adding a parameter to a long function? Grep the body for that name first.** `web.py`'s builders are
+  100+ lines and reuse obvious names, so a new parameter can be shadowed by an existing local and silently
+  take the wrong value — `build_sensor_message` already had a local `display_quat` (the yaw-offset
+  orientation view), which clobbered a new `display_quat` argument so it read the raw quat instead of the
+  smoothed one (BUG-026 follow-up). It produced a *plausible* number, which is what made it dangerous; only
+  a test asserting the `None` default caught it. Prefer a qualified name (`ir_display_quat`).
 
 ## Web UI
 
