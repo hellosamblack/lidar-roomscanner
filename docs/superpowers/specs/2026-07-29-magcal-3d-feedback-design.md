@@ -1,6 +1,8 @@
 # Responsive 3D magnetometer-calibration feedback
 
-**Status:** design, not implemented. **Date:** 2026-07-29. **Owner ask (verbatim intent):**
+**Status:** design, not implemented. **Date:** 2026-07-29.
+**Revised 2026-07-30 — the hero camera moved to first-person; see §4.1, which is amended in place.**
+**Owner ask (verbatim intent):**
 
 > "I want the feedback to be responsive. It should show the current and past orientation of the board
 > in 3d space at 30+ hz, with the magnetometer overlaid. Be creative on how you want to represent
@@ -142,10 +144,22 @@ optional auto-orbit off by default; see §11 open question 3).
 
 ### 4.1 The shell (hero)
 
-**Frame: SFLP body (X = Up, Y = Right, Z = Forward).** `camera.up = (1,0,0)` (body Up); the camera
-sits on a fixed offset looking at the origin. Face labels `Top / Bottom / Right / Left / Front /
-Back` sit at ±X, ±Y, ±Z at radius 1.15 — the same six names `magsweep.FACES` already uses, so the
-guidance text and the picture name the same thing.
+**Frame: SFLP body (X = Up, Y = Right, Z = Forward).** The camera sits on a fixed offset looking at
+the origin. Face labels `Top / Bottom / Right / Left / Front / Back` sit at ±X, ±Y, ±Z at radius
+1.15 — the same six names `magsweep.FACES` already uses, so the guidance text and the picture name
+the same thing.
+
+> **Amended 2026-07-30 (owner):** *"During mag cal, we should render the view from the first person
+> perspective of the camera (gravity down always, similar to the fpv world view)."* The camera is now
+> parked **behind the device on the boresight** (body −Z, standoff 4.3, fov 40°) looking along it, and
+> `camera.up` **tracks −g** instead of being pinned to body Up — the same rule the live view's FPV
+> mode applies to the cloud (`web.boresight_view_frame`), here applied to a camera instead of to
+> points. Consequences: the shell you are steering through is now the sensor's own field of view;
+> screen-down is room-down always; the camera's only motion is a gravity roll, so §3.2's "the hole is
+> where it was" property survives (a hole moves only when you roll the board, and then it moves the
+> way the room does). The `Front`/`Back` labels are dropped — the boresight axis projects to a point,
+> so both would land stacked on the device at screen centre. Roll is eased with a 0.12 s time
+> constant on the *camera only*; no mark is ever drawn from a smoothed number.
 
 **Cells.** All 92 lattice cells always drawn, as discs **tangent to the sphere** (oriented by their
 own normal, so orientation reads and a back-face disc is edge-on-ish rather than a flat sticker).
@@ -161,6 +175,21 @@ One `InstancedMesh` of 92, per-instance matrix + colour.
 Back-hemisphere cells render first at 0.35 opacity with `depthWrite: false`; front cells at full
 opacity. The user sees through the shell to the far side, which matters: a gap on the far side must
 be visible, not hidden.
+
+> **Amended 2026-07-30 (owner: "the sphere should be translucent for points that are 'behind' the
+> camera").** The translucency now keys on **`dir·boresight < 0`** — the cells behind the camera —
+> not on distance from the eye. Under the first-person framing above those *are* the near ones, and
+> the usual far-is-faint depth cue would be exactly backwards: the near cap covers the entire
+> silhouette, so fading the far side would hide the hemisphere you are aiming into. Ghosting the near
+> cap (0.26 filled / 0.30 missing, against 0.90 / 0.95) lets you see the aim hemisphere *through* it
+> and still find a gap behind you. Implementation note: `InstancedMesh`'s per-instance channel is
+> colour, not alpha, so this is a **material** split — four meshes (covered × behind), each cell
+> parked at scale 0 in the three that don't apply. The split is static, because the camera is fixed
+> in body axes and only rolls. Hue is left untouched by the ghosting (alpha carries depth, so the
+> |B| ramp still reads on a cell behind you) — which also retires the old brightness-mix depth cue.
+> The device model's fill drops to 0.30 in the hero for the same reason: seen from behind it is
+> face-on over the middle of the shell, where the target ring and geodesic live. The Steering widget
+> keeps the solid fill — its whole mechanic is landing a solid body inside a wireframe ghost.
 
 **Device model.** A small extruded board silhouette at the origin (NUCLEO outline + a nub for the USB
 end + a dot for the ToF aperture), muted ink, wireframe-ish. In the hero (body-fixed) camera it is

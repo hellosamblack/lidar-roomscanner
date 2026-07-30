@@ -58,9 +58,12 @@ Error budget during a 100 °/s pan, measured:
   **92-cell Fibonacci equal-area sphere lattice** over the **calibrated, body-frame** field direction
   (raw would never span the sphere: hard-iron ~65 µT exceeds the ~50 µT field). Verdicts gate on
   field **spread AND bias** — spread alone scored the current bad calibration "good" because it is
-  self-consistent at ~2× the wrong magnitude. Hero view is the body-fixed 3D "Shell & Steering" scene
+  self-consistent at ~2× the wrong magnitude. Hero view is the 3D "Shell & Steering" scene
   (binary **`MAGPOSE` tag 5**, 68 B at 30 Hz, modal-open clients only), with a 2D Lambert-disc
-  fallback on no-WebGL / context-loss / `?magcal2d=1`. Design:
+  fallback on no-WebGL / context-loss / `?magcal2d=1`. *(2026-07-30: the shell is body-fixed but the
+  hero **camera is first-person** — behind the device on the boresight, `camera.up` tracking −g like
+  the live view's FPV mode; the cells **behind the camera** are the translucent ones. Don't expect the
+  old 3/4-offset framing in a screenshot.)* Design:
   `docs/superpowers/specs/2026-07-29-magcal-3d-feedback-design.md`.
 - `host/tools/orientation_probe.py` — the canonical measurement CLI (`jitter` / `health` / `frame`).
 

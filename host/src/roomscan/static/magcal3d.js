@@ -18,13 +18,28 @@
 // Z = Forward): the 92 coverage cells, the device model, the field arrow at
 // `field_dir_body`, gravity at `gravity_body`.
 //
-//   HERO (body-fixed camera):  bodyGroup.matrix = identity.
+//   HERO (first-person camera):  bodyGroup.matrix = identity.
 //       The shell and the device are STATIONARY and the field marker moves.
 //       This is the map you can plan against — a hole is in the same screen
 //       place it was three seconds ago, which is the entire reason this is the
 //       hero. It also needs NO orientation data at all: `cell_dirs` and
 //       `field_dir_body` are already body vectors, so it renders correctly on a
 //       session with no stream 9.
+//
+//       The camera sits BEHIND the device on its boresight, looking where the
+//       ToF camera looks (owner, 2026-07-30) — the same framing as the live
+//       view's FPV mode, and for the same reason: the shell you are steering
+//       through is the sensor's own field of view, so "up-left on screen" has
+//       to mean "up-left of where I am pointing". Like FPV it is
+//       gravity-levelled: `camera.up` tracks −g (§ heroUp), so screen-down is
+//       room-down always and the shell counter-rolls when you roll the board.
+//       That is the ONLY motion the hero camera has — pitch and yaw move the
+//       camera with the body, so a hole still stays where it was.
+//
+//       Because the camera is pulled back along −boresight, the cells BEHIND it
+//       (dir·boresight < 0, the near cap) would otherwise cover the whole
+//       silhouette and hide the hemisphere you are aiming into. They are drawn
+//       translucent instead — see CELL_MESHES.
 //
 //   STEERING (world-fixed camera):  bodyGroup.matrix = T_WORLD_TO_CV · R.
 //       Now the device and its shell tumble and the field arrow stands still —
@@ -83,7 +98,7 @@ const DEV_COOL = [96, 165, 250];      // #60a5fa — |B| reads LOW
 const DEV_MID = [100, 116, 139];      // #64748b — |B| correct (NEUTRAL midpoint)
 const DEV_WARM = [239, 68, 68];       // #ef4444 — |B| reads HIGH
 const DEV_CLAMP = 30.0;               // percent, clamped so the shipped defect saturates
-const EMPTY_INK = [226, 232, 240];    // missing-cell outline, before depth dimming
+const EMPTY_INK = [226, 232, 240];    // missing-cell outline (depth cue is alpha, not ink)
 // Ordinal neutral trail ramp — validated `--ordinal`: monotone L, adjacent
 // ΔL ≥ 0.06, light end 2.97:1 vs surface, hue spread 5°.
 const TRAIL_RAMP = [[91, 100, 114], [139, 148, 163], [183, 192, 207], [226, 232, 240]];
@@ -99,8 +114,23 @@ const CELL_BASE_R = 0.150;
 const CELL_MIN_R = 0.32;        // fraction of CELL_BASE_R at 1 sample
 const DENSITY_FULL = 8;         // samples at which a cell reads "well visited"
 const TRAIL_LEN = 90;           // 3 s at 30 Hz
-const BACK_DIM = 0.72;          // how far a back-hemisphere cell mixes toward the surface
 const RENDER_LAG_MS = 33;       // one pose interval: interpolate, never extrapolate
+
+// Hero framing. The camera is on the −boresight axis looking at the origin, so
+// it sees the shell head-on from where the sensor sits. `HERO_DIST` is the
+// standoff: at the optical centre the shell is a wall in every direction and you
+// see one cell, so a non-zero standoff is structural, not cosmetic (the same
+// point the live view's FPV framing makes). It is set so the half-height at
+// `HERO_FOV` clears the |B| tick at r ≈ 1.56.
+const HERO_FOV = 40;
+const HERO_DIST = 4.3;
+// Camera-roll smoothing. The roll is a CAMERA property, never applied to a
+// mark: gravity is noisy at ±0.05°, and a shell that shivers reads as a broken
+// instrument. 0.12 s is below hand-motion timescale, so steering still feels direct.
+const UP_TAU_S = 0.12;
+// Below this much of g perpendicular to the boresight, "level" is undefined
+// (aimed at the floor or the ceiling) — hold the last roll rather than spin.
+const UP_MIN = 0.12;
 
 const FACES = [
     ['Top', [1, 0, 0]], ['Bottom', [-1, 0, 0]],
@@ -236,8 +266,16 @@ function labelSprite(text, colorCss) {
 function deviceModel() {
     const g = new THREE.Group();
     const board = new THREE.BoxGeometry(0.62, 0.34, 0.035);
-    g.add(new THREE.Mesh(board, new THREE.MeshBasicMaterial({
-        color: 0x2b313d, transparent: true, opacity: 0.85 })));
+    // The fill opacity is a per-pass value (`g.userData.fillMat`): seen from
+    // behind in the hero the board is face-on and would blank out the middle of
+    // the shell — exactly where the boresight, the target ring and the geodesic
+    // live — so the hero ghosts the fill and keeps the edges. The Steering
+    // widget needs the solid model, because its whole mechanic is landing a
+    // solid body inside a wireframe ghost.
+    const fillMat = new THREE.MeshBasicMaterial({
+        color: 0x2b313d, transparent: true, opacity: 0.85, depthWrite: false });
+    g.userData.fillMat = fillMat;
+    g.add(new THREE.Mesh(board, fillMat));
     g.add(new THREE.LineSegments(new THREE.EdgesGeometry(board),
         new THREE.LineBasicMaterial({ color: MUTED, transparent: true, opacity: 0.9 })));
     // USB end (body -X, "down" when held vertically).
@@ -332,8 +370,8 @@ export function createMagcal3d(opts) {
     const reduceMotion = !!(window.matchMedia
         && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
-    const stats = { renderer: '2d', frames: 0, cells: 0, covered: 0,
-                    lastPoseMs: 0, poseHz: 0, reason: null };
+    const stats = { renderer: '2d', frames: 0, cells: 0, covered: 0, ghosted: 0,
+                    upDeg: 0, lastPoseMs: 0, poseHz: 0, reason: null };
 
     let heroRenderer = null;
     let steerRenderer = null;
@@ -374,19 +412,45 @@ export function createMagcal3d(opts) {
     // Layers: 0 = shared, 1 = hero only (face labels), 2 = steering only (ghost).
     const setLayer = (obj, n) => obj.traverse((o) => o.layers.set(n));
 
+    // ---- the shell: four meshes, because translucency is per-MATERIAL ------
+    // A cell is one of {covered, missing} × {in front of the camera, behind it},
+    // and `InstancedMesh`'s per-instance channel is colour, not alpha — so the
+    // near/far split has to be a material split, i.e. a mesh split. Every cell
+    // has an instance slot in all four; the three that don't apply are parked at
+    // scale 0. Cheap (4 draw calls, no per-frame work: the split is STATIC,
+    // because the hero camera is fixed in body axes and only rolls).
+    //
+    // Translucency goes on the cells BEHIND the camera, not the far ones. The
+    // usual depth cue fades the far side, but here the camera looks down the
+    // boresight from behind, so the near cap is the rear of the shell and it
+    // covers the entire silhouette — fading the far side would hide precisely
+    // the hemisphere you are steering into. Ghosting the near cap instead lets
+    // you see the aim hemisphere through it, and a hole behind you still reads.
     const N = 92;
-    const filledMat = new THREE.MeshBasicMaterial({
-        transparent: true, opacity: 0.86, side: THREE.DoubleSide, depthWrite: false });
-    const emptyMat = new THREE.MeshBasicMaterial({
-        transparent: true, opacity: 0.8, side: THREE.DoubleSide, depthWrite: false });
-    const cellsFilled = new THREE.InstancedMesh(new THREE.CircleGeometry(1, 20), filledMat, N);
-    const cellsEmpty = new THREE.InstancedMesh(
-        dashedRingGeometry(0.62, 1.0, 4, 0.62, 3), emptyMat, N);
-    cellsFilled.frustumCulled = false;
-    cellsEmpty.frustumCulled = false;
-    cellsFilled.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    cellsEmpty.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    bodyGroup.add(cellsFilled, cellsEmpty);
+    const cellMat = (opacity) => new THREE.MeshBasicMaterial({
+        transparent: true, opacity, side: THREE.DoubleSide, depthWrite: false });
+    const discGeom = new THREE.CircleGeometry(1, 20);
+    const ringGeom = dashedRingGeometry(0.62, 1.0, 4, 0.62, 3);
+    // hero / steer opacities: in Steering the shell is a faint backdrop and the
+    // ghost is the message, so everything drops to a wash.
+    const CELL_MESHES = [
+        { filled: true,  ghost: false, geom: discGeom, hero: 0.90, steer: 0.20 },
+        { filled: true,  ghost: true,  geom: discGeom, hero: 0.26, steer: 0.09 },
+        { filled: false, ghost: false, geom: ringGeom, hero: 0.95, steer: 0.16 },
+        { filled: false, ghost: true,  geom: ringGeom, hero: 0.30, steer: 0.07 },
+    ];
+    for (const c of CELL_MESHES) {
+        c.mat = cellMat(c.hero);
+        c.mesh = new THREE.InstancedMesh(c.geom, c.mat, N);
+        c.mesh.frustumCulled = false;
+        c.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        // Back-to-front: the ghosted near cap composites OVER the solid far side.
+        c.mesh.renderOrder = c.ghost ? 2 : 1;
+        bodyGroup.add(c.mesh);
+    }
+    function setCellPass(key) {
+        for (const c of CELL_MESHES) c.mat.opacity = c[key];
+    }
 
     const device = deviceModel();
     bodyGroup.add(device);
@@ -396,8 +460,15 @@ export function createMagcal3d(opts) {
     ghostGroup.add(ghost);
 
     // Face labels: hero only. In the Steering view they'd tumble and be unreadable.
+    // Front/Back are skipped: the boresight axis projects to a single point in
+    // this camera, so both would land stacked on the device at screen centre,
+    // naming something the picture already says (you are looking out of Front).
+    // The four that ring the view are the informative ones — and because they
+    // roll with the gravity-levelled camera, "Top is over there now" is itself
+    // the roll readout.
     const labels = new THREE.Group();
     for (const [name, dir] of FACES) {
+        if (Math.abs(dir[2]) > 0.9) continue;
         const s = labelSprite(name, '#94a3b8');
         s.position.set(dir[0] * 1.18, dir[1] * 1.18, dir[2] * 1.18);
         labels.add(s);
@@ -472,13 +543,20 @@ export function createMagcal3d(opts) {
     let wristArrow = null;    // steering-only curved arrow around the rotation axis
 
     // ---- cameras ----------------------------------------------------------
-    // Hero: body-fixed, camera.up = body Up. FIXED — the "the hole is where it
-    // was" property is the whole framing, and a free orbit destroys it.
-    const heroCam = new THREE.PerspectiveCamera(38, 1, 0.1, 30);
-    heroCam.up.set(1, 0, 0);
-    heroCam.position.set(0.85, 1.55, 2.55).setLength(3.55);
+    // Hero: first-person. The camera stands off behind the device on the
+    // boresight (body −Z) and looks along it, so the shell is seen from where
+    // the ToF camera is. Position FIXED in body axes — the "the hole is where it
+    // was" property is the whole framing, and a free orbit destroys it. The only
+    // thing that moves is `up`, which tracks gravity so the view never rolls
+    // with the board (see updateHeroUp).
+    const heroCam = new THREE.PerspectiveCamera(HERO_FOV, 1, 0.1, 30);
+    heroCam.up.set(1, 0, 0);                       // body Up, until gravity says otherwise
+    heroCam.position.set(0, 0, -HERO_DIST);
     heroCam.lookAt(0, 0, 0);
     heroCam.layers.enable(1);
+    // The boresight, as a view direction: origin − camera. Everything the
+    // near/far split needs, and the one place the framing's axis is named.
+    const VIEW_DIR = new THREE.Vector3(0, 0, 1);
 
     // Steering: room camera, up = (0,-1,0) matching scene.js's Open3D CV world,
     // so "up on screen" is up in the room.
@@ -494,16 +572,22 @@ export function createMagcal3d(opts) {
     let cellDirs = null;         // [92][3], cached from the `open` report
     let counts = null;
     let devPcts = null;
-    let facing = null;           // static front/back split — the hero camera never moves
+    let behind = null;           // static near/far split — the hero camera never moves
     let report = null;
     let haveQuat = false;
     let running = false;
     let rafId = 0;
 
-    const poseA = { t: 0, q: new THREE.Quaternion(), dir: new THREE.Vector3(0, 0, 1), ok: false };
-    const poseB = { t: 0, q: new THREE.Quaternion(), dir: new THREE.Vector3(0, 0, 1), ok: false };
+    const poseA = { t: 0, q: new THREE.Quaternion(), dir: new THREE.Vector3(0, 0, 1),
+                    grav: new THREE.Vector3(), ok: false };
+    const poseB = { t: 0, q: new THREE.Quaternion(), dir: new THREE.Vector3(0, 0, 1),
+                    grav: new THREE.Vector3(), ok: false };
     const liveQ = new THREE.Quaternion();
     const liveDir = new THREE.Vector3(0, 0, 1);
+    const liveGrav = new THREE.Vector3();
+    const heroUp = new THREE.Vector3(1, 0, 0);
+    let upSettled = false;       // first gravity sample snaps; later ones ease
+    let lastFrameMs = 0;
     let lastDevPct = NaN;
     let poseCount = 0;
     let poseWindowStart = 0;
@@ -520,6 +604,9 @@ export function createMagcal3d(opts) {
     const _dn = new THREE.Vector3();
     const _dirArr = [0, 0, 0];
     const _gArr = [0, 0, 0];
+    const _upTarget = new THREE.Vector3();
+    const _qa = new THREE.Quaternion();
+    const _qb = new THREE.Quaternion();
     const _zero = new THREE.Vector3();
     const _yAxis = new THREE.Vector3(0, 1, 0);
     const _up = new THREE.Vector3(0, 0, 1);
@@ -539,11 +626,12 @@ export function createMagcal3d(opts) {
         if (Array.isArray(msg.cell_dirs)) {
             cellDirs = msg.cell_dirs;
             stats.cells = cellDirs.length;
-            // The hero camera is FIXED and the shell does not rotate in it, so
-            // "which cells are on the far side" is a static classification —
-            // computed once, not per frame.
-            const cam = heroCam.position.clone().normalize();
-            facing = cellDirs.map((d) => (d[0] * cam.x + d[1] * cam.y + d[2] * cam.z) >= 0);
+            // The hero camera is FIXED in body axes (it only rolls) and the
+            // shell does not rotate in it, so "which cells are behind the
+            // camera" is a static classification — computed once, not per frame.
+            behind = cellDirs.map(
+                (d) => (d[0] * VIEW_DIR.x + d[1] * VIEW_DIR.y + d[2] * VIEW_DIR.z) < 0);
+            stats.ghosted = behind.filter(Boolean).length;
         }
         if (Array.isArray(msg.t_world_to_cv) && msg.t_world_to_cv.length === 9) {
             const t = msg.t_world_to_cv;
@@ -564,37 +652,27 @@ export function createMagcal3d(opts) {
         for (let i = 0; i < N; i++) {
             const dir = cellDirs[i] || [0, 0, 1];
             const n = counts[i] || 0;
-            const front = !facing || facing[i];
-            if (n > 0) {
-                covered++;
-                placeTangent(_m4, dir, SHELL_R, CELL_BASE_R * densityRadius(n));
-                cellsFilled.setMatrixAt(i, _m4);
-                let rgb = devRgb(devPcts ? devPcts[i] : null);
-                if (!front) rgb = depthMix(rgb);
-                cellsFilled.setColorAt(i, colorOf(rgb));
-                placeTangent(_m4, dir, SHELL_R, 0);      // hide the empty ring
-                cellsEmpty.setMatrixAt(i, _m4);
-            } else {
-                placeTangent(_m4, dir, SHELL_R, 0);
-                cellsFilled.setMatrixAt(i, _m4);
-                placeTangent(_m4, dir, SHELL_R, CELL_BASE_R);
-                cellsEmpty.setMatrixAt(i, _m4);
-                cellsEmpty.setColorAt(i, colorOf(front ? EMPTY_INK : depthMix(EMPTY_INK)));
+            const filled = n > 0;
+            const ghost = behind ? behind[i] : false;
+            if (filled) covered++;
+            const rgb = filled ? devRgb(devPcts ? devPcts[i] : null) : EMPTY_INK;
+            const scale = filled ? CELL_BASE_R * densityRadius(n) : CELL_BASE_R;
+            // Hue survives the ghosting untouched — alpha is the depth cue, so
+            // the |B| ramp still reads on a cell behind you.
+            for (const c of CELL_MESHES) {
+                const live = c.filled === filled && c.ghost === ghost;
+                placeTangent(_m4, dir, SHELL_R, live ? scale : 0);
+                c.mesh.setMatrixAt(i, _m4);
+                if (live) c.mesh.setColorAt(i, colorOf(rgb));
             }
         }
         stats.covered = covered;
-        cellsFilled.instanceMatrix.needsUpdate = true;
-        cellsEmpty.instanceMatrix.needsUpdate = true;
-        if (cellsFilled.instanceColor) cellsFilled.instanceColor.needsUpdate = true;
-        if (cellsEmpty.instanceColor) cellsEmpty.instanceColor.needsUpdate = true;
+        for (const c of CELL_MESHES) {
+            c.mesh.instanceMatrix.needsUpdate = true;
+            if (c.mesh.instanceColor) c.mesh.instanceColor.needsUpdate = true;
+        }
     }
 
-    // Depth cue by BRIGHTNESS, not by alpha sorting: back-hemisphere cells mix
-    // toward the surface colour. Preserves hue direction (so the |B| ramp still
-    // reads) while letting you see through the shell to the far side — and a gap
-    // on the far side MUST be visible, not hidden.
-    const SURF_RGB = [0x16, 0x18, 0x1e];
-    function depthMix(rgb) { return lerpRgb(rgb, SURF_RGB, BACK_DIM); }
     const _c = new THREE.Color();
     function colorOf(rgb) {
         _c.setRGB(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255, THREE.SRGBColorSpace);
@@ -672,10 +750,12 @@ export function createMagcal3d(opts) {
     // ---- the 30 Hz pose channel -------------------------------------------
     function setPose(p) {
         const now = performance.now();
-        poseA.t = poseB.t; poseA.q.copy(poseB.q); poseA.dir.copy(poseB.dir); poseA.ok = poseB.ok;
+        poseA.t = poseB.t; poseA.q.copy(poseB.q); poseA.dir.copy(poseB.dir);
+        poseA.grav.copy(poseB.grav); poseA.ok = poseB.ok;
         poseB.t = now;
         poseB.q.set(p.quat[1], p.quat[2], p.quat[3], p.quat[0]);   // (x,y,z,w) from (w,x,y,z)
         poseB.dir.set(p.dir[0], p.dir[1], p.dir[2]);
+        poseB.grav.set(p.gravity[0], p.gravity[1], p.gravity[2]);
         poseB.ok = true;
         haveQuat = (p.flags & POSE_HAVE_QUAT) !== 0;
         lastDevPct = p.devPct;
@@ -705,25 +785,6 @@ export function createMagcal3d(opts) {
         trailGeom.attributes.color.needsUpdate = true;
         trailGeom.setDrawRange(0, m);
 
-        // Gravity arrow — SFLP gravity FIFO when the device streams it, else the
-        // quat-derived down vector; the server already picked. Zero = unknown.
-        const g = p.gravity;
-        const gn = Math.hypot(g[0], g[1], g[2]);
-        const haveG = gn > 1e-3;
-        gLine.visible = gTip.visible = dipArc.visible = haveG;
-        if (haveG) {
-            _gv.set(g[0] / gn, g[1] / gn, g[2] / gn);
-            _tmp.copy(_gv).multiplyScalar(0.82);
-            setSegment(gLine, _zero, _tmp);
-            gTip.position.copy(_gv).multiplyScalar(0.88);
-            gTip.quaternion.setFromUnitVectors(_yAxis, _gv);
-            _dn.copy(poseB.dir).normalize();
-            _dirArr[0] = _dn.x; _dirArr[1] = _dn.y; _dirArr[2] = _dn.z;
-            _gArr[0] = _gv.x; _gArr[1] = _gv.y; _gArr[2] = _gv.z;
-            writeArc(dipArc.geometry.attributes.position.array, _dirArr, _gArr, 0.5, DIP_SEG);
-            dipArc.geometry.attributes.position.needsUpdate = true;
-        }
-
         poseCount++;
         if (!poseWindowStart) poseWindowStart = now;
 
@@ -747,11 +808,47 @@ export function createMagcal3d(opts) {
     // rests on it never showing motion that did not happen.
     function interpolate(now) {
         if (!poseB.ok) return;
-        if (!poseA.ok || poseB.t <= poseA.t) { liveQ.copy(poseB.q); liveDir.copy(poseB.dir); return; }
+        if (!poseA.ok || poseB.t <= poseA.t) {
+            liveQ.copy(poseB.q); liveDir.copy(poseB.dir); liveGrav.copy(poseB.grav);
+            return;
+        }
         const target = now - RENDER_LAG_MS;
         const a = Math.max(0, Math.min(1, (target - poseA.t) / (poseB.t - poseA.t)));
         liveQ.copy(poseA.q).slerp(poseB.q, a);
         liveDir.copy(poseA.dir).lerp(poseB.dir, a).normalize();
+        liveGrav.copy(poseA.grav).lerp(poseB.grav, a);
+    }
+
+    /** Point `camera.up` at −g, so screen-down is room-down whatever the board
+     *  is doing. Only the component perpendicular to the boresight can be shown
+     *  (the parallel one points into the screen), which is the same projection
+     *  `web.boresight_view_frame` does for the live FPV cloud — this is that
+     *  rule, in body axes, on a camera instead of on points.
+     *
+     *  Eased, not snapped, and eased on the CAMERA only: no mark ever moves by
+     *  a smoothed number. Returns nothing; mutates heroUp/heroCam. */
+    function updateHeroUp(now, gUnit) {
+        const dt = lastFrameMs ? Math.min(0.25, (now - lastFrameMs) / 1000) : 0;
+        lastFrameMs = now;
+        if (gUnit) {
+            _upTarget.set(-gUnit.x, -gUnit.y, 0);    // ⊥ boresight == body XY
+            if (_upTarget.length() >= UP_MIN) {
+                _upTarget.normalize();
+                const a = (upSettled && dt > 0) ? 1 - Math.exp(-dt / UP_TAU_S)
+                                                : (upSettled ? 0 : 1);
+                if (a > 0) {
+                    // Rotate toward the target rather than lerping through it:
+                    // a straight lerp between near-opposite vectors passes
+                    // through zero, and normalizing that explodes.
+                    _qa.setFromUnitVectors(heroUp, _upTarget);
+                    _qb.identity().slerp(_qa, a);
+                    heroUp.applyQuaternion(_qb).normalize();
+                }
+                upSettled = true;
+            }
+        }
+        heroCam.up.copy(heroUp);
+        heroCam.lookAt(0, 0, 0);
     }
 
     function sizeTo(renderer, camera, canvas) {
@@ -776,6 +873,26 @@ export function createMagcal3d(opts) {
         // Live marks, all in body axes.
         const d = _dn;
         if (liveDir.lengthSq() > 1e-9) d.copy(liveDir).normalize(); else d.set(0, 0, 1);
+
+        // Gravity — SFLP gravity FIFO when the device streams it, else the
+        // quat-derived down vector; the server already picked. Zero = unknown,
+        // and then the hero simply doesn't roll (§ have_quat false still renders).
+        const gn = liveGrav.length();
+        const haveG = gn > 1e-3;
+        gLine.visible = gTip.visible = dipArc.visible = haveG;
+        if (haveG) {
+            _gv.copy(liveGrav).divideScalar(gn);
+            _tmp.copy(_gv).multiplyScalar(0.82);
+            setSegment(gLine, _zero, _tmp);
+            gTip.position.copy(_gv).multiplyScalar(0.88);
+            gTip.quaternion.setFromUnitVectors(_yAxis, _gv);
+            _dirArr[0] = d.x; _dirArr[1] = d.y; _dirArr[2] = d.z;
+            _gArr[0] = _gv.x; _gArr[1] = _gv.y; _gArr[2] = _gv.z;
+            writeArc(dipArc.geometry.attributes.position.array, _dirArr, _gArr, 0.5, DIP_SEG);
+            dipArc.geometry.attributes.position.needsUpdate = true;
+        }
+        updateHeroUp(now, haveG ? _gv : null);
+
         head.position.copy(d).multiplyScalar(SHELL_R * 1.02);
         setSegment(stem, _zero, head.position);
         _tmp.copy(d).multiplyScalar(SHELL_R * 1.20);
@@ -811,11 +928,13 @@ export function createMagcal3d(opts) {
             placeTangent(targetGroup.matrix, ga.target, SHELL_R * 1.008, pulse);
         }
 
-        // Pass 1 — HERO: body-fixed, so bodyGroup is identity.
+        // Pass 1 — HERO: the shell is body-fixed, so bodyGroup is identity; all
+        // the framing lives in the camera (position fixed on the boresight, up
+        // levelled by updateHeroUp above).
         bodyGroup.matrix.copy(IDENT);
         ghostGroup.visible = false;
-        filledMat.opacity = 0.86;
-        emptyMat.opacity = 0.95;
+        setCellPass('hero');
+        device.userData.fillMat.opacity = 0.30;
         if (sizeTo(heroRenderer, heroCam, heroCanvas)) {
             bodyGroup.updateMatrixWorld(true);
             heroRenderer.render(scene, heroCam);
@@ -841,8 +960,8 @@ export function createMagcal3d(opts) {
                 ghostGroup.visible = false;
             }
             // The shell is a faint backdrop here; the ghost is the message.
-            filledMat.opacity = 0.20;
-            emptyMat.opacity = 0.16;
+            setCellPass('steer');
+            device.userData.fillMat.opacity = 0.85;
             if (sizeTo(steerRenderer, steerCam, steerCanvas)) {
                 bodyGroup.updateMatrixWorld(true);
                 ghostGroup.updateMatrixWorld(true);
@@ -860,8 +979,13 @@ export function createMagcal3d(opts) {
         if (now - lastDiag >= 1000) {
             const dt = (now - (poseWindowStart || now)) / 1000;
             stats.poseHz = dt > 0 ? +(poseCount / dt).toFixed(1) : 0;
+            // Screen-up as a body angle from +X (body Up): 0 = board upright,
+            // ±90 = held on its side. This is the camera's gravity levelling,
+            // reported so it can be asserted rather than eyeballed.
+            stats.upDeg = +(Math.atan2(heroUp.y, heroUp.x) * 180 / Math.PI).toFixed(1);
             poseCount = 0; poseWindowStart = now; lastDiag = now;
             D(`renderer=${stats.renderer} cells=${stats.cells} covered=${stats.covered} `
+              + `ghosted=${stats.ghosted} up_deg=${stats.upDeg} `
               + `frames=${stats.frames} pose_hz=${stats.poseHz} have_quat=${haveQuat}`);
         }
     }

@@ -512,7 +512,8 @@
         .magcal-verdict__why { font-size: 0.7rem; color: var(--text-muted); }
         .magcal-empty { font-size: 0.72rem; color: var(--text-muted); font-style: italic; }
         /* --- 3D "Shell & Steering" view (magcal3d.js) --------------------- *
-         * The hero is body-fixed and its camera never moves, which is what    *
+         * The hero shell is body-fixed and its camera is parked on the        *
+         * boresight (first-person, gravity-levelled roll only), which is what  *
          * makes a hole stay where it was. The 2D Lambert pair below it is the  *
          * FALLBACK renderer, not a deleted view — it needs no orientation and  *
          * no WebGL.                                                            */
@@ -1080,8 +1081,10 @@
                 <p class="modal__intro">
                     A correct calibration reports the <strong>same field magnitude in every orientation</strong>, so
                     fitting one needs samples from the <strong>whole sphere of directions</strong>. The shell below
-                    is that sphere, drawn <strong>in the device's own frame</strong> — it does not move, so a gap
-                    stays where you last saw it. <strong>Dashed hollow rings are the angles you are still
+                    is that sphere, drawn <strong>in the device's own frame</strong> and seen
+                    <strong>from behind the sensor, looking where it looks</strong> — it does not move, so a gap
+                    stays where you last saw it, and screen-down is always room-down.
+                    <strong>Dashed hollow rings are the angles you are still
                     missing</strong>; a solid disc's <em>size</em> is how many samples it holds. Press Start and turn
                     the device to sweep the bright marker over the holes.
                 </p>
@@ -1122,10 +1125,10 @@
                         <div class="magcal-progress" id="magcal-progress">Coverage — · 0 samples</div>
                         <div class="magcal-progress-track"><div class="magcal-progress-fill" id="magcal-progress-bar"></div></div>
                         <div class="magcal-note" title="Hue is reserved for |B| deviation so that coverage never
-depends on seeing colour. Far-side cells are dimmed rather than hidden — a gap behind the board still has to be
-findable.">
+depends on seeing colour. The cells behind the camera are drawn translucent rather than hidden — they would otherwise
+cover the whole sphere from this viewpoint, and a gap behind you still has to be findable.">
                             Hue means one thing only: <strong>|B| deviation</strong>. Coverage is a <em>shape</em>,
-                            sample density a <em>size</em>; far-side cells are dimmed, not hidden.
+                            sample density a <em>size</em>; cells behind you are translucent, not hidden.
                         </div>
                     </div>
 

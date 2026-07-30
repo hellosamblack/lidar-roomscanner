@@ -952,6 +952,21 @@ channel, barometer as soft 1-DoF Z constraint.
 > the location, so a wobbling arc reveals errors the |B| magnitude metrics structurally cannot.
 > Degrades to the 2D Lambert discs on no-WebGL / context-loss / `?magcal2d=1`. 914 tests.
 > Design: `docs/superpowers/specs/2026-07-29-magcal-3d-feedback-design.md`.
+>
+> **Amended 2026-07-30 (owner) — the hero camera is ~~body-fixed at a 3/4 offset~~ now
+> FIRST-PERSON.** *"During mag cal, we should render the view from the first person perspective of the
+> camera (gravity down always, similar to the fpv world view). The sphere should be translucent for
+> points that are 'behind' the camera."* The **shell is still body-fixed**; what changed is the camera
+> — parked behind the device on the boresight (body −Z, standoff 4.3, fov 40°) with `camera.up`
+> tracking −g, the same rule `web.boresight_view_frame` applies to the live FPV cloud, here applied to
+> a camera instead of to points. Screen-down is room-down always and the camera's only motion is a
+> gravity roll, so the "a hole is where it was" property survives. Translucency **flipped side**: it
+> now keys on `dir·boresight < 0` (the cells *behind the camera*) rather than ~~distance from the
+> eye~~ — from this viewpoint the rear cap covers the whole silhouette, so the conventional
+> far-is-faint cue would hide exactly the hemisphere you are aiming into. Implemented as a **material**
+> split (four `InstancedMesh`es, since per-instance alpha does not exist), which also retires the old
+> brightness-mix depth cue; `Front`/`Back` labels dropped (they project to screen centre). Presentation
+> only — no `/ws` change, no protocol change, 1012 tests. §4.1 of the design spec is amended in place.
 > **Deferred:** driving pose from stream 11 / `ImuFusion` (design Phase 3 — note `ImuFusion.update()`
 > currently emits one quat per ToF frame, not 480/s, and should be a session-private instance never
 > attached to `SensorState`); `#ef4444` colour re-stepping (Phase 2).
