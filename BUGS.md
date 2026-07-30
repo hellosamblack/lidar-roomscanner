@@ -41,10 +41,11 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-027 | fixed   | firmware      | SFLP quaternion decimated 480 Hz → 30 Hz by keeping one sample of ~16, aliasing the whole noise band into the output |
 | BUG-028 | fixed   | firmware      | Ethernet hot-plug replug wedges board (LD2 freezes) — lwIP double-add assertion on `mdns_resp_add_netif` |
 | BUG-029 | fixed   | host/sources  | `UdpSource` stream recovery fails due to `255.255.255.255` fallback keepalives not routing on some Linux network configs |
-| BUG-030 | open    | host/sensors  | Magnetometer calibration is direction-dependent: |B| ranges 47→85 µT with tilt, heading errors up to ~90° |
+| BUG-030 | open    | host/sensors  | Magnetometer calibration is direction-dependent: |B| ranges 47→85 µT with tilt — root-caused to a ~59 µT wrong hard-iron offset (+ tripod, BUG-034); remedy is an owner re-fit via the UI |
 | BUG-031 | open    | firmware      | ToF frame timestamp and IMU FIFO drain skewed ~0.9 ms (dominates handheld orientation error) |
 | BUG-032 | fixed   | host/slam     | GPU SLAM OOMs on a long scan — Open3D's CUDA cache grows ~5.1 MiB/frame from the throttled mesh extraction (NOT the per-frame path, which is byte-flat) |
 | BUG-033 | fixed   | host/web      | Sensors card outgrew the dock band (~1600 px of flat, half-duplicated rows) — jitter table unreachable, whole card auto-collapsed on a narrow window |
+| BUG-034 | by-design | environment   | The tripod adds 15–27 µT of magnetic field — heading is unreliable while the device is mounted on it, regardless of calibration |
 
 ---
 
@@ -911,8 +912,9 @@ Even after the firmware crash (BUG-028) was fixed, the `UdpSource` stream would 
 
 ## BUG-030 — Magnetometer calibration is direction-dependent: |B| ranges 47→85 µT with tilt
 
-- **Status:** **open** · **Reported:** 2026-07-29 (owner: "most of the noise I see in the UI is in the
-  eCompass") · **Area:** host/sensors (calibration data, not code)
+- **Status:** **open — root-caused 2026-07-29, remedy pending an owner UI action** · **Reported:**
+  2026-07-29 (owner: "most of the noise I see in the UI is in the eCompass") · **Area:** host/sensors
+  (calibration data, not code)
 - **Where:** `host/mag_cal.json` (fitted 2026-07-15, `field_ut = 49.87`); consumed via
   `host/src/roomscan/magcal.py` → `MagCalibration.apply()`
 
@@ -961,11 +963,46 @@ Orientation-estimate jitter itself is excellent throughout: p95 0.006–0.079°/
   magnitude, wrong heading. 3D fitting cannot detect this; DT0103's accelerometer-assisted method pins
   the magnetometer frame to the body frame. Worth adopting for heading accuracy independently of BUG-030.
 
-**Fix (needs the owner — physical):** re-run the tumble with **full-sphere coverage**, spending real
-time in the horizontal attitudes where the current fit is worst. The web calibration modal built
-2026-07-29 exists to make missing coverage visible during collection and to gate acceptance on
-|B| consistency rather than a bare fit residual. Sources: DT0058 (tilt-compensated eCompass),
-DT0059 (ellipsoid fit), DT0103, AN5069 §5/§8.
+## ROOT CAUSE (2026-07-29) — two faults stacked; fixing one does not fix the other
+
+An owner hand-held tumble in open space (`captures/web_20260729_175941.bin`, 718 samples, ~24 s)
+produced a candidate fit that is **validated on independent data**:
+
+| capture (under the candidate fit) | \|B\| mean | std | ratio |
+|---|---|---|---|
+| tumble 17:59 — hand-held, *fit source* | 49.85 µT | 0.65% | 1.05 |
+| tumble 17:43 — hand-held, **independent** | **50.06 µT** | **1.23%** | 1.07 |
+| tilt sweep — on tripod, moving | 77.18 µT | 11.25% | 1.83 |
+| stationary 900 s — on tripod, fixed 86° | 64.64 µT | **0.46%** | 1.04 |
+
+**Fault 1 — the saved hard-iron offset was wrong by ~59 µT.** Saved `[44.4, −27.6, −41.7]` vs the new
+`[25.4, −5.5, +9.2]`, mostly in z. Both soft-iron matrices are near-identity (candidate eigenvalues
+0.966/0.991/1.045, axis-gain ratio 1.08), so **soft-iron was never the problem**. Under the saved
+calibration the tumble spans 14.7 → 107.6 µT, ratio **7.3**.
+
+**Fault 2 — the tripod is a genuine magnetic interferer, ~15–27 µT (a third to a half of Earth's
+field).** See BUG-034; heading is unreliable while the device is mounted, *regardless of calibration*.
+The proof is row 4 above: held stationary on the tripod at a fixed attitude, |B| is exquisitely
+consistent (0.46%) but at the **wrong magnitude** (64.6 vs 49.9) — an added field is steady when
+nothing moves. Row 3, where the sensor swings through an arc on the tripod, becomes 11.25% because the
+added field varies with **position**, not orientation.
+
+**Two earlier conclusions in this entry were WRONG and are corrected here** (kept, not deleted, per
+repo convention):
+- ~~"a simple hard-iron residual is arithmetically excluded"~~ — the arithmetic was right (|δ| ≈ 35 µT
+  implies a minimum near 15 µT) but it was applied to a **one-dimensional** tilt sweep that never
+  visited the cancelling orientation. The full tumble reaches **14.7 µT**, exactly as predicted.
+  Hard iron was the answer all along.
+- ~~the tilt sweep is valid independent validation data~~ — it is tripod-contaminated, so testing a fit
+  against it measures the tripod. See the `validating-against-suspect-data` memory.
+
+**Remedy (owner, via the UI — in progress):** re-fit and **Save & apply** in the calibration modal,
+which also exercises the hot-reload path not yet tested with a real fit. Coverage on the 17:59 tumble
+was 54/92 cells (59%), just under the tool's 60% marginal bar, so more tumbling raises confidence —
+but the field metrics are good *and* generalise to unseen data, which is the stronger evidence.
+Calibrate **hand-held in open space, away from the tripod**: calibrating while mounted would bake a
+position-dependent error into a fit used hand-held. `host/mag_cal.json` is still the 2026-07-15 file
+until that is done. Sources: DT0058, DT0059, DT0103, AN5069 §5/§8.
 
 ## BUG-031 — ToF frame timestamp and IMU FIFO drain are skewed ~0.9 ms
 
@@ -1090,3 +1127,37 @@ band in both states (`card=865` / `603`, zero overflow past the dock), drawer sc
 jitter table, and mode switching, World-mode gating (`Zero Yaw` disabled, ⚠ invalid), zero-yaw/clear
 and label rename (propagating to the jitter row labels) all still round-trip through the server.
 959 tests, 0 console errors.
+
+## BUG-034 — The tripod adds 15–27 µT: heading is unreliable while mounted
+
+- **Status:** **by-design** (environmental, not our code — recorded so it survives BUG-030's closure) ·
+  **Found:** 2026-07-29 while root-causing BUG-030 · **Area:** environment / operating procedure
+- **Where:** no code. A property of the physical rig.
+
+Separated from BUG-030 deliberately: BUG-030 is a calibration-data fault that an owner re-fit closes,
+whereas this is a permanent constraint that must outlive it.
+
+Measured with a magnetometer calibration that is *known good* (validated on two independent hand-held
+tumbles at 49.85 µT / 0.65% and 50.06 µT / 1.23%):
+
+| condition | \|B\| mean | std | interpretation |
+|---|---|---|---|
+| hand-held, open space | ~50 µT | 0.65–1.23% | Earth's field, correct |
+| tripod, **stationary** at a fixed attitude | 64.64 µT | **0.46%** | added field — steady, wrong magnitude |
+| tripod, tilting through an arc | 77.18 µT | 11.25% | added field varies with **position** |
+
+The stationary row is the diagnostic tell: **exquisite consistency at the wrong value is the signature
+of an added constant**, not of model error or noise. Tilting on a tripod *translates* the sensor through
+an arc past ferrous mass (head, centre column, screws), so the field at the sensor changes with position
+rather than orientation — which is why the tilt sweep looked like a calibration failure.
+
+**Consequences:**
+- **Never calibrate the magnetometer while mounted** — it bakes a position-dependent error into a fit
+  that is then used hand-held (the actual use case).
+- **Do not trust heading, `absolute_heading`, or `YawFusion` output from tripod-mounted captures**, and
+  do not use such captures to validate a calibration. Existing tripod captures
+  (`captures/web_20260729_061440.bin`, `captures/stationary_stream11_20260728_190311.bin`) are affected.
+- Tripod captures remain perfectly good for ToF, orientation-noise (gravity/gyro) and SLAM work — this
+  is a magnetometer-only constraint.
+- Untested: whether a different mount, or more separation between the sensor and the tripod head, brings
+  |B| back to ~50 µT. That would confirm the mechanism and might restore mounted heading.
