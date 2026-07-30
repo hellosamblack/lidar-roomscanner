@@ -183,9 +183,28 @@ class CdpSession:
         self._ws = await websockets.connect(ws_url, max_size=None)
         await self.cmd("Page.enable")
         await self.cmd("Runtime.enable")
+        await self._disable_http_cache()
         await self.cmd("Emulation.setDeviceMetricsOverride",
                        {"width": width, "height": height,
                         "deviceScaleFactor": 1, "mobile": False})
+
+    async def _disable_http_cache(self) -> None:
+        """Always refetch; never serve a static asset from Chrome's cache.
+
+        This browser exists to look at files that were edited seconds ago. A
+        cached `index.html` or `.js` shows the PREVIOUS edit while reporting a
+        successful load, which reads as "the change did not land" -- on
+        2026-07-30 a modal's copy was verified twice against a cached page
+        (`renavigate=True` is a navigation, not a cache bypass) and only a
+        query-string cache-buster exposed it. Non-fatal: an old CDP build
+        without the Network domain still gets a working, merely cache-warm
+        browser.
+        """
+        try:
+            await self.cmd("Network.enable")
+            await self.cmd("Network.setCacheDisabled", {"cacheDisabled": True})
+        except Exception:
+            pass
 
     async def stop(self) -> None:
         if self._ws is not None:
@@ -292,6 +311,14 @@ class PlaywrightSession:
             channel="chrome", args=[f for f in CHROME_FLAGS if f != "--headless=new"])
         self._page = await self._browser.new_page(
             viewport={"width": width, "height": height})
+        # Same reason as `CdpSession._disable_http_cache` -- this loop looks at
+        # files edited seconds ago, so a cache hit is a silent stale read.
+        try:
+            cdp = await self._page.context.new_cdp_session(self._page)
+            await cdp.send("Network.enable")
+            await cdp.send("Network.setCacheDisabled", {"cacheDisabled": True})
+        except Exception:
+            pass
 
     async def stop(self) -> None:
         for closer in (getattr(self._browser, "close", None),

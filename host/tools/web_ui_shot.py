@@ -99,6 +99,11 @@ async def _run(ws_url: str, args, steps: list[dict]) -> None:
 
         await cmd("Page.enable")
         await cmd("Runtime.enable")
+        # Never screenshot a cached asset: this script exists to look at files
+        # edited seconds ago, and a cache hit is a stale read that still reports
+        # a successful load (see roomscan.mcp_server.session._disable_http_cache).
+        await cmd("Network.enable")
+        await cmd("Network.setCacheDisabled", {"cacheDisabled": True})
         await cmd("Emulation.setDeviceMetricsOverride",
                   {"width": args.width, "height": args.height, "deviceScaleFactor": 1, "mobile": False})
         await cmd("Page.navigate", {"url": args.url})

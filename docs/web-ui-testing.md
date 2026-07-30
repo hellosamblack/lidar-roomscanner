@@ -25,6 +25,15 @@ quoting), and `ui_wait_for` waits on a **real condition** instead of a fixed sle
 which this doc has always warned is the trap. Backed by Playwright
 (`channel="chrome"`), with the raw-CDP path as fallback.
 
+**`renavigate=True` is a navigation, not a cache bypass** (2026-07-30). Chrome
+happily re-served a just-edited `index.html` from its cache across two full
+reloads, so a shipped copy change read as "not landed" until a `?cb=` query string
+exposed it — a stale read that reports a *successful* load, and one you cannot see
+in the pixels. Both browser backends (and `web_ui_shot.py`) now send
+`Network.setCacheDisabled` at start, so this should not recur; if you ever suspect
+it has, the one-line check is `ui_eval` on the text you just changed, and the
+escape hatch is still a `?cb=<anything>` on the URL.
+
 Assertable readouts: `#pos-status` ("frame N / total", replay only — it is empty on
 a live server), `#hud-view-fps`, `#hud-device-fps`, `#record-status`, `#ir-frame`,
 `#slam-frames`. **`window.__diag` is the page's logging sink *function*, not a state

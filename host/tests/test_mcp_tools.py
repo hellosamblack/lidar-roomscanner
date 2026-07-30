@@ -224,3 +224,44 @@ def test_tool_modules_do_not_import_open3d_eagerly():
                        env={"PYTHONPATH": "src:.", "PATH": "/usr/bin:/bin"})
     assert r.returncode == 0, f"probe failed: {r.stderr[-800:]}"
     assert r.stdout.strip() == "", f"heavy modules imported at server build: {r.stdout!r}"
+
+
+def test_cdp_browser_disables_the_http_cache_on_start():
+    """`renavigate=True` is a navigation, not a cache bypass.
+
+    This browser only ever looks at files edited seconds ago, so a cache hit is a
+    silent stale read that reports success (2026-07-30: modal copy verified twice
+    against a cached page). Asserting on the CDP command sequence rather than on
+    a screenshot, because the failure mode is invisible in the pixels.
+    """
+    import asyncio
+
+    from roomscan.mcp_server.session import CdpSession
+
+    sent: list[tuple[str, dict | None]] = []
+    s = CdpSession()
+
+    async def fake_cmd(method, params=None):
+        sent.append((method, params))
+        return {}
+
+    s.cmd = fake_cmd                      # type: ignore[method-assign]
+    asyncio.run(s._disable_http_cache())
+
+    assert ("Network.enable", {}) in [(m, p or {}) for m, p in sent]
+    assert ("Network.setCacheDisabled", {"cacheDisabled": True}) in sent
+
+
+def test_cdp_cache_disable_is_non_fatal_on_an_old_target():
+    """A CDP build without the Network domain must still yield a usable browser."""
+    import asyncio
+
+    from roomscan.mcp_server.session import CdpSession
+
+    s = CdpSession()
+
+    async def boom(method, params=None):
+        raise RuntimeError(f"CDP {method}: not supported")
+
+    s.cmd = boom                          # type: ignore[method-assign]
+    asyncio.run(s._disable_http_cache())  # must not raise
