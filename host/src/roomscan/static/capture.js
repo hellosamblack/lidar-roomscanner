@@ -26,6 +26,7 @@ export function createCapture(hub) {
     const capList = $('cap-list');
     const btnRefresh = $('btn-refresh-caps');
     const transport = $('transport');
+    const btnGoLive = $('btn-golive');
     const btnPlayPause = $('btn-playpause');
     const btnRestart = $('btn-restart');
     const segSpeed = $('seg-speed');
@@ -76,6 +77,7 @@ export function createCapture(hub) {
         else if (row.dataset.name) hub.send({ type: 'load_capture', name: row.dataset.name });
     });
 
+    btnGoLive?.addEventListener('click', () => hub.send({ type: 'go_live' }));
     btnPlayPause?.addEventListener('click', () => {
         const paused = session?.playback?.paused;
         hub.send({ type: 'transport', action: paused ? 'resume' : 'pause' });
@@ -187,6 +189,7 @@ export function createCapture(hub) {
         if (transport) transport.classList.toggle('hidden', !isReplay);
         if (isReplay) {
             const pb = session.playback;
+            if (btnGoLive) btnGoLive.disabled = !session.has_live;
             if (btnPlayPause) btnPlayPause.textContent = pb.paused ? 'Resume' : 'Pause';
             setActive(segSpeed, 'fps', String(pb.speed_fps ?? 0));
             if (chkLoop) chkLoop.checked = !!pb.loop;

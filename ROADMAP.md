@@ -649,6 +649,12 @@ desktop-parity: the app runs remotely on the headless box, so the operator brows
   collision/validity checks. Skip/Esc/backdrop-click leaves the auto name — never blocking, the file is on disk
   either way. Verified end-to-end in headless Chrome (open-on-stop, save, collision rejection, skip); full host
   suite 961 passed, 1 skipped.
+- **Discoverable Go Live (owner ask, 2026-07-29):** returning to live view only ever worked by clicking the
+  "● Live device" row buried in the Source list — easy to lose once scrolled past mid-playback, and the owner
+  hit exactly that dead end. Added a dedicated **"● Go Live"** button to the transport panel itself (`capture.js`
+  / `index.html`), sending the same existing `go_live` message the row already did (`SessionController.switch_to_live`,
+  unchanged); gated on `session.has_live` like the row. Verified in headless Chrome (renders, correctly disabled
+  with no live source); full host suite 971 passed, 1 skipped.
 
 #### Web Phase 4 — SLAM mode  ← **✅ Complete (2026-07-16)**
 
