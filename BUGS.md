@@ -47,6 +47,8 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-033 | fixed   | host/web      | Sensors card outgrew the dock band (~1600 px of flat, half-duplicated rows) — jitter table unreachable, whole card auto-collapsed on a narrow window |
 | BUG-034 | by-design | environment   | The tripod adds 15–27 µT of magnetic field — heading is unreliable while the device is mounted on it, regardless of calibration |
 | BUG-035 | fixed   | host/slam     | TSDF block capacity (40k) was *below* a real room sweep's demand (42.9k); running at ~97% of it stalled map growth and collapsed tracking for the last 18% of the scan (mechanism unproven — the grid *does* rehash) |
+| BUG-036 | fixed   | host/slam     | A single fixed ICP correspondence radius (0.05) made one bad frame terminal — 423 frames (22% of a room circuit) silently dead-reckoned; fixed by retrying only on failure at 0.10 |
+| BUG-037 | open    | host/slam     | `baro_weight = 0.05` slaves height to a barometer that wanders ~2.8 m of apparent altitude per minute — 581 mm height error on a run whose true error is ~0, and ~50% of reported path length is invented vertical motion |
 
 ---
 
@@ -1335,3 +1337,116 @@ per-step cost of that is the ~2.1× CPU/GPU ratio from the CUDA at-scale validat
 8.85 ms median), which still fits the ~28 fps sensor ceiling; this run did not time steps separately.
 Extraction already crosses the device line — `_extract_vbg()` copies to CPU because CUDA marching cubes
 OOMs at scale.
+
+---
+
+## BUG-036 — One bad frame is terminal: a single fixed ICP correspondence radius
+
+- **Status:** **fixed** 2026-07-30 · **Reported:** 2026-07-30 · **Area:** host/slam
+- **Where:** `host/src/roomscan/slam/odometry.py` (`register_escalating`),
+  `slam/mapper.py` (`icp_retry_dist`, `icp_escalations`, `lost_flags`),
+  `slam/metrics.py` (`tracking_stats`), `slam/config.py` (`icp_retry_dist`)
+- **Found by:** checking loop closure on the owner's two room circuits
+  (`captures/coffeeRoomCircuitMnt.bin`, `captures/coffeeRoomCircuitNoMnt.bin`).
+
+`max_dist` was one fixed 0.05 m serving two jobs it cannot both do. A frame whose frame-to-model
+residual exceeds it finds **zero** correspondences; `predict_pose` then freezes translation at
+`t_prev` and nothing relocalizes, so the frozen pose drifts further from truth and every later
+raycast fails too. One frame kills the rest of the scan.
+
+**Measured on `coffeeRoomCircuitMnt.bin`** (1889 depth frames, 62.4 s, 1 cm voxels, CUDA:0):
+
+- tracking died at frame **1466** (t+48.4 s) in **one unbroken 423-frame run to the end** — 22% of
+  the capture;
+- ICP fitness was **0.919 in the 4 s before it died**. There is no degradation to watch for; it
+  falls off a cliff. Fitness reads 0.086 for ~130 frames (ICP running, failing the gate), then
+  **exactly 0.000** to the end (the raycast finds no map at all);
+- depth was healthy throughout — post-gate valid count never below 1821 of 2268 — so this is not an
+  empty-frame problem;
+- it still **reported a plausible 2.05 m "drift"**. That number is not a measurement; it is where
+  the estimate stood when it died, held for the last 22% of the run. Nothing logged.
+
+**The fix — escalate only on failure.** Keep 0.05 as the first attempt; retry a *failed* frame once
+at `icp_retry_dist` (0.10). A wider radius is not free, so it must not apply to healthy frames:
+
+| capture | config | lost | start-end gap | path | escalations |
+|---|---|---|---|---|---|
+| Mnt | 0.05 fixed (old) | **423** | 2.047 m (7.48%) | 27.37 m | — |
+| Mnt | 0.05 → 0.10 retry | **0** | 1.521 m (4.80%) | 31.68 m | **1** |
+| NoMnt | 0.05 fixed (old) | 0 | 0.150 m (0.46%) | 32.50 m | — |
+| NoMnt | 0.05 → 0.10 retry | 0 | **0.150 m** (bit-identical) | 32.50 m | **0** |
+| NoMnt | 0.10 fixed | 0 | 0.953 m (2.63%) | 36.25 m | — |
+
+**One retry, in one frame out of 1889, recovered the whole second half of the scan**, and the clean
+run is bit-identical (`0.1501406473934001` / `32.50240193119565` before and after) because it never
+escalates. Cost: +0.4 ms p50, nowhere near the ~35 ms budget. A third rung at 0.20 never fired, so
+only one retry is implemented. `icp_retry_dist = 0` restores the old single-attempt path exactly.
+
+Rejected with data, on the same two captures: a **fixed** 0.10 (rescues Mnt but degrades NoMnt
+0.150 → 0.953 m), **6-DoF** (518 lost, first at frame 535 — much worse), and a looser `min_fitness`
+(identical to the radius change alone: the gate is not what fails, correspondences are).
+
+**Also fixed here: the silence.** `Mapper.lost_flags` now records the per-frame flag and
+`metrics.tracking_stats` reports `trailing_lost` / `longest_lost_run` / `died`. A count alone hides
+this failure — 423 lost of 1889 reads like "78% tracked fine" when in fact the run ended and the
+tail is fabricated. `roomscan-slam` now prints `<-- THE RUN DIED` when a run ends in a sustained
+lost streak, and the `--json` report carries the same under `tracking`.
+
+**Not fixed, and not claimed:** Mnt still closes at 4.80% versus NoMnt's 0.46%. The retry makes that
+run *complete*, not *accurate*. The remaining error is partly BUG-037 (barometer). Its horizontal
+residual is unexplained — the mount is **not** in the FOV (no body-fixed occluder: zero pixels with
+median < 700 mm, IQR < 60 mm, seen > 90% in either capture) and the motion profile does not
+discriminate (NoMnt had *more* close-and-fast exposure — 4.5% vs 3.5% of frames, longest run 37
+frames at 337 mm / 75 °/s vs 28 frames at 383 mm / 64 °/s — and never lost tracking). No mechanism
+is asserted for it.
+
+**Still open architecturally:** the retry makes a single bad *frame* survivable; it does not make a
+bad *second* survivable. There is still no relocalization — a lost pose can never re-find the map.
+
+---
+
+## BUG-037 — Height is slaved to a barometer that wanders metres per minute
+
+- **Status:** **open** · **Reported:** 2026-07-30 · **Area:** host/slam
+- **Where:** `host/src/roomscan/slam/mapper.py` (`_apply_baro_z`), `slam/config.py` (`baro_weight`)
+- **Found by:** scoring the owner's two room circuits against a ceiling-bookend ground truth
+  (see "How this was measured" below).
+
+`_apply_baro_z` blends the pose's height toward the barometric height every frame at
+`baro_weight = 0.05` — a ~20-frame (0.66 s) time constant. Height is therefore effectively *slaved*
+to the barometer. Over these two ~1-minute captures the sensor wandered **2.8 m and 2.6 m of
+apparent altitude** (33.7 Pa and 31.2 Pa), with **43 cm and 12 cm of net drift** start-to-end.
+
+**Measured** (ladder fix applied in both rows, so this isolates the barometer):
+
+| capture | `baro_weight` | height error | horizontal gap | reported path |
+|---|---|---|---|---|
+| Mnt | 0.05 (default) | **−581 mm** | 1.406 m | 31.68 m |
+| Mnt | 0 (off) | **−21 mm** | 0.941 m | 20.53 m |
+| NoMnt | 0.05 (default) | −7 mm | **0.150 m** | 32.50 m |
+| NoMnt | 0 (off) | −22 mm | 0.462 m | 21.73 m |
+
+Two separate problems:
+
+1. **Height error.** True height error is ~0 for both runs (ground truth below). The mounted run is
+   off by **581 mm** with the barometer on and **21 mm** with it off — a 28× improvement. The run
+   with 43 cm of barometric drift is exactly the one with the large height error.
+2. **Invented path length.** Turning the barometer off cuts reported path by ~35% in *both* runs
+   (31.68 → 20.53 m, 32.50 → 21.73 m). The operator walked a level circuit; roughly **10 m of
+   "path" is vertical motion the barometer invented**. This inflates every `%-of-path` drift figure
+   in the SLAM reports, i.e. it has been flattering our numbers.
+
+**It is not a simple flag flip.** NoMnt's *horizontal* closure gets worse with the barometer off
+(0.150 → 0.462 m), and `baro_weight = 0.01` was worse than both ends on the mounted run (−450 mm),
+so the response is not monotonic. This needs a proper sweep against ground truth, not a default
+change. Do not "fix" it by setting `baro_weight = 0` on this evidence.
+
+**How this was measured — ceiling bookends.** The owner's captures start and end with the device
+parked facing the ceiling (elevation 80.1°/80.2° and 89.2°/89.2°) at an identical measured range
+(1420/1420 mm and 1453/1452 mm). Same elevation + same range to a flat ceiling ⇒ **same height**, so
+the true height error over the loop is ~0 with no external instrumentation. That independently
+corroborates the clean run (SLAM says 7 mm) and condemns the mounted one.
+
+⚠ **This is an opportunistic check, not a protocol.** Do not build tooling that *requires* a parked
+bookend: the owner's objection (2026-07-30) is that reaching the table puts the operator in the
+sensor's FOV. Score it when a capture happens to have stationary bookends; never demand one.

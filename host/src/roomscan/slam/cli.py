@@ -68,7 +68,8 @@ def _load_frames(path, max_frames=None):
 def _run(frames, width, height, cfg, mode, device=None):
     mapper = Mapper(width, height, cfg.fov_h, cfg.fov_v, icp_mode=mode,
                     voxel_size=cfg.voxel_size, baro_weight=cfg.baro_weight,
-                    max_dist=cfg.max_dist, min_fitness=cfg.min_fitness, max_rmse=cfg.max_rmse,
+                    max_dist=cfg.max_dist, icp_retry_dist=cfg.icp_retry_dist,
+                    min_fitness=cfg.min_fitness, max_rmse=cfg.max_rmse,
                     min_confidence=cfg.min_confidence, weight_threshold=cfg.weight_threshold,
                     release_cache_every=cfg.release_cache_every,
                     block_count=cfg.block_count,
@@ -146,6 +147,13 @@ def main(argv=None) -> int:
         print(f"  timing: median={mstats['median_ms']:.1f} ms p90={mstats['p90_ms']:.1f} "
               f"p99={mstats['p99_ms']:.1f} max={mstats['max_ms']:.1f} "
               f"over35ms={mstats['over_budget_frac']*100:.1f}% lost={mapper.tracking_lost_count}")
+        kstats = metrics.tracking_stats(mapper.lost_flags)
+        died = ("  <-- THE RUN DIED: the tail is a frozen dead-reckoned pose, "
+                "not a measured trajectory" if kstats["died"] else "")
+        print(f"  tracking: lost={kstats['lost']}/{kstats['n']} "
+              f"({kstats['lost_frac']*100:.1f}%) longest_run={kstats['longest_lost_run']} "
+              f"trailing={kstats['trailing_lost']} "
+              f"icp_escalations={mapper.icp_escalations}{died}")
         # BUG-035: report against the CONFIGURED capacity, not the live one --
         # the grid rehashes to grow, so live capacity always looks roomy; what
         # predicted the failure was running near the value it was built with.
@@ -159,6 +167,8 @@ def main(argv=None) -> int:
         report["modes"][mode] = {
             "trajectory": dict(tstats), "timing": dict(mstats),
             "tracking_lost": mapper.tracking_lost_count,
+            "tracking": dict(kstats),
+            "icp_escalations": mapper.icp_escalations,
             "map": {"blocks": used, "capacity": cap, "live_capacity": live_cap,
                     "percent_of_capacity": round(100.0 * used / cap, 1),
                     "saturated": bool(saturated)},

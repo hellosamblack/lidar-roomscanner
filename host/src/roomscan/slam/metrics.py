@@ -17,6 +17,39 @@ def trajectory_stats(poses: list[np.ndarray]) -> dict:
             "max_step_m": float(steps.max())}
 
 
+def tracking_stats(lost_flags: list[bool]) -> dict:
+    """Summarize tracking loss, separating "a few dropped frames" from "the run
+    died and never recovered".
+
+    `trailing_lost` is the headline. Once a frame is lost, `predict_pose`
+    freezes translation at t_prev and nothing relocalizes, so an unbroken lost
+    streak running to the last frame means that whole tail is a frozen,
+    fabricated pose -- the reported trajectory and its start/end gap are
+    meaningless over it. captures/coffeeRoomCircuitMnt.bin failed exactly this
+    way (423 trailing frames, 22% of the capture) while still reporting a
+    plausible-looking 2.05 m "drift", which is why the count alone is not enough.
+    """
+    n = len(lost_flags)
+    if n == 0:
+        return {"n": 0, "lost": 0, "lost_frac": 0.0, "trailing_lost": 0,
+                "longest_lost_run": 0, "died": False}
+    trailing = 0
+    for f in reversed(lost_flags):
+        if not f:
+            break
+        trailing += 1
+    longest = cur = 0
+    for f in lost_flags:
+        cur = cur + 1 if f else 0
+        longest = max(longest, cur)
+    return {"n": n, "lost": int(sum(lost_flags)),
+            "lost_frac": float(sum(lost_flags)) / n,
+            "trailing_lost": trailing, "longest_lost_run": longest,
+            # A handful of trailing lost frames is a normal end-of-scan tail;
+            # a sustained one means the run never recovered.
+            "died": bool(trailing >= 30)}
+
+
 def timing_stats(ms: list[float]) -> dict:
     a = np.asarray(ms, dtype=np.float64)
     if a.size == 0:

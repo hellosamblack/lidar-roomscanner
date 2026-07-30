@@ -140,3 +140,34 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
     ok = bool(result.fitness >= min_fitness and result.inlier_rmse <= max_rmse)
     return RegistrationResult(pose=T, fitness=float(result.fitness),
                               rmse=float(result.inlier_rmse), ok=ok)
+
+
+def register_escalating(source, target, init_pose, retry_dist: float = 0.0,
+                        **kw) -> tuple[RegistrationResult, bool]:
+    """`register`, retried once at a wider correspondence radius if the first
+    attempt fails its gate. Returns (result, escalated).
+
+    A single fixed `max_dist` has to be both accurate and robust, and it cannot
+    be. The tight default (0.05) is the accuracy optimum -- measured on
+    captures/coffeeRoomCircuitNoMnt.bin, widening it to 0.10 throughout degrades
+    that run's loop closure from 0.150 m to 0.953 m. But a frame whose
+    frame-to-model residual exceeds 0.05 finds ZERO correspondences, and because
+    `predict_pose` freezes translation at t_prev on a lost frame and nothing
+    relocalizes, one such frame kills the rest of the scan: on
+    captures/coffeeRoomCircuitMnt.bin that cost 423 frames (22% of the capture)
+    from a single failure at frame 1466, silently.
+
+    Escalating only on failure gets both. Measured on those two captures:
+    Mnt 423 lost -> 0 (drift 7.48% -> 4.80%), NoMnt bit-identical (0 escalations,
+    still 0.150 m / 0.46%). Cost was ONE retry in 1889 frames, +0.5 ms p50. A
+    third rung at 0.20 never fired, so one retry is all this implements.
+
+    `retry_dist <= 0` disables the retry, restoring the single-attempt behavior
+    exactly (no extra `register` call is made).
+    """
+    res = register(source, target, init_pose, **kw)
+    if res.ok or retry_dist <= 0.0:
+        return res, False
+    kw = dict(kw)
+    kw["max_dist"] = retry_dist
+    return register(source, target, init_pose, **kw), True

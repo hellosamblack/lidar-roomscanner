@@ -22,7 +22,7 @@ from .cloud import source_cloud
 from .frames import baro_height_m, predict_pose, world_up
 from .intrinsics import pinhole
 from .motion import StationarityGate
-from .odometry import register
+from .odometry import register_escalating
 from .tsdf import DEFAULT_BLOCK_COUNT, TsdfMap
 
 _MIN_VALID_POINTS = 100
@@ -42,6 +42,7 @@ class Mapper:
     def __init__(self, width: int, height: int, fov_h: float = 55.0, fov_v: float = 42.0,
                  icp_mode: str = "translation", voxel_size: float = 0.01,
                  baro_weight: float = 0.05, max_dist: float = 0.05,
+                 icp_retry_dist: float = 0.10,
                  min_fitness: float = 0.3, max_rmse: float = 0.05,
                  min_confidence: float | None = _DEFAULT_MIN_CONFIDENCE,
                  weight_threshold: float = 3.0,
@@ -66,6 +67,11 @@ class Mapper:
                              release_cache_every=release_cache_every,
                              block_count=block_count)
         self._gate = dict(max_dist=max_dist, min_fitness=min_fitness, max_rmse=max_rmse)
+        self._retry_dist = icp_retry_dist
+        # Frames where the tight radius failed and the wider retry was tried.
+        # Expected to be ~0 on a clean scan; a non-trivial count means the scan
+        # was repeatedly on the edge of the terminal failure this guards against.
+        self.icp_escalations = 0
         self._clock = clock
         # Stationarity hold (owner: "device is stationary, tweak it until this
         # is true in our model"): the ICP translation noise random-walks the
@@ -85,6 +91,11 @@ class Mapper:
         self._ref_pa: float | None = None
         self.trajectory: list[np.ndarray] = []
         self.tracking_lost_count = 0
+        # Per-frame lost flag. Kept because the COUNT alone hides the failure
+        # that matters: a run that ends in an unbroken lost streak is
+        # dead-reckoning a frozen pose (predict_pose holds t_prev), so its
+        # trajectory tail is fabricated, not measured. See metrics.tracking_stats.
+        self.lost_flags: list[bool] = []
         self._bootstrapped = False
 
     def _apply_baro_z(self, pose: np.ndarray, pressure_pa: float | None) -> np.ndarray:
@@ -182,8 +193,11 @@ class Mapper:
                 # local frame -- so ICP's initial guess is identity (not T_pred), and
                 # the resulting correction must be composed onto T_pred afterward to
                 # get a world pose: pose_world = T_pred @ correction.
-                res = register(src, model, np.eye(4), mode=self.icp_mode,
-                              device=self._device, **self._gate)
+                res, escalated = register_escalating(
+                    src, model, np.eye(4), retry_dist=self._retry_dist,
+                    mode=self.icp_mode, device=self._device, **self._gate)
+                if escalated:
+                    self.icp_escalations += 1
                 fitness, rmse = res.fitness, res.rmse
                 if res.ok:
                     pose = self._apply_baro_z(T_pred @ res.pose, pressure_pa)
@@ -228,6 +242,7 @@ class Mapper:
             self._display_pos = pose[:3, 3].copy()
 
         self.trajectory.append(report_pose.copy())
+        self.lost_flags.append(bool(lost))
         slam_ms = (self._clock() - t0) * 1000.0
         return FrameStep(pose=report_pose, fitness=fitness, rmse=rmse,
                          tracking_lost=lost, slam_ms=slam_ms)

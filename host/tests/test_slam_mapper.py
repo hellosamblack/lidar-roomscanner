@@ -220,3 +220,66 @@ def test_mapper_forwards_block_count_to_its_tsdf():
     assert Mapper(W, H, voxel_size=0.02)._tsdf.block_count == DEFAULT_BLOCK_COUNT
     assert Mapper(W, H, voxel_size=0.02,
                   block_count=7777)._tsdf.block_count == 7777
+
+
+# --- ICP retry plumbing + per-frame lost flags
+
+
+def test_lost_flags_track_per_frame_and_match_the_count():
+    """lost_flags must stay 1:1 with trajectory so metrics.tracking_stats can
+    tell a recovered dropout from a run that died."""
+    m = Mapper(W, H, voxel_size=0.02)
+    m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    m.step(np.zeros((H, W), dtype=np.float32), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert len(m.lost_flags) == len(m.trajectory) == 3
+    assert m.lost_flags[1] is True                      # empty depth -> lost
+    assert sum(m.lost_flags) == m.tracking_lost_count
+
+
+def test_retry_disabled_makes_no_second_register_call():
+    """icp_retry_dist=0 must be a true opt-out: the wider attempt is never
+    even made, so a healthy run's behavior is exactly as before the fix."""
+    import roomscan.slam.mapper as mod
+    calls = []
+    real = mod.register_escalating
+
+    def spy(*a, **kw):
+        calls.append(kw.get("retry_dist"))
+        return real(*a, **kw)
+
+    mod.register_escalating = spy
+    try:
+        m = Mapper(W, H, voxel_size=0.02, icp_retry_dist=0.0)
+        for _ in range(3):
+            m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    finally:
+        mod.register_escalating = real
+    assert calls and all(c == 0.0 for c in calls)
+    assert m.icp_escalations == 0
+
+
+def test_escalation_counter_increments_when_the_retry_is_used():
+    """The counter is the diagnostic that says a scan was repeatedly on the
+    edge of the terminal failure, so it must reflect real escalations."""
+    import roomscan.slam.mapper as mod
+    real = mod.register_escalating
+
+    def always_escalate(*a, **kw):
+        res, _ = real(*a, **kw)
+        return res, True
+
+    m = Mapper(W, H, voxel_size=0.02)
+    m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)   # bootstrap, no ICP
+    mod.register_escalating = always_escalate
+    try:
+        m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+        m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    finally:
+        mod.register_escalating = real
+    assert m.icp_escalations == 2
+
+
+def test_default_retry_dist_is_wider_than_default_max_dist():
+    m = Mapper(W, H, voxel_size=0.02)
+    assert m._retry_dist > m._gate["max_dist"]

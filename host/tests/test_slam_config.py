@@ -13,6 +13,7 @@ def test_defaults():
     assert c.voxel_size == 0.01
     assert c.baro_weight == 0.05
     assert c.max_dist == 0.05
+    assert c.icp_retry_dist == 0.10
     assert c.min_fitness == 0.3
     assert c.max_rmse == 0.05
     assert c.fov_h == 55.0
@@ -131,3 +132,20 @@ def test_block_count_default_matches_tsdf_and_reads_from_toml(tmp_path):
     p = tmp_path / "roomscan.toml"
     p.write_text("[slam]\nblock_count = 500000\n", encoding="utf-8")
     assert SlamConfig.load(p).block_count == 500000
+
+
+def test_icp_retry_dist_is_configurable(tmp_path):
+    """The retry radius must be tunable from [slam] -- including off (0),
+    which restores the pre-fix single-attempt behavior."""
+    f = tmp_path / "roomscan.toml"
+    f.write_text("[slam]\nicp_retry_dist = 0.0\n", encoding="utf-8")
+    assert SlamConfig.load(f).icp_retry_dist == 0.0
+
+    f.write_text("[slam]\nicp_retry_dist = 0.25\n", encoding="utf-8")
+    assert SlamConfig.load(f).icp_retry_dist == 0.25
+
+
+def test_icp_retry_dist_is_wider_than_max_dist():
+    """A retry no wider than the first attempt could never rescue anything."""
+    c = SlamConfig()
+    assert c.icp_retry_dist > c.max_dist

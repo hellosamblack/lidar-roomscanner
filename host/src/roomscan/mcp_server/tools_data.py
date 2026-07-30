@@ -218,6 +218,15 @@ def slam_rerender(capture: str, voxel_size: float = 0.0, block_count: int = 0,
     `map.saturated`. Past ~6 GiB of grid, pass `device="CPU:0"`, where system RAM
     rather than VRAM is the limit.
 
+    Before quoting `trajectory.start_end_gap_m` as drift, read `tracking.died`.
+    Once a frame is lost the pose freezes and nothing relocalizes, so a run that
+    ended in a sustained lost streak reports a plausible-looking gap that is really
+    just where the estimate stood when it quit -- one real circuit reported 2.05 m
+    of "drift" whose last 22% was fabricated (BUG-036). `tracking.trailing_lost`
+    and `longest_lost_run` say how much of the tail to distrust, and
+    `icp_escalations` counts frames the tight ICP radius could not handle alone
+    (~0 on a clean scan; many means the run was repeatedly near that failure).
+
     Runs `roomscan-slam` as a subprocess (this is a long batch job -- many minutes on
     a full-length capture, and it must not block the server's event loop or pull CUDA
     into this process). Bound it with `max_frames` for a quick check. Zero/empty
@@ -265,4 +274,13 @@ def slam_rerender(capture: str, voxel_size: float = 0.0, block_count: int = 0,
             f"grid filled at {chosen['map']['blocks']}/{chosen['map']['capacity']} blocks: the map "
             "stopped accepting geometry partway through and tracking will have collapsed after "
             "that point. Re-run with a larger block_count (BUG-035).")
+    # Same class of silent failure as saturation: the run reports a trajectory and a
+    # start/end gap even though its tail is a frozen dead-reckoned pose (BUG-036).
+    tracking = chosen.get("tracking") or {}
+    if tracking.get("died"):
+        result["warning"] = (
+            f"tracking never recovered: the last {tracking['trailing_lost']} of "
+            f"{tracking['n']} frames are dead-reckoned from a frozen pose, so the "
+            f"trajectory tail and start_end_gap_m are not measurements. The map is "
+            f"only valid up to that point.")
     return result

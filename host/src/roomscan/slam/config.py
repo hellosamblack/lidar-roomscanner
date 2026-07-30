@@ -45,6 +45,15 @@ class SlamConfig:
     voxel_size: float = 0.01
     baro_weight: float = 0.05
     max_dist: float = 0.05
+    # Wider ICP correspondence radius retried ONLY when `max_dist` fails its
+    # gate; 0 disables. A single fixed radius cannot be both accurate and
+    # robust: 0.05 is the accuracy optimum, but one frame whose residual
+    # exceeds it finds zero correspondences and -- with translation frozen on a
+    # lost frame and no relocalization -- kills the rest of the scan silently
+    # (captures/coffeeRoomCircuitMnt.bin: 423 frames lost from one failure).
+    # Escalating only on failure fixed that run (423 lost -> 0) while leaving a
+    # clean run bit-identical (0 escalations). See odometry.register_escalating.
+    icp_retry_dist: float = 0.10
     min_fitness: float = 0.3
     max_rmse: float = 0.05
     fov_h: float = 55.0

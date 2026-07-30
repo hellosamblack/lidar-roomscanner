@@ -89,6 +89,13 @@ view; and blocks scale as 1/voxel², so halving the voxel wants ~4× the `block_
 where map growth stalled and tracking collapsed (BUG-035). Past ~6 GiB of grid use
 `device="CPU:0"`, where system RAM rather than VRAM is the limit.
 
+**And read `tracking.died` before quoting `start_end_gap_m` as drift.** A lost frame
+freezes the pose and nothing relocalizes, so a dead run still reports a plausible gap that
+is only where the estimate stopped — one real circuit reported 2.05 m of "drift" whose last
+22% was fabricated (BUG-036). `tracking.trailing_lost` / `longest_lost_run` bound how much
+of the tail to distrust; `icp_escalations` counts frames the tight ICP radius could not
+handle alone (~0 on a clean scan). Both this and saturation raise a top-level `warning`.
+
 Unlike its neighbours this one shells out to the `roomscan-slam` console script rather than
 calling in-process: the job runs for many minutes and would otherwise block the event loop
 and pull CUDA into the server. It reads that run's `--json` report instead of scraping

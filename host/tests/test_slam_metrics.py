@@ -1,4 +1,7 @@
 import numpy as np
+import pytest
+
+from roomscan.slam import metrics
 from roomscan.slam.metrics import trajectory_stats, timing_stats, write_tum, compare_kiss
 
 def _pose(t):
@@ -38,3 +41,51 @@ def test_compare_kiss_optional(monkeypatch):
         return real(name, *a, **k)
     monkeypatch.setattr(builtins, "__import__", fake)
     assert compare_kiss([], None, 55.0, 42.0) is None
+
+
+# --- tracking_stats: separate "a few dropped frames" from "the run died"
+
+
+def test_tracking_stats_empty():
+    s = metrics.tracking_stats([])
+    assert s == {"n": 0, "lost": 0, "lost_frac": 0.0, "trailing_lost": 0,
+                 "longest_lost_run": 0, "died": False}
+
+
+def test_tracking_stats_clean_run():
+    s = metrics.tracking_stats([False] * 100)
+    assert s["lost"] == 0 and s["trailing_lost"] == 0
+    assert s["longest_lost_run"] == 0
+    assert s["died"] is False
+
+
+def test_tracking_stats_scattered_losses_are_not_death():
+    """Isolated dropouts recover; the run is still a real measurement."""
+    flags = [False] * 100
+    for i in (10, 40, 41, 70):
+        flags[i] = True
+    s = metrics.tracking_stats(flags)
+    assert s["lost"] == 4
+    assert s["longest_lost_run"] == 2
+    assert s["trailing_lost"] == 0
+    assert s["died"] is False
+
+
+def test_tracking_stats_flags_a_run_that_never_recovered():
+    """The coffeeRoomCircuitMnt.bin shape: healthy, then an unbroken lost
+    streak to the end. That tail is a frozen dead-reckoned pose, so the run
+    must be reported as died even though 78% of frames tracked fine."""
+    flags = [False] * 1466 + [True] * 423
+    s = metrics.tracking_stats(flags)
+    assert s["lost"] == 423
+    assert s["trailing_lost"] == 423
+    assert s["longest_lost_run"] == 423
+    assert s["lost_frac"] == pytest.approx(423 / 1889)
+    assert s["died"] is True
+
+
+def test_tracking_stats_short_trailing_tail_is_not_death():
+    """A handful of trailing lost frames is a normal end-of-scan tail."""
+    s = metrics.tracking_stats([False] * 100 + [True] * 5)
+    assert s["trailing_lost"] == 5
+    assert s["died"] is False

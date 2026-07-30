@@ -890,8 +890,11 @@ channel, barometer as soft 1-DoF Z constraint.
 > byte-identical); and CUDA at-scale validation (GPU ~2.1× per-step vs CPU with a flat degradation
 > curve; ~~3 of 4 latent CUDA bugs fixed — the 4th is sub-phase 6.G~~ **all 4 now fixed — the 4th
 > closed 2026-07-29 as sub-phase 6.G / BUG-032**). **Open:** sub-phase **6.D** (drift correction /
-> loop-closure evaluation — the owner's next target; its "measure first" gate needs an
-> owner-recorded closed-loop walk, which no capture contains) and the on-rig flat-field capture
+> loop-closure evaluation — the owner's next target; ~~its "measure first" gate needs an
+> owner-recorded closed-loop walk, which no capture contains~~ **the gate is SATISFIED as of
+> 2026-07-30**: the owner recorded two room circuits, `captures/coffeeRoomCircuitNoMnt.bin` closes at
+> **0.150 m over 32.5 m (0.46%)** with 0 lost frames, and `captures/coffeeRoomCircuitMnt.bin` is the
+> failure case — see the 6.D block below) and the on-rig flat-field capture
 > (Phase 2.5 follow-up) gating reflectance-quality work.
 
 > **Orientation accuracy for handheld use (2026-07-29)** — a full pass on the orientation path,
@@ -1080,6 +1083,40 @@ and quantify end-to-end drift (`start_end_gap_m` in the `roomscan-slam` metrics;
 showed 1.1–1.4 m over ~70 m of path, pre-GPU). Then ship (2), re-measure, and decide from the residual
 whether (3) earns its complexity — frame-to-model may already be enough inside a single room; loop
 closure pays off on multi-room trajectories.
+
+**The "measure first" gate is satisfied (2026-07-30).** The owner walked two circuits of the same
+room, each ~60 s, both byte-clean with stream 9. Measured at 1 cm voxels on CUDA:0, after BUG-036:
+
+| capture | lost | start-end gap | path | drift | height error |
+|---|---|---|---|---|---|
+| `coffeeRoomCircuitNoMnt.bin` | 0 | **0.150 m** | 32.50 m | **0.46%** | −7 mm |
+| `coffeeRoomCircuitMnt.bin` | 0 (was 423) | 1.521 m | 31.68 m | 4.80% | −581 mm |
+
+**Frame-to-model alone already closes a single room to 0.46%** on the clean run — that is the number
+(3) has to beat, and on this evidence it does **not** obviously earn its complexity inside one room.
+Note this supersedes the 1.1–1.4 m / ~70 m Task-9 figure above as the current baseline.
+
+Three findings that change what 6.D should do next, in priority order:
+
+1. **Robustness, not drift, was the real failure.** The mounted run did not drift to 2 m — it *died*
+   at frame 1466 and dead-reckoned a frozen pose for the last 22% of the capture, silently reporting
+   a plausible 2.05 m "drift". Fixed as **BUG-036** (escalating ICP retry radius + `tracking_stats`
+   reporting `died`). Still architecturally open: **there is no relocalization**, so a bad *second*
+   (as opposed to a bad frame) is still terminal.
+2. **The barometer is a bigger error source than yaw drift right now** — **BUG-037**: `baro_weight`
+   0.05 costs 581 mm of height on the mounted run (true error ~0) and invents ~35% of reported path
+   length in *both* runs, which has been flattering every `%-of-path` figure in this document.
+   Worth resolving before ICP→IMU yaw feedback, since it corrupts the metric 6.D is judged by.
+3. **Yaw drift is not the bottleneck at this timescale.** The datasheet's SFLP spec (Table 1) is
+   5.9°/5 min heading drift at high dynamics — ~1.2° over a 62 s circuit, ≈8 cm over the 3.7 m max
+   excursion. Deliverable (2) is still worth shipping, but it cannot be what limits these runs.
+
+**Ground truth without instrumentation, opportunistically.** Both captures start and end parked on
+the ceiling at identical elevation (80.1°/80.2°, 89.2°/89.2°) and identical range (1420/1420 mm,
+1453/1452 mm) ⇒ same height ⇒ true height error ~0. That is what exposed BUG-037 and what
+corroborates the clean run's 0.46%. ⚠ **Do not turn this into a required protocol** — the owner's
+objection (2026-07-30) is that walking to the table to park the device puts the operator in the
+sensor's FOV. Score bookends when a capture happens to have them; never demand one.
 
 #### Sub-phase 6.G — SLAM GPU-memory hardening (long-scan OOM)  ← **✅ Complete (2026-07-29)**
 

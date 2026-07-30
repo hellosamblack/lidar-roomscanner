@@ -2,7 +2,7 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from roomscan.slam.odometry import register, RegistrationResult
+from roomscan.slam.odometry import register, register_escalating, RegistrationResult
 
 
 def _plane_cloud(n=40, z=1.0):
@@ -175,3 +175,64 @@ def test_translation_gate_reflects_genuine_translation_fit_not_stale_6dof():
     res_translation = register(source, target, np.eye(4), mode="translation")
     assert not res_translation.ok  # genuine translation-only fit correctly rejects it
     assert np.allclose(res_translation.pose[:3, :3], np.eye(3), atol=1e-9)
+
+
+# --- register_escalating: retry a failed gate at a wider correspondence radius
+
+
+def _far_pair(shift_m):
+    """A source displaced from the target by `shift_m` along x, so the residual
+    is tunable relative to the correspondence radius."""
+    target = _plane_cloud()
+    src_pts = target.point.positions.numpy().copy()
+    src_pts[:, 0] += shift_m
+    source = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
+    source.point.positions = o3d.core.Tensor(src_pts)
+    return source, target
+
+
+def test_escalating_no_retry_when_first_attempt_succeeds():
+    source, target = _far_pair(0.02)
+    res, escalated = register_escalating(source, target, np.eye(4),
+                                         retry_dist=0.10, mode="translation",
+                                         max_dist=0.05)
+    assert res.ok
+    assert escalated is False
+
+
+def test_escalating_disabled_is_identical_to_register():
+    """retry_dist<=0 must reproduce single-attempt behavior exactly, so the
+    feature is genuinely opt-out and cannot perturb a healthy run."""
+    source, target = _far_pair(0.30)
+    plain = register(source, target, np.eye(4), mode="translation", max_dist=0.05)
+    res, escalated = register_escalating(source, target, np.eye(4), retry_dist=0.0,
+                                         mode="translation", max_dist=0.05)
+    assert escalated is False
+    assert res.ok == plain.ok
+    assert res.fitness == pytest.approx(plain.fitness)
+    assert np.allclose(res.pose, plain.pose)
+
+
+def test_escalating_rescues_a_frame_the_tight_radius_loses():
+    """The whole point: a displacement that finds no correspondences at 0.05
+    must still register once retried wider. This is the single-frame failure
+    that killed 423 frames of captures/coffeeRoomCircuitMnt.bin."""
+    source, target = _far_pair(0.70)
+    tight = register(source, target, np.eye(4), mode="translation", max_dist=0.05)
+    assert not tight.ok, "fixture no longer exercises a tight-radius failure"
+
+    res, escalated = register_escalating(source, target, np.eye(4), retry_dist=0.20,
+                                         mode="translation", max_dist=0.05)
+    assert escalated is True
+    assert res.ok
+    assert res.pose[0, 3] == pytest.approx(-0.70, abs=0.02)
+
+
+def test_escalating_reports_escalation_even_when_retry_also_fails():
+    """A retry that also fails is still an escalation -- the counter measures
+    how often the tight radius was insufficient, not how often it was saved."""
+    source, target = _far_pair(5.0)
+    res, escalated = register_escalating(source, target, np.eye(4), retry_dist=0.06,
+                                         mode="translation", max_dist=0.05)
+    assert escalated is True
+    assert not res.ok

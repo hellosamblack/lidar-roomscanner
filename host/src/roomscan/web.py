@@ -1641,7 +1641,8 @@ class SlamRunner:
         worker = make_slam_worker(width, height, fov_h=self._fov_h,
                                   fov_v=self._fov_v, device=device,
                                   release_cache_every=cfg.release_cache_every,
-                                  block_count=cfg.block_count)
+                                  block_count=cfg.block_count,
+                                  icp_retry_dist=cfg.icp_retry_dist)
         worker.start()
         meshprep = MeshPrep(vertex_budget=cfg.live_vertex_budget,
                             fps_budget_ms=cfg.fps_budget_ms)
