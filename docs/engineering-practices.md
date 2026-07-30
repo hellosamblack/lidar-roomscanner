@@ -84,6 +84,15 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
   orientation view), which clobbered a new `display_quat` argument so it read the raw quat instead of the
   smoothed one (BUG-026 follow-up). It produced a *plausible* number, which is what made it dangerous; only
   a test asserting the `None` default caught it. Prefer a qualified name (`ir_display_quat`).
+- **Never mutate interpreter-global state in a test — use a subprocess.** A test asserting that
+  `roomscan.mcp_server` doesn't import `open3d` eagerly did `sys.modules.pop("open3d")`, which broke
+  three unrelated `test_panel_modes` tests *only in a full-suite run* (they passed in isolation, which
+  is the confusing part — the failures name the victim, not the culprit). The suite shares one
+  interpreter, so `sys.modules`, `os.environ`, `logging` config and monkeypatched globals all leak
+  forward. If an assertion is genuinely about import-time or process-level behaviour, run it in a
+  `subprocess` and assert on its output. **A test that passes alone but fails in the suite is almost
+  always a *different* test's leak** — bisect by running the failing file after suspect files, not by
+  debugging the failing file.
 
 ## Web UI
 
