@@ -3,7 +3,9 @@ trajectory + timing, optionally comparing ICP modes / KISS-ICP."""
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from pathlib import Path
 
 import numpy as np
 
@@ -97,17 +99,42 @@ def main(argv=None) -> int:
     ap.add_argument("--out-mesh", default="slam_map.ply")
     ap.add_argument("--out-traj", default="slam_traj.tum")
     ap.add_argument("--max-frames", type=int, default=None)
+    ap.add_argument("--json", default=None, metavar="PATH",
+                    help="also write the run's stats to PATH as JSON. The prose above is for "
+                         "humans; this is the machine-readable front end (roomscan-mcp's "
+                         "slam_rerender reads it) so nothing has to scrape stdout.")
+    ap.add_argument("--voxel-size", type=float, default=None,
+                    help="TSDF voxel size in metres, overriding [slam] voxel_size. The live "
+                         "scan is only a preview -- the capture holds raw frames, so re-running "
+                         "offline at a finer voxel is how you get a high-detail map. Note the "
+                         "sensor samples ~36 mm between rays at 2 m, so below ~5 mm the extra "
+                         "detail comes only from multi-view fusion, not from a single view.")
+    ap.add_argument("--block-count", type=int, default=None,
+                    help="TSDF grid capacity, overriding [slam] block_count. Blocks scale as "
+                         "1/voxel_size^2, so halving the voxel needs ~4x this. Give it real "
+                         "headroom: a scan that ran at ~97% of its capacity stalled and lost "
+                         "tracking (BUG-035). Beyond ~6 GiB use --device CPU:0, where system "
+                         "RAM rather than VRAM is the limit.")
     args = ap.parse_args(argv)
 
     cfg = SlamConfig.load()
+    if args.voxel_size is not None:
+        cfg.voxel_size = args.voxel_size
+    if args.block_count is not None:
+        cfg.block_count = args.block_count
     frames, width, height = _load_frames(args.capture, args.max_frames)
     if not frames:
         print("[slam] no depth frames decoded from capture", file=sys.stderr)
         return 1
-    print(f"[slam] {len(frames)} frames, {width}x{height}")
+    print(f"[slam] {len(frames)} frames, {width}x{height}, "
+          f"voxel {cfg.voxel_size * 1000:g} mm, capacity {cfg.block_count} blocks")
 
     modes = ["translation", "6dof"] if args.compare_modes else [args.icp_mode or cfg.icp_mode]
     results = {}
+    report = {"capture": args.capture, "frames": len(frames),
+              "width": width, "height": height,
+              "voxel_size": cfg.voxel_size, "block_count": cfg.block_count,
+              "device": args.device or cfg.device, "modes": {}}
     for mode in modes:
         mapper, timings, ts = _run(frames, width, height, cfg, mode, device=args.device)
         tstats = metrics.trajectory_stats(mapper.trajectory)
@@ -119,6 +146,23 @@ def main(argv=None) -> int:
         print(f"  timing: median={mstats['median_ms']:.1f} ms p90={mstats['p90_ms']:.1f} "
               f"p99={mstats['p99_ms']:.1f} max={mstats['max_ms']:.1f} "
               f"over35ms={mstats['over_budget_frac']*100:.1f}% lost={mapper.tracking_lost_count}")
+        # BUG-035: report against the CONFIGURED capacity, not the live one --
+        # the grid rehashes to grow, so live capacity always looks roomy; what
+        # predicted the failure was running near the value it was built with.
+        used, live_cap = mapper._tsdf.block_usage()
+        cap = cfg.block_count
+        saturated = used >= 0.97 * cap
+        note = ("  <-- outgrew the configured capacity; give it headroom via --block-count"
+                if saturated else "")
+        print(f"  map: {used} blocks, {100.0 * used / cap:.0f}% of the configured {cap} "
+              f"(live grid capacity {live_cap}){note}")
+        report["modes"][mode] = {
+            "trajectory": dict(tstats), "timing": dict(mstats),
+            "tracking_lost": mapper.tracking_lost_count,
+            "map": {"blocks": used, "capacity": cap, "live_capacity": live_cap,
+                    "percent_of_capacity": round(100.0 * used / cap, 1),
+                    "saturated": bool(saturated)},
+        }
 
     chosen = modes[0]
     mapper, _, _, ts = results[chosen]
@@ -129,12 +173,21 @@ def main(argv=None) -> int:
     metrics.write_tum(args.out_traj, ts, mapper.trajectory)
     print(f"\n[slam] wrote {args.out_mesh} and {args.out_traj} (mode={chosen})")
 
+    report["chosen_mode"] = chosen
+    report["out_mesh"], report["out_traj"] = args.out_mesh, args.out_traj
+
     if args.benchmark:
         depths = [d for d, _, _, _, _, _ in frames]
         kiss = metrics.compare_kiss(depths, mapper._intr, cfg.fov_h, cfg.fov_v)
         if kiss:
             print(f"[slam] KISS-ICP: path={kiss['path_length_m']:.3f} m "
                   f"gap={kiss['start_end_gap_m']:.3f} m")
+            report["kiss_icp"] = dict(kiss)
+
+    if args.json:
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json).write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"[slam] wrote {args.json}")
     return 0
 
 

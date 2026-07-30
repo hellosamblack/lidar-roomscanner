@@ -1,14 +1,21 @@
-"""Capture inspection and host diagnostics.
+"""Capture inspection, host diagnostics, and offline SLAM re-rendering.
 
-Every function here delegates to the corresponding `host/tools/` script's pure
-half -- this module contributes no analysis logic of its own.
+Most functions here delegate to the corresponding `host/tools/` script's pure
+half and contribute no analysis logic of their own. `slam_rerender` is the one
+exception in shape: it shells out to the `roomscan-slam` console script rather
+than calling it in-process, because that job runs for many minutes and would
+otherwise block the event loop and pull CUDA into the server process. It reads
+the run's `--json` report instead of scraping stdout, so the prose and the
+structured output stay one implementation with two front ends.
 """
 from __future__ import annotations
 
+import re
+import subprocess
 import sys
 from pathlib import Path
 
-from .paths import CAPTURES, HOST, RECORDINGS, REPO, WEB_WS, rel
+from .paths import CAPTURES, HOST, RECORDINGS, REPO, VENV_PY, WEB_WS, rel
 from .server import mcp
 
 sys.path.insert(0, str(HOST))  # `tools` is a top-level package rooted at host/
@@ -188,3 +195,74 @@ async def orientation_probe(mode: str = "jitter", seconds: float = 15.0,
                     "url": url, "seconds": seconds}
         return op.summarize_health(msgs, seconds=seconds)
     return {"error": f"unknown mode {mode!r} (expected 'jitter' or 'health')"}
+
+
+
+@mcp.tool()
+def slam_rerender(capture: str, voxel_size: float = 0.0, block_count: int = 0,
+                  device: str = "", max_frames: int = 0, icp_mode: str = "",
+                  out_mesh: str = "", out_traj: str = "", timeout_s: int = 1800) -> dict:
+    """Re-run SLAM over a recorded capture at a chosen resolution, offline.
+
+    A live scan is only a preview: the capture stores raw ToF frames, not a map, so
+    the whole pipeline can be re-run afterwards at any voxel size. This is the
+    high-detail post-processing pass -- `voxel_size=0.005` roughly doubles map
+    detail over the 10 mm default.
+
+    Two limits worth knowing before picking a voxel size. The sensor samples about
+    36 mm between adjacent rays at 2 m, so below ~5 mm the extra detail comes only
+    from multi-view fusion (dense back-and-forth sweeping), never from a single
+    view. And blocks scale as 1/voxel_size^2, so halving the voxel needs roughly 4x
+    the `block_count`. Give it real headroom: a scan that ran at ~97% of its
+    capacity stalled and lost tracking (BUG-035), so check the returned
+    `map.saturated`. Past ~6 GiB of grid, pass `device="CPU:0"`, where system RAM
+    rather than VRAM is the limit.
+
+    Runs `roomscan-slam` as a subprocess (this is a long batch job -- many minutes on
+    a full-length capture, and it must not block the server's event loop or pull CUDA
+    into this process). Bound it with `max_frames` for a quick check. Zero/empty
+    arguments mean "use the [slam] config default".
+    """
+    import json
+    import tempfile
+
+    cap = Path(capture)
+    if not cap.is_absolute():
+        for base in (REPO, CAPTURES, RECORDINGS):
+            if (base / capture).exists():
+                cap = base / capture
+                break
+    if not cap.exists():
+        return {"ok": False, "error": f"capture not found: {capture}"}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        report_path = Path(tmp) / "slam.json"
+        cmd = [str(VENV_PY), "-m", "roomscan.slam.cli", str(cap), "--json", str(report_path)]
+        for flag, value in (("--voxel-size", voxel_size), ("--block-count", block_count),
+                            ("--device", device), ("--max-frames", max_frames),
+                            ("--icp-mode", icp_mode), ("--out-mesh", out_mesh),
+                            ("--out-traj", out_traj)):
+            if value:
+                cmd += [flag, str(value)]
+        try:
+            p = subprocess.run(cmd, cwd=str(REPO), timeout=timeout_s,
+                               capture_output=True, text=True)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "cmd": " ".join(cmd),
+                    "error": f"timed out after {timeout_s}s -- raise timeout_s, bound the run "
+                             "with max_frames, or use a coarser voxel_size"}
+        if p.returncode != 0 or not report_path.exists():
+            return {"ok": False, "cmd": " ".join(cmd), "returncode": p.returncode,
+                    "stdout": p.stdout[-2000:], "stderr": p.stderr[-2000:]}
+        report = json.loads(report_path.read_text())
+
+    # Surface saturation at the top level: it is the difference between "this map is
+    # finished" and "this map stopped partway and the trajectory after that is junk".
+    result = {"ok": True, "cmd": " ".join(cmd), **report}
+    chosen = report["modes"][report["chosen_mode"]]
+    if chosen["map"]["saturated"]:
+        result["warning"] = (
+            f"grid filled at {chosen['map']['blocks']}/{chosen['map']['capacity']} blocks: the map "
+            "stopped accepting geometry partway through and tracking will have collapsed after "
+            "that point. Re-run with a larger block_count (BUG-035).")
+    return result

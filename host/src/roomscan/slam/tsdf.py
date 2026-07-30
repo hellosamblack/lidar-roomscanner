@@ -79,17 +79,31 @@ def _is_cuda(device: o3d.core.Device) -> bool:
     return "CUDA" in str(device).upper()
 
 
-# BUG-035. The VoxelBlockGrid pre-allocates `block_count` blocks and does NOT
-# grow: once the hashmap is full, integrate() silently drops new geometry, and
-# because SLAM is frame-to-model, ICP then has nothing fresh to register
-# against and tracking collapses within ~30 frames.
+# BUG-035. Running a scan near its configured `block_count` stalls map growth
+# and collapses frame-to-model tracking. The EFFECT is solid and reproducible;
+# the mechanism is not fully pinned down -- see below, and do not repeat the
+# wrong explanation.
 #
 # Measured on the owner's full room sweep (captures/roomSweepFull20260730.bin,
-# 3525 depth frames, 1 cm voxels): the scan genuinely needs 42,917 blocks --
-# just 7% over the old 40,000 default. At 40,000 it saturated at 38,937 (97.3%)
-# on frame 2879 and lost 560 of the remaining 646 frames (median ICP fitness
-# 0.887 -> 0.127, plus `stdgpu::vector::size ... Clamping to 0` from Open3D).
-# At 120,000 the same capture lost 11 frames total and ended at fitness 1.00.
+# 3525 depth frames, 1 cm voxels): the scan needs 42,917 blocks -- just 7% over
+# the old 40,000 default. At 40,000 the block count froze at 38,937 (97.3%) on
+# frame 2879 and never moved again; tracking-lost began 30 frames later and took
+# 560 of the remaining 646 frames (median ICP fitness 0.887 -> 0.127, plus
+# `stdgpu::vector::size: Size out of bounds: -2 ... Clamping to 0` from Open3D).
+# At 120,000 and at 160,000 the same capture peaked at 42,917 and lost 11.
+#
+# What is NOT the mechanism: "the grid cannot grow". It can, and does -- driving
+# a CUDA grid across the boundary shows a clean rehash 40,000 -> 80,000 at 99.2%
+# load, continuing to 52,027 blocks with no errors. An earlier version of this
+# comment (and of BUGS.md) asserted the opposite; it was wrong.
+#
+# Best current hypothesis, UNPROVEN: insertion failures in the ~97-99% load band
+# below the rehash trigger, which the stdgpu underflow message is consistent
+# with. The alternative -- that tracking degraded first and the frozen block
+# count is a symptom rather than a cause -- is not excluded by the frame
+# ordering alone, though it does not explain why 3x the capacity fixes it.
+# Either way the mitigation is the same and is validated: give the scan enough
+# initial capacity that it never runs near the limit.
 #
 # 160,000 is ~3.7x that scan, costing ~2.3 GiB of pre-allocated device memory
 # (measured 1707 MiB at 120,000, i.e. ~14.2 KiB/block). That fits alongside the
@@ -180,30 +194,41 @@ class TsdfMap:
         self._check_saturation()
 
     def block_usage(self) -> tuple[int, int]:
-        """(active blocks, capacity). Cheap -- a hashmap size read."""
-        return int(self._vbg.hashmap().size()), self.block_count
+        """(active blocks, LIVE hashmap capacity). Two cheap hashmap reads.
+
+        Reports the hashmap's *current* capacity rather than the `block_count`
+        it was constructed with: Open3D does rehash (measured, on CUDA:
+        40,000 -> 80,000 at 99.2% load), so the constructed value goes stale and
+        would misreport headroom as soon as that happens."""
+        hm = self._vbg.hashmap()
+        return int(hm.size()), int(hm.capacity())
 
     def _check_saturation(self) -> None:
-        """Warn (once) as the block hashmap approaches capacity -- see BUG-035.
+        """Warn (once) when the map outgrows its CONFIGURED capacity -- BUG-035.
 
-        The VBG does not grow, so crossing capacity is not a slowdown, it is a
-        silent stop: new geometry is dropped and frame-to-model tracking dies
-        shortly after. Warning at `_SATURATION_WARN_FRAC` turns that into
-        something a live scan can react to."""
+        Deliberately measured against the constructed `block_count`, not the
+        live capacity. The grid grows, so a live-capacity test would fire on
+        every scan and reset itself after each rehash -- noise. What is
+        actionable is "this scan needed more than you configured for it",
+        because the run that failed was the one sitting at 97% of its initial
+        capacity, while every run given headroom it never had to grow into
+        completed cleanly."""
         # Early-out first: this runs on every integrate, and after the warning
         # has fired there is nothing left to do, so don't pay for the hashmap
         # size read (a device sync on CUDA) for the rest of the scan.
         if self._saturation_warned or self.block_count <= 0:
             return
-        used, cap = self.block_usage()
+        used = int(self._vbg.hashmap().size())
+        cap = self.block_count
         if used >= _SATURATION_WARN_FRAC * cap:
             self._saturation_warned = True
             logging.getLogger(__name__).warning(
-                "[slam] TSDF map at %d/%d blocks (%.0f%% of capacity) -- the "
-                "VoxelBlockGrid does not grow, and new geometry is dropped once "
-                "it is full, which collapses frame-to-model tracking. Raise "
+                "[slam] TSDF map at %d blocks, %.0f%% of the configured "
+                "block_count (%d). Open3D will rehash to grow, but a scan that "
+                "ran near its initial capacity is exactly where map growth "
+                "stalled and frame-to-model tracking collapsed (BUG-035). Raise "
                 "[slam] block_count (or coarsen [slam] voxel_size) for a scan "
-                "this large.", used, cap, 100.0 * used / cap)
+                "this large.", used, 100.0 * used / cap, cap)
 
     def frustum_block_coords(self, depth_mm: np.ndarray, intrinsic: o3d.core.Tensor,
                               extrinsic: np.ndarray) -> o3d.core.Tensor:

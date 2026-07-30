@@ -274,10 +274,11 @@ def test_mesh_and_point_cloud_each_count_as_one_extraction():
 
 
 # ------------------------------------------------------------------- BUG-035
-# The VoxelBlockGrid pre-allocates block_count blocks and does NOT grow. Once
-# full it silently drops geometry and frame-to-model tracking collapses -- on
-# the owner's room sweep, 560 of the last 646 frames were lost. These cover the
-# capacity knob and the saturation warning that makes it visible.
+# Running a scan near its configured block_count stalls map growth and collapses
+# frame-to-model tracking -- on the owner's room sweep, 560 of the last 646
+# frames were lost at 40,000 vs 11 at 120,000. NOTE the grid *does* rehash to
+# grow (test below pins that), so the warning is deliberately measured against
+# the CONFIGURED capacity, not the live one.
 
 
 def test_default_block_count_covers_a_full_room_sweep():
@@ -289,13 +290,30 @@ def test_default_block_count_covers_a_full_room_sweep():
     assert TsdfMap(voxel_size=0.02, block_count=1234).block_count == 1234
 
 
-def test_block_usage_reports_active_blocks_and_capacity():
+def test_block_usage_reports_active_blocks_and_LIVE_capacity():
     m = TsdfMap(voxel_size=0.02, depth_max=5.0, block_count=5000)
     used, cap = m.block_usage()
     assert (used, cap) == (0, 5000)
     m.integrate(_wall_depth(1.0), pinhole(W, H), np.eye(4))
     used, cap = m.block_usage()
-    assert used > 0 and cap == 5000
+    assert used > 0 and cap >= 5000
+
+
+def test_the_grid_rehashes_to_grow_past_its_initial_block_count():
+    """Pins the correction to BUG-035's original (wrong) explanation: the grid is
+    NOT a hard cap. Measured on CUDA it rehashes 40,000 -> 80,000 at 99.2% load;
+    this is the same behaviour at a size a CPU test can reach quickly. If this
+    ever fails, the 'does not grow' story becomes true and the warning text in
+    _check_saturation needs revisiting."""
+    m = TsdfMap(voxel_size=0.02, depth_max=5.0, block_count=64)
+    K = pinhole(W, H)
+    for i in range(40):
+        T = np.eye(4)
+        T[0, 3] = 0.25 * i          # slide along the wall: new blocks every frame
+        m.integrate(_wall_depth(1.5), K, np.linalg.inv(T))
+    used, live_cap = m.block_usage()
+    assert used > 64, "expected the map to grow past its initial block_count"
+    assert live_cap > 64, f"hashmap should have rehashed; capacity still {live_cap}"
 
 
 def test_saturation_warns_once_when_the_map_nears_capacity(caplog):
@@ -307,13 +325,15 @@ def test_saturation_warns_once_when_the_map_nears_capacity(caplog):
     hits = [r for r in caplog.records if "block" in r.getMessage()]
     assert len(hits) == 1, "must warn exactly once, not once per frame"
     assert "block_count" in hits[0].getMessage()
+    # The message must not resurrect the disproven "cannot grow" claim.
+    assert "does not grow" not in hits[0].getMessage()
 
 
 def test_no_saturation_warning_with_headroom(caplog):
     m = TsdfMap(voxel_size=0.02, depth_max=5.0, block_count=40000)
     with caplog.at_level("WARNING"):
         m.integrate(_wall_depth(1.0), pinhole(W, H), np.eye(4))
-    assert not [r for r in caplog.records if "capacity" in r.getMessage()]
+    assert not [r for r in caplog.records if "block_count" in r.getMessage()]
 
 
 def test_empty_map_extraction_does_not_count_as_an_extraction():

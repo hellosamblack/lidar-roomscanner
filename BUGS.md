@@ -46,7 +46,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-032 | fixed   | host/slam     | GPU SLAM OOMs on a long scan — Open3D's CUDA cache grows ~5.1 MiB/frame from the throttled mesh extraction (NOT the per-frame path, which is byte-flat) |
 | BUG-033 | fixed   | host/web      | Sensors card outgrew the dock band (~1600 px of flat, half-duplicated rows) — jitter table unreachable, whole card auto-collapsed on a narrow window |
 | BUG-034 | by-design | environment   | The tripod adds 15–27 µT of magnetic field — heading is unreliable while the device is mounted on it, regardless of calibration |
-| BUG-035 | fixed   | host/slam     | TSDF block capacity (40k) was *below* a real room sweep's demand (42.9k) — the grid does not grow, so it silently dropped geometry and collapsed tracking for the last 18% of the scan |
+| BUG-035 | fixed   | host/slam     | TSDF block capacity (40k) was *below* a real room sweep's demand (42.9k); running at ~97% of it stalled map growth and collapsed tracking for the last 18% of the scan (mechanism unproven — the grid *does* rehash) |
 
 ---
 
@@ -1269,9 +1269,9 @@ geometry is in the wrong place" from "the geometry is fine and something refused
 - **Found by:** replaying the owner's first full room sweep
   (`captures/roomSweepFull20260730.bin`) through the sub-phase 6.G memory rig.
 
-Open3D's `VoxelBlockGrid` pre-allocates `block_count` blocks and **does not grow**. `TsdfMap` hard-coded
-40,000 and plumbed it nowhere — no `Mapper` kwarg, no `[slam]` key — so it could not be raised without
-editing source. That 40,000 turned out to sit *below* what one real room scan needs.
+`TsdfMap` hard-coded a `block_count` of 40,000 and plumbed it nowhere — no `Mapper` kwarg, no `[slam]`
+key — so it could not be raised without editing source. That 40,000 turned out to sit *below* what one
+real room scan needs, and running right at it broke the scan.
 
 **Measured on the owner's sweep** (3525 depth frames, 1 cm voxels, CUDA:0):
 
@@ -1283,9 +1283,9 @@ editing source. That 40,000 turned out to sit *below* what one real room scan ne
 The scan needs 42,917 blocks — **7% more than the old default**. It overshot by a hair, and the failure
 was not graceful:
 
-- blocks stop growing at frame **2879** and never move again;
+- blocks stop growing at frame **2879** (38,937, i.e. 97.3% of capacity) and never move again;
 - tracking-lost begins at frame **2909** — **30 frames later**. Because SLAM is frame-to-model, once
-  `integrate()` stops adding geometry, ICP has nothing fresh to register the next frame against;
+  the map stops gaining geometry, ICP has nothing fresh to register the next frame against;
 - median ICP fitness **0.887 → 0.127**; **0** lost frames before saturation, **560** after;
 - **646 frames — 18% of the scan** — produce a ruined trajectory and no new map;
 - Open3D also emits `stdgpu::vector::size : Size out of bounds: -2 not in [0, 18275]. Clamping to 0`,
@@ -1293,6 +1293,19 @@ was not graceful:
 
 Nothing logged. The scan simply stopped mapping, and it was only visible here because the 6.G rig
 records the active block count next to the memory every frame.
+
+**⚠ The mechanism is NOT "the grid cannot grow" — that was wrong and is corrected here.** An earlier
+version of this entry said the `VoxelBlockGrid` pre-allocates and never grows. It does grow: driving a
+CUDA grid across the boundary shows a clean rehash **40,000 → 80,000 at 99.2% load**, continuing to
+52,027 blocks with no errors, identically on CPU and CUDA. The real 40,000 run froze at **97.3%** —
+just *below* that rehash trigger.
+
+Best current hypothesis, **unproven**: insertion failures in the ~97–99% load band beneath the rehash
+threshold, which the `stdgpu` underflow message is consistent with. The competing explanation — that
+ICP degraded first and the frozen block count is a symptom rather than a cause — is not excluded by
+frame ordering alone, though it does not explain why 3× the capacity fixes it. What *is* established
+is the effect and the mitigation: 560 lost frames at 40,000 vs 11 at both 120,000 and 160,000, on the
+same capture, measured twice.
 
 **Fix:** `DEFAULT_BLOCK_COUNT = 160000` (~3.7× this scan, ~2.3 GiB of pre-allocated device memory at a
 measured ~14.2 KiB/block — 1707 MiB at 120,000), plumbed through `Mapper(block_count=…)`,

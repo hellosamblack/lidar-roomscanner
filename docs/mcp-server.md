@@ -76,7 +76,24 @@ function*, not a state object -- read what it logged via `ui_screenshot`'s tail.
 
 **data** — `capture_list()` (includes `has_stream_9`, which SLAM and orientation work
 ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, compare?)`,
+`slam_rerender(capture, voxel_size?, block_count?, device?, max_frames?)`,
 `doctor()`, `orientation_probe(mode)`.
+
+`slam_rerender` is the offline high-detail pass. A capture stores raw ToF frames, not a
+map, so the live scan is only a preview and the pipeline can be re-run at any resolution
+afterwards — `voxel_size=0.005` roughly doubles detail over the 10 mm default. Two limits
+worth knowing: the sensor samples ~36 mm between rays at 2 m, so below ~5 mm the extra
+detail comes only from multi-view fusion (dense back-and-forth sweeping), never from one
+view; and blocks scale as 1/voxel², so halving the voxel wants ~4× the `block_count`.
+**Always read `map.saturated`** — a scan that ran near its configured capacity is exactly
+where map growth stalled and tracking collapsed (BUG-035). Past ~6 GiB of grid use
+`device="CPU:0"`, where system RAM rather than VRAM is the limit.
+
+Unlike its neighbours this one shells out to the `roomscan-slam` console script rather than
+calling in-process: the job runs for many minutes and would otherwise block the event loop
+and pull CUDA into the server. It reads that run's `--json` report instead of scraping
+stdout, so prose and structured output stay one implementation with two front ends. Bound
+exploratory runs with `max_frames`; the default `timeout_s` is 1800.
 
 `capture_magcheck` scores a magnetometer calibration against a capture it never saw — the
 BUG-030 closing test. Read `verdict`, which is the worse of two deliberately different

@@ -60,12 +60,12 @@ EXCLUDED: dict[str, str] = {
     "measure_scene.py": "one-shot: physical deprojection validation",
 }
 
-CONSOLE_EXPOSED = {"roomscan-web": ("rig_up",), "roomscan-ctl": ("rig_command",)}
+CONSOLE_EXPOSED = {"roomscan-web": ("rig_up",), "roomscan-ctl": ("rig_command",),
+                   "roomscan-slam": ("slam_rerender",)}
 CONSOLE_EXCLUDED = {
     "roomscan-mcp": "this server itself; it cannot be one of its own tools",
     "roomscan-view": "desktop Open3D viewer; needs a display",
     "roomscan-panel": "deprecated (Web Phase 5)",
-    "roomscan-slam": "offline batch job; the interactive path is rig_set(mode='slam')",
 }
 
 

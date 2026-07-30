@@ -75,9 +75,10 @@ class SlamConfig:
     # same p50/p90/p99 step latency as off); 0 disables. No-op on a CPU device.
     # Measured with host/tools/slam_gpu_memory.py; see slam/tsdf.py.
     release_cache_every: int = 1
-    # BUG-035: VoxelBlockGrid capacity. It pre-allocates and does NOT grow --
-    # once full, new geometry is silently dropped and frame-to-model tracking
-    # collapses. The owner's full room sweep needs 42,917 blocks at 1 cm
+    # BUG-035: VoxelBlockGrid initial capacity. Running a scan NEAR this value
+    # stalls map growth and collapses frame-to-model tracking (the grid does
+    # rehash to grow -- that is not the problem; running at ~97% of it is).
+    # The owner's full room sweep needs 42,917 blocks at 1 cm
     # voxels; the default is ~3.7x that, at ~14.2 KiB/block of device memory.
     # Raise for larger rooms or finer voxels. A CPU grid ([slam] device =
     # "CPU:0") can go far higher -- system RAM, not VRAM, is the limit there

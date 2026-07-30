@@ -1147,11 +1147,14 @@ Step latency on real data stayed healthy: p50 8.7 ms, p90 11.6, p99 14.8 (and 7.
 final shipped-defaults run — see BUG-035; a bigger hashmap is slightly *faster*, not slower).
 
 **…and removing the memory ceiling exposed the next wall — BUG-035.** With the leak fixed, the same scan
-ran far enough to exhaust the `VoxelBlockGrid`'s fixed capacity: blocks saturated at 38,937 of 40,000 on
+ran far enough to run up against its `VoxelBlockGrid` capacity: blocks froze at 38,937 of 40,000 (97.3%) on
 frame 2879, and tracking collapsed 30 frames later (0 lost before, **560 after**; median ICP fitness
 0.887 → 0.127; 18% of the scan ruined), with no log line anywhere. The sweep genuinely needs **42,917**
 blocks — 7% over the old default. Fixed by raising `DEFAULT_BLOCK_COUNT` to 160,000, plumbing
-`block_count` through `Mapper`/`[slam]`/CLI/`SlamRunner`/the rig, and warning once at 90% of capacity.
+`block_count` through `Mapper`/`[slam]`/CLI/`SlamRunner`/the rig, and warning once at 90% of the
+*configured* capacity. **Mechanism correction:** the grid is not incapable of growing — a CUDA grid
+rehashes cleanly 40,000 → 80,000 at 99.2% load. The failing run froze just *below* that trigger, at
+97.3%; the precise cause is unproven (see BUGS.md), but the effect and the mitigation are measured.
 Re-run on the shipped defaults: **11 lost frames of 3525**, fitness 1.00 at the end, 42,917/160,000
 blocks (27% of capacity), memory flat at 0.013 MiB/frame, and step latency p50 **7.9** ms / p90 9.8 /
 p99 11.9 — *better* than the 40,000 run, so the larger pre-allocation costs nothing per frame. (The
