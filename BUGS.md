@@ -49,6 +49,8 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-035 | fixed   | host/slam     | TSDF block capacity (40k) was *below* a real room sweep's demand (42.9k); running at ~97% of it stalled map growth and collapsed tracking for the last 18% of the scan (mechanism unproven — the grid *does* rehash) |
 | BUG-036 | fixed   | host/slam     | A single fixed ICP correspondence radius (0.05) made one bad frame terminal — 423 frames (22% of a room circuit) silently dead-reckoned; fixed by retrying only on failure at 0.10 |
 | BUG-037 | fixed   | host/slam     | `baro_weight = 0.05` fed the barometer's ~267 mm RMS of per-frame white noise straight into the pose — ~35% of reported path was invented vertical motion (flattering every %-of-path drift figure) and a drifting baro owned the height outright; replaced by a low-passed, bounded-authority complementary correction |
+| BUG-038 | fixed   | host/web      | The live point cloud is frustum-culled against a stale, zero-radius `boundingSphere` — latent in World view, fatal in FPV (filed as a duplicate "BUG-033"; renumbered 2026-07-30) |
+| BUG-039 | open    | host/sensors  | `imufusion._correct_yaw` measures heading error about **body Z** on a body frame whose X is Up — 3.76° from gimbal lock, giving 1.69° mean heading error that loop gain cannot fix |
 
 ---
 
@@ -1125,7 +1127,25 @@ predicted "tens of µs". Note the measurement itself has a ~600 µs floor (it co
 *last* IMU sample of each batch, whose phase varies by up to one 2.083 ms sample period), implying
 ~890 µs of genuine residual.
 
-**Remaining root cause (hypothesis, not yet fixed):** the IMU FIFO is drained *later* in the loop
+**Costed 2026-07-30 → recommendation: keep SFLP, do not take ODR-triggered mode.** Full note:
+`docs/odr-triggered-sync-costing-2026-07-30.md`. (a) The gating precondition is untested — the
+host-side alternative has a broken heading loop (**BUG-039**). (b) INT2 *is* routed and free
+(CN9.5 → PE14 = TIM1_CH4), so availability does not settle it — but AN5763 Table 15's **40 ms
+minimum T_ref** vs our very stable **33.00 ms** frame period forbids 1:1, and **480 Hz is absent
+from the ODR-triggered ODRsel set**. (c) Losing SFLP also removes gravity *and* gbias from stream 11:
+raw accel exits the 5% gate **23.1%** of room-sweep frames (SFLP gravity: 0/3000), and gbias is
+0.18–0.20 °/s with no host replacement (`KI_BIAS_HZ = 0.0`). (d) Stream 13 `IMU_SYNC` (below) makes
+the skew a *measured* hardware quantity with SFLP left on, which removes the last thing
+ODR-triggered mode was going to buy.
+
+⚠ **One premise of that costing note is now known wrong.** Its §2.3 assumed the frame-ready stamp sits
+at the FIFO batch *end*, and concluded the quaternion was ~15.4 ms **stale**. Stream 13 measured the
+actual geometry: the drain sits **+24.3 ms past** the edge, so the quat batch midpoint is **+7.76 ms
+AFTER** it — the orientation **leads** the depth frame by ~0.30° at 38.5 °/s. Correcting it in the
+"stale" direction would roughly *double* the error. The note's structural conclusions (a)–(c) are
+unaffected; its sign is not.
+
+**Remaining root cause (hypothesis, since confirmed and fixed):** the IMU FIFO is drained *later* in the loop
 than the ToF frame-ready stamp, so the offset between them still breathes with processing load. The
 principled fix is to capture the LSM timestamp **at the frame-ready moment** rather than inferring it
 from whichever FIFO words happen to be present at drain time. Verification requires **real motion** —
@@ -1361,7 +1381,11 @@ than by raw |B| spread, and expect `YawFusion.anomaly_frac` (0.3) to be doing re
 
 ---
 
-## BUG-033 — The live point cloud is frustum-culled against a stale, zero-radius bounding sphere
+## BUG-038 — The live point cloud is frustum-culled against a stale, zero-radius bounding sphere
+
+*(Filed 2026-07-30 as a second "BUG-033" — an ID collision with the sensors-card entry above.
+Renumbered to BUG-038 on 2026-07-30 per this tracker's "IDs are never reused" convention. Commits
+and docs written before the renumber may still refer to this as BUG-033.)*
 
 - **Status:** **fixed** 2026-07-30 · **Reported:** 2026-07-30 (surfaced by the FPV view mode) ·
   **Area:** host/web frontend
@@ -1704,3 +1728,32 @@ resting on. `ROADMAP.md` and `CLAUDE.md` are corrected.
 software defect); the LPS22DF averaging configuration in `rs_lsm.c`, which is the only lever that
 would make the constraint useful — deliberately *not* touched here, the rig was live and streaming;
 and ICP's own vertical jitter, which is what the remaining ~19 m of vertical path on the sweep is.
+
+---
+
+## BUG-039 — Host IMU fusion measures heading error about the wrong axis (near gimbal lock)
+
+- **Status:** **open** · **Reported:** 2026-07-30 (found while costing ODR-triggered sync, BUG-031) ·
+  **Area:** host/sensors
+- **Where:** `roomscan.imufusion` (`_correct_yaw`), which is currently **gated off**
+- **Found by:** `docs/odr-triggered-sync-costing-2026-07-30.md` §1
+
+`_correct_yaw` measures its heading error with `quat_yaw_deg` — ZYX yaw, i.e. rotation about **body
+Z** — but this device's SFLP body frame has **X = Up**. On the stationary capture the ZYX pitch is
+86.2°, which is **3.76° from gimbal lock**, so the quantity the loop is nulling is not heading.
+
+Measured heading error vs SFLP: **1.689° mean / 2.217° p95**. Shortening `tau_yaw` to 0.3 s barely
+moves it (1.703°) — the signature of a *wrong measurement*, not a mistuned gain. Substituting a
+world-Z heading error term gives **0.017° / 0.053°**, a ~100× improvement.
+
+**Why it matters beyond the filter itself.** `imufusion` beating SFLP is the stated precondition for
+trading SFLP away for hardware ODR-triggered sync (BUG-031). While this defect stands, that
+precondition is untested, not merely unmet — the comparison that would decide it is measuring the
+wrong thing.
+
+⚠ **Do not treat "fixed this ⇒ imufusion beats SFLP" as established.** The only shipped evidence for
+the filter is synthetic (`test_imu_fusion.py` is all-synthetic by its own docstring), the within-capture
+win is measured at **one attitude, stationary**, and under motion the accel-referenced metric
+**saturates** (SFLP 0.879°, imufusion 0.864°, SFLP-gravity 0.868° — all within 2%). **No capture in
+the repo can adjudicate the two under motion**, and there is no orientation ground truth anywhere in
+the repo. Fixing the axis makes the comparison *meaningful*; it does not make it *decided*.
