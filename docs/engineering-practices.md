@@ -126,6 +126,15 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
   `go_live` that no-ops on a `--replay` server, and a record that silently refuses in replay. Each
   returned success. If a tool sends a request, check the resulting state actually changed.
 
+- **Do not write down a mechanism you have not tested.** BUG-035 shipped with the explanation "the
+  VoxelBlockGrid pre-allocates and does not grow", which was never checked and is false — a CUDA grid
+  rehashes 40,000 → 80,000 at 99.2% load. The *effect* (560 lost frames at 40k vs 11 at 120k) and the
+  *mitigation* were solidly measured; only the story about why was invented, and it reached BUGS.md,
+  ROADMAP.md, CLAUDE.md, a warning string and a test before a stray "4896 blocks / capacity 2000"
+  caught it. A measured effect plus an honest "mechanism unproven, best hypothesis is X" is worth more
+  than a tidy causal story, because the tidy story is what the next session builds on. When the fix
+  works regardless, say so — that is what licenses shipping without the full explanation.
+
 ### Verifying a rotation (or any sign)
 
 A rotation that is correct in magnitude but inverted in direction passes most tests you would think to
