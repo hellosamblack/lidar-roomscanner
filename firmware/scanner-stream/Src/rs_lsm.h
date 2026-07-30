@@ -16,6 +16,16 @@ typedef struct {
     float temp_c;        /* STTS22H, °C */
     uint8_t have_quat;   /* 1 if quat was updated this call */
     uint8_t have_env;    /* 1 if env fields were updated this call */
+    /* WHEN `quat` is, on the LSM's own clock. `quat` is the MEAN of `quat_n` SFLP samples
+     * spread across this drain (RS_LSM_SFLP_AVERAGE, shipped for BUG-027's 2.8x noise cut),
+     * so the orientation it carries is the batch's MIDPOINT -- not the ToF frame's t_us, and
+     * not the drain. Measured on this rig 2026-07-30: the midpoint leads the frame-ready edge
+     * by +7.8 ms (the drain is +24.3 ms past it), i.e. ~0.3 deg at 38.5 deg/s -- an order of
+     * magnitude above BUG-031's residual, and in the opposite direction to "stale". Shipped on
+     * stream 13 so a host can propagate the average to the frame instant instead of guessing
+     * (and so nobody has to re-derive the sign from a capture). */
+    uint32_t quat_mid_ticks;  /* midpoint of this drain's TIMESTAMP span; 0 if none seen */
+    uint16_t quat_n;          /* SFLP samples averaged into `quat` */
 } rs_lsm_sample_t;
 
 /* One verbatim LSM6DSV16X FIFO word, laid out exactly as stream 11 (RS_STREAM_IMU_RAW)
@@ -51,6 +61,13 @@ int rs_lsm_read_latest(rs_lsm_sample_t *out);
  * FIFO is still fully drained. Returns 0 if any quat/env/raw data was obtained. */
 int rs_lsm_read_latest_raw(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_t raw_max,
                            uint16_t *raw_count);
+
+/* Read the LSM timestamp counter (TIMESTAMP0..3) into *ticks. Returns 0 on success, <0 on a
+ * bus/read failure. One 4-byte register read — cheap enough to issue at the ToF's FRAME_READY
+ * edge, which is the point: it puts that edge on the LSM's clock directly instead of inferring
+ * it from whichever FIFO words a later drain happens to hold (BUG-031). Ticks are in the same
+ * units as stream 11's TIMESTAMP words, i.e. scaled by stream 12's INTERNAL_FREQ_FINE. */
+int rs_lsm_read_timestamp(uint32_t *ticks);
 
 /* INTERNAL_FREQ_FINE (register 0x4F), latched once by rs_lsm_init(). Factory trim of the
  * internal oscillator that clocks the ODRs and the FIFO timestamp counter; the true tick

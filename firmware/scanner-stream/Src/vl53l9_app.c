@@ -379,6 +379,46 @@ static uint64_t rs_stamp_us(void) {
     return g_frame_stamp_us ? g_frame_stamp_us : rs_time_us();
 }
 
+/* ---- CDC host attach (DTR rising) -------------------------------------------------------
+ *
+ * BUG-005: a host that opens the CDC port lands wherever the device happens to be in a frame,
+ * so its first bytes are the middle of a frame it never saw the header of -- one CRC failure
+ * and one resync -- and it then waits up to 63 frames for the periodic CALIB it needs before
+ * it can transform anything.
+ *
+ * The synchronisation this needs is smaller than it looks, and the reason is worth writing
+ * down because it is the whole objection that deferred this fix. TinyUSB's class callbacks do
+ * NOT run in interrupt context here: `USB_DRD_FS_IRQHandler` calls `tud_int_handler`, which
+ * only enqueues a `dcd_event_t` (vendor/tinyusb/src/device/usbd.c: `osal_queue_send`), and
+ * `tud_task()` dequeues and dispatches. So `tud_cdc_line_state_cb` runs on the acquisition
+ * loop's own thread -- but REENTRANTLY, because `rs_cdc_send()` below calls `tud_task()`
+ * between chunks. That makes this a reentrancy problem, not a concurrency one: a single
+ * volatile flag, set in the callback and consumed at the loop's per-frame safe point, is
+ * sufficient, and no state the loop owns (raw_mem_index, the CALIB countdown, the in-flight
+ * byte cursor) is ever touched from the callback.
+ *
+ * ETHERNET IS UNAFFECTED BY CONSTRUCTION. This callback only ever fires for a USB host, and
+ * the abort below only shortens the CDC copy of a frame -- `rs_send_generic_cdc` hands the
+ * whole frame to `ETH_SendFrame_Gather` before the CDC loop starts, so an Ethernet host cannot
+ * see a truncated frame no matter what a USB host does. */
+static volatile uint8_t g_cdc_connect_evt = 0;  /* set on DTR rise, consumed at the safe point */
+static uint8_t g_cdc_dtr = 0;                   /* previous DTR, to see the EDGE not the level */
+static uint32_t rs_calib_countdown = 0;         /* frames until the next periodic CALIB */
+
+void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts) {
+    (void)itf;
+    (void)rts;
+    uint8_t now = dtr ? 1u : 0u;
+    if (now && !g_cdc_dtr) {
+        /* Drop whatever is still queued for the host that just went away. Safe from here:
+         * see the context note above -- this is the main loop's thread, so the FIFO is not
+         * being mutated underneath us by an ISR. */
+        tud_cdc_write_clear();
+        g_cdc_connect_evt = 1u;
+    }
+    g_cdc_dtr = now;
+}
+
 /* Pump the CDC FIFO out. Returns false if the host stalled >100 ms (frame aborted:
  * the host decoder counts one CRC failure/resync and we set DROPPED on the next frame). */
 static bool rs_cdc_send(const uint8_t *p, uint32_t n) {
@@ -392,6 +432,13 @@ static bool rs_cdc_send(const uint8_t *p, uint32_t n) {
             n -= k;
         }
         tud_task(); ETH_Process();
+        if (g_cdc_connect_evt) {
+            /* A host attached partway through this frame (tud_task above can dispatch the
+             * line-state callback). It can only ever see this frame's tail, so stop feeding
+             * it: abandoning here costs the same single resync as sending the rest would,
+             * minus the wasted bytes, and the DROPPED flag on the next frame says so. */
+            return false;
+        }
         if ((HAL_GetTick() - t0) > 100u) {
             return false;
         }
@@ -455,6 +502,31 @@ static void rs_send_frame_cdc(uint8_t stream_id, uint32_t seq, uint8_t flags, co
  * not update it because that loop never calls rs_send_event (Task 5 scope is raw-only). */
 static uint32_t g_last_seq = 0;
 static uint8_t g_lsm_ok = 0; /* 1 once rs_lsm_init() succeeds; IMU/env streams are optional */
+
+/* ---- ToF<->IMU clock correspondence, latched per frame (stream 13, BUG-031) -------------
+ *
+ * The frame's t_us has been the FRAME_READY instant on the MCU's TIM2 clock since 2026-07-28,
+ * but a host that wants to orient that frame needs the same instant on the *LSM's* clock, and
+ * the only LSM timestamps on the wire used to be stream 11's FIFO words -- samples the LSM took
+ * at some point before a drain that happens far later in this loop, after the DMA readout and
+ * the RAW send. "Far" is now measured rather than guessed, by drain_delay_us below: **24.3 ms**
+ * past the edge, std 848 us. Inferring the frame's position from those words carries all of
+ * that variable gap (host-side, 5331 static frames: 1070 us RMS against a windowed clock fit,
+ * and a frame that also sends CALIB drains 655 us later still -- Welch t = -5.8).
+ *
+ * So ask the LSM directly, at the edge: one 4-byte TIMESTAMP register read issued immediately
+ * after the FRAME_READY event, before the ToF's DMA readout is kicked (the two devices share
+ * I3C1, so this is the last moment the bus is idle for the next several ms). The read is
+ * bracketed by rs_time_us() so the wire carries both the delay from the edge and the read's
+ * own duration -- i.e. the residual uncertainty is reported, not assumed. */
+typedef struct {
+    uint32_t lsm_ticks;       /* LSM TIMESTAMP counter, latched near FRAME_READY */
+    uint32_t latch_delay_us;  /* FRAME_READY -> midpoint of that read, MCU us */
+    uint32_t drain_delay_us;  /* FRAME_READY -> the FIFO drain, MCU us (the old inference's lag) */
+    uint16_t read_us;         /* duration of the latch read: the uncertainty on lsm_ticks */
+    uint8_t  valid;           /* 0 = the read failed; no stream-13 frame is emitted */
+} rs_frame_sync_t;
+static rs_frame_sync_t g_frame_sync = { 0 };
 
 /* Calibration blob buffer, per-device (VL53L9_CALIB_DATA_SIZE bytes). File-scope rather
  * than a vl53l9_app() stack local (as it was before Task 5) so handle_error()'s bounded
@@ -2061,6 +2133,28 @@ void vl53l9_app() {
             }
             platform_acknowledge_event(PLATFORM_GPIO_IT_EVT);
 
+            /* Put frame N's FRAME_READY edge on the LSM's clock while the shared I3C bus is
+             * still idle -- see the rs_frame_sync_t comment. Costs one 4-byte register read
+             * before the DMA kick below; a failure only suppresses this frame's stream 13
+             * (absence means "unknown", exactly like stream 12), it never touches the ToF
+             * path. Deliberately NOT retried: a late latch is worse than no latch. */
+            g_frame_sync.valid = 0u;
+            if (g_lsm_ok) {
+                uint32_t lsm_ticks = 0u;
+                uint64_t t_pre = rs_time_us();
+                if (rs_lsm_read_timestamp(&lsm_ticks) == 0) {
+                    uint64_t t_post = rs_time_us();
+                    uint64_t t_mid = t_pre + ((t_post - t_pre) / 2u);
+                    g_frame_sync.lsm_ticks = lsm_ticks;
+                    g_frame_sync.latch_delay_us =
+                        (uint32_t)((t_mid > rs_ready_us) ? (t_mid - rs_ready_us) : 0u);
+                    g_frame_sync.read_us = (uint16_t)((t_post - t_pre) > 0xFFFFu
+                                                          ? 0xFFFFu : (t_post - t_pre));
+                    g_frame_sync.drain_delay_us = 0u; /* filled in at the drain, below */
+                    g_frame_sync.valid = 1u;
+                }
+            }
+
             /* kick the DMA readout of frame N into this iteration's buffer */
             ret = vl53l9_get_frame_async(p_dev, in_raw_mem[raw_mem_index].data, in_raw_mem[raw_mem_index].size);
             if (ret == VL53L9_ERROR_INVALID_STATE) {
@@ -2144,6 +2238,16 @@ void vl53l9_app() {
         rs_poll_commands(calib_data, out_width, out_height, rs_counter);
         rs_poll_eth_commands(calib_data, out_width, out_height, rs_counter); /* UDP command channel */
 
+        /* BUG-005 safe point: a CDC host attached since the last frame. Anything it saw of the
+         * frame in flight was already abandoned in rs_cdc_send(); what it needs now is to start
+         * at a frame boundary WITH calibration, so lead this frame's group with CALIB instead of
+         * making it wait out the rest of the 64-frame cadence. Consumed here, in the loop, and
+         * nowhere else -- the callback only ever sets the flag. */
+        if (g_cdc_connect_evt) {
+            g_cdc_connect_evt = 0u;
+            rs_calib_countdown = 0u;
+        }
+
         if (rs_pending.pending) {
             /* rs_apply_pending_config() triggers its own first frame under whichever
              * profile ends up active before returning -- this REPLACES the normal
@@ -2180,7 +2284,8 @@ void vl53l9_app() {
                 printf("[STREAM] Processed frame %lu (ToF only via ST-LINK)\n", (unsigned long)rs_counter);
                 last_print = now;
             }
-            static uint32_t rs_calib_countdown = 0;
+            /* rs_calib_countdown is at file scope (not a function static as it used to be)
+             * so the DTR-attach handler above the loop can zero it -- see BUG-005. */
             if (rs_calib_countdown == 0) {
                 rs_send_frame_cdc(RS_STREAM_CALIB, rs_counter, 0u, calib_data,
                                   VL53L9_CALIB_DATA_SIZE, out_width, out_height);
@@ -2214,6 +2319,14 @@ void vl53l9_app() {
              * Static, not stack: the acquisition loop's frame is already deep. */
             static rs_lsm_raw_word_t lsm_raw[RS_LSM_RAW_FIFO_MAX];
             uint16_t lsm_raw_n = 0;
+            /* How far after FRAME_READY this drain actually happens -- the gap the host used
+             * to have to guess at (BUG-031). Measured, shipped on stream 13, so the guess is
+             * both unnecessary and checkable. */
+            if (g_frame_sync.valid) {
+                uint64_t t_drain = rs_time_us();
+                g_frame_sync.drain_delay_us =
+                    (uint32_t)((t_drain > rs_ready_us) ? (t_drain - rs_ready_us) : 0u);
+            }
             if (rs_lsm_read_latest_raw(&lsm, lsm_raw, (uint16_t)RS_LSM_RAW_FIFO_MAX, &lsm_raw_n) == 0) {
                 if (lsm.have_quat) {
                     rs_send_frame_cdc(RS_STREAM_IMU_QUAT, rs_counter, 0u,
@@ -2232,6 +2345,25 @@ void vl53l9_app() {
                     rs_send_frame_cdc(RS_STREAM_IMU_RAW, rs_counter, 0u, (const uint8_t *)lsm_raw,
                                       (uint32_t)lsm_raw_n * RS_IMU_RAW_REC_SIZE, lsm_raw_n, 0u);
                 }
+            }
+            /* Stream 13: where this frame's FRAME_READY edge sits on the LSM clock. Sent last
+             * in the group because drain_delay_us is only known once the drain above has run,
+             * and still inside the armed g_frame_stamp_us window so it carries the SAME t_us
+             * as the RAW frame it describes -- the pairing is the header, not a payload field. */
+            if (g_frame_sync.valid) {
+                uint8_t sync[RS_IMU_SYNC_SIZE];
+                rs_put_u32(sync + 0, g_frame_sync.lsm_ticks);
+                rs_put_u32(sync + 4, g_frame_sync.latch_delay_us);
+                rs_put_u32(sync + 8, g_frame_sync.drain_delay_us);
+                rs_put_u32(sync + 12, lsm.quat_mid_ticks);
+                sync[16] = (uint8_t)(g_frame_sync.read_us & 0xFFu);
+                sync[17] = (uint8_t)(g_frame_sync.read_us >> 8);
+                sync[18] = (uint8_t)(lsm.quat_n & 0xFFu);
+                sync[19] = (uint8_t)(lsm.quat_n >> 8);
+                sync[20] = 1u;   /* valid */
+                sync[21] = 0u;   /* reserved */
+                rs_send_frame_cdc(RS_STREAM_IMU_SYNC, rs_counter, 0u, sync,
+                                  RS_IMU_SYNC_SIZE, 0u, 0u);
             }
         }
 

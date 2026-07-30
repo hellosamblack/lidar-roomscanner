@@ -11,6 +11,7 @@ from roomscan.protocol import (
     IMU_QUAT_SIZE,
     IMU_RAW_REC_SIZE,
     IMU_RAW_TICK_US,
+    IMU_SYNC_SIZE,
     FrameHeader,
     FrameType,
     ImuFifoTag,
@@ -20,6 +21,7 @@ from roomscan.protocol import (
     decode_imu_cal,
     decode_imu_quat,
     decode_imu_raw,
+    decode_imu_sync,
     imu_tick_us,
 )
 
@@ -28,6 +30,7 @@ def test_stream_ids():
     assert StreamId.IMU_QUAT == 9
     assert StreamId.ENV == 10
     assert StreamId.IMU_CAL == 12
+    assert StreamId.IMU_SYNC == 13
 
 
 def test_decode_imu_quat_roundtrip():
@@ -209,6 +212,53 @@ def test_golden_imu_cal_fixture_is_reproducible():
     from make_fixtures import golden_imu_cal
     golden = (Path(__file__).parent / "fixtures" / "golden_imu_cal.bin").read_bytes()
     assert golden_imu_cal() == golden
+
+
+# --- stream 13 (IMU_SYNC) ----------------------------------------------------
+
+def test_decode_imu_sync_fields():
+    payload = struct.pack("<IIIIHHBB", 3_931_420_041, 61, 24_109, 3_931_420_386, 44, 15, 1, 0)
+    assert len(payload) == IMU_SYNC_SIZE
+    s = decode_imu_sync(payload)
+    assert s.lsm_ticks == 3_931_420_041
+    assert s.latch_delay_us == 61 and s.drain_delay_us == 24_109
+    assert s.quat_mid_ticks == 3_931_420_386 and s.quat_n == 15
+    assert s.read_us == 44 and s.valid is True
+
+
+def test_imu_sync_frame_ready_ticks_backs_out_the_latch_delay():
+    """The edge is the latch minus its own delay, converted with the stream-12 tick."""
+    s = decode_imu_sync(struct.pack("<IIIIHHBB", 1000, 217, 3000, 0, 40, 0, 1, 0))
+    # 217 µs at the nominal 21.7 µs/tick is exactly 10 ticks before the latch
+    assert s.frame_ready_ticks(IMU_RAW_TICK_US) == pytest.approx(990.0)
+    # a slower part's tick makes the same delay fewer ticks
+    assert s.frame_ready_ticks(imu_tick_us(-23)) == pytest.approx(1000 - 217 / 22.3703, abs=1e-3)
+
+
+def test_decode_imu_sync_bad_length():
+    with pytest.raises(ProtocolError):
+        decode_imu_sync(b"\x00" * 12)
+
+
+def test_golden_imu_sync_fixture_matches_decoder():
+    golden = (Path(__file__).parent / "fixtures" / "golden_imu_sync.bin").read_bytes()
+    assert zlib.crc32(golden[:-4]) == int.from_bytes(golden[-4:], "little")
+    header = FrameHeader.unpack(golden[:HEADER_SIZE])
+    assert header.stream_id == StreamId.IMU_SYNC
+    assert header.width == header.height == 0
+    assert header.payload_len == IMU_SYNC_SIZE
+    s = decode_imu_sync(golden[HEADER_SIZE:HEADER_SIZE + header.payload_len])
+    assert s.lsm_ticks == 3_931_420_041 and s.valid is True
+    assert s.latch_delay_us == 61 and s.drain_delay_us == 24_109 and s.read_us == 44
+    # the averaged stream-9 quat LEADS the frame-ready edge; a negative sign here would
+    # send any correction built on it the wrong way (see BUG-031 / the ODR costing note)
+    assert s.quat_offset_us(imu_tick_us(-23)) == pytest.approx(7778.7, abs=1.0)
+
+
+def test_golden_imu_sync_fixture_is_reproducible():
+    from make_fixtures import golden_imu_sync
+    golden = (Path(__file__).parent / "fixtures" / "golden_imu_sync.bin").read_bytes()
+    assert golden_imu_sync() == golden
 
 
 def test_sensor_state_applies_imu_cal_tick_to_later_batches():

@@ -16,7 +16,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-002 | fixed   | host/viewer   | Spatial surface mode pins many CPU cores; GPU sits idle |
 | BUG-003 | fixed   | host/viewer   | View color defaulted to depth instead of reflectance |
 | BUG-004 | fixed   | host/sensors  | Yaw fusion needs on-rig mag calibration + axis-convention check |
-| BUG-005 | open    | firmware/host | Connect-time transient: one CRC failure + RAW-frame skip on DTR connect |
+| BUG-005 | fix unverified | firmware/host | Connect-time transient: one CRC failure + RAW-frame skip on DTR connect — DTR-callback fix implemented, but the CDC path cannot be exercised on this host |
 | BUG-006 | anomaly | firmware      | One 100 s post-flash boot-recovery hang (seen once, never reproduced) |
 | BUG-007 | fixed   | transform lib | ZAPC confidence plane is structurally ~1.0 everywhere |
 | BUG-008 | fixed   | host/viewer   | Minimizing the roomscanner panel triggers Filament Camera preconditions warning |
@@ -42,7 +42,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-028 | fixed   | firmware      | Ethernet hot-plug replug wedges board (LD2 freezes) — lwIP double-add assertion on `mdns_resp_add_netif` |
 | BUG-029 | fixed   | host/sources  | `UdpSource` stream recovery fails due to `255.255.255.255` fallback keepalives not routing on some Linux network configs |
 | BUG-030 | fixed   | host/sensors  | Magnetometer calibration is direction-dependent: |B| ranges 47→85 µT with tilt — root-caused to a ~59 µT wrong hard-iron offset (+ tripod, BUG-034); owner re-fit 2026-07-30, validated on an independent room sweep |
-| BUG-031 | open    | firmware      | ToF frame timestamp and IMU FIFO drain skewed ~0.9 ms (dominates handheld orientation error) |
+| BUG-031 | fixed   | firmware      | ToF frame timestamp and IMU FIFO drain skewed ~0.9 ms — the drain sits 24.3 ms past the frame-ready edge and breathes with load; fixed by latching the LSM clock AT the edge (stream 13), 1070 → 18 µs RMS |
 | BUG-032 | fixed   | host/slam     | GPU SLAM OOMs on a long scan — Open3D's CUDA cache grows ~5.1 MiB/frame from the throttled mesh extraction (NOT the per-frame path, which is byte-flat) |
 | BUG-033 | fixed   | host/web      | Sensors card outgrew the dock band (~1600 px of flat, half-duplicated rows) — jitter table unreachable, whole card auto-collapsed on a narrow window |
 | BUG-034 | by-design | environment   | The tripod adds 15–27 µT of magnetic field — heading is unreliable while the device is mounted on it, regardless of calibration |
@@ -122,15 +122,59 @@ in every configuration.
 
 ## BUG-005 — Connect-time transient: one CRC failure + RAW-frame skip on DTR connect
 
-- **Status:** open (deferred fix specced) · **Recorded:** Phase 3 · **Area:** firmware + host
-- **Where:** forensics in `docs/connect-transient-forensics.md`; deferred fix in `ROADMAP.md`
-  Phase 3 "Deferred / honestly open"
+- **Status:** **fix implemented 2026-07-30, UNVERIFIED on hardware** (see "Why unverified") ·
+  **Recorded:** Phase 3 · **Area:** firmware + host
+- **Where:** `firmware/scanner-stream/Src/vl53l9_app.c` (`tud_cdc_line_state_cb`, `rs_cdc_send`);
+  forensics in `docs/connect-transient-forensics.md`
 
 On host connect (DTR rising) the first frame boundary lands mid-stream: exactly one CRC failure
-and a stale RAW skip, then clean streaming. Root-caused to stale TX FIFO residue (not a DTR race).
-The auto-fix — abort in-flight frame + send CALIB from `tud_cdc_line_state_cb` — needs
-TinyUSB-callback ↔ main-loop synchronization and was deliberately deferred. Shipped mitigation:
-manual `SEND_CALIB` (`C` key / `roomscan-ctl calib`).
+and a stale RAW skip, then clean streaming. Shipped mitigation: manual `SEND_CALIB` (`C` key /
+`roomscan-ctl calib`).
+
+**Correction to this entry (2026-07-30):** it used to say "root-caused to stale TX FIFO residue
+(not a DTR race)". `docs/connect-transient-forensics.md`, which is the primary evidence, says the
+opposite in as many words — *"**Not** stale TX FIFO residue — the truncated bytes are a genuine
+frame-1 payload prefix"*. The forensic root cause is `rs_cdc_send()`'s own 100 ms abort firing
+once, because the host's reader has not started draining by the time the device begins frame 1;
+the bytes on the wire are the intact **front** of a real frame, cut off mid-send. The summary here
+had drifted from the document it cites.
+
+### Implemented 2026-07-30 (the deferred `tud_cdc_line_state_cb` fix)
+
+`tud_cdc_line_state_cb` now watches for the DTR **edge**; on a rise it clears the CDC TX FIFO and
+sets one volatile flag. `rs_cdc_send()` checks that flag after each `tud_task()` and abandons the
+frame in flight (the new host can only ever see its tail); the acquisition loop consumes the flag
+at its existing per-frame safe point and zeroes `rs_calib_countdown`, so the next frame group leads
+with CALIB instead of the host waiting out up to 63 frames.
+
+The synchronisation that deferred this turned out to be smaller than it looked, and the reason is
+checkable rather than assumed: TinyUSB's class callbacks **do not run in interrupt context** in
+this build. `USB_DRD_FS_IRQHandler` calls `tud_int_handler`, which only enqueues a `dcd_event_t`
+(`vendor/tinyusb/src/device/usbd.c`, `osal_queue_send`); `tud_task()` dequeues and dispatches. So
+the callback runs on the acquisition loop's own thread — but **reentrantly**, since `rs_cdc_send()`
+calls `tud_task()` between chunks. That makes it a reentrancy problem, not a concurrency one: one
+volatile flag set in the callback and consumed in the loop is sufficient, and no state the loop
+owns (`raw_mem_index`, the CALIB countdown, the in-flight byte cursor) is touched from the callback.
+
+**It cannot affect the Ethernet path, by construction.** The callback only fires for a USB host,
+and the abort only shortens the CDC copy: `rs_send_generic_cdc()` hands the whole frame to
+`ETH_SendFrame_Gather()` *before* the CDC loop starts, so an Ethernet host cannot see a truncated
+frame regardless of what a USB host does. On-rig after this change, over Ethernet: 30.3 fps,
+0 CRC failures, 0 drops, 0 gaps.
+
+### Why unverified
+
+**The native CDC device does not exist on this host.** `lsusb` sees only the ST-LINK
+(`0483:374e`) — the board's USB_USER port is powered from the battery bridge, not connected to
+this machine, so `CAFE:4001` never enumerates and there is no DTR to raise. Even if it did,
+`/dev/ttyACM*` come back `root:root` mode 0 after every replug on this box and `dialout` does not
+help (see the `firmware-build-on-linux` memory). So no claim is made that the transient is gone:
+the code path has never executed. What *is* verified is that shipping it did not disturb the
+Ethernet path, which is what the rig actually runs on.
+
+To verify, on a machine with the board's USB_USER cable attached: capture with
+`host/tools/capture.py --seconds 15`, and check `capture_analyze` reports **0** CRC failures in
+the connect region (today: exactly 1) and that the first frame after connect is CALIB.
 
 ## BUG-006 — One 100 s post-flash boot-recovery hang
 
@@ -1065,7 +1109,7 @@ silently wrong, which is what happened here.
 
 ## BUG-031 — ToF frame timestamp and IMU FIFO drain are skewed ~0.9 ms
 
-- **Status:** **open** (partially mitigated 2026-07-29) · **Reported:** 2026-07-29 (analysis) ·
+- **Status:** **fixed** 2026-07-30 (stream 13 IMU_SYNC) · **Reported:** 2026-07-29 (analysis) ·
   **Area:** firmware
 - **Where:** `firmware/scanner-stream/Src/vl53l9_app.c` (frame stamp) vs `Src/rs_lsm.c` (FIFO drain)
 
@@ -1106,6 +1150,72 @@ CTRL2 `ODR_G` 0010/1100) and is incompatible with Qvar/EIS. So it is a choice, n
 
 Worth costing before more software mitigation: option 2 removes the skew at the source but puts the
 whole orientation path on the host, so it needs `imufusion` to first prove it beats SFLP.
+
+**Costed and declined 2026-07-30** (`docs/odr-triggered-sync-costing-2026-07-30.md`): keep SFLP.
+`imufusion` does not currently beat it, AN5763 Table 15's 40 ms minimum `T_ref` does not fit a
+33 ms frame period, and 480 Hz is not in ODR-triggered mode's ODR set. The fix below removes the
+last thing it would have bought.
+
+### Fixed 2026-07-30 — measure the correspondence instead of inferring it (stream 13)
+
+**The hypothesis was tested before anything was built, and it held.** Every 64th frame also carries
+the 2332-byte CALIB blob, which is sent *before* the FIFO drain — a load experiment the firmware
+was already running for free. Over 5331 static frames those frames' pairing sat **655 µs later**
+than a plain frame's (Welch t = **−5.8**; reproduced at −688 µs / t = −6.1 and −783 µs / t = −4.9
+on two later captures). The gap between the frame stamp and the drain therefore moves with
+processing load, exactly as predicted.
+
+**The fix:** the firmware now reads the LSM's `TIMESTAMP` register (0x40–0x43) **at the FRAME_READY
+edge itself**, in the one window where the shared I3C bus is idle — immediately after the event ack,
+before the ToF's DMA readout is kicked — and ships it as **stream 13 (IMU_SYNC)** with the delay
+from the edge and the read's own duration, so the residual uncertainty is *reported* rather than
+assumed. Costs one 4-byte register read per frame (**26.4 µs, std 0.5**) and no frame rate
+(30.26 → 30.29 fps, 0 CRC failures, 0 gaps over 15692 frames).
+
+**Before / after**, same rig, same static scene, same estimator family, windowed 2 s clock fits
+(`host/tools/skew_check.py`, MCP `capture_skew`):
+
+| | RMS | p95 | max | frame-to-frame |
+|---|---|---|---|---|
+| **before** — inferred from the last FIFO word (5332 frames, 176 s) | 1069.9 µs | 1260.6 µs | 5745.9 µs | 1628.7 µs |
+| **after** — measured at the edge (3119 frames, 103 s) | **18.3 µs** | **35.8 µs** | **82.3 µs** | **11.0 µs** |
+
+58× on RMS. Two honesty notes on those numbers:
+
+- The old estimator is **unchanged** by the fix (1069.9 → 1050.1 µs on the after-capture) and always
+  will be: it measures the drain's phase and lag, which are still there — we simply stopped
+  depending on them. The two rows answer "how well can we place a ToF frame on the IMU clock",
+  which is the question, not "did one number move".
+- The 18.3 µs is **window-dependent** (18 / 38 / 150 µs at 2 / 5 / 20 s) because what survives is
+  the two oscillators drifting against each other, lag-1 autocorrelation **0.992** — not per-frame
+  skew. The window-free number is the residual's first difference: **11.0 µs**. The old estimator
+  is window-*in*dependent (1070 / 1073 / 1085 µs) because its error is white, and it can never
+  beat 601 µs anyway (one 2.083 ms sample period of FIFO phase, uniform).
+
+**What the measurement then exposed — and it is bigger than the bug it closes.** With the edge
+finally on the LSM's clock, the drain turns out to sit **+24.3 ms** past it (std 848 µs — which is
+the "breathing" the host-side residual had inferred at ~900 µs, from the other side). That kills a
+premise everyone had been reasoning from, including the ODR costing note above, which assumed the
+FRAME_READY stamp sat at the *batch end*. It is 23.1 ms from it. Consequences, measured over 3119
+frames:
+
+- Stream 9's quaternion is a **batch mean** (`RS_LSM_SFLP_AVERAGE`, shipped for BUG-027's 2.8×
+  noise cut), so it carries the batch's **midpoint** orientation. That midpoint sits **+7.76 ms
+  AFTER** the frame-ready edge (std 0.68) — the batch straddles the edge.
+- So the orientation attached to a depth frame **leads** it by ~7.8 ms (~0.30° at 38.5 °/s), ~9×
+  the skew this bug was about. It is **not** ~15 ms stale, and a correction that propagates the
+  quaternion *forward* — the natural reading of "stale" — would roughly double the error.
+- Stream 13 therefore also carries `quat_mid_ticks` + `quat_n`, and
+  `roomscan.protocol.ImuSync.quat_offset_us()` returns the signed offset, so nobody has to
+  re-derive the sign from a capture. Firmware's value agrees with an independent host-side
+  computation from stream 11's timestamps to **0.02 ms** (+7.74 vs +7.76).
+
+**Still open, and deliberately not done here:** nothing yet *applies* that correction. The host
+still pairs stream 9 with a frame by `seq` and uses it as-is, so the ~7.8 ms lead is measured,
+documented and unremoved. Correcting it means propagating the averaged quaternion backward with
+stream 11's gyro words — a change to the orientation the SLAM prior and the whole UI read, which
+wants its own before/after on a moving capture (`docs/superpowers/plans/2026-07-29-orientation-resume.md`
+§4.5). Filed as the next step rather than smuggled in behind a timing fix.
 
 ---
 

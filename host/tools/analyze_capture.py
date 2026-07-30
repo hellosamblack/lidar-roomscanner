@@ -39,7 +39,8 @@ MAX_PAYLOAD = 1 << 20  # decoder policy (docs/protocol.md)
 FRAME_TYPES = {1: "DATA", 2: "EVENT", 3: "COMMAND", 4: "ACK"}
 STREAMS = {0: "DEPTH_ZF32", 1: "DEPTH_ZAPC", 2: "AMBIENT", 3: "AMPLITUDE", 4: "CONFIDENCE",
            5: "REFLECTANCE", 6: "STATUS", 7: "RAW_3DMD", 8: "CALIB", 9: "IMU_QUAT",
-           10: "ENV", 11: "IMU_RAW", 12: "IMU_CAL"}  # keep in sync with protocol.StreamId
+           10: "ENV", 11: "IMU_RAW", 12: "IMU_CAL",
+           13: "IMU_SYNC"}  # keep in sync with protocol.StreamId
 
 
 def zero_runs(buf: bytes, min_len: int) -> list[tuple[int, int]]:

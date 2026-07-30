@@ -479,6 +479,13 @@ reflectance super-resolution / sensor-fusion-overlay work (both scoped, not yet 
 >   TinyUSB callback context and the main loop's send/trigger state — not small/safe enough to land in
 >   Phase 3. Specced as a Phase 3/4 follow-up. `SEND_CALIB` (the `C` key / `roomscan-ctl calib`) is the
 >   shipped manual mitigation for the same blind-start problem.
+>   **Implemented 2026-07-30, UNVERIFIED (BUG-005).** The synchronization turned out to be reentrancy,
+>   not concurrency: TinyUSB dispatches class callbacks from `tud_task()`, not the ISR (verified in the
+>   vendored `usbd.c`), so one volatile flag set in the callback and consumed at the loop's existing
+>   per-frame safe point is enough. Cannot be exercised on the current headless host — the board's
+>   USB_USER port is not attached to it (`lsusb` shows only the ST-LINK), so `CAFE:4001` never
+>   enumerates and there is no DTR to raise. Verified only that it leaves the Ethernet path intact
+>   (30.3 fps, 0 CRC, 0 gaps); see BUGS.md BUG-005 for the verification recipe on a USB-attached box.
 > - **`SET_FRAME_PERIOD_US` is a spec-compliant no-op** in this app's always-manual-sync design (see the
 >   fps table above) — the command does exactly what the protocol promises (apply + read back), it just
 >   doesn't control fps here; would need an autonomous-sync redesign to matter.
@@ -907,7 +914,8 @@ channel, barometer as soft 1-DoF Z constraint.
 > |---|---|---|
 > | magnetometer calibration, direction-dependent | up to **~90°** heading error | **fixed 2026-07-30** — owner re-fit, BUG-030 |
 > | LSM tick uncalibrated (2.98% scale) | ~2.7° on a 90° pan | **fixed** — stream 12 `IMU_CAL` |
-> | ToF↔IMU frame-stamp skew | 0.19° → 0.107° RMS | **partly fixed** — BUG-031 |
+> | ToF↔IMU frame-stamp skew | 0.19° → 0.107° → **0.002°** RMS | **fixed 2026-07-30** — stream 13 `IMU_SYNC`, BUG-031 |
+> | stream-9 quat is a batch MEAN, valid +7.8 ms after the frame | **~0.30°** at 38.5 °/s | **measured & on the wire, not yet corrected** — `quat_mid_ticks`, BUG-031 |
 > | fp16 SFLP quantization | 0.018–0.027°/frame | transport shipped (stream 11); fusion built, **not wired in** |
 >
 > **Shipped:** **stream 11 `RS_STREAM_IMU_RAW`** — 480 Hz verbatim FIFO pass-through (GY 0x01 / XL 0x02 /

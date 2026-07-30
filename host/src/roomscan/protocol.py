@@ -38,6 +38,7 @@ class StreamId(IntEnum):
     ENV = 10
     IMU_RAW = 11
     IMU_CAL = 12
+    IMU_SYNC = 13
 
 
 class EventCode(IntEnum):
@@ -121,6 +122,23 @@ IMU_RAW_TICK_US = 21.7             # LSM timestamp counter LSB, nominal (DS13510
 IMU_CAL_SIZE = 4                   # int8 freq_fine, uint8 valid, uint16 reserved
 IMU_TICK_BASE_HZ = 46080.0         # nominal timestamp-counter frequency (AN5763 6.4)
 IMU_TICK_FREQ_FINE_STEP = 0.0013   # 0.13% per FREQ_FINE LSB
+
+# --- stream 13 (IMU_SYNC): the frame's FRAME_READY edge on the LSM's own clock ---------
+# The header's t_us is that edge on the MCU's TIM2 clock. Placing it on the LSM clock used to
+# mean guessing from stream 11's FIFO words, which are samples taken before a drain that runs
+# 1-2 ms later in the firmware's loop -- measured host-side at 1082 µs RMS of residual against
+# a windowed linear clock fit, and demonstrably load-dependent (a frame that also carries CALIB
+# drains 673 µs later, t = -3.9 over 5331 static frames). Stream 13 carries the answer instead:
+# the LSM TIMESTAMP register read at the edge, with the delay and the read's own duration
+# alongside so the residual uncertainty is stated rather than assumed. See BUG-031.
+#
+# It also answers the question that turns out to dominate the error budget: WHEN the stream-9
+# quaternion sent alongside a frame is actually valid. That quat is the mean of a whole FIFO
+# batch (firmware `RS_LSM_SFLP_AVERAGE`, shipped for BUG-027's 2.8x noise cut), so it carries the
+# batch's MIDPOINT orientation, which on this rig sits +7.8 ms AFTER the frame-ready edge (the
+# drain is +24.3 ms after it). ~0.3 deg at 38.5 deg/s — an order of magnitude above the skew
+# above, and it LEADS the depth frame rather than lagging it.
+IMU_SYNC_SIZE = 22   # u32 ticks, u32 latch_us, u32 drain_us, u32 quat_mid_ticks, u16 read_us, u16 quat_n, u8 valid, u8 rsv
 
 
 class ProtocolError(Exception):
@@ -303,6 +321,54 @@ def decode_imu_cal(payload: bytes) -> ImuClockCal:
         raise ProtocolError(f"IMU_CAL payload must be {IMU_CAL_SIZE} bytes, got {len(payload)}")
     freq_fine, valid, _reserved = struct.unpack("<bBH", payload)
     return ImuClockCal(freq_fine, bool(valid))
+
+
+@dataclass(frozen=True)
+class ImuSync:
+    """One stream-13 payload: this ToF frame's FRAME_READY edge on the LSM clock.
+
+    `lsm_ticks` is in the same units as stream 11's TIMESTAMP words, so scale it with the
+    stream-12 tick (`ImuClockCal.tick_us`), not the nominal 21.7 µs.
+    """
+    lsm_ticks: int          # LSM TIMESTAMP counter latched just after FRAME_READY
+    latch_delay_us: int     # MCU µs from the frame's t_us to the middle of that read
+    drain_delay_us: int     # MCU µs from the frame's t_us to the FIFO drain (diagnostic)
+    quat_mid_ticks: int     # LSM tick the paired stream-9 quaternion is valid AT (batch midpoint)
+    read_us: int            # duration of the latch read — the uncertainty on lsm_ticks
+    quat_n: int             # SFLP samples averaged into that quaternion (0 = none this drain)
+    valid: bool
+
+    def frame_ready_ticks(self, tick_us: float) -> float:
+        """The FRAME_READY edge itself, in LSM ticks: the latch minus its own delay."""
+        return self.lsm_ticks - self.latch_delay_us / tick_us
+
+    def quat_offset_us(self, tick_us: float) -> float | None:
+        """How far the paired quaternion's instant sits AFTER the frame-ready edge, in µs.
+
+        Positive means the orientation LEADS the depth frame, which is the case here
+        (+7.8 ms measured): the averaged batch straddles the edge and is centred well
+        past it. A host that wants the orientation at the frame instant must propagate
+        it BACKWARD by this much — the opposite direction to "the quat is stale".
+        Returns None when this drain produced no quaternion.
+        """
+        if not self.quat_n or not self.quat_mid_ticks:
+            return None
+        return (self.quat_mid_ticks - self.frame_ready_ticks(tick_us)) * tick_us
+
+
+def decode_imu_sync(payload: bytes) -> ImuSync:
+    """Decode a stream 13 IMU_SYNC payload -> ImuSync.
+
+    Layout: u32 lsm_ticks, u32 latch_delay_us, u32 drain_delay_us, u32 quat_mid_ticks,
+    u16 read_us, u16 quat_n, u8 valid, u8 reserved (0). The device only emits the stream
+    when the register read succeeded, so `valid` is 1 in practice; absence of the stream
+    means "unknown", exactly like stream 12.
+    """
+    if len(payload) != IMU_SYNC_SIZE:
+        raise ProtocolError(f"IMU_SYNC payload must be {IMU_SYNC_SIZE} bytes, got {len(payload)}")
+    (ticks, latch_us, drain_us, quat_mid, read_us, quat_n,
+     valid, _reserved) = struct.unpack("<IIIIHHBB", payload)
+    return ImuSync(ticks, latch_us, drain_us, quat_mid, read_us, quat_n, bool(valid))
 
 
 def decode_env(payload: bytes) -> tuple[float, tuple[float, float, float], float]:

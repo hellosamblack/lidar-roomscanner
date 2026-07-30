@@ -152,6 +152,33 @@ def capture_magcheck(path: str, cal_path: str = "", window_s: float = 5.0,
 
 
 @mcp.tool()
+def capture_skew(path: str, window_s: float = 2.0) -> dict:
+    """Measure how well a capture pins its ToF frames onto the IMU's clock (BUG-031).
+
+    Two estimators. `sync` is the direct measurement -- stream 13, the LSM
+    TIMESTAMP register read at the FRAME_READY edge -- and is absent from any
+    capture older than 2026-07-30. `fifo` is the older inference from stream 11's
+    last FIFO word, which also absorbs the firmware's drain lag and up to one
+    sample period of FIFO phase; it cannot beat ~601 us RMS however good the
+    timing gets, so read it as a bound, not a skew.
+
+    `calib_load` is the causal test: CALIB-carrying frames drain later, so a
+    negative `shift_us` with a large |welch_t| means the pairing moves with
+    processing load.
+
+    Wraps `host/tools/skew_check.py::check_capture()`.
+    """
+    from tools.skew_check import check_capture
+
+    p = (REPO / path) if not Path(path).is_absolute() else Path(path)
+    if not p.is_file():
+        return {"error": f"no such capture: {rel(p)}"}
+    rep = check_capture(p, window_s=window_s)
+    rep["path"] = rel(p)
+    return rep
+
+
+@mcp.tool()
 def doctor(build: bool = False, net: bool = True) -> dict:
     """Run the headless-host bring-up checks and return each verdict.
 

@@ -57,6 +57,23 @@ def golden_imu_cal() -> bytes:
     return header + payload + zlib.crc32(header + payload).to_bytes(4, "little")
 
 
+def golden_imu_sync() -> bytes:
+    """One stream-13 (IMU_SYNC) DATA frame: the frame-ready edge on the LSM clock.
+
+    Payload is u32 lsm_ticks, u32 latch_delay_us, u32 drain_delay_us, u32 quat_mid_ticks,
+    u16 read_us, u16 quat_n, u8 valid, u8 reserved(0). The values are the shape a real rig
+    produces: a large free-running tick counter, a latch 61 µs after the edge, a drain
+    24.1 ms later (the gap that made the old FIFO-word inference load-dependent, BUG-031),
+    and a quaternion midpoint 348 ticks (7.76 ms at this part's tick) PAST the edge — the
+    averaged batch leads the depth frame, it does not lag it.
+    """
+    payload = struct.pack("<IIIIHHBB", 3_931_420_041, 61, 24_109, 3_931_420_386, 44, 15, 1, 0)
+    # header: DATA(1), stream 13, seq 42, t_us 1_000_000, width = height = 0
+    header = struct.pack("<4sBBBBIQHHII", b"RSCN", 1, 1, 13, 0, 42, 1_000_000,
+                         0, 0, len(payload), 0)
+    return header + payload + zlib.crc32(header + payload).to_bytes(4, "little")
+
+
 def build_sensors_snippet(path):
     """A tiny capture: CALIB, then N (RAW, IMU_QUAT, ENV) triples with a rotating quaternion."""
     import numpy as np
@@ -85,5 +102,6 @@ if __name__ == "__main__":
     (FIXTURES / "golden_depth_2x2.bin").write_bytes(golden_depth_2x2())
     (FIXTURES / "golden_imu_raw.bin").write_bytes(golden_imu_raw())
     (FIXTURES / "golden_imu_cal.bin").write_bytes(golden_imu_cal())
+    (FIXTURES / "golden_imu_sync.bin").write_bytes(golden_imu_sync())
     build_sensors_snippet(FIXTURES / "golden_sensors_snippet.bin")
     print("fixtures written")

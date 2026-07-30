@@ -38,6 +38,7 @@ One frame = 32-byte header, payload, CRC32. See the `protocol-change` skill befo
 | 10 | ENV | LSM6DSV16X sensor-hub environmental sample: float32 pressure (Pa) + 3×float32 magnetic field `[x, y, z]` (µT) + float32 temperature (°C) = 20 B. One per ToF frame. `t_us` = capture time. | live (Phase 4) |
 | 11 | IMU_RAW | LSM6DSV16X FIFO words passed through **verbatim** (same philosophy as RAW_3DMD: sensor format on the wire, host demuxes). N × 8-byte records, `payload_len` = N × 8; **the header's `width` carries N and `height` is 0** (there is no zone grid). One frame per ToF frame, emitted only when N > 0. See the record layout below. | live (2026-07-28) |
 | 12 | IMU_CAL | LSM6DSV16X clock calibration: `INTERNAL_FREQ_FINE` (register 0x4F), the factory trim that sets what a stream-11 TIMESTAMP tick is actually worth. 4 B, `width` = `height` = 0. Static per device; sent on the **same 64-frame cadence as CALIB** (and at stream start) so a late-attaching host or a mid-recording seek always has one. Emitted only when the register read succeeded — its absence means "use the nominal tick". See the payload layout below. | live (2026-07-28) |
+| 13 | IMU_SYNC | The two instants a host needs on the **LSM's own clock**: where this ToF frame's FRAME_READY edge sits (the LSM `TIMESTAMP` register read at that edge, plus the delay and the read's duration), and when the stream-9 quaternion sent alongside it is valid (the averaged batch's midpoint). 22 B, `width` = `height` = 0. **One per ToF frame**, carrying the same `seq` and `t_us` as the RAW frame it describes — the pairing is the header, not a payload field. Emitted only when the register read succeeded; its absence means "unknown". See the payload layout below. | live (2026-07-30) |
 
 TBD formats are pinned when the stream is first enabled (the transform library's capability
 negotiation decides); pinning a TBD format is additive (no version bump); *changing* a pinned
@@ -117,6 +118,46 @@ default to the nominal 21.7 µs until a stream-12 frame arrives, which is byte-f
 behaviour every existing recording was decoded with. Likewise `valid = 0` means fall back to
 nominal — it exists so a failed register read can never be mistaken for a legitimate
 `freq_fine` of 0.
+
+### IMU_SYNC (stream 13) payload layout
+
+| Offset | Size | Field            | Notes                                                             |
+|--------|------|------------------|-------------------------------------------------------------------|
+| 0      | 4    | `lsm_ticks`      | u32 LE — LSM `TIMESTAMP0..3` (0x40–0x43), read just after FRAME_READY. **Same counter and units as stream 11's TIMESTAMP words**, so scale it with stream 12, not the nominal 21.7 µs |
+| 4      | 4    | `latch_delay_us` | u32 LE — MCU µs from this frame's `t_us` (the FRAME_READY edge) to the **midpoint** of that register read |
+| 8      | 4    | `drain_delay_us` | u32 LE — MCU µs from `t_us` to the FIFO drain that produced this frame's streams 9/10/11. Diagnostic: this is the lag the old FIFO-word inference silently absorbed (measured: 24.3 ms) |
+| 12     | 4    | `quat_mid_ticks` | u32 LE — the LSM tick the **stream-9 quaternion sent alongside this frame is valid at**: the midpoint of the averaged FIFO batch. 0 when this drain produced no quaternion |
+| 16     | 2    | `read_us`        | u16 LE — duration of the latch read; the uncertainty bound on `lsm_ticks` |
+| 18     | 2    | `quat_n`         | u16 LE — SFLP samples averaged into that quaternion               |
+| 20     | 1    | `valid`          | 1 = latched from the device (the only value ever sent)             |
+| 21     | 1    | reserved         | 0                                                                  |
+
+Total 22 B. The frame-ready edge on the LSM clock is `lsm_ticks - latch_delay_us / tick_us`
+(`roomscan.protocol.ImuSync.frame_ready_ticks`).
+
+**`quat_mid_ticks` — read the sign carefully.** Stream 9 carries the *mean* of a whole FIFO
+batch (firmware `RS_LSM_SFLP_AVERAGE`, shipped for BUG-027's 2.8× noise cut), so the orientation
+it holds is the batch's midpoint, not the frame's `t_us`. Measured on this rig over 3119 frames:
+the batch's last sample sits **+23.1 ms after** the frame-ready edge and its midpoint **+7.8 ms
+after** it (std 0.68 ms) — the batch straddles the edge, because the drain runs 24.3 ms into the
+frame. So the quaternion **leads** the depth frame by ~7.8 ms (~0.3° at 38.5 °/s), roughly 9× the
+frame-stamp skew this stream's other fields address. A host correcting for it must propagate the
+orientation **backward**; treating it as stale and propagating forward doubles the error.
+`ImuSync.quat_offset_us()` returns the signed offset.
+
+**Why it exists (BUG-031).** `t_us` has been the FRAME_READY edge on the MCU's TIM2 clock since
+2026-07-28, but orienting a depth frame needs that instant on the *IMU's* clock, and the only LSM
+timestamps on the wire were stream 11's FIFO words — samples the LSM took at some point before a
+drain the firmware runs 1–2 ms later, after the RAW send. Inferring the frame's position from
+them carries that whole variable gap. Measured on this rig over 5331 static frames (176 s): the
+residual of `t_us` against a windowed linear fit to the last FIFO word is **1082 µs RMS**, and it
+is demonstrably load-dependent — a frame that also carries CALIB drains **673 µs later** than a
+plain one (t = −3.9). Stream 13 replaces the inference with a measurement, and reports its own
+uncertainty (`read_us`) rather than asking the host to assume one.
+
+Compatibility: additive `stream_id`, no version bump — decoders that predate it skip it, and
+captures that predate it simply never carry one (a host must fall back to the stream-11
+inference, or to nothing).
 
 ## EVENT frame payload (frame_type = 2)
 
@@ -268,3 +309,18 @@ specced with the Phase 4 transport work).
      FRAME_READY edge**, then shared by that frame's RAW/CALIB/IMU/env/raw sends.
   Streams 7/9/10/11 are byte-for-byte unchanged in framing and payload; only what `t_us` means
   changed, and it changed to something strictly more accurate.
+- **v1 rev 2026-07-30**: additive — IMU_SYNC (13), one 16-byte frame per ToF frame carrying that
+  frame's FRAME_READY edge on the **LSM's own clock** (BUG-031). It closes the half of the
+  2026-07-28 timing work that stream 12 could not: `t_us` became an accurate MCU-clock stamp, but
+  the host still had to guess where that instant fell on the IMU clock, from FIFO words drained
+  1–2 ms later. The guess costs 1082 µs RMS on a static rig and moves with processing load (a
+  CALIB-carrying frame drains 673 µs later, t = −3.9 over 5331 frames). The firmware now reads the
+  LSM `TIMESTAMP` register at the edge itself, while the shared I3C bus is still idle, and ships
+  the tick with its own delay and read duration so the residual uncertainty is stated, not assumed.
+  The same frame also carries `quat_mid_ticks`: stream 9's quaternion is a batch *mean*
+  (`RS_LSM_SFLP_AVERAGE`, BUG-027), so it is valid at the batch midpoint — measured **+7.8 ms
+  after** the frame-ready edge, i.e. it leads the depth frame rather than lagging it, and by ~9×
+  the skew above. That offset was previously invisible: with no measurement of where the edge sat
+  on the LSM clock, the batch end was the only available proxy for it, and it is 23.1 ms out.
+  New stream_id only; no version bump, no layout change, streams 7/9/10/11/12 byte-for-byte
+  unchanged. Older captures never carry one — a host falls back to the stream-11 inference.

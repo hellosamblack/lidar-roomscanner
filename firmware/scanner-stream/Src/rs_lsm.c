@@ -504,11 +504,36 @@ int rs_lsm_read_latest(rs_lsm_sample_t *out) {
     return rs_lsm_read_latest_raw(out, NULL, 0u, NULL);
 }
 
+/* Latch the LSM's own timestamp counter (TIMESTAMP0..3, 0x40-0x43) in ONE 4-byte register
+ * read -- see rs_lsm.h. Deliberately NOT the FIFO: the FIFO tells you when a *sample* was
+ * taken, which is only ever "some time before the drain", whereas this register answers
+ * "what does the LSM's clock read right now", which is the question you have to ask at the
+ * ToF's FRAME_READY edge (BUG-031). TIMESTAMP_EN is already on (rs_lsm_init, RS_LSM_RAW_BATCH),
+ * so the counter is the same one stream 11's TIMESTAMP words come from and shares stream 12's
+ * tick period. */
+int rs_lsm_read_timestamp(uint32_t *ticks) {
+    if (ticks == NULL) {
+        return -1;
+    }
+    return (lsm6dsv16x_timestamp_raw_get(&g_ctx, ticks) == 0) ? 0 : -1;
+}
+
 int rs_lsm_read_latest_raw(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_t raw_max,
                            uint16_t *raw_count) {
     uint16_t raw_n = 0;
     out->have_quat = 0;
     out->have_env = 0;
+    out->quat_mid_ticks = 0u;
+    out->quat_n = 0u;
+    /* Span of this drain's TIMESTAMP words, for out->quat_mid_ticks. The midpoint of the
+     * span is used rather than a per-sample tally deliberately: the SFLP game-rotation word
+     * carries no timestamp of its own, and pairing it with "the last TIMESTAMP word seen"
+     * would inherit whatever order the FIFO happens to emit a sample-time's words in (a
+     * silent one-sample, 2.08 ms bias). SFLP and XL/GY share one ODR and one drain, so the
+     * quat samples tile the same span the TIMESTAMP words do, and the span's midpoint is the
+     * mean of their times without depending on intra-group ordering at all. */
+    uint32_t ts_first = 0u, ts_last = 0u;
+    uint8_t ts_seen = 0u;
     if (raw_count != NULL) {
         *raw_count = 0;
     }
@@ -538,6 +563,15 @@ int rs_lsm_read_latest_raw(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_
         }
         if (word.tag < 32) {
             g_lsm_tag_hist[word.tag]++;
+        }
+        if (word.tag == LSM6DSV16X_TIMESTAMP_TAG) {
+            uint32_t t = (uint32_t)word.data[0] | ((uint32_t)word.data[1] << 8) |
+                         ((uint32_t)word.data[2] << 16) | ((uint32_t)word.data[3] << 24);
+            if (!ts_seen) {
+                ts_first = t;
+                ts_seen = 1u;
+            }
+            ts_last = t;
         }
         if (raw != NULL) {
             /* stream-11 pass-through: 16-bit fixed-point words only. 0x13 (game rotation)
@@ -614,6 +648,12 @@ int rs_lsm_read_latest_raw(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_
                 out->quat[k] = quat_acc[k] / n;   /* normalize == divide by the mean's magnitude */
             }
             out->have_quat = 1;
+            out->quat_n = quat_n;
+            if (ts_seen) {
+                /* Unsigned midpoint written so a counter wrap between first and last (once
+                 * per ~26 h at 22.28 µs/tick) still lands on the right value. */
+                out->quat_mid_ticks = ts_first + (uint32_t)((ts_last - ts_first) / 2u);
+            }
         }
     }
 #endif
