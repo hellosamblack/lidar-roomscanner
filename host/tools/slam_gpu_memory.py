@@ -159,7 +159,8 @@ def main(argv=None) -> int:
         walk = None
 
     mapper = Mapper(width, height, cfg.fov_h, cfg.fov_v, icp_mode=cfg.icp_mode,
-                    voxel_size=voxel, baro_weight=cfg.baro_weight,
+                    voxel_size=voxel, baro_authority=cfg.baro_authority,
+                    baro_tau_frames=cfg.baro_tau_frames,
                     max_dist=cfg.max_dist, min_fitness=cfg.min_fitness,
                     max_rmse=cfg.max_rmse, min_confidence=cfg.min_confidence,
                     weight_threshold=cfg.weight_threshold,

@@ -1,5 +1,6 @@
 import numpy as np
 import open3d as o3d
+import pytest
 from roomscan.slam.intrinsics import pinhole
 from roomscan.slam.mapper import Mapper, FrameStep
 
@@ -283,3 +284,114 @@ def test_escalation_counter_increments_when_the_retry_is_used():
 def test_default_retry_dist_is_wider_than_default_max_dist():
     m = Mapper(W, H, voxel_size=0.02)
     assert m._retry_dist > m._gate["max_dist"]
+
+
+# --- BUG-037: the barometric height constraint
+#
+# These drive `_apply_baro_z` directly, feeding its own output back in as the
+# next frame's pose -- which is what the real loop does (the corrected pose
+# becomes t_prev and seeds the next prediction), and is the feedback path the
+# constraint has to account for.
+
+def _drive_baro(m, pressures, ref_pa=101325.0):
+    """Run `pressures` through m._apply_baro_z with the pose fed back, and
+    return (heights, per_frame_steps) in metres along world-up."""
+    from roomscan.slam.frames import world_up
+    up = world_up()
+    pose = np.eye(4)
+    heights, steps = [], []
+    for pa in pressures:
+        before = float(np.dot(pose[:3, 3], up))
+        pose = m._apply_baro_z(pose, pa)
+        after = float(np.dot(pose[:3, 3], up))
+        heights.append(after)
+        steps.append(after - before)
+    return np.array(heights), np.array(steps)
+
+
+def _old_blend_vertical_path(pressures, weight=0.05):
+    """The pre-BUG-037 constraint, verbatim: blend the pose height toward the
+    RAW barometric height every frame. Used as the regression yardstick -- it
+    is the thing that invented ~22 m of vertical "path" on a 32 m circuit."""
+    from roomscan.slam.frames import baro_height_m
+    ref, h_pose, path = None, 0.0, 0.0
+    for pa in pressures:
+        if ref is None:
+            ref = pa
+            continue
+        step = weight * (baro_height_m(pa, ref) - h_pose)
+        h_pose += step
+        path += abs(step)
+    return path
+
+
+def test_baro_datum_averages_the_first_frames_not_one_sample():
+    """A single pressure sample carries ~267 mm RMS of apparent altitude, so
+    freezing the datum on frame 1 baked that error into the whole run. The
+    datum is now the mean of the first _BARO_REF_FRAMES, and nothing is applied
+    until it exists."""
+    from roomscan.slam.mapper import _BARO_REF_FRAMES
+    rng = np.random.default_rng(0)
+    noisy = 101325.0 + rng.normal(0.0, 3.1, _BARO_REF_FRAMES)
+    m = Mapper(W, H, voxel_size=0.02)
+    _, steps = _drive_baro(m, noisy)
+    assert m._ref_pa == pytest.approx(float(np.mean(noisy)))
+    assert np.all(steps == 0.0)              # warm-up applies nothing
+    assert m.baro_correction_m == 0.0
+
+
+def test_baro_white_noise_no_longer_invents_vertical_path():
+    """The defect: the barometer's ~3.1 Pa of per-frame white noise (~267 mm of
+    apparent altitude) went straight into the pose at 5% a frame. Against the
+    same noise the new constraint must move the pose orders of magnitude less."""
+    rng = np.random.default_rng(1)
+    n = 2000
+    noisy = 101325.0 + rng.normal(0.0, 3.1, n)      # measured noise, no real motion
+    m = Mapper(W, H, voxel_size=0.02)
+    _, steps = _drive_baro(m, noisy)
+    new_path = float(np.abs(steps).sum())
+    old_path = _old_blend_vertical_path(noisy)
+    assert old_path > 5.0                            # metres of invented motion
+    assert new_path < old_path / 100.0
+    assert abs(m.baro_correction_m) < 0.05           # and it goes nowhere
+
+
+def test_baro_authority_bounds_the_lifetime_correction():
+    """A *sustained* barometric disagreement must move the pose by only
+    `baro_authority` of it -- the barometer contributes, it does not own the
+    height. The old blend converged to 100% of any disagreement, which is why a
+    barometer wandering 0.43 m dragged the pose 0.58 m off."""
+    from roomscan.slam.frames import baro_height_m
+    m = Mapper(W, H, voxel_size=0.02, baro_authority=0.05, baro_tau_frames=10)
+    ref = 101325.0
+    off = ref - 5.0                                  # ~+42 cm of apparent altitude
+    n_warm = 90                                      # datum frames (nothing applied)
+    heights, _ = _drive_baro(m, [ref] * n_warm + [off] * 500)
+    disagreement = baro_height_m(off, ref)
+    assert disagreement > 0.3
+    assert heights[-1] == pytest.approx(0.05 * disagreement, rel=0.02)
+    assert m.baro_correction_m == pytest.approx(heights[-1], abs=1e-9)
+
+
+def test_baro_authority_zero_disables_the_constraint():
+    m = Mapper(W, H, voxel_size=0.02, baro_authority=0.0)
+    heights, steps = _drive_baro(m, np.linspace(101325.0, 101300.0, 500))
+    assert np.all(steps == 0.0)
+    assert m.baro_correction_m == 0.0
+
+
+def test_baro_longer_tau_rejects_more_noise():
+    """`baro_tau_frames` is the noise filter: a longer one must let less of the
+    barometer's white noise through into the pose per frame.
+
+    Measured on the per-frame step, not on the height: the height also carries
+    the filter's start-up transient (the EMA opens at the first innovation and
+    decays over ~tau), which a LONGER tau necessarily drags out further -- so
+    the height's spread would rank the two filters backwards."""
+    rng = np.random.default_rng(2)
+    noisy = 101325.0 + rng.normal(0.0, 3.1, 3000)
+    short = Mapper(W, H, voxel_size=0.02, baro_tau_frames=10)
+    long_ = Mapper(W, H, voxel_size=0.02, baro_tau_frames=900)
+    _, s_short = _drive_baro(short, noisy)
+    _, s_long = _drive_baro(long_, noisy)
+    assert s_long.std() < s_short.std() / 10.0

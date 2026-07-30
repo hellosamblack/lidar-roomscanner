@@ -102,3 +102,36 @@ def test_cli_device_flag_parses_and_reaches_run(tmp_path, monkeypatch):
                "--out-mesh", str(tmp_path / "m.ply"), "--out-traj", str(tmp_path / "t.tum")])
     assert rc == 0
     assert seen_devices == ["CPU:0"]
+
+
+def test_cli_help_expands(capsys):
+    """argparse %-expands help strings, so a bare "% o" in one of them (as in
+    "~97% of its capacity") is read as an octal conversion and `--help`
+    crashes with a TypeError. That shipped and went unnoticed because nothing
+    exercised --help; this pins it."""
+    import pytest
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    assert "--baro-authority" in capsys.readouterr().out
+
+
+def test_cli_baro_authority_flag_reaches_the_mapper(tmp_path, monkeypatch):
+    """BUG-037: the authority knob exists so the default can be RE-measured, so
+    it has to arrive at Mapper -- a flag that only lands on `cfg` would sweep
+    nothing. Also pins the no-flag path to the config default."""
+    frames = [(np.full((42, 54), 1000.0 + 5 * i, np.float32), None, None,
+               (1.0, 0.0, 0.0, 0.0), 101325.0, float(i) * 0.03) for i in range(3)]
+    monkeypatch.setattr(slamcli, "_load_frames", lambda path, max_frames=None: (frames, 54, 42))
+    seen = []
+    orig_init = Mapper.__init__
+
+    def spy_init(self, *args, **kwargs):
+        seen.append((kwargs.get("baro_authority"), kwargs.get("baro_tau_frames")))
+        return orig_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(Mapper, "__init__", spy_init)
+    common = ["--out-mesh", str(tmp_path / "m.ply"), "--out-traj", str(tmp_path / "t.tum")]
+    assert main([str(tmp_path / "d.bin"), "--baro-authority", "0"] + common) == 0
+    assert seen[-1] == (0.0, 900)
+    assert main([str(tmp_path / "d.bin")] + common) == 0
+    assert seen[-1] == (0.05, 900)

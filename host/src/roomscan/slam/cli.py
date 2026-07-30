@@ -67,7 +67,8 @@ def _load_frames(path, max_frames=None):
 
 def _run(frames, width, height, cfg, mode, device=None):
     mapper = Mapper(width, height, cfg.fov_h, cfg.fov_v, icp_mode=mode,
-                    voxel_size=cfg.voxel_size, baro_weight=cfg.baro_weight,
+                    voxel_size=cfg.voxel_size, baro_authority=cfg.baro_authority,
+                    baro_tau_frames=cfg.baro_tau_frames,
                     max_dist=cfg.max_dist, icp_retry_dist=cfg.icp_retry_dist,
                     min_fitness=cfg.min_fitness, max_rmse=cfg.max_rmse,
                     min_confidence=cfg.min_confidence, weight_threshold=cfg.weight_threshold,
@@ -113,12 +114,25 @@ def main(argv=None) -> int:
     ap.add_argument("--block-count", type=int, default=None,
                     help="TSDF grid capacity, overriding [slam] block_count. Blocks scale as "
                          "1/voxel_size^2, so halving the voxel needs ~4x this. Give it real "
-                         "headroom: a scan that ran at ~97% of its capacity stalled and lost "
+                         # NB "%%": argparse %-expands help strings, and a bare "% o" is a
+                         # valid octal conversion -- this line alone made --help crash with
+                         # "%o format: an integer is required, not dict" (found 2026-07-30).
+                         "headroom: a scan that ran at ~97%% of its capacity stalled and lost "
                          "tracking (BUG-035). Beyond ~6 GiB use --device CPU:0, where system "
                          "RAM rather than VRAM is the limit.")
+    ap.add_argument("--baro-authority", type=float, default=None,
+                    help="barometer's share of the low-passed height disagreement, overriding "
+                         "[slam] baro_authority; 0 turns the height constraint off. Provided so "
+                         "the default can be RE-measured rather than argued about -- but note "
+                         "single-run comparisons below ~0.3 m are chaos, not signal (a 3 mm "
+                         "one-shot height nudge moves the final height error by 146 mm and the "
+                         "loop closure by 0.37 m on a real circuit). Sweep it across an ensemble "
+                         "of innocuous perturbations, not one run. See BUG-037.")
     args = ap.parse_args(argv)
 
     cfg = SlamConfig.load()
+    if args.baro_authority is not None:
+        cfg.baro_authority = args.baro_authority
     if args.voxel_size is not None:
         cfg.voxel_size = args.voxel_size
     if args.block_count is not None:
@@ -150,6 +164,11 @@ def main(argv=None) -> int:
         kstats = metrics.tracking_stats(mapper.lost_flags)
         died = ("  <-- THE RUN DIED: the tail is a frozen dead-reckoned pose, "
                 "not a measured trajectory" if kstats["died"] else "")
+        # BUG-037: say how much of the reported height came from the barometer
+        # rather than from ICP, so a run that was pulled by a drifting baro
+        # says so instead of quietly reporting it as measured motion.
+        print(f"  baro: correction={mapper.baro_correction_m * 1000:+.0f} mm "
+              f"(authority={cfg.baro_authority:g}, tau={cfg.baro_tau_frames} frames)")
         print(f"  tracking: lost={kstats['lost']}/{kstats['n']} "
               f"({kstats['lost_frac']*100:.1f}%) longest_run={kstats['longest_lost_run']} "
               f"trailing={kstats['trailing_lost']} "
@@ -169,6 +188,9 @@ def main(argv=None) -> int:
             "tracking_lost": mapper.tracking_lost_count,
             "tracking": dict(kstats),
             "icp_escalations": mapper.icp_escalations,
+            "baro": {"correction_m": mapper.baro_correction_m,
+                     "authority": cfg.baro_authority,
+                     "tau_frames": cfg.baro_tau_frames},
             "map": {"blocks": used, "capacity": cap, "live_capacity": live_cap,
                     "percent_of_capacity": round(100.0 * used / cap, 1),
                     "saturated": bool(saturated)},

@@ -5,6 +5,21 @@
 > Phase 6 / Web Phase 4). The trajectory-quality findings, gate methodology, and mode comparison remain
 > the reference — in particular `start_end_gap_m` ≈ 1.1–1.4 m over ~70 m is the drift baseline that
 > sub-phase 6.D targets.)*
+>
+> **⚠ Two corrections from 2026-07-30 (BUG-037) that this document predates — read before quoting any
+> number in it.**
+> 1. **Every `path_length_m` here is inflated by roughly a third.** The barometric height constraint
+>    fed ~267 mm RMS of per-frame sensor noise straight into the pose, adding ~12 mm of vertical step
+>    per *frame* — on three later captures that was 34/29/37% of reported path. So the "67.85 m walk"
+>    was more like ~45 m, and the **"~1.6% drift" below is really ~2.4%**. Anything computed as a
+>    fraction of path in this document is optimistic by the same factor.
+> 2. **The "Run-to-run variance (Open3D nondeterminism)" section below understates a real property,
+>    and its explanation is unproven.** The variance is not an Open3D quirk to be worked around: a
+>    deliberate **3 mm** one-shot height perturbation moves the final height error by **146 mm** and
+>    the loop closure by **0.37 m** on a real circuit. Frame-to-model tracking is genuinely chaotic at
+>    that scale, so a single run's gap is not a measurement. Score an ensemble of numerically
+>    innocuous perturbations (CPU vs CUDA, start one frame later, ±1e-4 on `max_dist`) and quote
+>    mean ± sd.
 
 Task 9 wires Tasks 1–8 (deprojection, TSDF, ICP odometry, frame-to-model
 `Mapper`, `SlamConfig`, `metrics`) into `roomscan-slam` and runs the empirical
@@ -230,7 +245,10 @@ faster and lighter).
 | 6dof | 3184 | 101.22 | 28.05 | 0.319 | 999 (31 %) | 50.7 | 67.9 | 85.7 | 74.2 % |
 
 `translation` mode: **0 tracking-loss**, a 1.095 m loop gap over a 67.85 m path
-(~1.6 % drift for prior-free frame-to-model odometry with **no loop closure**),
+(~1.6 % drift for prior-free frame-to-model odometry with **no loop closure** —
+but see the BUG-037 banner at the top: that path is ~35 % barometer-invented
+vertical motion, so the honest figure is **~2.4 %**, and a single run's gap
+carries ~±0.3 m of chaotic spread anyway),
 and a smooth trajectory (max per-frame step 0.100 m). As a bonus it now also
 sits at/under the 35 ms preview target at the median. `6dof` diverges badly
 (28 m gap, 31 % lost): full point-to-plane ICP wanders on the thin, noisy 54×42

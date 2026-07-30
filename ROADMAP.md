@@ -900,8 +900,9 @@ channel, barometer as soft 1-DoF Z constraint.
 > loop-closure evaluation — the owner's next target; ~~its "measure first" gate needs an
 > owner-recorded closed-loop walk, which no capture contains~~ **the gate is SATISFIED as of
 > 2026-07-30**: the owner recorded two room circuits, `captures/coffeeRoomCircuitNoMnt.bin` closes at
-> **0.150 m over 32.5 m (0.46%)** with 0 lost frames, and `captures/coffeeRoomCircuitMnt.bin` is the
-> failure case — see the 6.D block below) and the on-rig flat-field capture
+> ~~**0.150 m over 32.5 m (0.46%)**~~ **0.74 ± 0.19 m over 23.9 m (~3%)** with 0 lost frames — the
+> old figure was a lucky single run over a barometer-inflated path, corrected by BUG-037 — and
+> `captures/coffeeRoomCircuitMnt.bin` is the failure case — see the 6.D block below) and the on-rig flat-field capture
 > (Phase 2.5 follow-up) gating reflectance-quality work.
 
 > **Orientation accuracy for handheld use (2026-07-29)** — a full pass on the orientation path,
@@ -1093,16 +1094,24 @@ whether (3) earns its complexity — frame-to-model may already be enough inside
 closure pays off on multi-room trajectories.
 
 **The "measure first" gate is satisfied (2026-07-30).** The owner walked two circuits of the same
-room, each ~60 s, both byte-clean with stream 9. Measured at 1 cm voxels on CUDA:0, after BUG-036:
+room, each ~60 s, both byte-clean with stream 9. Measured at 1 cm voxels on CUDA:0, after BUG-036
+and BUG-037. **These numbers are ensemble means ± sd over 10 numerically innocuous perturbations,
+not single runs** — a single run cannot be trusted below ~0.3 m of closure, because a deliberate
+3 mm height nudge moves the loop closure by 0.37 m and the height error by 146 mm (BUG-037). Every
+figure in the first version of this table was a single run, and the ~35% of path that the barometer
+invented deflated the drift percentages on top of that:
 
-| capture | lost | start-end gap | path | drift | height error |
+| capture | lost | horizontal closure | path | drift | height error |
 |---|---|---|---|---|---|
-| `coffeeRoomCircuitNoMnt.bin` | 0 | **0.150 m** | 32.50 m | **0.46%** | −7 mm |
-| `coffeeRoomCircuitMnt.bin` | 0 (was 423) | 1.521 m | 31.68 m | 4.80% | −581 mm |
+| `coffeeRoomCircuitNoMnt.bin` | 0 | **0.74 ± 0.19 m** | 23.9 m | **~3%** | 125 ± 76 mm |
+| `coffeeRoomCircuitMnt.bin` | 0 (was 423) | 0.91 ± 0.31 m | 20.9 m | ~4.4% | 102 ± 113 mm |
 
-**Frame-to-model alone already closes a single room to 0.46%** on the clean run — that is the number
-(3) has to beat, and on this evidence it does **not** obviously earn its complexity inside one room.
-Note this supersedes the 1.1–1.4 m / ~70 m Task-9 figure above as the current baseline.
+~~**Frame-to-model alone already closes a single room to 0.46%**~~ **Frame-to-model closes a single
+room to ~3%** (~0.7 m over a ~24 m circuit) — that is the number (3) has to beat. It is ~5× worse
+than the 0.46% this section originally claimed, so the "loop closure does not obviously earn its
+complexity indoors" conclusion is **weaker than it looked**, though 0.7 m of absolute closure from a
+54×42 imager with no loop closure is still respectable. Note this supersedes the 1.1–1.4 m / ~70 m
+Task-9 figure above as the current baseline.
 
 Three findings that change what 6.D should do next, in priority order:
 
@@ -1111,10 +1120,18 @@ Three findings that change what 6.D should do next, in priority order:
    a plausible 2.05 m "drift". Fixed as **BUG-036** (escalating ICP retry radius + `tracking_stats`
    reporting `died`). Still architecturally open: **there is no relocalization**, so a bad *second*
    (as opposed to a bad frame) is still terminal.
-2. **The barometer is a bigger error source than yaw drift right now** — **BUG-037**: `baro_weight`
-   0.05 costs 581 mm of height on the mounted run (true error ~0) and invents ~35% of reported path
-   length in *both* runs, which has been flattering every `%-of-path` figure in this document.
-   Worth resolving before ICP→IMU yaw feedback, since it corrupts the metric 6.D is judged by.
+2. ~~**The barometer is a bigger error source than yaw drift right now**~~ — **BUG-037, fixed
+   2026-07-30.** The barometer's per-frame signal is **267 mm RMS of white noise**, and the old
+   fixed-gain blend pushed ~5% of it into the pose every frame: ~12 mm of vertical step per *frame*,
+   i.e. ~35% of reported path was motion that never happened, and a blend hands the barometer DC
+   authority 1.0 in exactly the band where it is ~20× the worse instrument. Replaced by a
+   low-passed, bounded-authority complementary correction (`baro_tau_frames` = 900,
+   `baro_authority` = 0.05 derived from the two drift rates). Reported path drops 34/29/37% across
+   three captures and the whole-run barometric contribution is now ~10 mm. **Honest caveat:** on
+   1-minute scans the corrected constraint is indistinguishable from switching the barometer off —
+   it is kept because its parameters are now measurable, not because it earns its keep today.
+   The second finding there is methodological and applies to everything in this section: **single
+   SLAM runs are chaotic** at the 0.3 m level, so score ensembles.
 3. **Yaw drift is not the bottleneck at this timescale.** The datasheet's SFLP spec (Table 1) is
    5.9°/5 min heading drift at high dynamics — ~1.2° over a 62 s circuit, ≈8 cm over the 3.7 m max
    excursion. Deliverable (2) is still worth shipping, but it cannot be what limits these runs.
@@ -1124,7 +1141,11 @@ the ceiling at identical elevation (80.1°/80.2°, 89.2°/89.2°) and identical 
 1453/1452 mm) ⇒ same height ⇒ true height error ~0. That is what exposed BUG-037 and what
 corroborates the clean run's 0.46%. ⚠ **Do not turn this into a required protocol** — the owner's
 objection (2026-07-30) is that walking to the table to park the device puts the operator in the
-sensor's FOV. Score bookends when a capture happens to have them; never demand one.
+sensor's FOV. Score bookends when a capture happens to have them; never demand one. (Re-verified
+independently 2026-07-30 while closing BUG-037: elevation matches to 0.17°/0.04°, range to
+0.1 mm/0.6 mm, device stationary at both ends ⇒ true height change **<1 mm**.
+`captures/roomSweepFull20260730.bin` has **no** bookend — it ends mid-sweep — so its height and
+closure numbers have no ground truth and must not be quoted as drift.)
 
 #### Sub-phase 6.G — SLAM GPU-memory hardening (long-scan OOM)  ← **✅ Complete (2026-07-29)**
 

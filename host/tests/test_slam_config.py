@@ -11,7 +11,8 @@ def test_defaults():
     c = SlamConfig()
     assert c.icp_mode == "translation"
     assert c.voxel_size == 0.01
-    assert c.baro_weight == 0.05
+    assert c.baro_authority == 0.05
+    assert c.baro_tau_frames == 900
     assert c.max_dist == 0.05
     assert c.icp_retry_dist == 0.10
     assert c.min_fitness == 0.3
@@ -38,7 +39,26 @@ def test_load_reads_slam_table(tmp_path):
     c = SlamConfig.load(p)
     assert c.icp_mode == "6dof"
     assert c.voxel_size == 0.02
-    assert c.baro_weight == 0.05  # unspecified => default
+    assert c.baro_authority == 0.05  # unspecified => default
+
+
+def test_baro_knobs_round_trip_and_retired_weight_is_ignored(tmp_path):
+    """BUG-037: the height constraint is parameterized by the barometer's
+    measured characteristics (`baro_authority`, `baro_tau_frames`), not by the
+    retired per-frame blend gain. A config still carrying `baro_weight` must
+    load cleanly -- it is an unknown key like any other, ignored, NOT a crash
+    and NOT silently reinterpreted as the new authority (their meanings differ:
+    the old gain's DC authority was 1.0)."""
+    p = tmp_path / "roomscan.toml"
+    p.write_text('[slam]\nbaro_authority = 0.2\nbaro_tau_frames = 300\n', encoding="utf-8")
+    c = SlamConfig.load(p)
+    assert c.baro_authority == 0.2
+    assert c.baro_tau_frames == 300
+
+    p.write_text('[slam]\nbaro_weight = 0.9\n', encoding="utf-8")
+    c = SlamConfig.load(p)
+    assert not hasattr(c, "baro_weight")
+    assert c.baro_authority == 0.05
 
 
 def test_load_corrupt_returns_defaults(tmp_path):

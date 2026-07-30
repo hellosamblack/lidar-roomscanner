@@ -113,7 +113,8 @@ def main(argv=None) -> int:
 
     serve(host=args.host, port=args.port, device=args.device,
           fov_h=cfg.fov_h, fov_v=cfg.fov_v, voxel_size=cfg.voxel_size,
-          icp_mode=cfg.icp_mode, baro_weight=cfg.baro_weight, max_dist=cfg.max_dist,
+          icp_mode=cfg.icp_mode, baro_authority=cfg.baro_authority,
+          baro_tau_frames=cfg.baro_tau_frames, max_dist=cfg.max_dist,
           icp_retry_dist=cfg.icp_retry_dist,
           min_fitness=cfg.min_fitness, max_rmse=cfg.max_rmse,
           min_confidence=cfg.min_confidence, weight_threshold=cfg.weight_threshold,

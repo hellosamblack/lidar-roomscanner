@@ -43,7 +43,17 @@ class SlamConfig:
 
     icp_mode: str = "translation"
     voxel_size: float = 0.01
-    baro_weight: float = 0.05
+    # BUG-037. `baro_weight` (a per-frame blend gain toward the RAW barometric
+    # height, whose DC authority was 1.0) is retired and no longer read; an
+    # old config that still sets it is ignored, as with any unknown key.
+    # `baro_authority` is the barometer's share of a low-passed height
+    # disagreement -- the least-squares blend of two drifting estimates, from
+    # the measured drift rates (ICP ~0.09 m/min vs barometer ~0.45 m/min).
+    # `baro_tau_frames` is that low-pass, in frames: the raw signal is ~267 mm
+    # RMS of white noise, and ~900 frames (30 s at 30 fps) leaves ~6 mm of it.
+    # 0 authority disables the constraint entirely. See mapper._apply_baro_z.
+    baro_authority: float = 0.05
+    baro_tau_frames: int = 900
     max_dist: float = 0.05
     # Wider ICP correspondence radius retried ONLY when `max_dist` fails its
     # gate; 0 disables. A single fixed radius cannot be both accurate and

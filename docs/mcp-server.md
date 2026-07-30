@@ -96,6 +96,12 @@ is only where the estimate stopped — one real circuit reported 2.05 m of "drif
 of the tail to distrust; `icp_escalations` counts frames the tight ICP radius could not
 handle alone (~0 on a clean scan). Both this and saturation raise a top-level `warning`.
 
+`baro.correction_m` reports how much of the height came from the barometer rather than
+from ICP (expect ~10 mm). **`trajectory.path_length_m` is not comparable across
+2026-07-30**: before BUG-037 the height constraint fed the barometer's per-frame noise
+straight into the pose, so ~35% of reported path was vertical motion that never happened —
+and every "% of path" drift figure divided by it came out flatteringly small.
+
 Unlike its neighbours this one shells out to the `roomscan-slam` console script rather than
 calling in-process: the job runs for many minutes and would otherwise block the event loop
 and pull CUDA into the server. It reads that run's `--json` report instead of scraping

@@ -1642,7 +1642,9 @@ class SlamRunner:
                                   fov_v=self._fov_v, device=device,
                                   release_cache_every=cfg.release_cache_every,
                                   block_count=cfg.block_count,
-                                  icp_retry_dist=cfg.icp_retry_dist)
+                                  icp_retry_dist=cfg.icp_retry_dist,
+                                  baro_authority=cfg.baro_authority,
+                                  baro_tau_frames=cfg.baro_tau_frames)
         worker.start()
         meshprep = MeshPrep(vertex_budget=cfg.live_vertex_budget,
                             fps_budget_ms=cfg.fps_budget_ms)

@@ -48,7 +48,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-034 | by-design | environment   | The tripod adds 15–27 µT of magnetic field — heading is unreliable while the device is mounted on it, regardless of calibration |
 | BUG-035 | fixed   | host/slam     | TSDF block capacity (40k) was *below* a real room sweep's demand (42.9k); running at ~97% of it stalled map growth and collapsed tracking for the last 18% of the scan (mechanism unproven — the grid *does* rehash) |
 | BUG-036 | fixed   | host/slam     | A single fixed ICP correspondence radius (0.05) made one bad frame terminal — 423 frames (22% of a room circuit) silently dead-reckoned; fixed by retrying only on failure at 0.10 |
-| BUG-037 | open    | host/slam     | `baro_weight = 0.05` slaves height to a barometer that wanders ~2.8 m of apparent altitude per minute — 581 mm height error on a run whose true error is ~0, and ~50% of reported path length is invented vertical motion |
+| BUG-037 | fixed   | host/slam     | `baro_weight = 0.05` fed the barometer's ~267 mm RMS of per-frame white noise straight into the pose — ~35% of reported path was invented vertical motion (flattering every %-of-path drift figure) and a drifting baro owned the height outright; replaced by a low-passed, bounded-authority complementary correction |
 
 ---
 
@@ -1537,7 +1537,7 @@ bad *second* survivable. There is still no relocalization — a lost pose can ne
 
 ## BUG-037 — Height is slaved to a barometer that wanders metres per minute
 
-- **Status:** **open** · **Reported:** 2026-07-30 · **Area:** host/slam
+- **Status:** **fixed** 2026-07-30 · **Reported:** 2026-07-30 · **Area:** host/slam
 - **Where:** `host/src/roomscan/slam/mapper.py` (`_apply_baro_z`), `slam/config.py` (`baro_weight`)
 - **Found by:** scoring the owner's two room circuits against a ceiling-bookend ground truth
   (see "How this was measured" below).
@@ -1580,3 +1580,127 @@ corroborates the clean run (SLAM says 7 mm) and condemns the mounted one.
 ⚠ **This is an opportunistic check, not a protocol.** Do not build tooling that *requires* a parked
 bookend: the owner's objection (2026-07-30) is that reaching the table puts the operator in the
 sensor's FOV. Score it when a capture happens to have stationary bookends; never demand one.
+
+---
+
+### Resolution (2026-07-30)
+
+The table above reproduces exactly on CUDA:0 (all twelve numbers), and the bookends re-verify
+independently: elevation matches to 0.17°/0.04° and range to 0.1 mm/0.6 mm with the device
+stationary at both ends, so the true height change over each loop is **<1 mm**. What the table does
+*not* say is that most of its columns are chaos — see "the measurement was the second defect" below.
+
+#### What the defect actually was
+
+Not "over-trusting a drifting barometer" — that was the visible half. Decomposing the pressure trace
+(NoMnt: total σ 4.32 Pa) splits it into **σ 3.12 Pa of frame-to-frame white noise** and only ~3.0 Pa
+of slow wander. In apparent altitude that is:
+
+| band | magnitude | vs ICP |
+|---|---|---|
+| white noise, per frame | **267 mm RMS** (380 mm frame-to-frame, max 1.9 m) | — |
+| slow wander, per minute | ~0.4–0.5 m (0.43 m net on Mnt) | ICP's own vertical drift ~20–100 mm/min |
+
+Three distinct faults followed from feeding that raw into a fixed-gain blend:
+
+1. **Unfiltered white noise went straight into the pose.** At a 0.66 s blend the pose absorbs ~5% of
+   a 267 mm-RMS signal every frame ⇒ **~12 mm of vertical step per frame**, which is precisely what
+   was measured: 11.5 / 11.8 / 15.1 mm per frame across the three captures. That is the whole of the
+   "invented path" — it scales with *frame count*, not with distance walked.
+2. **A blend gives the barometer DC authority 1.0.** Below its corner frequency the pose *becomes*
+   the barometer, in exactly the band where the barometer is ~20× the worse instrument. There was no
+   notion that the two estimates have different uncertainties.
+3. **The datum was one sample.** `_ref_pa` froze on the first pressure reading — a single draw from
+   that 267 mm distribution, baked in as a constant altitude offset for the whole run at gain 1.
+
+#### The measurement was the second defect
+
+Most of the original table cannot support the weight it was given. Re-running the *identical*
+configuration under numerically innocuous perturbations (CPU vs CUDA float ordering, starting one
+frame later, `max_dist` 0.05 → 0.0501) moves the answers by more than the effect being measured. A
+controlled test settles it: a deliberate **3 mm** one-shot height nudge, barometer otherwise off,
+moves the final height error by **146 mm** and the loop closure by **0.37 m**.
+
+So: **single-run SLAM comparisons below ~0.3 m of closure or ~0.2 m of height are realization noise.**
+The specific claim that blocked the obvious fix — "NoMnt's horizontal closure gets worse with the
+barometer off, 0.150 → 0.462 m" — is not real. Across a 10-member ensemble NoMnt's closure is
+0.68 ± 0.36 m with the old blend and 0.61 ± 0.25 m with it off; 0.150 was simply the luckiest member.
+Everything below is an ensemble mean ± sd over 10 perturbations (effectively 9 — `weight_threshold`
++1e-4 turned out to be a no-op and duplicates the base run).
+
+#### The fix
+
+`baro_weight` is retired. The constraint is now a **low-passed, bounded-authority complementary
+correction** whose whole lifetime contribution is exactly
+
+```
+baro_correction = baro_authority · LPF_tau(h_baro − h_icp)
+```
+
+with both parameters *measured quantities* rather than a magic gain:
+
+- **`baro_tau_frames = 900`** (~30 s at 30 fps) — the noise filter. 267 mm RMS through a 1/900 EMA
+  leaves ~6 mm. Answers fault (1).
+- **`baro_authority = 0.05`** — the least-squares share of two drifting estimates,
+  q_icp²/(q_icp² + q_baro²) ≈ 0.09²/(0.09² + 0.45²) ≈ 0.04, rounded up. Answers fault (2). *That this
+  equals the old `baro_weight`'s numeral is a coincidence of arithmetic, not of meaning* — the old
+  gain's DC authority was 1.0.
+- The datum is the mean of the first 90 frames (`_BARO_REF_FRAMES`), and the filter opens at 0 rather
+  than at the first innovation. Answers fault (3).
+- New `Mapper.baro_correction_m` reports how much height came from the barometer; `roomscan-slam`
+  prints it and puts it in `--json`, and `slam_rerender` surfaces it.
+
+Plumbed the same way `block_count` was: `Mapper` / `[slam]` / CLI (`--baro-authority`, added so the
+default can be re-measured) / `slam/service.py` / `web.SlamRunner` / `slam_gpu_memory.py`. A config
+still carrying `baro_weight` loads fine — unknown keys are ignored — and is *not* reinterpreted.
+
+#### Before / after (ensemble means ± sd, n = 10)
+
+`roomSweepFull20260730.bin` is the independent check: nothing was tuned on it, and it has **no
+bookend** (it ends mid-sweep, elevation 26.8° → 8.7°, still moving) so its height column is a
+*reported height change*, not an error, and its closure is not a loop closure. It is in the table for
+the path column only.
+
+| capture | config | height error | horizontal closure | reported path | of which vertical |
+|---|---|---|---|---|---|
+| Mnt | old `baro_weight = 0.05` | 458 ± 232 mm | 1.286 ± 0.249 m | 31.52 m | 21.72 m (69%) |
+| Mnt | **new default** | **102 ± 113 mm** | **0.912 ± 0.310 m** | **20.88 m** | **6.75 m (32%)** |
+| Mnt | authority 0 (off) | 67 ± 57 mm | 0.912 ± 0.192 m | 20.77 m | 6.70 m |
+| NoMnt | old `baro_weight = 0.05` | 125 ± 138 mm | 0.683 ± 0.364 m | 33.74 m | 23.27 m (69%) |
+| NoMnt | **new default** | **125 ± 76 mm** | **0.738 ± 0.187 m** | **23.89 m** | **7.41 m (31%)** |
+| NoMnt | authority 0 (off) | 204 ± 280 mm | 0.608 ± 0.252 m | 22.23 m | 7.29 m |
+| Sweep † | old `baro_weight = 0.05` | (418 ± 202 mm) | (0.812 m) | 72.20 m | 53.25 m (74%) |
+| Sweep † | **new default** | (963 ± 503 mm) | (2.550 m) | **45.15 m** | **19.31 m (43%)** |
+| Sweep † | authority 0 (off) | (520 ± 170 mm) | (2.918 m) | 44.40 m | 19.38 m |
+
+† not a closed loop and no bookend — parenthesised columns have no ground truth.
+
+**What improved, robustly:** the invented path is gone. Reported path drops **34% / 29% / 37%** and
+the vertical share drops from ~70% to ~32%, on all three captures including the one it was not tuned
+on. The whole-run barometric correction is now **9 / 10 / 27 mm** instead of hundreds.
+
+**Height error:** the old blend's 458 mm on the mounted run (the one whose barometer drifted 43 cm)
+is gone — 102 mm, a 4.5× improvement, and the *spread* halves. Note the original entry's headline
+"−581 mm vs −21 mm, 28×" overstated it: those were single members of ensembles whose means are
+458 mm and 67 mm.
+
+**Honest negative:** on this evidence the fixed constraint is **not distinguishable from switching
+the barometer off**. It is better on NoMnt (125 vs 204 mm) and worse on Mnt (102 vs 67 mm), both
+inside the chaos band, and its total contribution is ~10 mm — arithmetically far too small to explain
+either difference. With *this* barometer, on a 1-minute scan, the correct authority is small enough
+to be worth nothing. It is kept in this shape because the parameters are now measurable: a quieter
+barometer (the firmware writes LPS22DF `CTRL_REG1 = 0x20`, which by that register map is minimum
+averaging — untested hypothesis for the 3.1 Pa, which is measured) or a scan long enough for ICP's
+drift to overtake the barometer's would make it earn its place by moving a number, not an argument.
+
+**Consequence for every `%-of-path` figure.** They were all divided by an inflated denominator. The
+headline "frame-to-model closes a room to **0.46 %**" was a lucky single run (0.150 m) over an
+inflated path (32.50 m). Honestly: **0.74 ± 0.19 m over 23.9 m ≈ 3 %** on NoMnt and
+**0.91 ± 0.31 m over 20.9 m ≈ 4.4 %** on Mnt. Still decent absolute closure for a 54×42 imager with
+no loop closure, but ~5× the number 6.D's "does loop closure earn its complexity" argument was
+resting on. `ROADMAP.md` and `CLAUDE.md` are corrected.
+
+**Not fixed / still open:** the barometer's slow wander itself (environmental + sensor, not a
+software defect); the LPS22DF averaging configuration in `rs_lsm.c`, which is the only lever that
+would make the constraint useful — deliberately *not* touched here, the rig was live and streaming;
+and ICP's own vertical jitter, which is what the remaining ~19 m of vertical path on the sweep is.

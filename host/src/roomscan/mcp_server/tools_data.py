@@ -254,6 +254,14 @@ def slam_rerender(capture: str, voxel_size: float = 0.0, block_count: int = 0,
     `icp_escalations` counts frames the tight ICP radius could not handle alone
     (~0 on a clean scan; many means the run was repeatedly near that failure).
 
+    `baro.correction_m` says how much of the reported height came from the
+    barometer rather than from ICP. Expect ~10 mm; a large value means a drifting
+    barometer dragged the run. Note that `trajectory.path_length_m` from before
+    2026-07-30 is not comparable with this one: the old height constraint injected
+    the barometer's per-frame noise straight into the pose, so ~35% of the reported
+    path was vertical motion that never happened, and every "% of path" drift
+    figure computed against it was flattered by the same factor (BUG-037).
+
     Runs `roomscan-slam` as a subprocess (this is a long batch job -- many minutes on
     a full-length capture, and it must not block the server's event loop or pull CUDA
     into this process). Bound it with `max_frames` for a quick check. Zero/empty

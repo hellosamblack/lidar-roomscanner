@@ -28,6 +28,14 @@ from .tsdf import DEFAULT_BLOCK_COUNT, TsdfMap
 _MIN_VALID_POINTS = 100
 _DEFAULT_MIN_CONFIDENCE = 20.0  # tuned against captures/phase6_motion_ref.bin, see task-quality-report.md
 
+# BUG-037: frames of pressure averaged into the barometric datum before the
+# height constraint is allowed to act. A single sample carries ~267 mm RMS of
+# apparent altitude (see _apply_baro_z), and the old code froze the datum on
+# exactly one -- baking that error in as a constant offset for the whole run.
+# 90 frames (~3 s at 30 fps) cuts it to ~28 mm; the captures are parked at the
+# start, and the low-pass below makes the residual harmless anyway.
+_BARO_REF_FRAMES = 90
+
 
 @dataclass
 class FrameStep:
@@ -41,7 +49,8 @@ class FrameStep:
 class Mapper:
     def __init__(self, width: int, height: int, fov_h: float = 55.0, fov_v: float = 42.0,
                  icp_mode: str = "translation", voxel_size: float = 0.01,
-                 baro_weight: float = 0.05, max_dist: float = 0.05,
+                 baro_authority: float = 0.05, baro_tau_frames: int = 900,
+                 max_dist: float = 0.05,
                  icp_retry_dist: float = 0.10,
                  min_fitness: float = 0.3, max_rmse: float = 0.05,
                  min_confidence: float | None = _DEFAULT_MIN_CONFIDENCE,
@@ -57,7 +66,8 @@ class Mapper:
                  clock=time.perf_counter):
         self.width, self.height = width, height
         self.icp_mode = icp_mode
-        self.baro_weight = baro_weight
+        self.baro_authority = baro_authority
+        self.baro_tau_frames = baro_tau_frames
         self.min_confidence = min_confidence
         self._device = device if isinstance(device, o3d.core.Device) else o3d.core.Device(device)
         self._deproj = Deprojector(width, height, fov_h, fov_v)
@@ -89,6 +99,18 @@ class Mapper:
         self._quat_prev = None      # for the stationarity gate's rotation signal
         self._t_prev = np.zeros(3)
         self._ref_pa: float | None = None
+        self._ref_acc = 0.0          # running sum for the averaged baro datum
+        self._ref_n = 0
+        # Low-passed baro-vs-ICP height disagreement (m). Opens at 0, not at the
+        # first innovation: at that instant the pose height IS 0 and the datum
+        # is the averaged start pressure, so the true disagreement is ~0 and a
+        # single noisy sample (~267 mm) is the worst possible seed -- seeding
+        # from it put a k*267 mm step into the very first corrected frame.
+        self._baro_lp = 0.0
+        # Cumulative height the barometer has pushed the pose by, in metres
+        # along world-up. Reported (not just applied) so a run can say how much
+        # of its height came from the barometer rather than from ICP.
+        self.baro_correction_m = 0.0
         self.trajectory: list[np.ndarray] = []
         self.tracking_lost_count = 0
         # Per-frame lost flag. Kept because the COUNT alone hides the failure
@@ -99,19 +121,72 @@ class Mapper:
         self._bootstrapped = False
 
     def _apply_baro_z(self, pose: np.ndarray, pressure_pa: float | None) -> np.ndarray:
-        if pressure_pa is None or self.baro_weight <= 0.0:
+        """Barometric height as a bounded, low-passed complementary correction
+        (BUG-037). The cumulative correction ever applied is exactly
+
+            baro_correction = baro_authority * LPF_tau(h_baro - h_icp)
+
+        i.e. the barometer nudges a fraction of a heavily smoothed disagreement;
+        it never owns the height. Three measurements set that shape, taken on
+        the owner's room circuits (captures/coffeeRoomCircuit{Mnt,NoMnt}.bin):
+
+        1. **The signal is mostly white noise.** Frame-rate pressure carries
+           ~3.1 Pa RMS of sample-to-sample noise = **~267 mm RMS of apparent
+           altitude**, 380 mm frame to frame. The old code fed that raw into a
+           0.66 s blend, which injected **11.5-15.1 mm of vertical step per
+           frame** (measured on all three captures) -- 34/29/37% of the whole
+           reported path length was motion that never happened, flattering
+           every %-of-path drift figure. Hence `baro_tau_frames` -- it must be
+           low-passed before it is allowed anywhere near the pose. (The noise
+           is measured; its cause is not proven. Best hypothesis: `rs_lsm.c`
+           writes LPS22DF `CTRL_REG1 = 0x20`, which by that register map is
+           25 Hz with the *minimum* averaging setting, and the sensor hub
+           delivers ~1 sample per ToF frame so there is no second bite.)
+        2. **What survives the filter is still worse than ICP.** The smoothed
+           barometer wanders ~0.4-0.5 m per minute (0.43 m net on the mounted
+           run) against ICP's own vertical drift of ~20-100 mm/min. A blend
+           gives the barometer *full* authority below its corner frequency --
+           precisely the band where it is ~20x the worse instrument. Hence
+           `baro_authority`: the least-squares share of two drifting estimates
+           is q_icp^2/(q_icp^2 + q_baro^2) ~= 0.09^2/(0.09^2 + 0.45^2) ~= 0.04,
+           rounded to 0.05. (That it equals the retired `baro_weight`'s value
+           is a coincidence of arithmetic, not of meaning: `baro_weight = 0.05`
+           was a per-frame gain whose DC authority was 1.0.)
+        3. **The datum was one noisy sample** -- see `_BARO_REF_FRAMES`.
+
+        The honest consequence, measured: with *this* barometer the optimal
+        authority is small enough that the constraint is worth ~nothing on a
+        1-minute room scan -- its whole-run correction is ~10 mm, and outcome
+        differences at that scale are chaos, not signal (a deliberate 3 mm
+        one-shot nudge moves the final height error by 146 mm and the loop
+        closure by 0.37 m). It is kept, in this shape, because the parameters
+        are now measurable quantities rather than a magic gain: a quieter
+        barometer, or a scan long enough for ICP drift to overtake (2), makes
+        it earn its place again by moving a number we can measure."""
+        if pressure_pa is None or self.baro_authority <= 0.0:
             return pose
         if self._ref_pa is None:
-            self._ref_pa = pressure_pa
+            self._ref_acc += pressure_pa
+            self._ref_n += 1
+            if self._ref_n < _BARO_REF_FRAMES:
+                return pose
+            self._ref_pa = self._ref_acc / self._ref_n
             return pose
-        h = baro_height_m(pressure_pa, self._ref_pa)        # metres up in world
         up = world_up()
-        target_up = h                                       # height along world_up axis
         cur = pose[:3, 3]
-        cur_up = np.dot(cur, up)
-        blended = cur + self.baro_weight * (target_up - cur_up) * up
+        h_baro = baro_height_m(pressure_pa, self._ref_pa)    # metres up in world
+        # Disagreement against ICP's OWN height: the pose already carries every
+        # correction applied so far (it feeds t_prev and the next prediction),
+        # so subtract it back out or the loop would chase its own tail and the
+        # steady-state authority would be k/(1+k) instead of k.
+        innov = h_baro - (float(np.dot(cur, up)) - self.baro_correction_m)
+        alpha = 1.0 if self.baro_tau_frames <= 1 else 1.0 / float(self.baro_tau_frames)
+        self._baro_lp += alpha * (innov - self._baro_lp)
+        target = self.baro_authority * self._baro_lp
+        step = target - self.baro_correction_m
+        self.baro_correction_m = target
         out = pose.copy()
-        out[:3, 3] = blended
+        out[:3, 3] = cur + step * up
         return out
 
     def _gate_confidence(self, depth_mm: np.ndarray, confidence: np.ndarray | None) -> np.ndarray:
