@@ -73,6 +73,8 @@ class ViewerConfig:
     web_cam_mirror_distance_m: float = 0.30
     web_cam_mirror_height_m: float = 0.20
     web_cam_mirror_rotation_deg: float = 0.0
+    web_orbit_enabled: bool = False    # world view only: slow auto-orbit (azimuth only)
+    web_orbit_speed_deg_s: float = 6.0 # 60 s per revolution; negative reverses
     imu_gizmo: bool = True             # show the orientation gizmo in the scene
     sensors_panel: bool = True         # show the Sensors panel group
     gizmo_scale: float = 0.15          # gizmo axis length (metres)

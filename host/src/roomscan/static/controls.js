@@ -74,6 +74,13 @@ export function createControls(hub) {
     slCamHeight?.addEventListener('input', () => sendView({ cam_height: parseFloat(slCamHeight.value) }));
     slCamRotation?.addEventListener('input', () => sendView({ cam_rotation: parseFloat(slCamRotation.value) }));
     $('btn-cam-reset')?.addEventListener('click', () => sendView({ cam_reset: true }));
+
+    // Auto-orbit (World only).
+    const chkOrbit = $('chk-orbit');
+    const slOrbitSpeed = $('sl-orbit-speed');
+    const orbitSpeedVal = $('orbit-speed-val');
+    chkOrbit?.addEventListener('change', () => sendView({ orbit: chkOrbit.checked }));
+    slOrbitSpeed?.addEventListener('input', () => sendView({ orbit_speed: parseFloat(slOrbitSpeed.value) }));
     segViewColormap?.addEventListener('click', (e) => {
         const btn = e.target.closest('button[data-colormap]');
         if (btn) sendView({ colormap: btn.dataset.colormap });
@@ -137,6 +144,16 @@ export function createControls(hub) {
             if (camHeightVal) camHeightVal.textContent = cam.height_m.toFixed(2) + ' m';
             if (camRotationVal) camRotationVal.textContent = Math.round(cam.rotation_deg) + '°';
         }
+        if (chkOrbit && msg.orbit_enabled !== undefined) chkOrbit.checked = !!msg.orbit_enabled;
+        if (msg.orbit_speed_deg_s !== undefined) {
+            if (slOrbitSpeed) slOrbitSpeed.value = msg.orbit_speed_deg_s;
+            if (orbitSpeedVal) orbitSpeedVal.textContent = msg.orbit_speed_deg_s.toFixed(1) + '°/s';
+        }
+        // Orbiting only means something in World — a locked view has nothing to
+        // circle, so grey the controls out rather than let them look armed.
+        const worldOnly = msg.view_mode === 'world' && msg.mode !== 'slam';
+        if (chkOrbit) chkOrbit.disabled = !worldOnly;
+        if (slOrbitSpeed) slOrbitSpeed.disabled = !worldOnly;
         setActive(segViewColormap, 'colormap', msg.view_colormap);
         if (slPointSize && msg.point_size !== undefined) slPointSize.value = msg.point_size;
         if (chkPointAuto && msg.point_size_auto !== undefined) chkPointAuto.checked = !!msg.point_size_auto;

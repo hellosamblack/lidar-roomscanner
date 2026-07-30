@@ -2584,6 +2584,59 @@ def test_view_cam_round_trips_through_config():
     assert web.ui_from_config(cfg).view_cam["mirror"] == web.ViewCam(3.5, -1.25, 90.0)
 
 
+def test_orbit_defaults_off_at_a_slow_speed():
+    """Off by default — a scene that starts spinning on its own would be a
+    surprise — and 6 deg/s is one revolution per minute, i.e. "slow orbit"."""
+    ui = web.UiState()
+    assert ui.orbit_enabled is False
+    assert ui.orbit_speed_deg_s == 6.0
+
+
+def test_state_message_carries_orbit():
+    m = web._state_message(web.UiState(orbit_enabled=True, orbit_speed_deg_s=-12.5))
+    assert m["orbit_enabled"] is True
+    assert m["orbit_speed_deg_s"] == -12.5
+
+
+def test_set_view_orbit_updates_and_persists(tmp_path):
+    import types
+    import roomscan.config as config_mod
+    p = tmp_path / "roomscan.toml"
+    state = types.SimpleNamespace(config=ViewerConfig(), ui_state=web.UiState(),
+                                  clients=set(), controller=None)
+    orig = config_mod.config_path
+    config_mod.config_path = lambda: p
+    try:
+        asyncio.run(web._handle_inbound(
+            state, {"type": "set_view", "orbit": True, "orbit_speed": -20.0}))
+    finally:
+        config_mod.config_path = orig
+    assert state.ui_state.orbit_enabled is True
+    assert state.ui_state.orbit_speed_deg_s == -20.0
+    back = ViewerConfig.load(p)
+    assert back.web_orbit_enabled is True and back.web_orbit_speed_deg_s == -20.0
+    assert web.ui_from_config(back).orbit_speed_deg_s == -20.0
+
+
+def test_set_view_rejects_out_of_range_orbit_speed():
+    """Negative is legal (it reverses); absurd is not. A bad value must leave
+    the current speed alone rather than parking the orbit at 0."""
+    import types
+    state = types.SimpleNamespace(config=None, ui_state=web.UiState(orbit_speed_deg_s=6.0),
+                                  clients=set(), controller=None)
+    for bad in (600.0, -600.0, "fast", None):
+        asyncio.run(web._handle_inbound(state, {"type": "set_view", "orbit_speed": bad}))
+        assert state.ui_state.orbit_speed_deg_s == 6.0
+    # ...and 0 IS in range: it parks the orbit without disabling it.
+    asyncio.run(web._handle_inbound(state, {"type": "set_view", "orbit_speed": 0.0}))
+    assert state.ui_state.orbit_speed_deg_s == 0.0
+
+
+def test_ui_from_config_rejects_corrupt_orbit_speed():
+    assert web.ui_from_config(ViewerConfig(web_orbit_speed_deg_s=1e6)).orbit_speed_deg_s == 6.0
+    assert web.ui_from_config(ViewerConfig(web_orbit_speed_deg_s="quick")).orbit_speed_deg_s == 6.0
+
+
 def test_ui_from_config_rejects_corrupt_view_cam_values():
     """A hand-edited or corrupt roomscan.toml must not be able to park the
     camera 1000 m away with no way back through the UI."""

@@ -226,6 +226,14 @@ export function createScene(hub) {
     // camera here is a fixed pose and can never lag or slosh against the
     // geometry. Mirror needs nothing extra client-side: the server negates X.
     const FPV_NEAR = 0.02, WORLD_NEAR = 0.1;
+    // Slow auto-orbit of the world view (owner ask, 2026-07-30). Handed to
+    // OrbitControls' own `autoRotate`, which advances the AZIMUTH only —
+    // elevation and distance are left exactly as they are, which is the ask.
+    // Doing it here rather than by animating the persisted `rotation_deg`
+    // keeps it smooth at the browser's frame rate and off the wire entirely.
+    // Its speed unit is 2*PI/60 rad per second per unit, i.e. 6 deg/s.
+    const AUTOROTATE_PER_DEG_S = 1 / 6;
+    let orbitOn = false;
     let viewMode = 'world';
     const viewCam = {};                     // live per-mode framing, from `state.view_cam`
     for (const m of Object.keys(DEFAULT_VIEW_CAM)) viewCam[m] = { ...DEFAULT_VIEW_CAM[m] };
@@ -289,6 +297,10 @@ export function createScene(hub) {
             controls.enabled = false;
             gridHelper.visible = false;
         }
+        // World only — a locked view has nothing to orbit around. (The FPV
+        // branch also skips controls.update(), so it could not advance anyway;
+        // this keeps the flag honest rather than relying on that.)
+        controls.autoRotate = orbitOn && m === 'world';
         D('view mode -> ' + m);
     }
 
@@ -389,6 +401,13 @@ export function createScene(hub) {
         // the slider being dragged. (When the mode also changed, applyViewMode
         // already placed the camera.)
         if (framingMoved && !modeMoved) applyPose(viewMode);
+        if (msg.orbit_speed_deg_s !== undefined) {
+            controls.autoRotateSpeed = msg.orbit_speed_deg_s * AUTOROTATE_PER_DEG_S;
+        }
+        if (msg.orbit_enabled !== undefined) {
+            orbitOn = !!msg.orbit_enabled;
+            controls.autoRotate = orbitOn && viewMode === 'world';
+        }
         if (msg.point_size !== undefined) material.size = msg.point_size;
         // Uniform-only: toggling auto never recompiles the program.
         if (msg.point_size_auto !== undefined) pointUniforms.uAutoSize.value = msg.point_size_auto ? 1.0 : 0.0;
@@ -421,9 +440,22 @@ export function createScene(hub) {
     let renderActive = true;
     function setRenderActive(on) { renderActive = !!on; }
 
+    // Wall-clock delta handed to controls.update(). Without it OrbitControls
+    // assumes a fixed 1/60 s step for auto-rotation, so the orbit would run at
+    // whatever fraction of the requested deg/s the frame rate happens to be —
+    // and this box renders the live scene nearer 13 fps than 60.
+    let lastFrameTime = performance.now();
+    function frameDelta() {
+        const now = performance.now();
+        const dt = (now - lastFrameTime) / 1000;
+        lastFrameTime = now;
+        return Math.min(dt, 0.25);          // clamp: a backgrounded tab must not lurch
+    }
+
     function animate() {
         requestAnimationFrame(animate);
-        if (!renderActive) { if (viewMode === 'world') controls.update(); return; }
+        const dt = frameDelta();
+        if (!renderActive) { if (viewMode === 'world') controls.update(dt); return; }
         if (followOn && haveFollowTarget) {
             controls.enabled = false;
             // Velocity-adaptive lerp: fast when the sensor moves, steady when still.
@@ -438,7 +470,7 @@ export function createScene(hub) {
             // damping keeps easing toward the controls' own internal spherical
             // state even while `enabled` is false, which would drift the pose.
         } else {
-            controls.update();
+            controls.update(dt);
         }
         renderer.render(scene, camera);
 

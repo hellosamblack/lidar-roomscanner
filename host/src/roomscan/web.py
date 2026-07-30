@@ -171,6 +171,11 @@ _VALID_VIEW_MODES = ("world", "fpv", "mirror")
 _CAM_DISTANCE_RANGE = (0.0, 15.0)      # metres back along the view axis
 _CAM_HEIGHT_RANGE = (-5.0, 10.0)       # metres up (negative dips below)
 _CAM_ROTATION_RANGE = (-180.0, 180.0)  # degrees; positive swings the eye right
+# Auto-orbit is WORLD-ONLY: fpv/mirror are locked to the sensor, so there is no
+# scene to circle. Azimuth only -- elevation and distance are untouched, which
+# is why the client hands it to OrbitControls' own `autoRotate` rather than
+# animating `rotation_deg` (that would also churn the persisted value at 30 Hz).
+_ORBIT_SPEED_RANGE = (-60.0, 60.0)     # deg/s; negative reverses
 
 
 @dataclass
@@ -302,6 +307,9 @@ class UiState:
     # Camera framing per view mode, all referenced to the FPV baseline --
     # see `_DEFAULT_VIEW_CAM`. Keyed by view mode; always all three keys.
     view_cam: dict[str, ViewCam] = field(default_factory=default_view_cam)
+    # Slow auto-orbit of the world view (owner ask, 2026-07-30). Azimuth only.
+    orbit_enabled: bool = False
+    orbit_speed_deg_s: float = 6.0     # 60 s per revolution
     idle_enabled: bool = True
     idle_level: str = "soft"           # "soft" | "hard"
     # Orientation decomposition (owner ask, 2026-07-28): which VIEW of the
@@ -1255,6 +1263,8 @@ def _state_message(ui: UiState) -> dict:
             "surface_threshold_pct": ui.surface_threshold_pct,
             "view_mode": ui.view_mode,
             "view_cam": {m: asdict(c) for m, c in ui.view_cam.items()},
+            "orbit_enabled": ui.orbit_enabled,
+            "orbit_speed_deg_s": ui.orbit_speed_deg_s,
             "mode": ui.mode, "slam_trajectory": ui.slam_trajectory,
             "slam_walls": ui.slam_walls, "slam_follow": ui.slam_follow,
             "idle_enabled": ui.idle_enabled, "idle_level": ui.idle_level,
@@ -1308,6 +1318,13 @@ def ui_from_config(cfg: ViewerConfig) -> UiState:
                 continue                      # corrupt value: keep the default
             if lo <= v <= hi:
                 setattr(cam, attr, v)
+    ui.orbit_enabled = bool(cfg.web_orbit_enabled)
+    try:
+        speed = float(cfg.web_orbit_speed_deg_s)
+    except (TypeError, ValueError):
+        speed = None
+    if speed is not None and _ORBIT_SPEED_RANGE[0] <= speed <= _ORBIT_SPEED_RANGE[1]:
+        ui.orbit_speed_deg_s = speed
     ui.slam_trajectory = bool(cfg.slam_trajectory)
     if cfg.slam_walls in _VALID_WALL_MODES:
         ui.slam_walls = cfg.slam_walls
@@ -1343,6 +1360,8 @@ def apply_ui_to_config(ui: UiState, cfg: ViewerConfig) -> None:
         cam = ui.view_cam[mode]
         for key, (attr, _range) in zip(keys, _VIEW_CAM_FIELDS):
             setattr(cfg, key, float(getattr(cam, attr)))
+    cfg.web_orbit_enabled = bool(ui.orbit_enabled)
+    cfg.web_orbit_speed_deg_s = float(ui.orbit_speed_deg_s)
     cfg.slam_trajectory = bool(ui.slam_trajectory)
     cfg.slam_walls = ui.slam_walls
     cfg.slam_follow = bool(ui.slam_follow)
@@ -2768,6 +2787,18 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
                 continue
             if lo <= v <= hi:                 # out of range: drop, keep the current value
                 setattr(cam, attr, v)
+                changed = True
+        if "orbit" in msg:
+            ui.orbit_enabled = bool(msg["orbit"])
+            changed = True
+        if "orbit_speed" in msg:
+            try:
+                s = float(msg["orbit_speed"])
+            except (TypeError, ValueError):
+                log.warning("invalid set_view orbit_speed: %r", msg.get("orbit_speed"))
+                s = None
+            if s is not None and _ORBIT_SPEED_RANGE[0] <= s <= _ORBIT_SPEED_RANGE[1]:
+                ui.orbit_speed_deg_s = s
                 changed = True
         if changed:
             _persist_ui(state)
