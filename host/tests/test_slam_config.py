@@ -119,3 +119,15 @@ def test_release_cache_every_default_and_toml_override(tmp_path):
     p = tmp_path / "roomscan.toml"
     p.write_text("[slam]\nrelease_cache_every = 0\n", encoding="utf-8")
     assert SlamConfig.load(p).release_cache_every == 0
+
+
+def test_block_count_default_matches_tsdf_and_reads_from_toml(tmp_path):
+    # BUG-035. SlamConfig spells the default as a literal so this module stays
+    # importable without open3d -- pin it to the real constant so the two
+    # cannot drift apart silently.
+    from roomscan.slam.config import SlamConfig
+    from roomscan.slam.tsdf import DEFAULT_BLOCK_COUNT
+    assert SlamConfig().block_count == DEFAULT_BLOCK_COUNT
+    p = tmp_path / "roomscan.toml"
+    p.write_text("[slam]\nblock_count = 500000\n", encoding="utf-8")
+    assert SlamConfig.load(p).block_count == 500000

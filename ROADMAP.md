@@ -1132,6 +1132,34 @@ run with live-cadence extraction asserting a peak ceiling (1500 MiB), a flat tai
 becoming unwired). Thresholds sit in the wide gap between fixed (~0.005–0.04) and unfixed (5.13), so it
 should not flap.
 
+**Validated on real data (2026-07-30)** — the owner's first full room sweep, `captures/roomSweepFull20260730.bin`
+(14,407 frames, 0 CRC failures, 3,525 depth frames), replayed through the rig. The effect is **larger**
+than the synthetic estimate, because the leak scales with block count and a real sweep grows the map
+faster than the generated walk:
+
+| | unfixed (`release_cache_every=0`) | fixed (default) |
+|---|---|---|
+| growth | **10.34 MiB/frame** (2× synthetic) | **−0.03 MiB/frame** |
+| device memory | 7305 of 8188 MiB by frame **800** | peak 811 MiB, ends at 523, over **3525** frames |
+| outcome | ~100 frames from OOM; would need ~36 GB to finish | flat throughout |
+
+Step latency on real data stayed healthy: p50 8.7 ms, p90 11.6, p99 14.8 (and 7.9 / 9.8 / 11.9 on the
+final shipped-defaults run — see BUG-035; a bigger hashmap is slightly *faster*, not slower).
+
+**…and removing the memory ceiling exposed the next wall — BUG-035.** With the leak fixed, the same scan
+ran far enough to exhaust the `VoxelBlockGrid`'s fixed capacity: blocks saturated at 38,937 of 40,000 on
+frame 2879, and tracking collapsed 30 frames later (0 lost before, **560 after**; median ICP fitness
+0.887 → 0.127; 18% of the scan ruined), with no log line anywhere. The sweep genuinely needs **42,917**
+blocks — 7% over the old default. Fixed by raising `DEFAULT_BLOCK_COUNT` to 160,000, plumbing
+`block_count` through `Mapper`/`[slam]`/CLI/`SlamRunner`/the rig, and warning once at 90% of capacity.
+Re-run on the shipped defaults: **11 lost frames of 3525**, fitness 1.00 at the end, 42,917/160,000
+blocks (27% of capacity), memory flat at 0.013 MiB/frame, and step latency p50 **7.9** ms / p90 9.8 /
+p99 11.9 — *better* than the 40,000 run, so the larger pre-allocation costs nothing per frame. (The
+90%-capacity check is one hashmap size read, measured at **5.8 µs**, i.e. 0.02 s across the whole scan,
+and it early-outs permanently once it has fired.) A **CPU grid** (`[slam] device =
+"CPU:0"`, system RAM instead of VRAM) completed the same scan with **0 lost of 3525** at 46,037 blocks —
+the grid is device-homogeneous, so that is the route to maps larger than VRAM holds.
+
 Two pieces of shared scaffolding came out of this, both used by the rig *and* the guard:
 `roomscan.slam.gpumem` (a ctypes NVML probe — Open3D exposes no "bytes allocated" API, and this avoids
 adding pynvml) and `roomscan.slam.synthscene` (a deterministic analytic room + camera walk, runnable to

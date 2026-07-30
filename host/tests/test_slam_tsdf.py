@@ -273,6 +273,49 @@ def test_mesh_and_point_cloud_each_count_as_one_extraction():
     assert len(seen) == 2
 
 
+# ------------------------------------------------------------------- BUG-035
+# The VoxelBlockGrid pre-allocates block_count blocks and does NOT grow. Once
+# full it silently drops geometry and frame-to-model tracking collapses -- on
+# the owner's room sweep, 560 of the last 646 frames were lost. These cover the
+# capacity knob and the saturation warning that makes it visible.
+
+
+def test_default_block_count_covers_a_full_room_sweep():
+    # The owner's roomSweepFull20260730.bin needs 42,917 blocks at 1 cm voxels.
+    # The old 40,000 default sat *below* real demand, which is what made the
+    # failure so easy to hit -- keep a real margin over it.
+    assert tsdf_mod.DEFAULT_BLOCK_COUNT >= 3 * 42917
+    assert TsdfMap(voxel_size=0.02).block_count == tsdf_mod.DEFAULT_BLOCK_COUNT
+    assert TsdfMap(voxel_size=0.02, block_count=1234).block_count == 1234
+
+
+def test_block_usage_reports_active_blocks_and_capacity():
+    m = TsdfMap(voxel_size=0.02, depth_max=5.0, block_count=5000)
+    used, cap = m.block_usage()
+    assert (used, cap) == (0, 5000)
+    m.integrate(_wall_depth(1.0), pinhole(W, H), np.eye(4))
+    used, cap = m.block_usage()
+    assert used > 0 and cap == 5000
+
+
+def test_saturation_warns_once_when_the_map_nears_capacity(caplog):
+    # A capacity small enough that one wall integration blows past 90%.
+    m = TsdfMap(voxel_size=0.02, depth_max=5.0, block_count=8)
+    with caplog.at_level("WARNING"):
+        m.integrate(_wall_depth(1.0), pinhole(W, H), np.eye(4))
+        m.integrate(_wall_depth(1.0), pinhole(W, H), np.eye(4))
+    hits = [r for r in caplog.records if "block" in r.getMessage()]
+    assert len(hits) == 1, "must warn exactly once, not once per frame"
+    assert "block_count" in hits[0].getMessage()
+
+
+def test_no_saturation_warning_with_headroom(caplog):
+    m = TsdfMap(voxel_size=0.02, depth_max=5.0, block_count=40000)
+    with caplog.at_level("WARNING"):
+        m.integrate(_wall_depth(1.0), pinhole(W, H), np.eye(4))
+    assert not [r for r in caplog.records if "capacity" in r.getMessage()]
+
+
 def test_empty_map_extraction_does_not_count_as_an_extraction():
     # The empty-map guards return a placeholder without touching the grid --
     # nothing was allocated, so there is nothing to release.

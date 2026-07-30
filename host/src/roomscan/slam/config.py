@@ -75,6 +75,20 @@ class SlamConfig:
     # same p50/p90/p99 step latency as off); 0 disables. No-op on a CPU device.
     # Measured with host/tools/slam_gpu_memory.py; see slam/tsdf.py.
     release_cache_every: int = 1
+    # BUG-035: VoxelBlockGrid capacity. It pre-allocates and does NOT grow --
+    # once full, new geometry is silently dropped and frame-to-model tracking
+    # collapses. The owner's full room sweep needs 42,917 blocks at 1 cm
+    # voxels; the default is ~3.7x that, at ~14.2 KiB/block of device memory.
+    # Raise for larger rooms or finer voxels. A CPU grid ([slam] device =
+    # "CPU:0") can go far higher -- system RAM, not VRAM, is the limit there
+    # (it completed that same sweep with 0 lost frames), at the ~2.1x CPU/GPU
+    # per-step ratio from the CUDA at-scale validation. See slam/tsdf.py.
+    #
+    # Spelled as a literal, not imported from slam.tsdf: this module must stay
+    # importable without open3d (see preferred_device's lazy import), and
+    # importing tsdf would pull it in at module scope. test_slam_config pins
+    # this to tsdf.DEFAULT_BLOCK_COUNT so the two cannot drift.
+    block_count: int = 160000
     # Compute backend for the live worker: "local" runs Mapper in-process
     # (default, unchanged behavior); "remote" ships frames to a SlamService
     # (GPU WSL container) at remote_addr, falling back to local if unreachable.

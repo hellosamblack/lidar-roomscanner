@@ -69,6 +69,7 @@ def _run(frames, width, height, cfg, mode, device=None):
                     max_dist=cfg.max_dist, min_fitness=cfg.min_fitness, max_rmse=cfg.max_rmse,
                     min_confidence=cfg.min_confidence, weight_threshold=cfg.weight_threshold,
                     release_cache_every=cfg.release_cache_every,
+                    block_count=cfg.block_count,
                     stationary_hold=cfg.stationary_hold, stationary_window=cfg.stationary_window,
                     stationary_coherence=cfg.stationary_coherence,
                     stationary_step_ceiling=cfg.stationary_step_ceiling,

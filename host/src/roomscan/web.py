@@ -1640,7 +1640,8 @@ class SlamRunner:
         device = preferred_device()
         worker = make_slam_worker(width, height, fov_h=self._fov_h,
                                   fov_v=self._fov_v, device=device,
-                                  release_cache_every=cfg.release_cache_every)
+                                  release_cache_every=cfg.release_cache_every,
+                                  block_count=cfg.block_count)
         worker.start()
         meshprep = MeshPrep(vertex_budget=cfg.live_vertex_budget,
                             fps_budget_ms=cfg.fps_budget_ms)

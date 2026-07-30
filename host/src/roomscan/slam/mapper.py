@@ -23,7 +23,7 @@ from .frames import baro_height_m, predict_pose, world_up
 from .intrinsics import pinhole
 from .motion import StationarityGate
 from .odometry import register
-from .tsdf import TsdfMap
+from .tsdf import DEFAULT_BLOCK_COUNT, TsdfMap
 
 _MIN_VALID_POINTS = 100
 _DEFAULT_MIN_CONFIDENCE = 20.0  # tuned against captures/phase6_motion_ref.bin, see task-quality-report.md
@@ -47,6 +47,7 @@ class Mapper:
                  weight_threshold: float = 3.0,
                  device: str | o3d.core.Device = "CPU:0",
                  release_cache_every: int = 1,
+                 block_count: int = DEFAULT_BLOCK_COUNT,
                  stationary_hold: bool = True,
                  stationary_window: int = 10,
                  stationary_coherence: float = 0.5,
@@ -62,7 +63,8 @@ class Mapper:
         self._intr = pinhole(width, height, fov_h, fov_v, device=self._device)
         self._tsdf = TsdfMap(voxel_size=voxel_size, weight_threshold=weight_threshold,
                              device=self._device,
-                             release_cache_every=release_cache_every)
+                             release_cache_every=release_cache_every,
+                             block_count=block_count)
         self._gate = dict(max_dist=max_dist, min_fitness=min_fitness, max_rmse=max_rmse)
         self._clock = clock
         # Stationarity hold (owner: "device is stationary, tweak it until this

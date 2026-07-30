@@ -116,6 +116,10 @@ def main(argv=None) -> int:
                     help="also extract a point cloud at --mesh-every (the map_point_cloud path)")
     ap.add_argument("--voxel-size", type=float, default=None,
                     help="override [slam] voxel_size (smaller = more blocks per metre walked)")
+    ap.add_argument("--block-count", type=int, default=None,
+                    help="override [slam] block_count (VoxelBlockGrid capacity; it does not "
+                         "grow -- see BUG-035). Watch the blocks/capacity column: saturation "
+                         "silently stops the map and collapses tracking.")
     ap.add_argument("--width", type=int, default=54)
     ap.add_argument("--height", type=int, default=42)
     ap.add_argument("--csv", default=None,
@@ -161,6 +165,8 @@ def main(argv=None) -> int:
                     weight_threshold=cfg.weight_threshold,
                     stationary_hold=cfg.stationary_hold,
                     release_cache_every=release_every,
+                    block_count=(args.block_count if args.block_count is not None
+                                 else cfg.block_count),
                     device=args.device)
     vbg = mapper._tsdf._vbg
 

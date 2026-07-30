@@ -65,6 +65,8 @@ numbers and the mechanism.
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import open3d as o3d
 
@@ -75,6 +77,31 @@ def _resolve_device(device) -> o3d.core.Device:
 
 def _is_cuda(device: o3d.core.Device) -> bool:
     return "CUDA" in str(device).upper()
+
+
+# BUG-035. The VoxelBlockGrid pre-allocates `block_count` blocks and does NOT
+# grow: once the hashmap is full, integrate() silently drops new geometry, and
+# because SLAM is frame-to-model, ICP then has nothing fresh to register
+# against and tracking collapses within ~30 frames.
+#
+# Measured on the owner's full room sweep (captures/roomSweepFull20260730.bin,
+# 3525 depth frames, 1 cm voxels): the scan genuinely needs 42,917 blocks --
+# just 7% over the old 40,000 default. At 40,000 it saturated at 38,937 (97.3%)
+# on frame 2879 and lost 560 of the remaining 646 frames (median ICP fitness
+# 0.887 -> 0.127, plus `stdgpu::vector::size ... Clamping to 0` from Open3D).
+# At 120,000 the same capture lost 11 frames total and ended at fitness 1.00.
+#
+# 160,000 is ~3.7x that scan, costing ~2.3 GiB of pre-allocated device memory
+# (measured 1707 MiB at 120,000, i.e. ~14.2 KiB/block). That fits alongside the
+# ~520 MiB steady-state working set on an 8 GiB card. Rooms bigger than this,
+# or finer voxels, want `[slam] block_count` raised -- and on a CPU grid it can
+# go far higher, since system RAM is the only limit (see the class docstring).
+DEFAULT_BLOCK_COUNT = 160000
+
+# Warn once the map crosses this fraction of capacity. The failure above was
+# invisible until the trajectory was already ruined; ~30 frames of warning at
+# 90% is enough to abort a scan rather than discover it in post.
+_SATURATION_WARN_FRAC = 0.90
 
 
 # Open3D's VoxelBlockGrid takes the camera intrinsic/extrinsic as CPU:0 Float64
@@ -89,7 +116,7 @@ _CPU = o3d.core.Device("CPU:0")
 
 class TsdfMap:
     def __init__(self, voxel_size: float = 0.01, trunc_multiplier: float = 8.0,
-                 block_resolution: int = 8, block_count: int = 40000,
+                 block_resolution: int = 8, block_count: int = DEFAULT_BLOCK_COUNT,
                  depth_scale: float = 1000.0, depth_max: float = 5.0,
                  weight_threshold: float = 3.0,
                  device: str | o3d.core.Device = "CPU:0",
@@ -99,6 +126,8 @@ class TsdfMap:
         self.depth_scale = depth_scale
         self.depth_max = depth_max
         self.weight_threshold = weight_threshold
+        self.block_count = int(block_count)
+        self._saturation_warned = False
         self._device = _resolve_device(device)
         # Sub-phase 6.G: release Open3D's CUDA cache every N extractions
         # (0 disables). See _release_cache_if_due for why extractions, not
@@ -148,6 +177,33 @@ class TsdfMap:
             self._vbg.integrate(coords, depth, intr, ext,
                                 self.depth_scale, self.depth_max, self.trunc_multiplier)
         self._empty = False
+        self._check_saturation()
+
+    def block_usage(self) -> tuple[int, int]:
+        """(active blocks, capacity). Cheap -- a hashmap size read."""
+        return int(self._vbg.hashmap().size()), self.block_count
+
+    def _check_saturation(self) -> None:
+        """Warn (once) as the block hashmap approaches capacity -- see BUG-035.
+
+        The VBG does not grow, so crossing capacity is not a slowdown, it is a
+        silent stop: new geometry is dropped and frame-to-model tracking dies
+        shortly after. Warning at `_SATURATION_WARN_FRAC` turns that into
+        something a live scan can react to."""
+        # Early-out first: this runs on every integrate, and after the warning
+        # has fired there is nothing left to do, so don't pay for the hashmap
+        # size read (a device sync on CUDA) for the rest of the scan.
+        if self._saturation_warned or self.block_count <= 0:
+            return
+        used, cap = self.block_usage()
+        if used >= _SATURATION_WARN_FRAC * cap:
+            self._saturation_warned = True
+            logging.getLogger(__name__).warning(
+                "[slam] TSDF map at %d/%d blocks (%.0f%% of capacity) -- the "
+                "VoxelBlockGrid does not grow, and new geometry is dropped once "
+                "it is full, which collapses frame-to-model tracking. Raise "
+                "[slam] block_count (or coarsen [slam] voxel_size) for a scan "
+                "this large.", used, cap, 100.0 * used / cap)
 
     def frustum_block_coords(self, depth_mm: np.ndarray, intrinsic: o3d.core.Tensor,
                               extrinsic: np.ndarray) -> o3d.core.Tensor:

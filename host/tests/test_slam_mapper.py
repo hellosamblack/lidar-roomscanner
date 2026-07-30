@@ -212,3 +212,11 @@ def test_mapper_forwards_release_cache_every_to_its_tsdf():
                   release_cache_every=0)._tsdf.release_cache_every == 0
     assert Mapper(W, H, voxel_size=0.02,
                   release_cache_every=10)._tsdf.release_cache_every == 10
+
+
+def test_mapper_forwards_block_count_to_its_tsdf():
+    # BUG-035: the capacity knob has to reach TsdfMap, which owns the grid.
+    from roomscan.slam.tsdf import DEFAULT_BLOCK_COUNT
+    assert Mapper(W, H, voxel_size=0.02)._tsdf.block_count == DEFAULT_BLOCK_COUNT
+    assert Mapper(W, H, voxel_size=0.02,
+                  block_count=7777)._tsdf.block_count == 7777
