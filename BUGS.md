@@ -41,7 +41,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-027 | fixed   | firmware      | SFLP quaternion decimated 480 Hz → 30 Hz by keeping one sample of ~16, aliasing the whole noise band into the output |
 | BUG-028 | fixed   | firmware      | Ethernet hot-plug replug wedges board (LD2 freezes) — lwIP double-add assertion on `mdns_resp_add_netif` |
 | BUG-029 | fixed   | host/sources  | `UdpSource` stream recovery fails due to `255.255.255.255` fallback keepalives not routing on some Linux network configs |
-| BUG-030 | open    | host/sensors  | Magnetometer calibration is direction-dependent: |B| ranges 47→85 µT with tilt — root-caused to a ~59 µT wrong hard-iron offset (+ tripod, BUG-034); remedy is an owner re-fit via the UI |
+| BUG-030 | fixed   | host/sensors  | Magnetometer calibration is direction-dependent: |B| ranges 47→85 µT with tilt — root-caused to a ~59 µT wrong hard-iron offset (+ tripod, BUG-034); owner re-fit 2026-07-30, validated on an independent room sweep |
 | BUG-031 | open    | firmware      | ToF frame timestamp and IMU FIFO drain skewed ~0.9 ms (dominates handheld orientation error) |
 | BUG-032 | fixed   | host/slam     | GPU SLAM OOMs on a long scan — Open3D's CUDA cache grows ~5.1 MiB/frame from the throttled mesh extraction (NOT the per-frame path, which is byte-flat) |
 | BUG-033 | fixed   | host/web      | Sensors card outgrew the dock band (~1600 px of flat, half-duplicated rows) — jitter table unreachable, whole card auto-collapsed on a narrow window |
@@ -912,11 +912,13 @@ Even after the firmware crash (BUG-028) was fixed, the `UdpSource` stream would 
 
 ## BUG-030 — Magnetometer calibration is direction-dependent: |B| ranges 47→85 µT with tilt
 
-- **Status:** **open — root-caused 2026-07-29, remedy pending an owner UI action** · **Reported:**
-  2026-07-29 (owner: "most of the noise I see in the UI is in the eCompass") · **Area:** host/sensors
-  (calibration data, not code)
-- **Where:** `host/mag_cal.json` (fitted 2026-07-15, `field_ut = 49.87`); consumed via
-  `host/src/roomscan/magcal.py` → `MagCalibration.apply()`
+- **Status:** **fixed 2026-07-30** (owner re-fit, validated on independent data — see "RESOLUTION"
+  at the end of this entry) · **Reported:** 2026-07-29 (owner: "most of the noise I see in the UI is
+  in the eCompass") · **Area:** host/sensors (calibration data, not code)
+- **Where:** `mag_cal.json` at the **repo root** — the path a `roomscan-web` started from the repo
+  root resolves `ViewerConfig.mag_cal_path` to; consumed via `host/src/roomscan/magcal.py` →
+  `MagCalibration.apply()`. (Was `host/mag_cal.json`, fitted 2026-07-15, `field_ut = 49.87`;
+  **that file is deleted** — see "The two-file trap" below.)
 
 A correctly calibrated magnetometer reports a **constant** field magnitude at every orientation —
 that is the defining property. Ours does not. Measured on a deliberate braced tilt sweep
@@ -1001,8 +1003,62 @@ which also exercises the hot-reload path not yet tested with a real fit. Coverag
 was 54/92 cells (59%), just under the tool's 60% marginal bar, so more tumbling raises confidence —
 but the field metrics are good *and* generalise to unseen data, which is the stronger evidence.
 Calibrate **hand-held in open space, away from the tripod**: calibrating while mounted would bake a
-position-dependent error into a fit used hand-held. `host/mag_cal.json` is still the 2026-07-15 file
-until that is done. Sources: DT0058, DT0059, DT0103, AN5069 §5/§8.
+position-dependent error into a fit used hand-held. ~~`host/mag_cal.json` is still the 2026-07-15 file
+until that is done.~~ Sources: DT0058, DT0059, DT0103, AN5069 §5/§8.
+
+## RESOLUTION (2026-07-30) — owner re-fit, validated against a capture the fit never saw
+
+The owner ran a full tumble through the calibration modal **hand-held, off the tripod, with the
+metal tripod mount plate still attached** (body-fixed, so its hard iron is calibratable — and it is
+now baked into the fit; **removing the plate invalidates the calibration**). Saved via **Save &
+apply**, which exercised the hot-reload path for the first time with a real fit. Then recorded an
+independent 118 s room sweep, `captures/roomSweepFull20260730.bin` (3574 mag samples at 30.3 Hz,
+streams 7/8/9/10/11/12, walking the room).
+
+New fit: hard iron `[24.8, −5.8, +8.6]` (|offset| 26.9 µT), `field_ut` 48.09, soft-iron axis-gain
+ratio **1.091**. That offset sits **58.3 µT** from the superseded one — matching the ~59 µT the root
+cause above predicted.
+
+Scored with the new `host/tools/mag_check.py` (`capture_magcheck` MCP tool):
+
+| metric on the sweep | new fit | superseded 2026-07-15 fit |
+|---|---|---|
+| **attitude-locked error** (the verdict) | **0.29 µT = 0.56%** → good | 3.44 µT = 3.81% → marginal |
+| **tilt ramp**, \|B\| max/min across 10 tilt bins | **1.042×** → good | 2.721× → bad |
+| \|B\| by tilt, 0° (ceiling) → 90° (horizontal) → 180° | 51.5 → 51.5 → 52.7 (flat) | 40.3 → 92.1 → 109.5 (ramp) |
+| `YawFusion` `gated:anomaly` | **0%** | 58.6% |
+| `YawFusion` `active` | **64.8%** | 6.2% |
+
+The gating row is the practical consequence: fusion was silently off for most of a scan and is now
+on (the remainder is `gated:motion` 30% / `gated:gimbal` 5%, both by design). Live on the desk
+afterwards: `has_mag_cal=true`, `fusion="Active"`, |B| 50.24 µT over a 49.76–50.87 range.
+
+**The raw spread is NOT the calibration.** `field_consistency` scores this good fit "bad" on the
+sweep (std 4.58%, bias +6.91%) — that metric assumes every sample came from one place, which is true
+of a tumble and false of a 118 s walk. Detrending |B| with a 5 s rolling median splits the 2.35 µT
+total std into **2.00 µT of slow spatial drift** (the building's ferrous mass moving the ambient
+field under the operator — |B| walks 49.9 → 53.6 → 48.3 → 54.4 across the room while the *within-bin*
+std is often 0.4 µT) and only 0.29 µT locked to body attitude. See `magsweep.attitude_locked_error`.
+
+**Still unproven: heading direction.** |B| flatness proves magnitude, not direction — an ellipsoid
+fit is ambiguous up to a rotation (DT0103, noted in the app-note review above), which would give the
+right magnitude at a systematically rotated heading. The near-spherical soft iron bounds that at
+~2.5°, but the sweep cannot measure it: there is no ground truth in it, and a mag-vs-SFLP-yaw proxy
+is invalid because `quat_yaw_deg` is ZYX yaw about body **Z (Forward)** while the SFLP body frame has
+**X = Up** — that is not heading. The test that would settle it is a braced, fixed-compass-heading
+tilt sweep through level → 45° → vertical, hand-held.
+
+### The two-file trap (found while validating this)
+
+`ViewerConfig.mag_cal_path` is **relative**, so it resolves against the server's cwd — the repo root
+in practice. The tracked calibration lived at `host/mag_cal.json`, which the running server therefore
+never loaded: it had **no calibration at all** from boot until the 07:22 save created the root file.
+Anything run from `host/` (`tools/mag_calibrate.py`, the deprecated panel) would meanwhile have
+silently applied the superseded fit.
+
+Fixed by keeping **one** tracked file, at the root, and deleting `host/mag_cal.json`. A missing file
+fails loudly and safely (`has_mag_cal=false`, `fusion="gated:no-cal"` in the UI); a stale one is
+silently wrong, which is what happened here.
 
 ## BUG-031 — ToF frame timestamp and IMU FIFO drain are skewed ~0.9 ms
 
@@ -1159,6 +1215,14 @@ rather than orientation — which is why the tilt sweep looked like a calibratio
   (`captures/web_20260729_061440.bin`, `captures/stationary_stream11_20260728_190311.bin`) are affected.
 - Tripod captures remain perfectly good for ToF, orientation-noise (gravity/gyro) and SLAM work — this
   is a magnetometer-only constraint.
+
+**The tripod is only the loudest instance (2026-07-30).** The *room* does the same thing at a smaller
+amplitude: over BUG-030's validation sweep, |B| under a known-good calibration walked 49.9 → 53.6 →
+48.3 → 54.4 µT as the operator crossed the room, while the spread *within* any 10 s window stayed
+around 0.4 µT. That is ~±6% of position-dependent ambient field with no tripod involved, and it is
+irreducible — no calibration can subtract a field that depends on where you are standing. Practical
+consequences: judge a calibration by `magsweep.attitude_locked_error` (which detrends this out) rather
+than by raw |B| spread, and expect `YawFusion.anomaly_frac` (0.3) to be doing real work indoors.
 - Untested: whether a different mount, or more separation between the sensor and the tripod head, brings
   |B| back to ~50 µT. That would confirm the mechanism and might restore mounted heading.
 

@@ -329,6 +329,89 @@ def field_consistency(samples, cal: MagCalibration | None) -> dict | None:
     }
 
 
+def attitude_locked_error(samples, t_s, cal: MagCalibration | None,
+                          window_s: float = 5.0, n: int = SPHERE_CELLS,
+                          min_cell: int = 15) -> dict | None:
+    """Split |B| error into the part a calibration CAN fix and the part it cannot.
+
+    `field_consistency` assumes every sample was taken in one place. That holds
+    for a tumble and fails for a room scan: as the operator walks, the
+    building's own ferrous mass moves the ambient field under them, so both the
+    spread and the bias grow for reasons no calibration can touch. Measured on
+    the 2026-07-30 sweep, **85% of the |B| variance was that slow spatial
+    drift** -- and `field_consistency` scored the (good) calibration "bad"
+    because the room's field level differed from the spot the tumble happened
+    in. Read this function's verdict, not that one, on a moving capture.
+
+    Method: detrend |B| with a short rolling median to remove the slow level,
+    then measure how much of the residual is a function of body-frame
+    ATTITUDE. Residual hard/soft iron is attitude-locked -- it repeats every
+    time the device returns to the same pose -- while the room's contribution
+    does not, so the between-cell spread of the detrended residual isolates the
+    calibration's own error. On the 2026-07-30 fit that is 0.28 uT (0.55%);
+    the superseded 2026-07-15 fit scores 3.4 uT (3.8%) on the same data.
+
+    `window_s` must be long enough to span several attitudes (so real
+    calibration error is not absorbed into the trend) and short enough to track
+    the walk. None when there is nothing to measure.
+
+    **This is a LOWER bound on calibration error, not a bound.** Wherever the
+    operator holds one attitude family for longer than `window_s`, the trend
+    absorbs that family's error along with the room's -- the superseded fit
+    scores 3.4 uT at a 5 s window and 9.0 uT at 10 s on the same data for
+    exactly that reason. So a "good" here is only trustworthy alongside a flat
+    |B|-vs-tilt table (`tools/mag_check.py`), which is detrend-free and cannot
+    hide a monotonic attitude ramp.
+    """
+    x = np.asarray(samples, dtype=np.float64).reshape(-1, 3)
+    t = np.asarray(t_s, dtype=np.float64).reshape(-1)
+    if cal is None or x.shape[0] < MIN_FIT_SAMPLES or t.shape[0] != x.shape[0]:
+        return None
+    span = float(t[-1] - t[0])
+    if not np.isfinite(span) or span <= 0:
+        return None
+    norms = calibrated_norms(x, cal)
+    mean = float(np.mean(norms))
+    if not np.isfinite(mean) or mean < 1e-9:
+        return None
+
+    rate = x.shape[0] / span
+    half = max(1, int(round(window_s * rate / 2.0)))
+    padded = np.pad(norms, half, mode="edge")
+    windows = np.lib.stride_tricks.sliding_window_view(padded, 2 * half + 1)
+    trend = np.median(windows, axis=1)
+    resid = norms - trend
+
+    cells = assign_cells(calibrated_directions(x, cal), n)
+    keep = [c for c in np.unique(cells) if int((cells == c).sum()) >= min_cell]
+    if len(keep) < 2:
+        # One attitude family only: there is no attitude dependence to measure,
+        # which is NOT the same as measuring none. Say so rather than return 0.
+        return {"window_s": window_s, "cells_used": len(keep), "attitude_locked_ut": None,
+                "attitude_locked_pct": None, "mean_ut": mean,
+                "total_std_ut": float(np.std(norms)), "spatial_std_ut": float(np.std(trend)),
+                "residual_std_ut": float(np.std(resid)), "verdict": "unknown",
+                "reason": f"only {len(keep)} attitude cells hold >={min_cell} samples"}
+    cell_means = np.array([resid[cells == c].mean() for c in keep])
+    cell_n = np.array([int((cells == c).sum()) for c in keep], dtype=np.float64)
+    grand = float(np.average(cell_means, weights=cell_n))
+    att = float(np.sqrt(np.average((cell_means - grand) ** 2, weights=cell_n)))
+    att_pct = 100.0 * att / mean
+    return {
+        "window_s": window_s,
+        "cells_used": len(keep),
+        "mean_ut": mean,
+        "total_std_ut": float(np.std(norms)),
+        # The building's field as the operator walks -- irreducible by calibration.
+        "spatial_std_ut": float(np.std(trend)),
+        "residual_std_ut": float(np.std(resid)),
+        # The calibration's own error.
+        "attitude_locked_ut": att,
+        "attitude_locked_pct": att_pct,
+        "verdict": _verdict(att_pct, FIELD_GOOD_PCT, FIELD_MARGINAL_PCT, higher_is_better=False),
+    }
+
+
 def coverage_stats(cell_idx, n: int = SPHERE_CELLS) -> dict:
     """Occupancy of the sphere cells: counts, occupied/empty, fraction, verdict."""
     idx = np.asarray(cell_idx, dtype=np.int64).reshape(-1)

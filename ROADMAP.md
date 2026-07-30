@@ -902,7 +902,7 @@ channel, barometer as soft 1-DoF Z constraint.
 >
 > | source | contribution | status |
 > |---|---|---|
-> | magnetometer calibration, direction-dependent | up to **~90°** heading error | **open — BUG-030**, needs an owner tumble |
+> | magnetometer calibration, direction-dependent | up to **~90°** heading error | **fixed 2026-07-30** — owner re-fit, BUG-030 |
 > | LSM tick uncalibrated (2.98% scale) | ~2.7° on a 90° pan | **fixed** — stream 12 `IMU_CAL` |
 > | ToF↔IMU frame-stamp skew | 0.19° → 0.107° RMS | **partly fixed** — BUG-031 |
 > | fp16 SFLP quantization | 0.018–0.027°/frame | transport shipped (stream 11); fusion built, **not wired in** |
@@ -956,8 +956,27 @@ channel, barometer as soft 1-DoF Z constraint.
 > currently emits one quat per ToF frame, not 480/s, and should be a session-private instance never
 > attached to `SensorState`); `#ef4444` colour re-stepping (Phase 2).
 > **Unanswered by the owner:** free tumble with steering (implemented) vs a prescribed six-pose recipe,
-> plus four more in §12 of the design. **No capture contains a real tumble yet** — the tilt sweep fills
-> only 2 of 92 cells (it is one-dimensional); covered-shell screenshots used a synthetic fixture.
+> plus four more in §12 of the design. ~~**No capture contains a real tumble yet** — the tilt sweep fills
+> only 2 of 92 cells (it is one-dimensional); covered-shell screenshots used a synthetic fixture.~~
+>
+> **Magnetometer recalibration — ✅ done (2026-07-30, BUG-030 closed).** The owner ran the tumble
+> through this modal (hand-held, off the tripod, mount plate attached) and hit **Save & apply**,
+> exercising the hot-reload path with a real fit for the first time. Validated against an independent
+> 118 s room sweep (`captures/roomSweepFull20260730.bin`): **attitude-locked error 0.29 µT (0.56%)**,
+> tilt ramp **1.042×** (was 2.721×), |B| flat across every tilt bin (was a 40 → 110 µT monotonic ramp),
+> and `YawFusion` **`gated:anomaly` 58.6% → 0%, `active` 6.2% → 64.8%** — i.e. the eCompass was silently
+> off for most of a scan and now runs. New scoring tool `host/tools/mag_check.py` +
+> `capture_magcheck` MCP tool, built on a new `magsweep.attitude_locked_error`.
+>
+> Two things this taught, both now encoded in that tool. **Raw |B| spread is not calibration error on a
+> moving capture** — the room's own field walked ±6% across the sweep (49.9 → 54.4 µT) while the spread
+> *within* any 10 s window stayed ~0.4 µT, so `field_consistency` scores the good fit "bad"; detrend
+> first (BUG-034). And **the detrended number alone is not a verdict** — it is a lower bound, because an
+> attitude family held longer than the detrend window gets absorbed into the trend. A synthetic capture
+> with a 59 µT hard-iron error scores "good" on it while ramping 3.5× across the detrend-free tilt table,
+> so `mag_check` takes the worse of the two. **Still unproven: heading *direction*** (magnitude flatness
+> cannot see DT0103's rotation ambiguity; ~2.5° bound from the near-spherical soft iron) — needs a
+> braced, fixed-compass-heading tilt sweep.
 >
 > **Measurement method matters here** — three plausible readings were wrong before the right one
 > emerged; see the `orientation-noise-floor` memory for the five traps (notably: use **p95**, never the

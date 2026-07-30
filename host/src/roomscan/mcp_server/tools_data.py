@@ -110,6 +110,41 @@ def capture_analyze(path: str, min_zero_run: int = 50, zero_scan_frames: int = 8
 
 
 @mcp.tool()
+def capture_magcheck(path: str, cal_path: str = "", window_s: float = 5.0,
+                     compare: list[str] | None = None) -> dict:
+    """Score a magnetometer calibration against a recorded capture it never saw.
+
+    Read `attitude.attitude_locked_pct` first -- on a moving capture that is the
+    calibration's own error, with the room's slowly-varying field detrended out.
+    It is a LOWER bound, so confirm it against the detrend-free `tilt` table:
+    a good fit is flat across boresight tilt, BUG-030's bad fit ramped 40->110 uT.
+    `field` is `magsweep.field_consistency`, correct for a stationary tumble but
+    it under-rates a good calibration on a walk (its bias term absorbs the room).
+
+    `cal_path` defaults to the calibration a roomscan-web on this box would load.
+    `compare` scores several calibrations against the same capture.
+
+    Wraps `host/tools/mag_check.py::check_capture()`.
+    """
+    from tools.mag_check import check_capture
+
+    p = (REPO / path) if not Path(path).is_absolute() else Path(path)
+    if not p.is_file():
+        return {"error": f"no such capture: {rel(p)}"}
+
+    def _resolve(c: str) -> str | None:
+        if not c:
+            return None
+        cp = Path(c)
+        return str(cp if cp.is_absolute() else REPO / cp)
+
+    if compare:
+        return {"path": rel(p),
+                "reports": [check_capture(p, _resolve(c), window_s=window_s) for c in compare]}
+    return check_capture(p, _resolve(cal_path), window_s=window_s)
+
+
+@mcp.tool()
 def doctor(build: bool = False, net: bool = True) -> dict:
     """Run the headless-host bring-up checks and return each verdict.
 

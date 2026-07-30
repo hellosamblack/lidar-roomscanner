@@ -28,7 +28,9 @@ from roomscan.magcal import MagCalibration, fit_ellipsoid
 from roomscan.sensors import AXIS_CONVENTION
 
 FIELD = 50.0
-# The real rig's hard-iron offset (host/mag_cal.json, fitted 2026-07-15). Larger
+# The rig's hard-iron offset as fitted 2026-07-15 -- the SUPERSEDED value: it was
+# wrong by ~59 uT and is what BUG-030 was. Kept as the test fixture because it is
+# a realistic magnitude, and because it is larger
 # in magnitude than the field itself -- which is exactly why raw directions are
 # useless for binning (see the magsweep module docstring).
 HARD_IRON = np.array([44.4, -27.6, -41.7])
@@ -1205,3 +1207,58 @@ def test_magpose_dip_is_the_angle_between_field_and_gravity():
     assert got["dip_deg"] == pytest.approx(expect, abs=1e-3)
     assert np.allclose(got["gravity"], g, atol=1e-6)
     assert isinstance(sensor_state, SensorState)
+
+
+# --- attitude_locked_error (2026-07-30, BUG-030 validation) -----------------
+#
+# The load-bearing case is `test_attitude_locked_ignores_a_walking_room_field`:
+# a CORRECT calibration measured while the ambient field level drifts (the
+# operator walking a room) must not be blamed for the room. `field_consistency`
+# scores that same data "bad" -- which is what happened on the 2026-07-30 sweep.
+
+def _walk(n=3600, rate_hz=30.0, seed=3, drift_pct=6.0):
+    """(dirs, t_s, drift): a tumble-through-attitudes walk whose AMBIENT field
+    level breathes slowly, the way a building's ferrous mass moves it."""
+    t = np.arange(n) / rate_hz
+    drift = 1.0 + (drift_pct / 100.0) * np.sin(2 * np.pi * t / 60.0)
+    return _sphere(n, seed=seed), t, drift
+
+
+def test_attitude_locked_ignores_a_walking_room_field():
+    dirs, t, drift = _walk()
+    raw = _raw_from_body(dirs * drift[:, None])
+    cal = _cal()                                    # exactly right for this rig
+    att = ms.attitude_locked_error(raw, t, cal)
+    assert att["attitude_locked_pct"] < ms.FIELD_GOOD_PCT
+    assert att["verdict"] == "good"
+    # the drift is real and IS reported -- just not as calibration error
+    assert att["spatial_std_ut"] > att["residual_std_ut"]
+    # ...while the tumble-time metric condemns the very same good calibration
+    assert ms.field_consistency(raw, cal)["verdict"] in ("marginal", "bad")
+
+
+def test_attitude_locked_still_catches_a_hard_iron_error():
+    dirs, t, drift = _walk()
+    raw = _raw_from_body(dirs * drift[:, None])
+    att = ms.attitude_locked_error(raw, t, _cal(offset=(0.0, 0.0, 0.0)))
+    assert att["attitude_locked_pct"] > ms.FIELD_MARGINAL_PCT
+    assert att["verdict"] == "bad"
+
+
+def test_attitude_locked_says_unknown_rather_than_zero_on_one_attitude():
+    """A rig held in a single pose has no attitude dependence to measure. That
+    is not the same as measuring none, and must not read as a clean bill."""
+    t = np.arange(600) / 30.0
+    raw = _raw_from_body(np.tile([0.0, 0.0, 1.0], (600, 1)))
+    att = ms.attitude_locked_error(raw, t, _cal())
+    assert att["verdict"] == "unknown"
+    assert att["attitude_locked_ut"] is None
+    assert "cells" in att["reason"]
+
+
+def test_attitude_locked_needs_matching_lengths_and_samples():
+    dirs, t, _ = _walk(n=100)
+    raw = _raw_from_body(dirs)
+    assert ms.attitude_locked_error(raw, t[:50], _cal()) is None
+    assert ms.attitude_locked_error(raw, t, None) is None
+    assert ms.attitude_locked_error(raw[:5], t[:5], _cal()) is None

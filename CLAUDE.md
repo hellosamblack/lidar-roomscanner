@@ -103,9 +103,17 @@ Two decisions that override the older parts of `references/roadmapResearch.md`:
 *(2026-07-29: the fp16-floor item is **superseded** — raw XL/GY now ship as **stream 11** and a host
 complementary filter `roomscan.imufusion` exists but is **gated off**; the floor also turned out to be
 **dither**-limited, not step-limited, so a quieter board measures worse. More importantly the visible
-noise was the **eCompass**, traced to a direction-dependent magnetometer calibration — **BUG-030**,
-the top open item. Full state + resume instructions:
-`docs/superpowers/plans/2026-07-29-orientation-resume.md`.)* Still open: SHT40 humidity unstreamed.
+noise was the **eCompass**, traced to a direction-dependent magnetometer calibration — ~~**BUG-030**,
+the top open item~~ **BUG-030, closed 2026-07-30**: the owner re-fit hand-held off the tripod and it
+validated on an independent room sweep (attitude-locked error 0.56%, tilt ramp 1.042×, `YawFusion`
+`gated:anomaly` 58.6% → 0%, `active` 6.2% → 64.8%). Two traps learned there, now encoded in
+`host/tools/mag_check.py` / the `capture_magcheck` MCP tool: **the live calibration is `./mag_cal.json`
+at the repo root** (`mag_cal_path` is cwd-relative — a stale `host/` copy shadowed it for two weeks and
+is now deleted), and **raw |B| spread is not calibration error on a moving capture** — indoor ambient
+field varies ~±6% with position (BUG-034), so detrend before judging a fit. Full state + resume
+instructions: `docs/superpowers/plans/2026-07-29-orientation-resume.md`.)* Still open: SHT40 humidity
+unstreamed; **heading *direction*** remains unvalidated — |B| flatness cannot see DT0103's rotation
+ambiguity, so it needs a braced fixed-heading tilt sweep (resume doc §4.6).
 
 ### Roadmap
 

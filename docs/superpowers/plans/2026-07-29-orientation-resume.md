@@ -21,7 +21,7 @@ Error budget during a 100 °/s pan, measured:
 
 | source | contribution | status |
 |---|---|---|
-| magnetometer calibration | up to **~90°** heading error | **OPEN — BUG-030**, needs owner |
+| magnetometer calibration | up to **~90°** heading error | **FIXED 2026-07-30** — owner re-fit, BUG-030 |
 | LSM tick uncalibrated (2.98%) | ~2.7° on a 90° pan | fixed (stream 12) |
 | ToF↔IMU frame-stamp skew | 0.19° → 0.107° RMS | partly fixed — **BUG-031 open** |
 | fp16 SFLP quantization | 0.018–0.027°/frame | transport shipped, **fusion not wired in** |
@@ -93,7 +93,16 @@ emerged. The full list lives in the `orientation-noise-floor` auto-memory; the l
 
 ## 4. Open items, in priority order
 
-### 4.1 BUG-030 — magnetometer recalibration **(needs the owner, highest value)**
+### 4.1 BUG-030 — magnetometer recalibration — ✅ **DONE 2026-07-30, this item is closed**
+
+> The owner tumbled hand-held off the tripod (mount plate on, so its hard iron is in the fit) and hit
+> **Save & apply**. Validated on an independent 118 s room sweep — `captures/roomSweepFull20260730.bin`
+> — with the new `host/tools/mag_check.py` / `capture_magcheck`: attitude-locked error **0.29 µT
+> (0.56%)**, tilt ramp **1.042×** (was 2.721×), `YawFusion` `gated:anomaly` **58.6% → 0%** and `active`
+> **6.2% → 64.8%**. The live calibration now lives at the **repo root** `mag_cal.json` (the cwd the
+> server resolves `mag_cal_path` against); the stale tracked `host/mag_cal.json` is deleted. Full
+> numbers and the two metric traps are in BUGS.md → BUG-030 "RESOLUTION". **Heading *direction* is
+> still unvalidated** — see §4.6. Everything below is the historical statement of the problem.
 Current `host/mag_cal.json` (fitted 2026-07-15) is accurate at ceiling-facing and degrades
 monotonically with tilt: |B| reads 47 µT at the ceiling and 85 µT horizontal, against a fitted
 49.87 µT. Causes systematic heading errors up to ~90° in the horizontal wall-scanning attitude.
@@ -133,6 +142,22 @@ quantization, −1/2 = angle random walk (compare to the datasheet's 2.8 mdps/�
 flat minimum ÷ 0.664 = bias instability (ST does **not** specify it). Method summarised from DT0064.
 Those numbers are the tuning constants for §4.2's crossover, not just validation.
 
+### 4.6 Heading *direction* validation — the piece BUG-030's closure does not cover **(needs the owner)**
+A constant |B| proves the calibration's **magnitude**, not its **direction**. A general ellipsoid fit
+is ambiguous up to a rotation (DT0103): it can put every sample on a perfect sphere while
+systematically rotating the field vector — right magnitude, wrong heading. The 2026-07-30 fit's
+near-spherical soft iron (axis-gain 1.091) bounds that at ~2.5°, but nothing has measured it.
+
+**Do not try to measure it off a room sweep.** There is no ground truth in one, and the obvious proxy
+is a trap: comparing the mag heading against `quat_yaw_deg` is meaningless because that is ZYX yaw
+about body **Z (Forward)** while the SFLP body frame has **X = Up** — it is not heading. (Tried
+2026-07-30; it produced a plausible-looking 66° "error" that means nothing.)
+
+**Action (~2 min):** hand-held, off the tripod, keep the device pointed at one fixed compass bearing
+and sweep tilt level → 45° → vertical, holding each. Heading should stay constant across the holds;
+`mag_check` on the capture should show a flat tilt table (it will) *and* the holds should agree in
+`absolute_heading`. DT0103's accelerometer-assisted fit is the remedy if they do not.
+
 ### 4.5 Handheld dynamic verification **(needs the owner)**
 Every claim about tracking during motion is inferred from stationary data plus arithmetic. A
 deliberate pan is the only way to confirm the timing fixes and the fusion filter actually help.
@@ -162,7 +187,9 @@ deliberate pan is the only way to confirm the timing fixes and the fusion filter
 | path | what |
 |---|---|
 | `captures/stationary_stream11_20260728_190311.bin` | 900 s stationary, stream 11 — for §4.4 |
-| `captures/web_20260729_061440.bin` | the braced tilt sweep (8 holds, 0°→90°) behind BUG-030 |
+| `captures/roomSweepFull20260730.bin` | 118 s room walk, all streams — BUG-030's validation set |
+| `host/tools/mag_check.py` | score a calibration against a capture (`capture_magcheck` MCP tool) |
+| `captures/web_20260729_061440.bin` | the braced tilt sweep (8 holds, 0°→90°) behind BUG-030 — **tripod-contaminated** (BUG-034) |
 | `captures/postflash_verify.bin` | 25 s post-flash health + stream 11/12 verification |
 | `host/tools/orientation_probe.py` | canonical jitter/health measurement |
 | `docs/iks4a1-stacking.md` → "Orientation-noise pass" | the BUG-027 analysis this built on |

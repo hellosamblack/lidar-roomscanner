@@ -75,7 +75,17 @@ Useful readouts: `#pos-status` ("frame N / total", replay only), `#hud-view-fps`
 function*, not a state object -- read what it logged via `ui_screenshot`'s tail.
 
 **data** — `capture_list()` (includes `has_stream_9`, which SLAM and orientation work
-ask constantly), `capture_analyze(path)`, `doctor()`, `orientation_probe(mode)`.
+ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, compare?)`,
+`doctor()`, `orientation_probe(mode)`.
+
+`capture_magcheck` scores a magnetometer calibration against a capture it never saw — the
+BUG-030 closing test. Read `verdict`, which is the worse of two deliberately different
+measurements: `attitude.attitude_locked_pct` (|B| error left after detrending the room's
+own slowly-varying field, a **lower** bound — an attitude held longer than the window is
+absorbed into the trend) and `tilt_ramp.ratio` (|B| max/min across boresight-tilt bins,
+detrend-free, so it catches exactly what the first one hides). `field` is
+`magsweep.field_consistency`, correct for a stationary tumble but it under-rates a good
+calibration on a walk. `compare=[...]` scores several fits against one capture.
 
 **build** — `fw_build()`, `fw_flash()`, `run_tests()`. These encode the host facts
 that bite every session: Ninja comes from the venv, the packaged stlink 1.8.0 cannot

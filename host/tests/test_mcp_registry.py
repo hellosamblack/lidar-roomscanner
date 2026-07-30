@@ -28,6 +28,7 @@ PYPROJECT = REPO / "host" / "pyproject.toml"
 EXPOSED: dict[str, tuple[str, ...]] = {
     "analyze_capture.py": ("capture_analyze",),
     "headless_doctor.py": ("doctor",),
+    "mag_check.py": ("capture_magcheck",),
     "orientation_probe.py": ("orientation_probe",),
     "web_ui_shot.py": ("ui_screenshot", "ui_eval", "ui_wait_for", "ui_reset"),
 }
