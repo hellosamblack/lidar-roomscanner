@@ -34,10 +34,25 @@
 * Batching ODRs for Accel, Gyro, SFI, Temperature, FSM, MLC, and external sensors.
 * **FIFO Compression**: Embedded lossless compression algorithm (2x or 3x compression factor) to maximize FIFO autonomy buffer time.
 
-### 4. Embedded Sensor Fusion (SFI)
-* Computes 3D orientation quaternions ($q_0, q_1, q_2, q_3$) and gravity vector directly inside the LSM6DSV16X hardware core.
-* Operates in **6-axis mode** (Accel + Gyro) or **9-axis eCompass mode** (Accel + Gyro + External Magnetometer via Sensor Hub / I3C).
+### 4. Embedded Sensor Fusion (SFLP)
+* Computes the **game rotation vector** (attitude quaternion), gravity vector and gyroscope bias directly inside the LSM6DSV16X hardware core.
+* **6-axis ONLY — accelerometer + gyroscope. There is no 9-axis / eCompass / geomagnetic mode on this part.**
+  AN5763 §6.5: *"based on the accelerometer and gyroscope data processing"*. Datasheet §2.8 and p.1:
+  *"a sensor fusion low-power (SFLP) algorithm able to provide a 6-axis (accelerometer + gyroscope) game
+  rotation vector"*; the `SFLP_GAME_EN` bit is documented as *"sensor fusion algorithm for 6-axis
+  accelerometer + gyroscope"*. "Game rotation vector" is Android's term for precisely the mag-free one.
+* The **sensor hub (mode 2) is an I²C master**, not a fusion input: it attaches an external magnetometer or
+  barometer so their data can reach the FIFO / FSM / MLC. It does **not** feed SFLP. Magnetometer fusion on
+  this project is therefore host-side (`roomscan.sensors` `YawFusion`) by necessity, not by choice.
+* Heading drift spec (datasheet Table 1): **0.5°/5 min** static, **0.7°/5 min** low-dynamic,
+  **5.9°/5 min** high-dynamic. Pitch/roll 1.5°/0.5°/1.6° respectively.
 * Outperformed host software fusion in power efficiency (~0.65 mA total IMU + fusion current).
+
+> ⚠ **This file is a derived summary, not ST text.** An earlier revision of this section claimed SFLP
+> *"Operates in 6-axis mode or 9-axis eCompass mode (Accel + Gyro + External Magnetometer via Sensor Hub /
+> I3C)"* — that sentence appears **nowhere** in the source PDF and sent a 2026-07-30 session looking for an
+> on-chip 9-axis mode that does not exist. Corrected against `pdftotext` output of the PDF beside it.
+> **Verify any load-bearing claim in these `.md` summaries against the PDF before acting on it.**
 
 ### 5. Interrupt & Event Generation
 * **Free-Fall Detection**: Triggers when acceleration along all 3 axes drops below configurable threshold.

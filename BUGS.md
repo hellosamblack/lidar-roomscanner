@@ -1087,6 +1087,26 @@ principled fix is to capture the LSM timestamp **at the frame-ready moment** rat
 from whichever FIFO words happen to be present at drain time. Verification requires **real motion** —
 both defects are invisible on a stationary rig.
 
+**A hardware option, with a hard trade-off (found 2026-07-30 while reading DT0155).** ST's
+**ODR-triggered mode** phase-locks the LSM6DSV16X's data generation to an external reference on the
+**INT2** pin — the device aligns both frequency and phase to that signal's edges (DT0155,
+*"Synchronizing multiple sensors using ODR-triggered mode in MEMS devices"*). Driving INT2 from the
+ToF frame clock would make this skew a *hardware* property instead of a software race, which is
+strictly stronger than any drain-ordering fix.
+
+⚠ **But it is mutually exclusive with SFLP.** AN5763, verbatim: *"ODR-triggered mode is not compatible
+with the pedometer, relative tilt, **SFLP**, DRDY mask, or activity/inactivity functionality (only
+motion/stationary can be used)."* It also forbids some ODR settings (CTRL1 `ODR_XL` 0001/0010/1100,
+CTRL2 `ODR_G` 0010/1100) and is incompatible with Qvar/EIS. So it is a choice, not an addition:
+
+- **Keep SFLP** (stream 9, the on-chip game rotation vector that `Mapper` uses as its rotation prior)
+  and live with a software-timed skew; or
+- **Take ODR-triggered sync** and fuse orientation on the host from raw XL/GY — which is exactly what
+  stream 11 (480 Hz raw IMU FIFO) and the currently gated-off `roomscan.imufusion` already exist for.
+
+Worth costing before more software mitigation: option 2 removes the skew at the source but puts the
+whole orientation path on the host, so it needs `imufusion` to first prove it beats SFLP.
+
 ---
 
 ## BUG-032 — GPU SLAM OOMs on a long scan (Open3D CUDA cache grows per extraction)
