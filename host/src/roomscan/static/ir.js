@@ -23,6 +23,11 @@
 // bounding box always fits: the card never changes shape as the board rolls and no
 // field of view is cropped, at the cost of empty corners at intermediate angles.
 //
+// MIRROR. The Mirror view mode (`state.view_mode`) flips the pane left-right with
+// a signed scale on the same transform, matching the server's X negation of the
+// point cloud (the IR raster and the cloud grid share one index space). It is the
+// only view mode this pane reacts to: World and FPV render identically.
+//
 // Public surface:  createIr(hub) -> {}
 // Hub events:  subscribes "ir_image", "sensor", "state", "ir_show";  sends set_ir via hub.send
 
@@ -41,6 +46,7 @@ export function createIr(hub) {
     let imageData = null;   // reused ImageData, reallocated only when size changes
     let imgW = 0, imgH = 0; // last image dims, for the fit math
     let rollDeg = 0;        // residual gravity roll, CCW-positive degrees
+    let mirror = false;     // Mirror view mode: flip the pane left-right
 
     // Size + rotate the canvas so the rotated image is inscribed in the square
     // frame. Fit the unrotated image first (its long side spans the frame), then
@@ -59,8 +65,13 @@ export function createIr(hub) {
         canvas.style.width = cssW + 'px';
         canvas.style.height = cssH + 'px';
         // translate(-50%,-50%) centres it; the frame's own CSS pins top/left to 50%.
+        // ORDER MATTERS in Mirror: CSS applies the list right-to-left, so `scale`
+        // listed BEFORE `rotate` flips the already-rotated pane — i.e. it mirrors
+        // the finished, gravity-corrected image, which is what "mirror the IR
+        // view" means. (A uniform scale commutes with rotate, which is why the
+        // original order was harmless; a signed one does not.)
         canvas.style.transform =
-            `translate(-50%, -50%) rotate(${-rollDeg}deg) scale(${k})`;
+            `translate(-50%, -50%) scale(${mirror ? -k : k}, ${k}) rotate(${-rollDeg}deg)`;
     }
 
     // The residual roll rides the `sensor` message (the orientation message), not
@@ -111,6 +122,11 @@ export function createIr(hub) {
             }
         }
         if (chkFreeze) chkFreeze.checked = !!msg.ir_freeze;
+        // Mirror is the ONLY view mode that touches the IR pane (owner: "IR view
+        // is unchanged for all but mirror") — World and FPV both leave the
+        // gravity roll exactly as it is.
+        const m = (msg.view_mode === 'mirror');
+        if (m !== mirror) { mirror = m; layout(); }
     });
 
     // Read current desired settings from the DOM and emit one set_ir.

@@ -426,6 +426,101 @@ def test_rotate_points_upside_down_board_is_flipped_upright():
     assert web.rotate_points(up_cv, web.display_rotation(yaw_stripped))[0][1] > 0.9
 
 
+# --- real-time view modes: World / FPV / Mirror (owner ask, 2026-07-29) -----
+
+def test_view_rotation_world_is_the_gravity_alignment_unchanged():
+    """World must be byte-for-byte the pre-existing behaviour: the same matrix
+    object the broadcaster already computed, not a re-derivation."""
+    grav = web.display_rotation((0.92388, 0.38268, 0.0, 0.0))
+    assert web.view_rotation(grav, "world") is grav
+    # ToF-only session (no orientation) stays None, as it always did.
+    assert web.view_rotation(None, "world") is None
+
+
+def test_view_rotation_fpv_keeps_the_boresight_dead_ahead():
+    """FPV looks along the sensor's optical axis, so whatever the sensor has
+    centred stays centred: CV +Z in, CV +Z out, however the board is held."""
+    for quat in (_Q_UPRIGHT, (0.92388, 0.38268, 0.0, 0.0), (0.7, 0.1, -0.3, 0.64)):
+        rot = web.view_rotation(web.display_rotation(quat), "fpv")
+        ahead = web.rotate_points(np.array([[0.0, 0.0, 2.0]], dtype=np.float32), rot)
+        assert np.allclose(ahead, [[0.0, 0.0, 2.0]], atol=1e-5)
+
+
+def test_view_rotation_fpv_is_a_no_op_when_held_the_reference_way():
+    """Held upright (the pose where `display_rotation` is the identity), the
+    boresight view frame IS the raw sensor frame -- nothing moves. Anchors the
+    frame algebra: if this drifts, every other FPV assertion is measuring the
+    wrong thing."""
+    rot = web.view_rotation(web.display_rotation(_Q_UPRIGHT), "fpv")
+    assert np.allclose(rot, np.eye(3), atol=1e-6)
+
+
+def test_view_rotation_fpv_levels_the_horizon_under_roll():
+    """The owner requirement: FPV must "respect gravity the same way world
+    does". Roll the board about its own boresight and the physically-up
+    direction has to keep rendering straight UP on screen (CV -Y, no sideways
+    lean) — the scene must not spin with the board."""
+    world_up = np.array([0.0, -1.0, 0.0])       # Open3D CV world is Y-down
+    for deg in (0.0, 30.0, 90.0, 180.0, -75.0):
+        grav = web.display_rotation(_perturb(_Q_UPRIGHT, deg, (0.0, 0.0, 1.0)))
+        up_cv = (grav.T @ world_up).astype(np.float32)[None, :]   # same ray, sensor frame
+
+        out = web.rotate_points(up_cv, web.view_rotation(grav, "fpv"))[0]
+        assert out[1] < -0.999, (deg, out)          # straight up...
+        assert abs(out[0]) < 1e-4, (deg, out)       # ...and not leaning
+
+        # Contrast: shipping the RAW sensor frame (the naive "FPV") tilts it,
+        # which is the thing this frame exists to prevent.
+        raw = up_cv[0]
+        assert deg == 0.0 or not (raw[1] < -0.999 and abs(raw[0]) < 1e-4), deg
+
+
+def test_view_rotation_fpv_survives_a_vertical_boresight():
+    """Aimed straight at the ceiling, "level" is undefined about the boresight.
+    A handheld scanner does that constantly, so the fallback must produce a
+    finite, still-orthonormal frame rather than a NaN cloud."""
+    # Rotate the reference pose about body Y (Right) so the boresight (body Z)
+    # swings onto the world vertical.
+    grav = web.display_rotation(_perturb(_Q_UPRIGHT, 90.0, (0.0, 1.0, 0.0)))
+    assert abs(abs((grav @ np.array([0.0, 0.0, 1.0]))[1]) - 1.0) < 1e-6   # really vertical
+    rot = web.view_rotation(grav, "fpv")
+    assert np.all(np.isfinite(rot))
+    assert np.allclose(rot @ rot.T, np.eye(3), atol=1e-6)
+
+
+def test_view_rotation_mirror_is_fpv_with_x_negated():
+    """Mirror is a left-right flip about the vertical axis of the FPV view: in
+    the CV frame (X=Right, Y=Down, Z=Forward) that is X alone -- up/down and
+    range must be untouched, or the view would be upside down or inside out."""
+    grav = web.display_rotation((0.92388, 0.38268, 0.0, 0.0))
+    fpv = web.view_rotation(grav, "fpv")
+    mirror = web.view_rotation(grav, "mirror")
+    assert np.allclose(mirror, np.diag([-1.0, 1.0, 1.0]) @ fpv)
+
+    pts = np.array([[0.4, -0.2, 1.5], [-0.9, 0.3, 2.0]], dtype=np.float32)
+    a, b = web.rotate_points(pts, fpv), web.rotate_points(pts, mirror)
+    assert np.allclose(b[:, 0], -a[:, 0], atol=1e-5)     # X flipped
+    assert np.allclose(b[:, 1:], a[:, 1:], atol=1e-5)    # Y/Z untouched
+
+
+def test_view_rotation_without_orientation_falls_back_to_the_sensor_frame():
+    """ToF-only session: there is no gravity to level against, and the cloud is
+    already the sensor's own view -- so FPV is a no-op and Mirror is the bare
+    flip. It must not crash or silently blank the cloud."""
+    assert web.view_rotation(None, "fpv") is None
+    assert np.allclose(web.view_rotation(None, "mirror"), np.diag([-1.0, 1.0, 1.0]))
+
+
+def test_view_rotation_keys_differ_so_the_cloud_cache_invalidates_on_a_switch():
+    """The broadcaster's packed-bytes cache is keyed on `rotation_key(view_rot)`
+    (plus seq/colour). If two modes shared a key, switching mode on a paused or
+    stationary frame would keep serving the previous mode's bytes."""
+    grav = web.display_rotation((0.92388, 0.38268, 0.0, 0.0))
+    keys = [web.rotation_key(web.view_rotation(grav, m))
+            for m in ("world", "fpv", "mirror")]
+    assert len(set(keys)) == 3
+
+
 def _perturb(quat, deg, axis=(1.0, 0.0, 0.0)):
     """Rotate `quat` by `deg` about a body axis — a stand-in for IMU noise."""
     from roomscan.sensors import quat_mul
@@ -2339,6 +2434,165 @@ def test_set_view_ignores_out_of_range_point_size():
                                   clients=set(), controller=None)
     asyncio.run(web._handle_inbound(state, {"type": "set_view", "point_size": 99.0}))
     assert state.ui_state.point_size == web.UiState().point_size
+
+
+# --- view mode: state echo + persistence (owner ask, 2026-07-29) ------------
+
+def test_state_message_carries_view_mode():
+    assert web._state_message(web.UiState())["view_mode"] == "world"
+    assert web._state_message(web.UiState(view_mode="mirror"))["view_mode"] == "mirror"
+
+
+def test_set_view_view_mode_updates_and_persists(tmp_path):
+    """End-to-end through the real inbound handler: the mode lands in UiState,
+    in the `state` echo, and in roomscan.toml."""
+    import types
+    import roomscan.config as config_mod
+    p = tmp_path / "roomscan.toml"
+    state = types.SimpleNamespace(config=ViewerConfig(), ui_state=web.UiState(),
+                                  clients=set(), controller=None)
+    orig = config_mod.config_path
+    config_mod.config_path = lambda: p
+    try:
+        asyncio.run(web._handle_inbound(state, {"type": "set_view", "view_mode": "fpv"}))
+    finally:
+        config_mod.config_path = orig
+    assert state.ui_state.view_mode == "fpv"
+    assert web._state_message(state.ui_state)["view_mode"] == "fpv"
+    assert ViewerConfig.load(p).web_view_mode == "fpv"
+
+
+def test_set_view_rejects_unknown_view_mode():
+    """Untrusted inbound: an unknown mode must be dropped, not stored -- it
+    would otherwise reach `view_rotation` and silently fall through to World."""
+    import types
+    state = types.SimpleNamespace(config=None, ui_state=web.UiState(),
+                                  clients=set(), controller=None)
+    asyncio.run(web._handle_inbound(state, {"type": "set_view", "view_mode": "selfie"}))
+    assert state.ui_state.view_mode == "world"
+
+
+def test_ui_from_config_maps_view_mode_and_rejects_garbage():
+    assert web.ui_from_config(ViewerConfig(web_view_mode="mirror")).view_mode == "mirror"
+    assert web.ui_from_config(ViewerConfig(web_view_mode="wat")).view_mode == "world"
+
+
+def test_apply_ui_to_config_writes_view_mode():
+    cfg = ViewerConfig()
+    web.apply_ui_to_config(web.UiState(view_mode="fpv"), cfg)
+    assert cfg.web_view_mode == "fpv"
+
+
+# --- per-mode camera framing (owner ask, 2026-07-30) ------------------------
+
+def test_default_view_cam_copies_are_independent():
+    """`UiState` must not share the module-level `ViewCam` objects: they are
+    mutable, so a slider drag in one session would silently rewrite the
+    defaults (and, in tests, leak between cases)."""
+    a, b = web.UiState(), web.UiState()
+    a.view_cam["fpv"].distance_m = 9.0
+    assert b.view_cam["fpv"].distance_m == web._DEFAULT_VIEW_CAM["fpv"].distance_m
+    assert web._DEFAULT_VIEW_CAM["fpv"].distance_m != 9.0
+
+
+def test_fpv_baseline_is_the_zero_offset():
+    """The whole scheme is 'FPV is the ground truth, everything is an offset
+    from it'. That only holds if all-zero really means 'at the sensor' — which
+    the client relies on when it builds the pose (`scene.js` poseFor)."""
+    zero = web.ViewCam()
+    assert (zero.distance_m, zero.height_m, zero.rotation_deg) == (0.0, 0.0, 0.0)
+    # ...and the shipped defaults are a small, non-zero nudge off that baseline,
+    # because a camera exactly at the optical centre renders flat.
+    fpv = web._DEFAULT_VIEW_CAM["fpv"]
+    assert 0.0 < fpv.distance_m < 1.0 and 0.0 < fpv.height_m < 1.0
+
+
+def test_state_message_carries_all_three_view_cams():
+    m = web._state_message(web.UiState())["view_cam"]
+    assert set(m) == {"world", "fpv", "mirror"}
+    assert set(m["world"]) == {"distance_m", "height_m", "rotation_deg"}
+    assert m["world"]["distance_m"] == web._DEFAULT_VIEW_CAM["world"].distance_m
+
+
+def test_set_view_cam_edits_only_the_selected_mode(tmp_path):
+    """The sliders show the selected mode, so that is the only slot they may
+    touch — editing in FPV must not disturb World's framing."""
+    import types
+    import roomscan.config as config_mod
+    p = tmp_path / "roomscan.toml"
+    state = types.SimpleNamespace(config=ViewerConfig(), ui_state=web.UiState(view_mode="fpv"),
+                                  clients=set(), controller=None)
+    world_before = web.replace(state.ui_state.view_cam["world"])
+    orig = config_mod.config_path
+    config_mod.config_path = lambda: p
+    try:
+        asyncio.run(web._handle_inbound(state, {
+            "type": "set_view", "cam_distance": 1.25, "cam_height": 0.8, "cam_rotation": -35.0}))
+    finally:
+        config_mod.config_path = orig
+    fpv = state.ui_state.view_cam["fpv"]
+    assert (fpv.distance_m, fpv.height_m, fpv.rotation_deg) == (1.25, 0.8, -35.0)
+    assert state.ui_state.view_cam["world"] == world_before
+    back = ViewerConfig.load(p)
+    assert back.web_cam_fpv_distance_m == 1.25 and back.web_cam_fpv_rotation_deg == -35.0
+    assert back.web_cam_world_distance_m == world_before.distance_m
+
+
+def test_set_view_cam_lands_on_the_new_mode_when_both_change():
+    """A combined message must apply the framing to the mode being switched TO
+    — otherwise the first drag after a mode switch would edit the mode the user
+    just left."""
+    import types
+    state = types.SimpleNamespace(config=None, ui_state=web.UiState(view_mode="world"),
+                                  clients=set(), controller=None)
+    asyncio.run(web._handle_inbound(
+        state, {"type": "set_view", "view_mode": "mirror", "cam_distance": 2.0}))
+    assert state.ui_state.view_cam["mirror"].distance_m == 2.0
+    assert state.ui_state.view_cam["world"].distance_m == web._DEFAULT_VIEW_CAM["world"].distance_m
+
+
+def test_set_view_cam_rejects_out_of_range_and_non_numeric():
+    import types
+    state = types.SimpleNamespace(config=None, ui_state=web.UiState(view_mode="fpv"),
+                                  clients=set(), controller=None)
+    before = web.replace(state.ui_state.view_cam["fpv"])
+    for bad in ({"cam_distance": 999.0}, {"cam_distance": -1.0}, {"cam_height": 99.0},
+                {"cam_rotation": 400.0}, {"cam_distance": "near"}, {"cam_height": None}):
+        asyncio.run(web._handle_inbound(state, {"type": "set_view", **bad}))
+    assert state.ui_state.view_cam["fpv"] == before
+
+
+def test_set_view_cam_reset_restores_that_mode_only():
+    import types
+    state = types.SimpleNamespace(config=None, ui_state=web.UiState(view_mode="fpv"),
+                                  clients=set(), controller=None)
+    state.ui_state.view_cam["fpv"].distance_m = 7.0
+    state.ui_state.view_cam["world"].distance_m = 7.0
+    asyncio.run(web._handle_inbound(state, {"type": "set_view", "cam_reset": True}))
+    assert state.ui_state.view_cam["fpv"] == web._DEFAULT_VIEW_CAM["fpv"]
+    assert state.ui_state.view_cam["world"].distance_m == 7.0
+
+
+def test_view_cam_round_trips_through_config():
+    cfg = ViewerConfig()
+    ui = web.UiState()
+    ui.view_cam["mirror"] = web.ViewCam(3.5, -1.25, 90.0)
+    web.apply_ui_to_config(ui, cfg)
+    assert cfg.web_cam_mirror_distance_m == 3.5
+    assert cfg.web_cam_mirror_height_m == -1.25
+    assert cfg.web_cam_mirror_rotation_deg == 90.0
+    assert web.ui_from_config(cfg).view_cam["mirror"] == web.ViewCam(3.5, -1.25, 90.0)
+
+
+def test_ui_from_config_rejects_corrupt_view_cam_values():
+    """A hand-edited or corrupt roomscan.toml must not be able to park the
+    camera 1000 m away with no way back through the UI."""
+    cfg = ViewerConfig(web_cam_world_distance_m=1000.0, web_cam_fpv_rotation_deg="sideways",
+                       web_cam_mirror_height_m=-99.0)
+    ui = web.ui_from_config(cfg)
+    assert ui.view_cam["world"] == web._DEFAULT_VIEW_CAM["world"]
+    assert ui.view_cam["fpv"] == web._DEFAULT_VIEW_CAM["fpv"]
+    assert ui.view_cam["mirror"] == web._DEFAULT_VIEW_CAM["mirror"]
 
 
 def test_root_redirects_to_static_index():

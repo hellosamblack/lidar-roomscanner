@@ -56,6 +56,23 @@ class ViewerConfig:
     web_point_size: float = 0.025
     web_point_size_auto: bool = True   # scale each point with its range from the sensor
                                        # (then web_point_size is the size at 1 m of range)
+    web_view_mode: str = "world"       # web real-time view: "world" (orbit a gravity-aligned
+                                       # scene) | "fpv" (camera locked to the sensor) | "mirror"
+                                       # (fpv, left-right flipped). Distinct from `camera` below,
+                                       # which is the desktop panel's own first_person|orbit field.
+    # Camera framing per web view mode, as an offset from the FPV baseline (a
+    # camera at the sensor looking down its boresight; all zeros reproduces it
+    # exactly). Nine flat floats because the TOML writer is scalar-only --
+    # grouped and validated in web.py (`_VIEW_CAM_CONFIG_KEYS`).
+    web_cam_world_distance_m: float = 4.2
+    web_cam_world_height_m: float = 2.6
+    web_cam_world_rotation_deg: float = 0.0
+    web_cam_fpv_distance_m: float = 0.30
+    web_cam_fpv_height_m: float = 0.20
+    web_cam_fpv_rotation_deg: float = 0.0
+    web_cam_mirror_distance_m: float = 0.30
+    web_cam_mirror_height_m: float = 0.20
+    web_cam_mirror_rotation_deg: float = 0.0
     imu_gizmo: bool = True             # show the orientation gizmo in the scene
     sensors_panel: bool = True         # show the Sensors panel group
     gizmo_scale: float = 0.15          # gizmo axis length (metres)

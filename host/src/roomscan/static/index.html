@@ -391,6 +391,8 @@
         .control-group.collapsed .control-group__body { display: none; }
 
         .field-label { font-size: 0.7rem; color: var(--text-muted); font-weight: 500; }
+        /* a sub-field under a group heading (the camera-framing sliders) */
+        .field-label--sub { padding-left: 8px; opacity: 0.85; }
 
         /* ---- component: debug-section (collapsed-by-default sub-group) ---- */
         .debug-section { border-top: 1px solid var(--panel-border); padding-top: 8px; }
@@ -436,6 +438,10 @@
         .segmented button.active { background: var(--accent); color: white; }
         .segmented button.active:hover { background: var(--accent-hover); }
         .segmented--sm button { padding: 4px 8px; font-size: 0.7rem; }
+        /* e.g. the real-time view modes, which don't apply while SLAM owns the camera */
+        .segmented button:disabled,
+        .segmented button:disabled:hover { opacity: 0.35; cursor: default; background: transparent; }
+        .segmented button.active:disabled { background: var(--accent); opacity: 0.35; }
 
         /* generic hide utility (shared by the transport block + IR card) */
         .hidden { display: none !important; }
@@ -923,6 +929,27 @@
         <div class="control-group card">
             <button class="control-group__header"><span>View</span><span class="chevron">&#9662;</span></button>
             <div class="control-group__body">
+                <!-- Real-time view mode (owner ask, 2026-07-29). The frame swap
+                     happens server-side (web.py `view_rotation`); the client just
+                     locks its camera. Disabled in SLAM mode. -->
+                <div class="field-label">View</div>
+                <div class="segmented" id="seg-view-mode">
+                    <button data-viewmode="world" title="Orbit a gravity-aligned world — the scene stays upright however the board is held">World</button>
+                    <button data-viewmode="fpv" title="Lock the camera to the sensor's own viewpoint — the scene tilts with the board">FPV</button>
+                    <button data-viewmode="mirror" title="Like FPV but flipped left-right, so you can look at yourself; also mirrors the IR pane">Mirror</button>
+                </div>
+                <!-- Camera framing for the SELECTED view mode, as an offset from
+                     the FPV baseline (a camera at the sensor looking down its
+                     boresight: all zeros reproduces it exactly). Persisted per
+                     mode, so each view keeps its own framing. -->
+                <div class="field-label">Camera <span class="hud-val" id="cam-mode-val">World</span></div>
+                <div class="field-label field-label--sub">Distance <span class="hud-val" id="cam-distance-val">4.2 m</span></div>
+                <input type="range" class="slider" id="sl-cam-distance" min="0" max="15" step="0.05" value="4.2" title="How far the camera sits back along the view axis — 0 puts it at the sensor, where the view goes flat for lack of parallax">
+                <div class="field-label field-label--sub">Height <span class="hud-val" id="cam-height-val">2.6 m</span></div>
+                <input type="range" class="slider" id="sl-cam-height" min="-3" max="8" step="0.05" value="2.6" title="How far the camera sits above the sensor">
+                <div class="field-label field-label--sub">Rotation <span class="hud-val" id="cam-rotation-val">0&deg;</span></div>
+                <input type="range" class="slider" id="sl-cam-rotation" min="-180" max="180" step="1" value="0" title="Swing the camera around the aim point — positive moves it to the right">
+                <button id="btn-cam-reset" title="Restore this view mode's default framing">Default Framing</button>
                 <div class="field-label">Color Mode</div>
                 <div class="segmented" id="seg-color">
                     <button data-mode="depth" title="Color points by distance from the sensor">Depth</button>

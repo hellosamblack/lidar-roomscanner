@@ -94,6 +94,9 @@ Open it with `sensor-mag-cal`; drive it with `magcal-start` / `magcal-stop` /
 diag line and `window.__magcal3d = {renderer, frames, cells, covered, lastPoseMs,
 poseHz, reason}` — assert `renderer=="webgl"` and `poseHz≈30` rather than merely
 that a canvas exists. **`?magcal2d=1` forces the 2D Lambert fallback**, so one run
+real-time view modes `#seg-view-mode button[data-viewmode=world|fpv|mirror]`
+plus their camera framing `sl-cam-distance`/`sl-cam-height`/`sl-cam-rotation`
+and `btn-cam-reset` (each edits the *selected* mode's framing),
 covers both paths; `window.__magcal3d.renderer` reads `"2d"` and
 `#magcal-fallback-note` says why. Context loss is reachable from a step:
 `document.getElementById('magcal-hero').getContext('webgl2')

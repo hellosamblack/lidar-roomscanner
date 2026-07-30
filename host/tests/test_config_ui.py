@@ -21,6 +21,17 @@ def test_new_fields_round_trip(tmp_path):
     assert back.ir_opacity == 0.8
 
 
+def test_web_view_mode_default_and_round_trip(tmp_path):
+    """The web real-time view mode (World/FPV/Mirror). Distinct from `camera`,
+    which is the desktop panel's own first_person|orbit field."""
+    assert ViewerConfig().web_view_mode == "world"
+    path = tmp_path / "roomscan.toml"
+    ViewerConfig(web_view_mode="mirror", camera="orbit").save(path)
+    back = ViewerConfig.load(path)
+    assert back.web_view_mode == "mirror"
+    assert back.camera == "orbit"          # the two never alias
+
+
 def test_unknown_keys_ignored_still_loads(tmp_path):
     path = tmp_path / "roomscan.toml"
     path.write_text("[viewer]\nmode = \"slam\"\nbogus = 1\n", encoding="utf-8")

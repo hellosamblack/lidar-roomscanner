@@ -38,7 +38,8 @@ export function createControls(hub) {
     });
     $('btn-reset-cam')?.addEventListener('click', () => hub.emit('reset_camera'));
 
-    // View: colormap, point size, render mode, surface settings
+    // View: view mode, colormap, point size, render mode, surface settings
+    const segViewMode = $('seg-view-mode');
     const segViewColormap = $('seg-view-colormap');
     const slPointSize = $('sl-point-size');
     const chkPointAuto = $('chk-point-auto');
@@ -51,6 +52,28 @@ export function createControls(hub) {
 
     function sendView(fields) { hub.send({ type: 'set_view', ...fields }); }
 
+    segViewMode?.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-viewmode]');
+        if (btn) sendView({ view_mode: btn.dataset.viewmode });
+    });
+
+    // Camera framing — the three sliders always edit the SELECTED view mode's
+    // own values (the server applies them to `ui.view_mode`), so switching mode
+    // swaps the whole set. Values come back on the `state` echo like everything
+    // else; nothing is applied optimistically.
+    const slCamDistance = $('sl-cam-distance');
+    const slCamHeight = $('sl-cam-height');
+    const slCamRotation = $('sl-cam-rotation');
+    const camModeVal = $('cam-mode-val');
+    const camDistanceVal = $('cam-distance-val');
+    const camHeightVal = $('cam-height-val');
+    const camRotationVal = $('cam-rotation-val');
+    const CAM_MODE_LABELS = { world: 'World', fpv: 'FPV', mirror: 'Mirror' };
+
+    slCamDistance?.addEventListener('input', () => sendView({ cam_distance: parseFloat(slCamDistance.value) }));
+    slCamHeight?.addEventListener('input', () => sendView({ cam_height: parseFloat(slCamHeight.value) }));
+    slCamRotation?.addEventListener('input', () => sendView({ cam_rotation: parseFloat(slCamRotation.value) }));
+    $('btn-cam-reset')?.addEventListener('click', () => sendView({ cam_reset: true }));
     segViewColormap?.addEventListener('click', (e) => {
         const btn = e.target.closest('button[data-colormap]');
         if (btn) sendView({ colormap: btn.dataset.colormap });
@@ -96,7 +119,24 @@ export function createControls(hub) {
         setActive(segColor, 'mode', msg.color_mode);
         setActive(segIrColormap, 'colormap', msg.ir_colormap);
         if (chkIrFreeze) chkIrFreeze.checked = !!msg.ir_freeze;
-        // View: colormap, point size, render mode, surface
+        // View: view mode, colormap, point size, render mode, surface
+        setActive(segViewMode, 'viewmode', msg.view_mode);
+        // The view mode only governs the real-time cloud — SLAM mode replaces it
+        // with the reconstructed mesh and drives its own follow camera.
+        if (segViewMode && msg.mode !== undefined) {
+            for (const b of segViewMode.querySelectorAll('button')) b.disabled = (msg.mode === 'slam');
+        }
+        // Camera framing for whichever mode is selected.
+        const cam = msg.view_cam && msg.view_cam[msg.view_mode];
+        if (cam) {
+            if (camModeVal) camModeVal.textContent = CAM_MODE_LABELS[msg.view_mode] || msg.view_mode;
+            if (slCamDistance) slCamDistance.value = cam.distance_m;
+            if (slCamHeight) slCamHeight.value = cam.height_m;
+            if (slCamRotation) slCamRotation.value = cam.rotation_deg;
+            if (camDistanceVal) camDistanceVal.textContent = cam.distance_m.toFixed(2) + ' m';
+            if (camHeightVal) camHeightVal.textContent = cam.height_m.toFixed(2) + ' m';
+            if (camRotationVal) camRotationVal.textContent = Math.round(cam.rotation_deg) + '°';
+        }
         setActive(segViewColormap, 'colormap', msg.view_colormap);
         if (slPointSize && msg.point_size !== undefined) slPointSize.value = msg.point_size;
         if (chkPointAuto && msg.point_size_auto !== undefined) chkPointAuto.checked = !!msg.point_size_auto;

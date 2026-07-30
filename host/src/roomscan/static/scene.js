@@ -1,11 +1,20 @@
 // scene.js — Three.js scene / camera / OrbitControls / point-cloud geometry.
 //
 // Extracted verbatim (in behaviour) from the old monolithic app.js: same camera
-// pose (0.5,0,-1.5), y-down Open3D CV up vector, Z-forward grid, MAX_POINTS,
-// PointsMaterial. Subscribes to "point_cloud" and parses the tag+positions+colors
-// layout itself (§6.1). Owns the requestAnimationFrame render loop, measures its
-// own VIEW fps (browser paint rate) and publishes it on the hub (~1/s) — this is
-// distinct from the device fps the server reports.
+// pose (0.5,0,-1.5), y-down Open3D CV up vector, MAX_POINTS, PointsMaterial.
+// Subscribes to "point_cloud" and parses the tag+positions+colors layout itself
+// (§6.1). Owns the requestAnimationFrame render loop, measures its own VIEW fps
+// (browser paint rate) and publishes it on the hub (~1/s) — this is distinct
+// from the device fps the server reports.
+//
+// VIEW MODE (`state.view_mode`, owner ask 2026-07-29). "world" is the orbit
+// view; "fpv"/"mirror" lock the camera to the sensor's viewpoint. The frame
+// change happens SERVER-side (web.py `view_rotation` ships the cloud already in
+// the boresight view frame — still gravity-levelled, X-negated for mirror), so
+// all this module does is park the camera at the origin, take OrbitControls
+// fully out (no orbit, no pan, no zoom — it is a locked view) and hide the world
+// grid. A fixed pose cannot lag the geometry the way a client-rotated camera
+// would, and the level horizon comes from the server, not from `camera.up`.
 //
 // Public surface:
 //   createScene(hub) -> { resetCamera, THREE, scene, camera,
@@ -23,8 +32,36 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 const D = (m, l) => { try { window.__diag && window.__diag('scene.js: ' + m, l); } catch (e) {} };
 
 const MAX_POINTS = 300000;                 // large buffer for later SLAM maps
-const CAM_POS = new THREE.Vector3(0.5, 0, -1.5);
-const CAM_TARGET = new THREE.Vector3(0, 0, 1);
+
+// --- camera framing: one baseline, three offsets -------------------------
+// Every view is described relative to ONE reference — the FPV ground truth, a
+// camera sitting exactly at the sensor looking down its boresight. All-zero
+// offsets reproduce that camera exactly, in every mode.
+//
+//   distance_m   back off along the view axis
+//   height_m     lift the eye (the world is Y-DOWN, so up is NEGATIVE y)
+//   rotation_deg swing the eye about the vertical axis through the aim point,
+//                positive to the right; the aim point stays on the axis so the
+//                subject stays framed
+//
+// Why any offset at all: a camera exactly at the optical centre reproduces the
+// depth image's own projection — every point lands where it already was in 2D
+// and the render reads as a flat picture. The offset supplies the parallax
+// that makes depth legible. Mirror uses its own values but the same maths; its
+// default eye is on x = 0, so it mirrors onto itself.
+//
+// The modes differ only in what "the axis" is: fpv/mirror ride the live
+// boresight (the server has already rotated the cloud into the boresight view
+// frame), world uses the fixed world forward. They coincide when the board is
+// held in the reference pose, which is what makes this one baseline rather
+// than three unrelated cameras. Server-side twins: web.py `_DEFAULT_VIEW_CAM`.
+const CAM_LOOK_AHEAD_M = 1.0;              // aim point down the axis; also the rotation pivot
+const CAM_UP = new THREE.Vector3(0, -1, 0);
+const DEFAULT_VIEW_CAM = {
+    world:  { distance_m: 4.2,  height_m: 2.6,  rotation_deg: 0 },   // elevated establishing shot
+    fpv:    { distance_m: 0.30, height_m: 0.20, rotation_deg: 0 },   // just over the sensor's shoulder
+    mirror: { distance_m: 0.30, height_m: 0.20, rotation_deg: 0 },
+};
 
 export function createScene(hub) {
     D('module loaded; THREE r' + THREE.REVISION);
@@ -34,11 +71,14 @@ export function createScene(hub) {
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0a0a0f);
-    scene.fog = new THREE.FogExp2(0x0a0a0f, 0.1);
+    // Density retuned for the backed-off default camera: at 0.1 the cloud sat
+    // ~30% washed into the background from 6 m, which defeats an establishing
+    // shot. 0.05 keeps the depth cue and costs ~8% at that range.
+    scene.fog = new THREE.FogExp2(0x0a0a0f, 0.05);
 
     const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
-    camera.position.copy(CAM_POS);
     camera.up.set(0, -1, 0);               // Open3D CV convention, y-down
+    // Position is set below by applyPose('world'), once the framing table exists.
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -48,11 +88,24 @@ export function createScene(hub) {
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
-    controls.target.copy(CAM_TARGET);
 
-    // Subtle grid, oriented to the XY plane for the Z-forward convention.
+    // Subtle ground grid. GridHelper is natively in the XZ plane, which IS the
+    // horizontal plane here: the world is Open3D CV (Y-down, so gravity runs
+    // along +Y) and the server ships the cloud gravity-aligned into it. It used
+    // to be rotated into XY, a hangover from the pre-gravity-alignment days when
+    // the cloud was raw sensor-frame -- that made it a wall facing the camera
+    // rather than an earth plane.
+    //
+    // It also has to sit BELOW the viewer to read as ground: the sensor is the
+    // origin and the default camera is at the sensor's own height, so a plane
+    // through y = 0 is seen exactly edge-on and all but disappears. GRID_FLOOR_Y
+    // drops it to a plausible handheld height above the floor -- a visual
+    // reference only, nothing measures against it. Hidden in FPV/Mirror, where
+    // the cloud is in the boresight view frame and a world-fixed plane would
+    // tilt the wrong way as soon as the sensor pitched.
+    const GRID_FLOOR_Y = 1.2;                  // metres BELOW the sensor (world +Y is down)
     const gridHelper = new THREE.GridHelper(10, 20, 0x333333, 0x1a1a1a);
-    gridHelper.rotation.x = Math.PI / 2;
+    gridHelper.position.y = GRID_FLOOR_Y;
     scene.add(gridHelper);
 
     // Point cloud — position + color attributes, draw range grown per frame.
@@ -62,6 +115,19 @@ export function createScene(hub) {
     geometry.setDrawRange(0, 0);
     const material = new THREE.PointsMaterial({ size: 0.025, vertexColors: true, sizeAttenuation: true });
     const points = new THREE.Points(geometry, material);
+    // Frustum culling OFF — mandatory for these live-updating buffers, not an
+    // optimisation choice. Three computes `geometry.boundingSphere` lazily ONCE
+    // and never invalidates it, but we rewrite the position attribute every
+    // frame; the sphere it caches is the one from the first render, when the
+    // buffer was still all zeros, i.e. centre (0,0,0) radius 0. World mode gets
+    // away with it because the origin happens to fall inside the default
+    // frustum, so the point-sphere "intersects" and the object is drawn. FPV
+    // puts the camera AT the origin, which is behind the near plane — the
+    // zero-radius sphere then fails the test and the entire cloud silently
+    // vanishes. Recomputing per frame is the alternative and is far more
+    // expensive (a 300k-vertex pass that ignores drawRange) for an object that
+    // is always in front of the viewer anyway.
+    points.frustumCulled = false;
     scene.add(points);
 
     // --- auto point size ---------------------------------------------------
@@ -104,6 +170,7 @@ export function createScene(hub) {
     const meshMat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
     const surfaceMesh = new THREE.Mesh(meshGeom, meshMat);
     surfaceMesh.visible = false;
+    surfaceMesh.frustumCulled = false;        // same stale-bounding-sphere trap as `points`
     scene.add(surfaceMesh);
     // Uncovered-but-valid points shown alongside the mesh.
     const uncovGeom = new THREE.BufferGeometry();
@@ -112,6 +179,7 @@ export function createScene(hub) {
     uncovGeom.setDrawRange(0, 0);
     const uncovPoints = new THREE.Points(uncovGeom, material);
     uncovPoints.visible = false;
+    uncovPoints.frustumCulled = false;        // same stale-bounding-sphere trap as `points`
     scene.add(uncovPoints);
     let surfaceOn = false;
 
@@ -138,13 +206,109 @@ export function createScene(hub) {
     }
     function setFollow(on) {
         followOn = !!on;
-        if (!followOn) { controls.enabled = true; }
+        // Hand the camera back to OrbitControls — but ONLY in world mode. slam.js
+        // calls this with `false` on every `state` message, so an unconditional
+        // re-enable here would quietly unlock the FPV/Mirror camera one message
+        // after it was locked.
+        if (!followOn && viewMode === 'world') { controls.enabled = true; }
     }
     function setFollowTarget(eye, center, up) {
         followEye.set(eye[0], eye[1], eye[2]);
         followCenter.set(center[0], center[1], center[2]);
         if (up) followUp.set(up[0], up[1], up[2]);
         haveFollowTarget = true;
+    }
+
+    // --- real-time view mode (owner ask, 2026-07-29) ------------------------
+    // "world" is the orbit view; "fpv"/"mirror" lock the camera to the sensor.
+    // The server does the frame change -- in FPV/Mirror it ships the cloud in
+    // the boresight view frame (see web.py `view_rotation`), so the locked
+    // camera here is a fixed pose and can never lag or slosh against the
+    // geometry. Mirror needs nothing extra client-side: the server negates X.
+    const FPV_NEAR = 0.02, WORLD_NEAR = 0.1;
+    let viewMode = 'world';
+    const viewCam = {};                     // live per-mode framing, from `state.view_cam`
+    for (const m of Object.keys(DEFAULT_VIEW_CAM)) viewCam[m] = { ...DEFAULT_VIEW_CAM[m] };
+
+    // Turn a mode's three numbers into an eye/target pair. Zero offsets give
+    // eye == (0,0,0) — the FPV baseline — by construction.
+    function poseFor(m) {
+        const c = viewCam[m] || DEFAULT_VIEW_CAM.world;
+        const target = new THREE.Vector3(0, 0, CAM_LOOK_AHEAD_M);
+        const off = new THREE.Vector3(0, -c.height_m, -(CAM_LOOK_AHEAD_M + c.distance_m));
+        off.applyAxisAngle(CAM_UP, c.rotation_deg * Math.PI / 180);
+        return { eye: target.clone().add(off), target };
+    }
+
+    const savedPos = new THREE.Vector3();   // the orbit pose to return to
+    const savedTarget = new THREE.Vector3();
+
+    // Park the camera on a mode's computed pose. In world this also becomes the
+    // new "return to" pose, so a framing change acts like a Reset Camera; in
+    // fpv/mirror it IS the locked pose.
+    function applyPose(m) {
+        const { eye, target } = poseFor(m);
+        camera.position.copy(eye);
+        camera.up.set(0, -1, 0);
+        controls.target.copy(target);
+        camera.lookAt(controls.target);
+        if (m === 'world') { savedPos.copy(eye); savedTarget.copy(target); controls.update(); }
+        camera.updateProjectionMatrix();
+    }
+    applyPose('world');                     // initial pose + seeds savedPos/savedTarget
+
+    function applyViewMode(m) {
+        if (!(m in DEFAULT_VIEW_CAM)) return;
+        if (m === viewMode) return;
+        if (viewMode === 'world') {         // remember where the orbit was left
+            savedPos.copy(camera.position);
+            savedTarget.copy(controls.target);
+        }
+        viewMode = m;
+        if (m === 'world') {
+            camera.position.copy(savedPos);   // the user's own orbit, not the default framing
+            controls.target.copy(savedTarget);
+            camera.up.set(0, -1, 0);
+            camera.near = WORLD_NEAR;
+            controls.enableRotate = controls.enablePan = controls.enableZoom = true;
+            controls.enabled = true;
+            controls.update();
+            camera.updateProjectionMatrix();
+            gridHelper.visible = true;
+        } else {
+            // Off the sensor's shoulder, aimed down its boresight (CV +Z), CV
+            // up = -Y. The horizon is level because the SERVER levelled the
+            // geometry, not because of `camera.up` — see web.py
+            // `boresight_view_frame`.
+            camera.near = FPV_NEAR;         // we are near the sensor: don't clip near returns
+            applyPose(m);
+            // Fully locked (owner): no orbit, no pan, no zoom. `enabled = false`
+            // already gates every OrbitControls handler; the three flags are set
+            // too so nothing can re-enable one of them piecemeal.
+            controls.enableRotate = controls.enablePan = controls.enableZoom = false;
+            controls.enabled = false;
+            gridHelper.visible = false;
+        }
+        D('view mode -> ' + m);
+    }
+
+    // Merge a `state.view_cam` payload; true only if a number actually moved.
+    // That check is load-bearing: `state` is re-broadcast on every unrelated
+    // setting change, and reacting to those would yank a user's world-mode
+    // orbit back to the default framing every time someone clicked a colour.
+    function mergeViewCam(incoming) {
+        let changed = false;
+        for (const m of Object.keys(viewCam)) {
+            const src = incoming[m];
+            if (!src) continue;
+            for (const k of ['distance_m', 'height_m', 'rotation_deg']) {
+                if (typeof src[k] === 'number' && src[k] !== viewCam[m][k]) {
+                    viewCam[m][k] = src[k];
+                    changed = true;
+                }
+            }
+        }
+        return changed;
     }
 
     // --- point cloud ingest (§6.1: u32 tag · f32[3N] positions · f32[3N] colors) ---
@@ -218,6 +382,13 @@ export function createScene(hub) {
 
     // --- state echo: point size + surface visibility ---
     hub.on('state', (msg) => {
+        const framingMoved = msg.view_cam ? mergeViewCam(msg.view_cam) : false;
+        const modeMoved = msg.view_mode !== undefined && msg.view_mode !== viewMode;
+        if (msg.view_mode !== undefined) applyViewMode(msg.view_mode);
+        // A framing edit with no mode change still has to be applied — that is
+        // the slider being dragged. (When the mode also changed, applyViewMode
+        // already placed the camera.)
+        if (framingMoved && !modeMoved) applyPose(viewMode);
         if (msg.point_size !== undefined) material.size = msg.point_size;
         // Uniform-only: toggling auto never recompiles the program.
         if (msg.point_size_auto !== undefined) pointUniforms.uAutoSize.value = msg.point_size_auto ? 1.0 : 0.0;
@@ -229,11 +400,9 @@ export function createScene(hub) {
         }
     });
 
-    function resetCamera() {
-        camera.position.copy(CAM_POS);
-        controls.target.copy(CAM_TARGET);
-        controls.update();
-    }
+    // Back to the current mode's configured framing (which for world is the
+    // establishing shot, discarding whatever orbit the user had wandered into).
+    function resetCamera() { applyPose(viewMode); }
     hub.on('reset_camera', resetCamera);
 
     window.addEventListener('resize', () => {
@@ -254,7 +423,7 @@ export function createScene(hub) {
 
     function animate() {
         requestAnimationFrame(animate);
-        if (!renderActive) { controls.update(); return; }
+        if (!renderActive) { if (viewMode === 'world') controls.update(); return; }
         if (followOn && haveFollowTarget) {
             controls.enabled = false;
             // Velocity-adaptive lerp: fast when the sensor moves, steady when still.
@@ -264,6 +433,10 @@ export function createScene(hub) {
             controls.target.lerp(followCenter, alpha);
             camera.up.copy(followUp);
             camera.lookAt(controls.target);
+        } else if (viewMode !== 'world') {
+            // Camera locked to the sensor. Deliberately NOT controls.update():
+            // damping keeps easing toward the controls' own internal spherical
+            // state even while `enabled` is false, which would drift the pose.
         } else {
             controls.update();
         }

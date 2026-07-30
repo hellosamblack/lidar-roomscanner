@@ -32,7 +32,7 @@ from collections import deque
 import webbrowser
 import zlib
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -150,6 +150,63 @@ _VALID_IR_COLORMAPS = ("gray", "turbo")
 _VALID_VIEW_COLORMAPS = ("turbo", "gray")
 _VALID_SURFACE_MODES = ("grid", "spatial")
 _VALID_IDLE_LEVELS = ("soft", "hard")
+# Real-time view modes (owner ask, 2026-07-29). Which frame the live cloud is
+# shipped in -- see `view_rotation`. Real-time only; SLAM has its own camera.
+_VALID_VIEW_MODES = ("world", "fpv", "mirror")
+
+# --- camera framing per view mode (owner ask, 2026-07-30) --------------------
+# All three views are described as an offset from ONE baseline: the FPV ground
+# truth, i.e. a camera sitting exactly at the sensor looking down its boresight.
+# All-zero offsets reproduce that camera exactly, in every mode. `distance_m`
+# backs the eye off along the view axis, `height_m` lifts it, and
+# `rotation_deg` swings it about the vertical axis through the aim point (which
+# stays on the axis, so the subject stays framed).
+#
+# The modes differ only in what "the axis" is: in fpv/mirror it is the live
+# boresight, because the server has already rotated the cloud into the
+# boresight view frame (`view_rotation`); in world it is the fixed world
+# forward. Those coincide exactly when the board is held in the reference pose,
+# which is what makes the FPV baseline a common reference rather than three
+# unrelated cameras. Ranges are validated on the wire AND on config load.
+_CAM_DISTANCE_RANGE = (0.0, 15.0)      # metres back along the view axis
+_CAM_HEIGHT_RANGE = (-5.0, 10.0)       # metres up (negative dips below)
+_CAM_ROTATION_RANGE = (-180.0, 180.0)  # degrees; positive swings the eye right
+
+
+@dataclass
+class ViewCam:
+    """Camera framing for one view mode, as an offset from the FPV baseline."""
+    distance_m: float = 0.0
+    height_m: float = 0.0
+    rotation_deg: float = 0.0
+
+
+# Defaults: world is an elevated establishing shot, fpv/mirror sit just off the
+# optical centre. A camera exactly AT the centre (all zeros) reproduces the
+# depth image's own projection and renders flat -- the small default offset is
+# what supplies the parallax that makes depth legible.
+_DEFAULT_VIEW_CAM = {
+    "world": ViewCam(4.2, 2.6, 0.0),
+    "fpv": ViewCam(0.30, 0.20, 0.0),
+    "mirror": ViewCam(0.30, 0.20, 0.0),
+}
+
+# `[viewer]` keys per mode, in (distance, height, rotation) order. The TOML
+# writer is flat/scalar-only, so the nine values are nine plain floats.
+_VIEW_CAM_CONFIG_KEYS = {
+    m: (f"web_cam_{m}_distance_m", f"web_cam_{m}_height_m", f"web_cam_{m}_rotation_deg")
+    for m in _VALID_VIEW_MODES
+}
+_VIEW_CAM_FIELDS = (("distance_m", _CAM_DISTANCE_RANGE),
+                    ("height_m", _CAM_HEIGHT_RANGE),
+                    ("rotation_deg", _CAM_ROTATION_RANGE))
+
+
+def default_view_cam() -> dict[str, ViewCam]:
+    """A fresh, independent copy of the per-mode defaults (never share the
+    module-level `ViewCam` instances -- they are mutable and would leak edits
+    across `UiState`s, which in tests reads as one test corrupting the next)."""
+    return {m: replace(c) for m, c in _DEFAULT_VIEW_CAM.items()}
 
 # --- orientation decomposition modes (owner ask, 2026-07-28) -----------------
 # Presentation-only: every mode is a different VIEW of the same
@@ -237,6 +294,14 @@ class UiState:
     surface_enabled: bool = False      # surface interpolation (triangulated mesh)
     surface_mode: str = "grid"         # "grid" (relative depth %) | "spatial" (3D Euclidean)
     surface_threshold_pct: float = 4.0 # grid: max depth gap %; spatial: % of mean depth -> metres
+    # Real-time view mode (owner ask, 2026-07-29): "world" orbits a
+    # gravity-aligned scene (the original behaviour), "fpv" ships the cloud in
+    # the sensor's own frame for a camera locked to the sensor, "mirror" is fpv
+    # with X negated so the user can look at themselves. See `view_rotation`.
+    view_mode: str = "world"
+    # Camera framing per view mode, all referenced to the FPV baseline --
+    # see `_DEFAULT_VIEW_CAM`. Keyed by view mode; always all three keys.
+    view_cam: dict[str, ViewCam] = field(default_factory=default_view_cam)
     idle_enabled: bool = True
     idle_level: str = "soft"           # "soft" | "hard"
     # Orientation decomposition (owner ask, 2026-07-28): which VIEW of the
@@ -321,6 +386,71 @@ def display_rotation(quat) -> np.ndarray | None:
     if quat is None:
         return None
     return T_WORLD_TO_CV @ quat_to_matrix(*quat) @ T_CV_TO_BODY
+
+
+# A horizontal (left-right) flip of the live cloud. The ToF/CV frame is
+# X=Right, Y=Down, Z=Forward (`docs/coordinate-frames.md`), so negating X alone
+# mirrors about the vertical axis -- a selfie flip -- and leaves up/down and
+# range untouched. The IR raster shares that index space, which is why the same
+# idea shows up client-side as one `scaleX(-1)` on the IR pane.
+_MIRROR_X = np.diag([-1.0, 1.0, 1.0])
+_WORLD_DOWN_CV = np.array([0.0, 1.0, 0.0])   # Open3D CV world is Y-DOWN
+_CV_FORWARD = np.array([0.0, 0.0, 1.0])
+_CV_UP = np.array([0.0, -1.0, 0.0])
+
+
+def boresight_view_frame(grav_rot: np.ndarray) -> np.ndarray:
+    """World -> a CV camera frame aimed along the sensor's boresight but *level*.
+
+    Rows are the frame's right/down/forward axes in the gravity-aligned world:
+    forward is the boresight, and right is forced perpendicular to world down,
+    which is what keeps the horizon flat. Composed with `grav_rot` (below) the
+    net effect on the cloud is a pure roll about the boresight -- the same
+    un-rolling the IR pane already gets from `ir_gravity_rot`, so the FPV view
+    and the IR monitor finally agree on which way is up.
+    """
+    z = grav_rot @ _CV_FORWARD
+    z = z / np.linalg.norm(z)
+    x = np.cross(_WORLD_DOWN_CV, z)
+    nx = float(np.linalg.norm(x))
+    if nx < 1e-6:
+        # Aimed straight up or down: "level" is undefined about a vertical
+        # boresight, so fall back to the sensor's own up axis. Without this the
+        # frame would blow up exactly when a handheld scanner looks at the
+        # ceiling or the floor.
+        x = np.cross(grav_rot @ _CV_UP, z)
+        nx = float(np.linalg.norm(x))
+        if nx < 1e-6:                       # unreachable for a real rotation
+            return np.eye(3)
+    x = x / nx
+    return np.stack([x, np.cross(z, x), z])
+
+
+def view_rotation(grav_rot: np.ndarray | None, view_mode: str) -> np.ndarray | None:
+    """The rotation baked into the live cloud for the selected real-time view mode.
+
+    The mode is resolved HERE, server-side, rather than by moving the client's
+    camera: the cloud is rotated by the smoothed display quat at the broadcast
+    rate, while the client's only orientation feed (`sensor.rot`) is raw and
+    half as fast, so a client-rotated camera would lag and slosh against the
+    geometry it is supposed to be locked to. Baking the frame in instead makes
+    the client camera a *static* pose, matched by construction.
+
+    - "world"  -> `grav_rot`: gravity-aligned, free orbit (the original behaviour)
+    - "fpv"    -> look down the boresight, still gravity-levelled (owner: FPV and
+                  Mirror "need to respect gravity the same way world does" --
+                  the camera follows the sensor's aim, but the scene never rolls)
+    - "mirror" -> fpv, then flipped left-right
+    """
+    if view_mode == "world":
+        return grav_rot
+    if grav_rot is None:
+        # No orientation yet (ToF-only session): the cloud is already in the
+        # sensor's frame, which IS the boresight view -- there is simply no
+        # gravity to level against. Mirror still mirrors.
+        return _MIRROR_X if view_mode == "mirror" else None
+    rot = boresight_view_frame(grav_rot) @ grav_rot
+    return _MIRROR_X @ rot if view_mode == "mirror" else rot
 
 
 def rotate_points(pts: np.ndarray, rot: np.ndarray | None) -> np.ndarray:
@@ -1123,6 +1253,8 @@ def _state_message(ui: UiState) -> dict:
             "surface_enabled": ui.surface_enabled,
             "surface_mode": ui.surface_mode,
             "surface_threshold_pct": ui.surface_threshold_pct,
+            "view_mode": ui.view_mode,
+            "view_cam": {m: asdict(c) for m, c in ui.view_cam.items()},
             "mode": ui.mode, "slam_trajectory": ui.slam_trajectory,
             "slam_walls": ui.slam_walls, "slam_follow": ui.slam_follow,
             "idle_enabled": ui.idle_enabled, "idle_level": ui.idle_level,
@@ -1165,6 +1297,17 @@ def ui_from_config(cfg: ViewerConfig) -> UiState:
     if cfg.surface_mode in _VALID_SURFACE_MODES:
         ui.surface_mode = cfg.surface_mode
     ui.surface_threshold_pct = float(cfg.surface_threshold_pct)
+    if cfg.web_view_mode in _VALID_VIEW_MODES:
+        ui.view_mode = cfg.web_view_mode
+    for mode, keys in _VIEW_CAM_CONFIG_KEYS.items():
+        cam = ui.view_cam[mode]
+        for key, (attr, (lo, hi)) in zip(keys, _VIEW_CAM_FIELDS):
+            try:
+                v = float(getattr(cfg, key))
+            except (TypeError, ValueError):
+                continue                      # corrupt value: keep the default
+            if lo <= v <= hi:
+                setattr(cam, attr, v)
     ui.slam_trajectory = bool(cfg.slam_trajectory)
     if cfg.slam_walls in _VALID_WALL_MODES:
         ui.slam_walls = cfg.slam_walls
@@ -1195,6 +1338,11 @@ def apply_ui_to_config(ui: UiState, cfg: ViewerConfig) -> None:
     cfg.surface_enabled = bool(ui.surface_enabled)
     cfg.surface_mode = ui.surface_mode
     cfg.surface_threshold_pct = float(ui.surface_threshold_pct)
+    cfg.web_view_mode = ui.view_mode
+    for mode, keys in _VIEW_CAM_CONFIG_KEYS.items():
+        cam = ui.view_cam[mode]
+        for key, (attr, _range) in zip(keys, _VIEW_CAM_FIELDS):
+            setattr(cfg, key, float(getattr(cam, attr)))
     cfg.slam_trajectory = bool(ui.slam_trajectory)
     cfg.slam_walls = ui.slam_walls
     cfg.slam_follow = bool(ui.slam_follow)
@@ -2290,6 +2438,13 @@ async def _broadcaster() -> None:
             # becomes visible shimmer once it swings a 3 m lever arm.
             grav_quat = smoother.update(state.sensor_state.fused_quat())
             grav_rot = display_rotation(grav_quat)
+            # ...unless the user picked FPV/Mirror, which ship the cloud in the
+            # sensor's own frame instead. `grav_quat`/`grav_rot` themselves stay
+            # gravity-true below: the IR pane's quarter-turn snap and the
+            # `sensor` message are deliberately unaffected by the view mode
+            # (owner: "IR view is unchanged for all but mirror", and Mirror's IR
+            # flip is a client-side CSS transform, not a re-rotation).
+            view_rot = view_rotation(grav_rot, ui.view_mode)
 
             # POINT_CLOUD (or SURFACE) every tick (so late joiners see data
             # within ~36ms), but only in real-time mode -- SLAM mode replaces
@@ -2301,7 +2456,7 @@ async def _broadcaster() -> None:
                              ui.surface_threshold_pct) if ui.surface_enabled
                             else None)
                 key = (header.seq, ui.color_mode, ui.view_colormap, surf_key,
-                       rotation_key(grav_rot))
+                       rotation_key(view_rot))
                 if key != last_pc_key:
                     if ui.surface_enabled:
                         pg, cg, val, tris, cov, fell_back = select_surface(
@@ -2309,12 +2464,12 @@ async def _broadcaster() -> None:
                             ui.view_colormap, ui.surface_mode,
                             ui.surface_threshold_pct)
                         last_pc_bytes = pack_surface_cloud(
-                            rotate_points(pg, grav_rot), cg, val, tris, cov)
+                            rotate_points(pg, view_rot), cg, val, tris, cov)
                     else:
                         pts, colors, fell_back = select_colors(
                             outputs, state.deproj, ui.color_mode, ui.view_colormap)
                         last_pc_bytes = pack_point_cloud(
-                            rotate_points(pts, grav_rot), colors)
+                            rotate_points(pts, view_rot), colors)
                     if fell_back:
                         _log_debounced(state, bus, f"color-miss:{ui.color_mode}",
                                        f"color mode {ui.color_mode!r} unavailable this frame, showing depth")
@@ -2586,6 +2741,33 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             t = float(msg["surface_threshold"])
             if 0.1 <= t <= 50.0:
                 ui.surface_threshold_pct = t
+                changed = True
+        if "view_mode" in msg:
+            if msg["view_mode"] not in _VALID_VIEW_MODES:
+                log.warning("invalid set_view view_mode: %r", msg.get("view_mode"))
+                return
+            ui.view_mode = msg["view_mode"]
+            changed = True
+        # Camera framing always edits the CURRENTLY SELECTED mode's slot -- the
+        # three sliders show that mode, so there is exactly one thing they can
+        # mean. Handled after `view_mode` above so a combined message lands on
+        # the newly selected mode, not the one being left.
+        cam = ui.view_cam.setdefault(ui.view_mode, ViewCam())
+        if msg.get("cam_reset"):
+            ui.view_cam[ui.view_mode] = cam = replace(_DEFAULT_VIEW_CAM[ui.view_mode])
+            changed = True
+        for key, attr, (lo, hi) in (("cam_distance", "distance_m", _CAM_DISTANCE_RANGE),
+                                    ("cam_height", "height_m", _CAM_HEIGHT_RANGE),
+                                    ("cam_rotation", "rotation_deg", _CAM_ROTATION_RANGE)):
+            if key not in msg:
+                continue
+            try:
+                v = float(msg[key])
+            except (TypeError, ValueError):
+                log.warning("invalid set_view %s: %r", key, msg.get(key))
+                continue
+            if lo <= v <= hi:                 # out of range: drop, keep the current value
+                setattr(cam, attr, v)
                 changed = True
         if changed:
             _persist_ui(state)

@@ -53,6 +53,61 @@ orbit parity). With no orientation yet (ToF-only session, or before the first st
 back to the raw sensor frame — identity rotation. The client applies **no** further rotation to the
 cloud; doing so would double-count.
 
+**...and which frame exactly is `state.view_mode`'s job** (real-time view modes, owner ask 2026-07-29;
+`web.view_rotation`). The three modes are three *server-side* rotations of the same cloud; the client
+never composes one:
+
+| `view_mode` | rotation baked into the payload | client camera |
+|---|---|---|
+| `world` | `display_rotation(quat)` — the paragraph above, unchanged | OrbitControls, world grid visible |
+| `fpv` | `boresight_view_frame(R) @ R` — look down the sensor's optical axis, **still gravity-levelled** | locked just above/behind the origin, aimed down CV +Z; no orbit/pan/zoom, grid hidden |
+| `mirror` | `diag(-1,1,1) @` the above — left-right flip (CV X is Right) | same locked pose |
+
+`boresight_view_frame` builds a CV camera frame whose forward is the boresight and whose right is
+forced perpendicular to world down, so composing it with `R` nets out to a **pure roll about the
+boresight** — the same un-rolling `ir_gravity_rot` already applies to the IR pane, which is why the
+FPV view and the IR monitor agree on which way is up. The owner requirement is that FPV/Mirror
+"respect gravity the same way world does": the camera follows the sensor's *aim*, but the scene never
+rolls. Shipping the raw sensor frame instead (the obvious first implementation) fails exactly that.
+
+Two consequences worth stating, because both are load-bearing:
+- **The mode is resolved server-side on purpose.** The cloud is rotated by the *smoothed* display quat
+  at the broadcast rate, while the client's only orientation feed (`sensor.rot`) is raw and half as
+  fast — a client-rotated camera would lag and slosh against the geometry it is meant to be locked to.
+  Baking the frame in makes the client camera a static pose, matched by construction.
+- **A vertical boresight has no "level".** Aimed at the ceiling or the floor the right-axis cross
+  product degenerates, so `boresight_view_frame` falls back to the sensor's own up axis. A handheld
+  scanner visits that attitude constantly; without the fallback the cloud goes NaN.
+
+**Camera framing — one baseline, three offsets** (`state.view_cam`, owner ask 2026-07-30). The client
+camera is never *at* the sensor's optical centre: a camera exactly there reproduces the depth image's
+own projection, so every point lands where it already was in 2D and the render reads as a flat
+picture. The offset that fixes that is user-tunable and persisted, and **all three modes are described
+against one reference — the FPV ground truth, a camera at the sensor looking down its boresight.
+All-zero offsets reproduce that camera exactly, in every mode.**
+
+| field | meaning | range |
+|---|---|---|
+| `distance_m` | back off along the view axis | 0 … 15 |
+| `height_m` | lift the eye (world is Y-down, so up is −y) | −5 … 10 |
+| `rotation_deg` | swing the eye about the vertical axis through the aim point, positive to the right; the aim point stays on the axis so the subject stays framed | −180 … 180 |
+
+The modes differ only in what "the axis" is: `fpv`/`mirror` ride the live boresight (the server has
+already rotated the cloud into the boresight view frame), `world` uses the fixed world forward. Those
+coincide when the board is held in the reference pose, which is what makes this one baseline rather
+than three unrelated cameras. Defaults: world `(4.2, 2.6, 0)` — an elevated establishing shot;
+fpv/mirror `(0.30, 0.20, 0)` — just over the sensor's shoulder, enough parallax to read depth.
+
+Client side (`scene.js` `poseFor`) the pose is `target + Ryaw(rotation)·(0, −height, −(look_ahead +
+distance))` with `look_ahead = 1 m`, which is what makes the zero offset land exactly on the sensor.
+In world the computed pose is the *default/reset* framing and OrbitControls takes over from there;
+in fpv/mirror it is the locked pose. Ranges are validated on the wire **and** on config load, so a
+hand-edited `roomscan.toml` cannot park the camera somewhere the UI can't recover from.
+
+With no orientation (ToF-only) `fpv` is `None` (the cloud is already the sensor's own view) and
+`mirror` is the bare flip. The mode applies to **real-time only** — SLAM mode ships a mesh and drives
+its own follow camera, and the client disables the control there.
+
 **`IR_IMAGE` is rolled to match, but in two halves.** The server pre-rotates by whole quarter turns
 (`ir_gravity_rot` → `np.rot90`), which is pixel-exact and free, so **`width`/`height` swap on a 90°/270°
 roll** (54×42 ↔ 42×54) — clients must size from the message, never assume landscape. The snap alone can
@@ -77,6 +132,15 @@ row 0 renders at the top), so a CSS `rotate()` — which turns clockwise — nee
 It is computed from the *smoothed* display quat, the same one the snap uses; deriving it from the raw
 fused quat instead would let snap and residual disagree near a 45° boundary and make the pane jump.
 `null` before the first smoothed sample, and the client then applies no residual rather than guessing.
+**Mirror mode flips the pane, and nothing else does.** `view_mode == "mirror"` adds a signed
+`scaleX(-1)` to the same CSS transform, matching the server's X negation of the cloud (the IR raster
+and the cloud grid share one index space, so the two operations are the same flip). `world` and `fpv`
+render the pane identically — the gravity roll is *not* a function of the view mode (owner: "IR view is
+unchanged for all but mirror"). Order matters in the transform list: CSS applies it right-to-left, so
+the scale is listed **before** the rotate, which flips the already-rotated pane rather than the raw
+image. A uniform scale commutes with a rotation and a signed one does not, which is why the original
+`rotate(...) scale(k)` order was harmless and is no longer.
+
 Because the image rotates freely, `ir.js` renders it inside a fixed **square** frame (`#ir-frame`),
 scaled so the rotated bounding box always fits: the card never changes shape as the board rolls and no
 field of view is cropped, at the cost of empty corners at intermediate angles (worst at 45°, where the
@@ -303,7 +367,7 @@ exact body-axis rotation above, plus a countdown of the cells left in the gap be
 |------|-----------|----------|-------|
 | `metrics` | `render_fps`, `streams[]{stream_id,label,device_hz,host_hz,bytes_per_s,jitter_ms}`, `link_bytes_per_s`, `resources`(null), `drops`, `gaps` | `build_metrics_message` `web.py:221` | metrics cadence; `device_hz`/`jitter_ms` may be null |
 | `sensor` | `have_quat`, `rot`[9 row-major], `heading`, `pressure_pa`, `temp_c`, `mag_ut`[3], `fusion`(human label), `fusion_key`(raw status), `has_mag_cal`, `pressure_hist[]`, `temp_hist[]`, `orientation_raw`{quat[4],roll_deg,pitch_deg,yaw_deg,heading_deg}, `jitter`{window_s,roll/pitch/yaw/heading/orientation→{mean_deg,p95_deg,n}}, `orientation_view`{mode,labels[3],roll_deg,pitch_deg,yaw_deg,singularity_margin_deg,near_singularity,valid,reason,yaw_offset_deg,...}, `ir_roll_deg` | `build_sensor_message` | **None (silent) on a ToF-only session**; `rot`/`heading` computed server-side so the frontend never re-derives sign/permutation matrices — see `docs/coordinate-frames.md`. `fusion` is a human-friendly label (`_FUSION_LABELS`); `fusion_key` is the raw `YawFusion.status` (`off`/`init`/`active`/`gated:no-cal`/`gated:gimbal`/`gated:motion`/`gated:anomaly`). `pressure_hist`/`temp_hist` are decimated (1 sample/2 s, ~10 min window) for sparklines. `orientation_raw`/`jitter` add full-precision numerics + noise stats alongside the existing (also raw, just rounded) `rot`/`heading` — see the frame-of-reference section above; `rot`/`heading` themselves are unchanged by this addition. `orientation_view` is the selected-mode decomposition + singularity/validity — see "Orientation decomposition modes" above; `yaw_offset_deg` echoes the applied "Zero yaw here" offset (0.0 in World mode, where it never applies) — see "Zero yaw here" below. `ir_roll_deg` is the residual in-plane gravity roll the IR pane's server-side quarter-turn snap leaves behind, CCW-positive, `null` until the display quat exists — see the `IR_IMAGE` paragraph above; `ir.js` applies it as a CSS transform and must negate it |
-| `state` | `color_mode`, `ir_colormap`, `ir_freeze`, `view_colormap`(turbo\|gray), `point_size`, `point_size_auto`, `surface_enabled`, `surface_mode`(grid\|spatial), `surface_threshold_pct`, `mode`(realtime\|slam), `slam_trajectory`, `slam_walls`, `slam_follow`, `idle_enabled`, `idle_level`(soft\|hard), `orientation_mode`(zyx\|zxy\|boresight\|world), `orientation_labels`[3], `yaw_offset_deg` | `_state_message` | echoed after every `set_color`/`set_ir`/`set_view`/`set_mode`/`slam_opt`/`set_idle`/`set_orientation`/`zero_yaw`/`clear_yaw_offset` (one-way flow) **and** sent first on connect. Web Phase 5: the display prefs (all but `mode`) + the two sensor auto-idle prefs are seeded from + persisted to the shared `roomscan.toml` [viewer]` table (`web.ui_from_config`/`_persist_ui`), so a reconnect **and** a server restart bring a tab current; `mode` is not persisted (SLAM arms lazily → restart is always real-time). `orientation_mode`/`orientation_labels` (owner ask, 2026-07-28) follow the same persisted-pref pattern — `orientation_labels` round-trips to `roomscan.toml` as a single comma-joined string (`ViewerConfig.orientation_labels`), the flat-TOML writer being scalar-only. `yaw_offset_deg` (owner ask, 2026-07-29) is the raw "Zero yaw here" delta, also persisted (`ViewerConfig.yaw_offset_deg`, a plain float) — see "Zero yaw here" above |
+| `state` | `color_mode`, `ir_colormap`, `ir_freeze`, `view_colormap`(turbo\|gray), `point_size`, `point_size_auto`, `surface_enabled`, `surface_mode`(grid\|spatial), `surface_threshold_pct`, `view_mode`(world\|fpv\|mirror), `view_cam`{world/fpv/mirror→{distance_m,height_m,rotation_deg}}, `mode`(realtime\|slam), `slam_trajectory`, `slam_walls`, `slam_follow`, `idle_enabled`, `idle_level`(soft\|hard), `orientation_mode`(zyx\|zxy\|boresight\|world), `orientation_labels`[3], `yaw_offset_deg` | `_state_message` | echoed after every `set_color`/`set_ir`/`set_view`/`set_mode`/`slam_opt`/`set_idle`/`set_orientation`/`zero_yaw`/`clear_yaw_offset` (one-way flow) **and** sent first on connect. Web Phase 5: the display prefs (all but `mode`) + the two sensor auto-idle prefs are seeded from + persisted to the shared `roomscan.toml` [viewer]` table (`web.ui_from_config`/`_persist_ui`), so a reconnect **and** a server restart bring a tab current; `mode` is not persisted (SLAM arms lazily → restart is always real-time). `orientation_mode`/`orientation_labels` (owner ask, 2026-07-28) follow the same persisted-pref pattern — `orientation_labels` round-trips to `roomscan.toml` as a single comma-joined string (`ViewerConfig.orientation_labels`), the flat-TOML writer being scalar-only. `yaw_offset_deg` (owner ask, 2026-07-29) is the raw "Zero yaw here" delta, also persisted (`ViewerConfig.yaw_offset_deg`, a plain float) — see "Zero yaw here" above |
 | `session` | `mode`(live\|replay), `source_label`, `has_live`, `recording{active,path,elapsed_s,bytes,last_name}`, `playback{is_replay,capture_name,paused,speed_fps,loop,position,total_frames}` | `build_session_message` `web.py:400` | broadcast on change **and** on the metrics cadence (so timer/position tick). `recording.last_name` (owner ask, 2026-07-29) is the basename of the most recently *stopped* take, surviving past `active` flipping back to `false` — it is how the post-recording naming modal (`capture.js`) knows what to prefill/rename, and how it reads back rename success (name changed) vs. rejection (name unchanged) without a dedicated ack message. Cleared to `null` the moment the next `record on` starts, so a tab that connects between takes never sees a stale name and pops the modal unprompted |
 | `captures` | `items[]{name,bytes,mtime}` (newest first) | `build_captures_message` `web.py:354` | on connect, on `list_captures`, after a recording stops |
 | `slam` | `pose`[16], `follow{eye,center,up}`, `traj_tail[][3]`, `traj_len`, `fitness`, `rmse`, `tracking_lost`, `slam_ms`, `frames_integrated`, `mesh_seq`, `mesh_verts` | `build_slam_message` (web Phase 4) | every processed frame in SLAM mode; follow eye/center/up computed server-side; traj downsampled to ≤256 |
@@ -335,7 +399,7 @@ process with no live source.
 | `load_capture` | `name` | swap reader → replay (`sanitize_capture_name` → basename-only, `.bin`, must-exist; off-loop via `to_thread`) → echo `session` | `web.py:974` |
 | `go_live` | — | swap reader → live proxy → echo `session` | `web.py:982` |
 | `transport` | `action`(pause\|resume\|speed\|loop\|restart\|seek), `value` | playback control; `seek`/`restart` run off-loop via `to_thread` → echo `session` | `web.py:986` |
-| `set_view` | `colormap?`(turbo\|gray), `point_size?`, `point_size_auto?`, `surface?`, `surface_mode?`(grid\|spatial), `surface_threshold?` | 3D viewport display: colormap, point size, surface interpolation toggle + settings; all optional, only provided fields update → echo `state`. `point_size_auto` scales each point by its range from the sensor (a client-side shader uniform, no wire change) so every zone subtends the same solid angle; with it on, `point_size` means the size at **1 m of range** rather than metres | `web.py` |
+| `set_view` | `colormap?`(turbo\|gray), `point_size?`, `point_size_auto?`, `surface?`, `surface_mode?`(grid\|spatial), `surface_threshold?`, `view_mode?`(world\|fpv\|mirror), `cam_distance?`, `cam_height?`, `cam_rotation?`, `cam_reset?` | 3D viewport display: colormap, point size, surface interpolation toggle + settings, real-time view mode, camera framing; all optional, only provided fields update → echo `state`. `view_mode` picks which frame the live cloud is shipped in (`view_rotation`, see "Frame of reference" above) and is persisted to `[viewer] web_view_mode`; an unknown value is rejected+logged, never stored. The `cam_*` fields edit the **currently selected** mode's framing only (the three sliders show that mode, so there is exactly one thing they can mean) — handled *after* `view_mode`, so a combined message lands on the mode being switched to, not the one being left. Out-of-range or non-numeric values are dropped, keeping the current value. `cam_reset` restores that one mode's defaults. Persisted as nine flat floats, `[viewer] web_cam_<mode>_{distance_m,height_m,rotation_deg}`. `point_size_auto` scales each point by its range from the sensor (a client-side shader uniform, no wire change) so every zone subtends the same solid angle; with it on, `point_size` means the size at **1 m of range** rather than metres | `web.py` |
 | `set_idle` | `enabled?`, `level?`(soft\|hard) | sensor auto-idle prefs (laser-wear reduction); persisted to `[viewer]` → echo `state`. Disabling cancels any armed idle timer. The idle itself is driven server-side off the viewer count (see below), not by an inbound message | this change |
 | `set_mode` | `mode`(realtime\|slam) | switch top-bar mode; arms/disarms the `SlamRunner` off-loop (lazy worker build) → echo `state` | web Phase 4 |
 | `slam_opt` | `trajectory?`, `walls?`(solid\|split), `follow?` | SLAM display toggles → echo `state` | web Phase 4 |

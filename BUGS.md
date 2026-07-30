@@ -1161,3 +1161,36 @@ rather than orientation — which is why the tilt sweep looked like a calibratio
   is a magnetometer-only constraint.
 - Untested: whether a different mount, or more separation between the sensor and the tripod head, brings
   |B| back to ~50 µT. That would confirm the mechanism and might restore mounted heading.
+
+---
+
+## BUG-033 — The live point cloud is frustum-culled against a stale, zero-radius bounding sphere
+
+- **Status:** **fixed** 2026-07-30 · **Reported:** 2026-07-30 (surfaced by the FPV view mode) ·
+  **Area:** host/web frontend
+- **Where:** `host/src/roomscan/static/scene.js` (`points` / `uncovPoints` / `surfaceMesh`)
+
+Three.js computes `BufferGeometry.boundingSphere` **lazily, once**, and never invalidates it. The live
+cloud rewrites its position attribute every frame, so the sphere that gets cached is the one from the
+*first* render — before any `POINT_CLOUD` arrived, when the 300k-vertex buffer was still all zeros.
+That is a sphere of **centre (0,0,0), radius 0**, and it never updates again.
+
+World mode survived this purely by luck: its default camera sits at (0.5, 0, -1.5) looking at (0,0,1),
+so the origin falls inside the frustum, the degenerate point-sphere "intersects", and the object is
+drawn. It was a live tripwire the whole time — orbiting until the origin left the frustum would have
+blanked the cloud.
+
+**The FPV/Mirror view modes step straight on it.** They park the camera *at* the origin, which puts the
+cached centre behind the near plane (`distanceToPoint = -0.02 < -radius = 0`), so the cull test fails
+and the entire cloud disappears — a black viewport with no error, while the data was arriving and
+correct all along. Confirmed by probing the first vertex's NDC in the render loop: `(0.53, -0.68, 0.95)`,
+comfortably inside the frustum, with `frustumCulled=true` and `bs=(0,0,0)/r0`.
+
+**Fix:** `frustumCulled = false` on the three live-updating objects (`points`, `uncovPoints`,
+`surfaceMesh`). Recomputing the sphere per frame is the alternative and is far more expensive — a
+300k-vertex pass that ignores `drawRange` — for objects that are always in front of the viewer.
+
+*Diagnostic lesson:* the symptom (black viewport) looked like a camera-placement bug, and the frame
+algebra was re-derived twice before instrumenting. The decisive measurement was three numbers printed
+from inside the render loop — projected NDC, `boundingSphere`, `frustumCulled` — which separated "the
+geometry is in the wrong place" from "the geometry is fine and something refused to draw it".
