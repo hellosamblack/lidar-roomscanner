@@ -114,6 +114,13 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
 - **Prefer an MCP tool over parsing a CLI's prose** (`docs/mcp-server.md`): `capture_analyze` over
   reading `analyze_capture.py` output, `rig_status`/`orientation_probe` over scraping fps, `doctor`
   over eyeballing PASS/FAIL lines. New agent-facing capability ⇒ new MCP tool, per CLAUDE.md.
+- **Don't assert on a quantity you haven't measured.** A sub-phase 6.G test checked that a CPU grid
+  releases no CUDA cache, but asserted `point_cloud()` returns >100 points along the way — on that map
+  (4 integrations at `weight_threshold=3.0`) it legitimately returns 0 where `mesh()` does not, so the
+  test failed for a reason unrelated to what it covers. Assert the behaviour under test; for anything
+  incidental, either measure the real value first or just call the function. This one landed **red on
+  main** because the verification window was blocked (see the `concurrent-sessions-shared-checkout`
+  memory — unverified work in a shared tree can be committed by another session before you run it).
 - **A tool must report what happened, not what was asked for.** Three bugs found while verifying the
   MCP server were all this shape: a set that echoed a timer-driven `state` predating the change, a
   `go_live` that no-ops on a `--replay` server, and a record that silently refuses in replay. Each
