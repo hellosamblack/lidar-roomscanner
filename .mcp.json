@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "roomscan": {
+      "command": "host/.venv/bin/python",
+      "args": ["-m", "roomscan.mcp_server"],
+      "env": {
+        "PYTHONPATH": "host/src:host"
+      }
+    }
+  }
+}

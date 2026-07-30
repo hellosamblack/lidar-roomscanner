@@ -67,7 +67,11 @@ is* — the most useful clue when the viewing browser isn't on the host itself.
 
 - **No USB link to this host** — Ethernet/UDP is the only transport here; the USB
   CDC fallback is dead. See the `headless-host-deployment` memory.
-- **Running the server as an agent**: the agent Bash sandbox kills network-listener
-  processes (uvicorn → exit 144). Verify the data path directly
-  (`get_best_source`→`pump`→`TransformStage`) and the browser via headless-Chrome
-  screenshot; see the `agent-sandbox-port-binding` memory.
+- **Running the server as an agent**: use `rig_up()` / `rig_down()` from
+  `roomscan-mcp` (`docs/mcp-server.md`), which starts it detached and waits for the
+  UI to answer. Verify the browser via `ui_screenshot()`.
+  *Stale claim, re-measure before relying on it (2026-07-29):* this bullet used to
+  say the agent Bash sandbox kills network-listener processes (uvicorn → exit 144),
+  and the `agent-sandbox-port-binding` memory still does. That did **not** reproduce
+  — uvicorn bound `0.0.0.0`, served a request and exited 0 from a normal Bash call.
+  It may have been accurate when written.

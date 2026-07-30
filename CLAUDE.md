@@ -55,6 +55,17 @@ physical actions Claude cannot perform: moving IKS4A1/53L9A1 jumpers & solder br
 power-cycling (USB replug) to clear a warm-wedged I3C bus. Diagnose in firmware first; escalate to the
 human only for a genuinely physical cause, and name the exact physical action.
 
+**New tools land in the MCP server (2026-07-29):** the agent-facing surface is `roomscan-mcp`
+(`host/src/roomscan/mcp_server/`, registered in `.mcp.json`) — typed tools returning structured
+data, documented in `docs/mcp-server.md`. **Any new agent-facing capability lands as an MCP tool,
+not only as a script under `host/tools/`.** Write the logic as a pure function returning a dict,
+register a thin wrapper (its **docstring is the description the agent sees**), and add a CLI front
+end only if a human will run it directly — one implementation, two front ends. If a script is
+deliberately *not* exposed, record it in `EXCLUDED` in `host/tests/test_mcp_registry.py` with the
+reason; that test fails on any script which is neither exposed nor excluded. Two invariants: the
+server never binds the device stream (`roomscan-web` owns it — recording goes through
+`rig_record()`), and every tool reports what actually happened rather than what was requested.
+
 Throughout this doc, **`<APP>`** = `firmware/vendor/53L9A1/Projects/NUCLEO-H563ZI/Applications/53L9A1/53L9A1_PostprocessSingle/` (the reference firmware app dir). File references like `Src/vl53l9_app.c` are relative to `<APP>`.
 
 ## The reference firmware (`<APP>`)

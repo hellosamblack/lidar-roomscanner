@@ -39,7 +39,7 @@ MAX_PAYLOAD = 1 << 20  # decoder policy (docs/protocol.md)
 FRAME_TYPES = {1: "DATA", 2: "EVENT", 3: "COMMAND", 4: "ACK"}
 STREAMS = {0: "DEPTH_ZF32", 1: "DEPTH_ZAPC", 2: "AMBIENT", 3: "AMPLITUDE", 4: "CONFIDENCE",
            5: "REFLECTANCE", 6: "STATUS", 7: "RAW_3DMD", 8: "CALIB", 9: "IMU_QUAT",
-           10: "ENV", 11: "IMU_RAW"}
+           10: "ENV", 11: "IMU_RAW", 12: "IMU_CAL"}  # keep in sync with protocol.StreamId
 
 
 def zero_runs(buf: bytes, min_len: int) -> list[tuple[int, int]]:
@@ -70,13 +70,18 @@ def hexdump(data: bytes, base_off: int, width: int = 16) -> str:
     return "\n".join(lines)
 
 
-def analyze(path: str, *, min_zero_run: int, zero_scan_frames: int,
-            show_frames: bool, dump_bytes: int) -> None:
+def scan(path: str, *, min_zero_run: int = 50, zero_scan_frames: int = 8,
+         dump_bytes: int = 0) -> dict:
+    """Decode `path` frame by frame and return every finding as data.
+
+    Pure: reads the file, returns a dict, prints nothing. `analyze()` renders this
+    as prose for the CLI; `roomscan.mcp_server` returns it as JSON. Raw file bytes
+    are deliberately not included -- any hexdump is rendered here into a string so
+    callers never carry megabytes around.
+    """
     with open(path, "rb") as f:
         data = f.read()
     n = len(data)
-    print(f"=== {path} ===")
-    print(f"file size: {n} bytes")
 
     pos = 0
     frames_decoded = 0
@@ -152,16 +157,7 @@ def analyze(path: str, *, min_zero_run: int, zero_scan_frames: int,
             "run_end": n, "run_len": n - skip_run_start,
         })
 
-    print(f"frames_decoded={frames_decoded} crc_failures={crc_failures} "
-          f"bytes_skipped={bytes_skipped}")
-
-    print("\n--- anomalies (file order) ---")
-    if not anomalies:
-        print("  none — capture decodes clean end to end")
-    for a in anomalies:
-        print(f"  {a}")
-
-    print("\n--- skip-run context ---")
+    skip_context = []
     for a in anomalies:
         if a["kind"] != "SKIP_RUN":
             continue
@@ -173,44 +169,105 @@ def analyze(path: str, *, min_zero_run: int, zero_scan_frames: int,
             elif rec[0] >= end:
                 next_ = rec
                 break
-        print(f"\n  SKIP RUN [{start}, {end}) len={end - start}")
+        ctx: dict = {"run_start": start, "run_end": end, "run_len": end - start,
+                     "prev_frame": None, "next_frame": None,
+                     "zero_runs": zero_runs(data[start:end], min_zero_run)}
         if prev:
             off, ft, sid, seq, fl, pl, _t = prev
-            frame_end = off + HEADER_SIZE + pl + 4
-            print(f"    prev good frame: off={off} {ft}/{sid} seq={seq} flags=0x{fl:02x} "
-                  f"plen={pl} ends_at={frame_end} (gap to run: {start - frame_end} B)")
-        else:
-            print("    prev good frame: none (run at capture start)")
+            ctx["prev_frame"] = {"offset": off, "frame_type": ft, "stream_id": sid, "seq": seq,
+                                 "flags": fl, "declared_payload_len": pl,
+                                 "ends_at": off + HEADER_SIZE + pl + 4,
+                                 "gap_to_run": start - (off + HEADER_SIZE + pl + 4)}
         if next_:
             off, ft, sid, seq, fl, pl, _t = next_
-            print(f"    next good frame: off={off} {ft}/{sid} seq={seq} flags=0x{fl:02x} plen={pl}")
-        else:
-            print("    next good frame: none (run extends to EOF)")
-        zr = zero_runs(data[start:end], min_zero_run)
-        print(f"    zero-runs >= {min_zero_run} B inside run (offsets relative to run start): {zr}")
+            ctx["next_frame"] = {"offset": off, "frame_type": ft, "stream_id": sid, "seq": seq,
+                                 "flags": fl, "declared_payload_len": pl}
         if dump_bytes > 0:
             d0 = max(0, start - 32)
             d1 = min(n, start + dump_bytes)
-            print(f"    hexdump [{d0}, {d1}):")
-            print(hexdump(data[d0:d1], d0))
+            ctx["hexdump"] = {"start": d0, "end": d1, "text": hexdump(data[d0:d1], d0)}
+        skip_context.append(ctx)
 
-    print(f"\n--- zero-runs >= {min_zero_run} B in the first {zero_scan_frames} good RAW payloads ---")
-    shown = 0
+    raw_zero_runs = []
     for off, ft, sid, seq, fl, pl, _t in frame_log:
         if sid != "RAW_3DMD":
             continue
         payload = data[off + HEADER_SIZE:off + HEADER_SIZE + pl]
-        zr = zero_runs(payload, min_zero_run)
-        print(f"  RAW seq={seq:6d} flags=0x{fl:02x} zero-runs (payload offsets): {zr if zr else 'none'}")
-        shown += 1
-        if shown >= zero_scan_frames:
+        raw_zero_runs.append({"seq": seq, "flags": fl,
+                              "zero_runs": zero_runs(payload, min_zero_run)})
+        if len(raw_zero_runs) >= zero_scan_frames:
             break
+
+    return {
+        "path": path,
+        "size_bytes": n,
+        "frames_decoded": frames_decoded,
+        "crc_failures": crc_failures,
+        "bytes_skipped": bytes_skipped,
+        "clean": not anomalies,
+        "anomalies": anomalies,
+        "skip_context": skip_context,
+        "raw_zero_runs": raw_zero_runs,
+        "min_zero_run": min_zero_run,
+        "zero_scan_frames": zero_scan_frames,
+        "frame_log": [
+            {"offset": off, "frame_type": ft, "stream_id": sid, "seq": seq,
+             "flags": fl, "declared_payload_len": pl, "t_us": t_us}
+            for off, ft, sid, seq, fl, pl, t_us in frame_log
+        ],
+    }
+
+
+def analyze(path: str, *, min_zero_run: int, zero_scan_frames: int,
+            show_frames: bool, dump_bytes: int) -> None:
+    """Print `scan()`'s findings as the prose report the CLI has always emitted."""
+    r = scan(path, min_zero_run=min_zero_run, zero_scan_frames=zero_scan_frames,
+             dump_bytes=dump_bytes)
+    print(f"=== {path} ===")
+    print(f"file size: {r['size_bytes']} bytes")
+    print(f"frames_decoded={r['frames_decoded']} crc_failures={r['crc_failures']} "
+          f"bytes_skipped={r['bytes_skipped']}")
+
+    print("\n--- anomalies (file order) ---")
+    if not r["anomalies"]:
+        print("  none — capture decodes clean end to end")
+    for a in r["anomalies"]:
+        print(f"  {a}")
+
+    print("\n--- skip-run context ---")
+    for c in r["skip_context"]:
+        print(f"\n  SKIP RUN [{c['run_start']}, {c['run_end']}) len={c['run_len']}")
+        p = c["prev_frame"]
+        if p:
+            print(f"    prev good frame: off={p['offset']} {p['frame_type']}/{p['stream_id']} "
+                  f"seq={p['seq']} flags=0x{p['flags']:02x} "
+                  f"plen={p['declared_payload_len']} ends_at={p['ends_at']} "
+                  f"(gap to run: {p['gap_to_run']} B)")
+        else:
+            print("    prev good frame: none (run at capture start)")
+        nx = c["next_frame"]
+        if nx:
+            print(f"    next good frame: off={nx['offset']} {nx['frame_type']}/{nx['stream_id']} "
+                  f"seq={nx['seq']} flags=0x{nx['flags']:02x} plen={nx['declared_payload_len']}")
+        else:
+            print("    next good frame: none (run extends to EOF)")
+        print(f"    zero-runs >= {min_zero_run} B inside run "
+              f"(offsets relative to run start): {c['zero_runs']}")
+        if "hexdump" in c:
+            print(f"    hexdump [{c['hexdump']['start']}, {c['hexdump']['end']}):")
+            print(c["hexdump"]["text"])
+
+    print(f"\n--- zero-runs >= {min_zero_run} B in the first {zero_scan_frames} good RAW payloads ---")
+    for z in r["raw_zero_runs"]:
+        print(f"  RAW seq={z['seq']:6d} flags=0x{z['flags']:02x} "
+              f"zero-runs (payload offsets): {z['zero_runs'] if z['zero_runs'] else 'none'}")
 
     if show_frames:
         print("\n--- frame inventory ---")
         print(f"  {'offset':>10}  {'type':8}  {'stream':12}  {'seq':>8}  flags  {'plen':>6}  t_us")
-        for off, ft, sid, seq, fl, pl, t_us in frame_log:
-            print(f"  {off:>10}  {ft:8}  {str(sid):12}  {seq:>8}  0x{fl:02x}   {pl:>6}  {t_us}")
+        for f_ in r["frame_log"]:
+            print(f"  {f_['offset']:>10}  {f_['frame_type']:8}  {str(f_['stream_id']):12}  "
+                  f"{f_['seq']:>8}  0x{f_['flags']:02x}   {f_['declared_payload_len']:>6}  {f_['t_us']}")
 
 
 def main(argv=None) -> int:

@@ -98,9 +98,17 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
   tool, observe fps + zero CRC failures + zero seq gaps). State actual numbers, not "works".
 - When debugging link problems, capture raw bytes first (`--record`), then debug offline against the
   file — don't iterate on live hardware.
-- **Web UI work is verified visually, not just by tests.** On this headless host use
-  `host/tools/web_ui_shot.py` to screenshot *and* drive the page (headless Chrome over CDP) against a
-  replay server — the full recipe (sandbox/detach caveats, replay selection) is in `docs/web-ui-testing.md`.
+- **Web UI work is verified visually, not just by tests.** On this headless host use the `ui_*` MCP
+  tools — `rig_up(replay=…)`, then `ui_screenshot()` (returns the PNG inline), `ui_wait_for(…)` and
+  `ui_eval(…)` to assert real state. `host/tools/web_ui_shot.py` remains the fallback for a client
+  without MCP. Full recipe in `docs/web-ui-testing.md`; the tool surface in `docs/mcp-server.md`.
+- **Prefer an MCP tool over parsing a CLI's prose** (`docs/mcp-server.md`): `capture_analyze` over
+  reading `analyze_capture.py` output, `rig_status`/`orientation_probe` over scraping fps, `doctor`
+  over eyeballing PASS/FAIL lines. New agent-facing capability ⇒ new MCP tool, per CLAUDE.md.
+- **A tool must report what happened, not what was asked for.** Three bugs found while verifying the
+  MCP server were all this shape: a set that echoed a timer-driven `state` predating the change, a
+  `go_live` that no-ops on a `--replay` server, and a record that silently refuses in replay. Each
+  returned success. If a tool sends a request, check the resulting state actually changed.
 
 ### Verifying a rotation (or any sign)
 

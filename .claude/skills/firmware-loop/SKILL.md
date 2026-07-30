@@ -8,6 +8,20 @@ description: Use when building, flashing, or monitoring STM32 firmware in this p
 Firmware validation is on-target only — no simulator, no unit tests. Every firmware change ends with
 flash-and-observe.
 
+> **Prefer the MCP tools where they exist** (`docs/mcp-server.md`) — they return structured results
+> and already encode the host quirks the command lines below spell out:
+>
+> | instead of | call |
+> |---|---|
+> | `cmake --build …` with the venv on `PATH` | `fw_build()` — parsed errors, `.bin` size |
+> | `st-info --probe` + `st-flash …` | `fw_flash()` — probes first, checks chipid `0x484` |
+> | `check_udp.py` / reading fps out of prose | `rig_status()`, `orientation_probe(mode="health")` |
+> | `capture.py --udp` while the UI is live | `rig_record(on=True/False)` — no stream contention |
+> | `analyze_capture.py <file>` | `capture_analyze(path)` — anomalies as JSON with offsets |
+> | `pytest` from the wrong directory | `run_tests()` — runs with cwd=`host/` |
+>
+> The raw commands below remain correct and are the fallback for a client without MCP.
+
 ## Which app
 
 - Our fork: `firmware/scanner-stream/` — the app that actually ships (raw-only streaming over native

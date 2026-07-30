@@ -14,6 +14,9 @@ monitor = ["nvidia-ml-py>=12"]
 slam = ["kiss-icp>=1.0"]
 # Web UI dependencies
 web = ["fastapi", "uvicorn", "websockets"]
+# Agent-facing MCP server (roomscan-mcp). Needs [web] too: the rig_* tools speak
+# the same /ws protocol and the ui_* tools drive Chrome over `websockets`.
+mcp = ["mcp>=2.0", "playwright>=1.40", "roomscan[web]"]
 
 [project.scripts]
 roomscan-view = "roomscan.viewer:main"
@@ -21,6 +24,7 @@ roomscan-panel = "roomscan.panel:main"   # DEPRECATED (Web Phase 5): legacy Open
 roomscan-ctl = "roomscan.control:main"
 roomscan-slam = "roomscan.slam.cli:main"
 roomscan-web = "roomscan.web:main"        # primary UI: browser instrument, headless-capable
+roomscan-mcp = "roomscan.mcp_server.__main__:main"  # agent-facing MCP tool server
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

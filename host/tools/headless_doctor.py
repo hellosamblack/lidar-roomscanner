@@ -41,20 +41,35 @@ if not sys.stdout.isatty():
 
 
 class Doctor:
-    def __init__(self) -> None:
+    """Runs the bring-up checks, accumulating each verdict in `self.results`.
+
+    `quiet=True` suppresses printing so callers (roomscan.mcp_server) can take the
+    structured results instead; the default prints exactly what it always has.
+    """
+
+    def __init__(self, quiet: bool = False) -> None:
         self.failed = 0
+        self.quiet = quiet
+        self.results: list[dict] = []
+
+    def _emit(self, *lines: str) -> None:
+        if not self.quiet:
+            for line in lines:
+                print(line)
 
     def ok(self, name: str, detail: str = "") -> None:
-        print(f"  {GREEN}PASS{RESET} {name}" + (f" — {detail}" if detail else ""))
+        self.results.append({"check": name, "status": "pass", "detail": detail, "fix": None})
+        self._emit(f"  {GREEN}PASS{RESET} {name}" + (f" — {detail}" if detail else ""))
 
     def bad(self, name: str, detail: str, fix: str) -> None:
         self.failed += 1
-        print(f"  {RED}FAIL{RESET} {name} — {detail}")
-        for line in fix.splitlines():
-            print(f"       {YELLOW}fix:{RESET} {line}")
+        self.results.append({"check": name, "status": "fail", "detail": detail, "fix": fix})
+        self._emit(f"  {RED}FAIL{RESET} {name} — {detail}",
+                   *(f"       {YELLOW}fix:{RESET} {line}" for line in fix.splitlines()))
 
     def warn(self, name: str, detail: str) -> None:
-        print(f"  {YELLOW}WARN{RESET} {name} — {detail}")
+        self.results.append({"check": name, "status": "warn", "detail": detail, "fix": None})
+        self._emit(f"  {YELLOW}WARN{RESET} {name} — {detail}")
 
     # 1 -------------------------------------------------------------------
     def check_vendored_sources(self) -> None:
@@ -180,7 +195,7 @@ class Doctor:
                 " — auto-open passes --enable-unsafe-swiftshader (web.py)")
 
     def run(self, build: bool, net: bool) -> int:
-        print("roomscan headless-host doctor\n")
+        self._emit("roomscan headless-host doctor\n")
         self.check_vendored_sources()
         self.check_native_lib(build)
         if net:
@@ -189,11 +204,11 @@ class Doctor:
             self.warn("board UDP stream", "skipped (--no-net)")
         self.check_viewer_assets()
         self.check_browser_webgl()
-        print()
+        self._emit("")
         if self.failed:
-            print(f"{RED}{self.failed} check(s) failed{RESET} — fix the above, then `./view-web.sh`.")
+            self._emit(f"{RED}{self.failed} check(s) failed{RESET} — fix the above, then `./view-web.sh`.")
         else:
-            print(f"{GREEN}all checks passed{RESET} — `./view-web.sh` should show live data.")
+            self._emit(f"{GREEN}all checks passed{RESET} — `./view-web.sh` should show live data.")
         return self.failed
 
 

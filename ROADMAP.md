@@ -101,6 +101,38 @@ Found during review of `<APP>/Src/vl53l9_app.c`; fix these in our fork, leave th
 - **`-Ofast` on float depth data**: implies `-ffast-math` (no NaN semantics). Any NaN/invalid-depth
   sentinel handling must live host-side or use explicit sentinel values, not NaN checks, in firmware.
 
+## Agent tooling — `roomscan-mcp` ✅ (2026-07-29)
+
+The agent-facing surface is an MCP server (`host/src/roomscan/mcp_server/`, `.mcp.json`,
+`docs/mcp-server.md`) exposing 19 typed tools: `rig_*` (drive a running `roomscan-web` over `/ws`),
+`ui_*` (headless Chrome held open across calls, screenshots returned as image blocks), `capture_*` /
+`doctor` / `orientation_probe`, and `fw_build` / `fw_flash` / `run_tests`. Thin layer only — each
+wrapped script keeps its `argparse` `main()` as a prose printer over the same pure function
+(`analyze_capture.scan()`, `Doctor(quiet=True).results`), verified by byte-identical CLI output.
+
+Two decisions worth keeping:
+- **Client, never competitor.** The server never binds the device stream; `capture.py` stays
+  CLI-only and recording goes through `rig_record()`, so the contention rule is structural.
+- **12 scripts are deliberately CLI-only** (scratch tier, deprecated panel, one-shot rigs), each with
+  a recorded reason. `host/tests/test_mcp_registry.py` fails on any `host/tools/` script that is
+  neither exposed nor excluded — verified to go red on a probe script.
+
+Measured along the way, both correcting the repo: the **Bash sandbox no longer kills network
+listeners** (uvicorn bound `0.0.0.0`, served, exited 0 — `docs/headless-host-setup.md` and the
+`agent-sandbox-port-binding` memory are stale), and **Playwright renders the Three.js scene on this
+GPU-less host** via `channel="chrome"` + SwiftShader, so it is now the `ui_*` backend (raw CDP kept
+as fallback) for native `wait_for_function`. **Five** "confidently wrong answer" bugs were found and
+fixed during verification, all from trusting a timer-driven broadcast as proof of effect — including
+one that reported failure while 734 clean frames *were* recorded, and a `rig_command` that called a
+device timeout a success. See `docs/mcp-server.md` → "Two invariants".
+
+**Firmware tools verified on-rig 2026-07-29.** `fw_build` (text 148044 / data 13231 / bss 54232) and
+`fw_flash` (chipid `0x484`, written + verified) were run against a board that had **stopped
+responding entirely** — no ping, no command ACK, `device_hz: None`, though SWD saw it fine at
+3291 mV. Reflashing revived it: ping 0% loss, streams 7/9/10/11 at **30.5 Hz, 0 drops, 0 gaps**,
+`ping` → `OK applied=1`, and 614 recorded frames with 0 CRC failures. Cause of the original hang not
+investigated — worth watching for a recurrence.
+
 ## Phases
 
 ### Phase 0 — ✅ Complete

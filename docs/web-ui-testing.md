@@ -1,21 +1,52 @@
 # Visually testing the web UI on the headless host
 
-This box has **no display and no Chrome extension**, so the mcp browser tools,
-VNC clicking, and any on-screen interaction are unavailable. To *see* and *drive*
-the `roomscan-web` UI here, use **`host/tools/web_ui_shot.py`** — it launches
-headless Chrome (software WebGL via SwiftShader), navigates the page over the
-Chrome DevTools Protocol, runs JS to click/toggle/type, and captures PNGs you
-then Read back. This is the standard way to verify web front-end work in this
-repo (established 2026-07-16, Web Phase 1).
+This box has **no display**, so VNC clicking and any on-screen interaction are
+unavailable. Web front-end work is verified by driving headless Chrome (software
+WebGL via SwiftShader), screenshotting, and reading the PNGs back.
 
-## The recipe
+## Preferred: the `ui_*` MCP tools (2026-07-29)
+
+`roomscan-mcp` (`docs/mcp-server.md`) holds **one browser open across calls**, so
+only the first call pays the launch and settle. It supersedes the `web_ui_shot.py`
+recipe below for day-to-day work:
+
+```
+rig_up(replay="captures/tilt_sweep_20260729.bin", replay_fps=20)
+ui_screenshot(renavigate=True, settle=8)     # returns the PNG inline + #diag-log tail
+ui_wait_for("parseInt(document.getElementById('pos-status').textContent.match(/\\d+/)[0]) > 50")
+ui_eval("document.getElementById('hud-device-fps').textContent")
+ui_reset()                                   # between independent scenarios
+rig_down()
+```
+
+Why prefer it: the screenshot comes back as an image block (no `/tmp` file, no
+separate Read), JS goes in as a plain string (no JSON-inside-shell-argument
+quoting), and `ui_wait_for` waits on a **real condition** instead of a fixed sleep —
+which this doc has always warned is the trap. Backed by Playwright
+(`channel="chrome"`), with the raw-CDP path as fallback.
+
+Assertable readouts: `#pos-status` ("frame N / total", replay only — it is empty on
+a live server), `#hud-view-fps`, `#hud-device-fps`, `#record-status`, `#ir-frame`,
+`#slam-frames`. **`window.__diag` is the page's logging sink *function*, not a state
+object** — read what it logged from `ui_screenshot`'s diag-log tail.
+
+## Fallback recipe: `host/tools/web_ui_shot.py`
+
+Still correct, and the only option in a client without MCP. It launches and tears
+down its own Chrome per invocation.
 
 ### 1. Start the server against a replay — DETACHED, sandbox off
 
-The Bash sandbox kills network-listener processes (uvicorn exits 144), so the
-server **must** run with `dangerouslyDisableSandbox`, and it must be *detached*
-(`setsid … &`, stdin from `/dev/null`) so it survives after the launching Bash
-call returns. Use `ROOMSCAN_NO_BROWSER=1` (nothing to open here):
+The server must be *detached* (`setsid … &`, stdin from `/dev/null`) so it survives
+after the launching Bash call returns. Use `ROOMSCAN_NO_BROWSER=1` (nothing to open
+here):
+
+> **Stale claim, re-measure before relying on it (2026-07-29):** this doc used to
+> say the Bash sandbox kills network listeners (uvicorn → exit 144) and that
+> `dangerouslyDisableSandbox` was therefore mandatory. That did **not** reproduce:
+> uvicorn bound `0.0.0.0`, served a request and exited 0 from a normal Bash call, as
+> did plain listeners on loopback and `0.0.0.0`. It may have been true when written.
+> `rig_up()` starts the server detached without needing the flag.
 
 ```bash
 ROOMSCAN_NO_BROWSER=1 setsid host/.venv/bin/python -m roomscan.web \

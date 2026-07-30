@@ -27,6 +27,12 @@ session pays to rediscover (the 2026-07-10 retro burned a full session correctin
    now-changed status ("STILL OPEN", "blocked", "draft PR") gets reconciled.
 6. **New files** — repo-relative paths ≤150 chars (longer breaks `git worktree add` and fresh
    clones on Windows).
+7. **MCP surface** — did this work add an agent-facing capability, or a script under `host/tools/`?
+   Then it ships as an MCP tool in the same commit: wrapper registered in
+   `host/src/roomscan/mcp_server/`, `EXPOSED`/`EXCLUDED` updated in
+   `host/tests/test_mcp_registry.py`, `docs/mcp-server.md` updated. Did it change a `/ws` message
+   the `rig_*` tools read or send? Then check those tools still verify the *effect* rather than
+   just the echo (`docs/mcp-server.md` → "Two invariants").
 
 ## Branch discipline (owner workflow, 2026-07-16)
 

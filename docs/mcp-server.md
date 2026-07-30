@@ -1,0 +1,161 @@
+# The `roomscan` MCP server
+
+`roomscan-mcp` exposes the dev loop as typed tools with structured results. It is the
+primary agent-facing surface; the `host/tools/` CLIs remain for humans and for
+clients without MCP.
+
+**Why it exists.** Two reasons, both measured rather than assumed:
+
+1. **The structure already existed and was being thrown away.** `analyze_capture`
+   built anomaly dicts with byte offsets, `Doctor` accumulated per-check verdicts,
+   `orientation_probe` returned summary dicts -- and each one flattened that into
+   prose at the `print()` boundary for an agent to re-parse. Every wrapped tool now
+   returns the dict directly.
+2. **One process can hold state across many tool calls.** Each Bash call is a fresh
+   process, so UI checks relaunched Chrome and paid an ~8 s settle every time. The
+   server keeps one browser and one `/ws` connection warm.
+
+**Not a reason:** sandbox escape. An earlier draft of this work claimed the agent
+Bash sandbox kills network listeners (uvicorn → exit 144). Measured 2026-07-29:
+uvicorn binds `0.0.0.0`, serves a request and exits 0 from inside a normal Bash
+call, as do plain listeners on loopback and `0.0.0.0`. See "Stale claim" below.
+
+## Running it
+
+Registered for this repo in `.mcp.json` (project scope, checked in, so the
+`.agents/` runtime picks it up too):
+
+```jsonc
+{"mcpServers": {"roomscan": {
+  "command": "host/.venv/bin/python", "args": ["-m", "roomscan.mcp_server"],
+  "env": {"PYTHONPATH": "host/src:host"}}}}
+```
+
+Install with `pip install -e "host[mcp]"` (pulls `mcp>=2.0`, `playwright`, and the
+`[web]` extra). Note SDK 2.x renamed `FastMCP` to `mcp.server.MCPServer`.
+
+**stdio vs HTTP.** The default stdio server is a child of its MCP client and dies
+with it, so the browser and `/ws` connection are rebuilt each session. For
+cross-session warmth run it standalone instead:
+
+```sh
+host/.venv/bin/python -m roomscan.mcp_server --http --port 8765
+claude mcp add --transport http roomscan http://127.0.0.1:8765/mcp -s project
+```
+
+Both transports serve the same tool definitions.
+
+## Tools
+
+**rig_\*** — control a running `roomscan-web` over `/ws` (`docs/web-protocol.md`).
+
+| tool | notes |
+|---|---|
+| `rig_status()` | start here: server up?, source, fps, playback frame, streams |
+| `rig_up(replay?, replay_fps?)` | starts the server detached; `replay` for deterministic checks |
+| `rig_down()` | terminates it and drops the `/ws` connection |
+| `rig_command(name, param?)` | device COMMAND/ACK; `ok=false` when the ACK is an error |
+| `rig_record(on)` | records via the server, returning the capture path |
+| `rig_set(...)` | display/mode options; verifies the echo before reporting success |
+| `rig_playback(action, value?)` | `go_live` / `load_capture` / transport |
+| `rig_save()` | SLAM `.ply` + `.tum` |
+
+**ui_\*** — headless Chrome, held open across calls.
+
+| tool | notes |
+|---|---|
+| `ui_screenshot(...)` | returns the PNG as an image block plus the `#diag-log` tail |
+| `ui_eval(js)` | JS result as JSON; JS errors come back as `ok=false` |
+| `ui_wait_for(predicate_js)` | wait on a real condition instead of sleeping |
+| `ui_reset(relaunch?)` | clean page between scenarios -- server state persists |
+
+Useful readouts: `#pos-status` ("frame N / total", replay only), `#hud-view-fps`,
+`#hud-device-fps`, `#record-status`, `#ir-frame`, `#slam-frames`. Element ids live in
+`host/src/roomscan/static/index.html`. `window.__diag` is the page's *logging sink
+function*, not a state object -- read what it logged via `ui_screenshot`'s tail.
+
+**data** — `capture_list()` (includes `has_stream_9`, which SLAM and orientation work
+ask constantly), `capture_analyze(path)`, `doctor()`, `orientation_probe(mode)`.
+
+**build** — `fw_build()`, `fw_flash()`, `run_tests()`. These encode the host facts
+that bite every session: Ninja comes from the venv, the packaged stlink 1.8.0 cannot
+identify an H5 (a locally built `develop` is used, expect chipid `0x484`), and pytest
+must run with cwd=`host/`.
+
+**On-rig verified 2026-07-29.** `fw_build()` returned `text=148044 data=13231
+bss=54232`, `.bin` 161279 B (`size` is `null` on a no-op build — `ninja: no work to
+do` prints no size line, which is honest rather than a parser bug). `fw_flash()`
+probed `chipid 0x484`, wrote and verified. It was flashed against a board that had
+gone unresponsive — no ping, no ACK, `device_hz: None` — and the flash revived it:
+ping 0% loss, streams 7/9/10/11 all at **30.5 Hz, 0 drops, 0 gaps**, `ping` →
+`OK applied=1`, and a `rig_record` → `capture_analyze` round trip gave 614 frames,
+0 CRC failures. `run_tests()` was checked in both directions: 22 passed on a `-k`
+selection, and `ok=False` with the failing test id against a deliberate probe.
+
+## Two invariants
+
+**Client, never competitor.** The server must never bind the device UDP/CDC stream --
+`roomscan-web` owns it, and `capture.py --udp` starves it. This is why raw
+`capture.py` stays CLI-only and recording goes through `rig_record()`: the rule is
+structural rather than something to remember. Verified with `ss -uanp`: only
+`roomscan.web` binds `0.0.0.0:5000`.
+
+**Report what happened, not what was requested.** roomscan-web broadcasts `state` and
+`session` on a timer as well as on change, so the first one after a request can
+predate it -- which reads as success while reporting the old value, or (worse) as
+failure while the thing actually worked. Five real bugs of this shape were caught
+during verification, every one of them returning a confident wrong answer:
+
+| tool | symptom | fix |
+|---|---|---|
+| `rig_set` | reported the *old* colour after a successful set | poll until the echoed field matches |
+| `rig_playback("go_live")` | `ok` on a `--replay` server, which has no live source | check `is_replay` actually cleared |
+| `rig_record(on=True)` | `ok` in replay, where `start_record()` is a no-op | check `active`, explain why |
+| `rig_record(on=True)` | **`ok=False` while 734 clean frames were recorded** | poll `session` for `active == on` |
+| `rig_command` | `ok` for `status="timeout"` — device never answered | only `status == "ok"` is success |
+
+The last two were found on real hardware, against a board that had stopped
+responding. `_await_state` / `_await_session` exist for exactly this: a broadcast
+arriving is not evidence that anything changed. A sync test pins `web._cmd_status`'s
+vocabulary (`ok | error | busy | timeout`) so a new status cannot silently read as
+success.
+
+## Adding a tool
+
+1. Write the logic as a **pure function returning structured data**, in the
+   `host/tools/` script if one exists. Keep its `argparse` `main()` as a prose
+   printer over that same function -- one implementation, two front ends.
+2. Register a thin wrapper in the matching `roomscan/mcp_server/tools_*.py`. The
+   **docstring is the description the agent sees**; write it for someone who has
+   never seen the tool. Type the parameters -- the schema comes from the signature.
+3. Lazy-import anything heavy (`open3d`, `numpy`) inside the function body. A test
+   asserts the server builds without importing them.
+4. Update `EXPOSED`/`EXCLUDED` in `host/tests/test_mcp_registry.py` and this file.
+
+Not everything should be wrapped. The scratch tier, the deprecated-panel tools, and
+the rare one-shot rigs stay CLI-only; each is listed in `EXCLUDED` with its reason,
+and the test fails on any script that is neither exposed nor excluded.
+
+## Browser backend
+
+`session.py` defines the browser as an interface (`goto`, `evaluate`, `wait_for`,
+`screenshot`, `diag_tail`) with two implementations. **Playwright is the default**
+(`channel="chrome"` drives the system Chrome, so there is no browser download);
+`CdpSession`, the raw-CDP plumbing lifted from `web_ui_shot.py`, is the fallback when
+playwright is not installed.
+
+**Spike result (2026-07-29): Playwright passes on this GPU-less host.** With
+`--enable-unsafe-swiftshader --use-gl=angle --use-angle=swiftshader`, it obtained a
+WebGL context, logged `first point cloud: 2256 pts`, and produced a screenshot
+equivalent to the CDP one. It was adopted for native waiting: `wait_for_function` is
+driven by the page's own event loop rather than a 4 Hz poll, so `ui_wait_for` cannot
+miss a transient condition between polls.
+
+## Stale claim: the Bash sandbox and listeners
+
+`docs/headless-host-setup.md` and the `agent-sandbox-port-binding` memory state that
+the agent Bash sandbox kills network listeners (uvicorn → exit 144), and prescribe
+working around it. **That did not reproduce on 2026-07-29**: uvicorn on `0.0.0.0`
+served a request and exited 0 from a normal Bash call; `$HOME` writes and external
+HTTPS were also allowed. It may have been accurate when written. Re-verify before
+relying on either the claim or its workarounds.

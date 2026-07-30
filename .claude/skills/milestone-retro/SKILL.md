@@ -21,6 +21,13 @@ major effort, before the next phase's plan executes.
 2. **Convert, don't summarize.** For each finding pick the durable form:
    - **Script** (`host/tools/*.py`, or `scripts/` for non-Python): parameterized, documented, tested at
      least once for real. Rule: a hardware ritual performed from prose by >2 subagents MUST become one.
+     **Then expose it as an MCP tool** — this step is what keeps the agent-facing surface from
+     rotting back into 20-odd prose-printing scripts. Write the logic as a pure function returning a
+     dict, keep `main()` as a prose printer over it, register a thin wrapper in
+     `host/src/roomscan/mcp_server/tools_*.py` (the docstring *is* the agent's description), and
+     update `EXPOSED`/`EXCLUDED` in `host/tests/test_mcp_registry.py` plus `docs/mcp-server.md`. A
+     script that should stay CLI-only goes in `EXCLUDED` with its reason — the test fails on
+     anything that is neither. See `docs/mcp-server.md` → "Adding a tool".
    - **Skill update**: new facts/steps into the governing skill (`firmware-loop`, `protocol-change`, …);
      a genuinely new activity gets a new skill (follow superpowers:writing-skills). Put long supporting
      material in the skill's `references/`, runnable helpers in its `scripts/`.
