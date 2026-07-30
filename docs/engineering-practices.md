@@ -171,6 +171,14 @@ proven otherwise. The 2026-07-28 orientation-noise pass produced three wrong num
   (`host/tools/orientation_probe.py health`).
 - Order-independent statistics beat index-wise diffs on variable-length payloads: POINT_CLOUD carries
   only *valid* points, so index i is a different ray between frames.
+- **Timing runs need an idle box, and a suspiciously bad tail is usually contention.** A 6.G replay
+  reported p99 22.1 ms against a 14.8 ms baseline; the cause was a second heavy job this session had
+  itself backgrounded, and the clean re-run came in at **11.9** — better than baseline. The tell is the
+  shape: contention inflates p99/max while leaving p50 alone, whereas a real regression moves the median
+  too. Check for other running jobs *before* the run, and prefer isolating the suspect cost directly (a
+  microbenchmark put the accused code at 5.8 µs/call, 0.02 s across the whole scan) over re-running a
+  20-minute end-to-end and hoping. Beware that `pgrep -f <pattern>` matches its own enclosing shell —
+  it will answer "busy" when the box is idle.
 
 ## Self-improvement after milestones
 
