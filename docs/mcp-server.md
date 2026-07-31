@@ -76,8 +76,15 @@ function*, not a state object -- read what it logged via `ui_screenshot`'s tail.
 
 **data** — `capture_list()` (includes `has_stream_9`, which SLAM and orientation work
 ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, compare?)`,
+`capture_skew(path, window_s?)`,
 `slam_rerender(capture, voxel_size?, block_count?, device?, max_frames?)`,
 `doctor()`, `orientation_probe(mode)`.
+
+`capture_skew` measures where a depth frame actually sits on the IMU's clock, from stream 13
+`IMU_SYNC` (BUG-031). ⚠ Its number is **window-dependent** — 18/38/150 µs RMS at `window_s`
+2/5/20 — because what survives the fix is the two oscillators drifting apart, not per-frame skew
+(lag-1 autocorrelation 0.992). Quote the window alongside the figure, or use the window-free
+10–11 µs. It also reports the quaternion's phase offset, which is a **+7.8 ms lead**, not a lag.
 
 `slam_rerender` is the offline high-detail pass. A capture stores raw ToF frames, not a
 map, so the live scan is only a preview and the pipeline can be re-run at any resolution
