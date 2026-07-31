@@ -1,0 +1,9 @@
+[mcp_servers.roomscan]
+command = "host/.venv/bin/python"
+args = [
+    "-m",
+    "roomscan.mcp_server",
+]
+
+[mcp_servers.roomscan.env]
+PYTHONPATH = "host/src:host"
