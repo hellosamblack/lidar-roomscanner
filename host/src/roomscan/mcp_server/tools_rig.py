@@ -369,10 +369,37 @@ async def rig_playback(action: str, value: str | float | None = None,
 
 
 @mcp.tool()
+async def rig_view(source: str = "", display: str = "", regenerate: bool = False,
+                   timeout: float = 15.0) -> dict:
+    """Select Live/View and Point cloud/SLAM/Detailed, verifying server state.
+
+    ``source`` is live|view; View reuses the selected capture. ``display`` is
+    point_cloud|slam|detailed. Set ``regenerate=True`` to start an explicit
+    Detailed sidecar rebuild for the selected View capture. The returned state,
+    not the requested value, is the result.
+    """
+    sent = []
+    if source:
+        msg = {"type": "set_source", "source": source}
+        await rig.send(msg)
+        sent.append(msg)
+    if display:
+        msg = {"type": "set_display", "display": display}
+        await rig.send(msg)
+        sent.append(msg)
+    if regenerate:
+        msg = {"type": "regenerate_detailed"}
+        await rig.send(msg)
+        sent.append(msg)
+    if not sent:
+        return {"ok": False, "error": "pass source, display, or regenerate"}
+    expected = {k: v for k, v in (("source", source), ("display", display)) if v}
+    state = await _await_state(expected, timeout)
+    return {"ok": state is not None and all(state.get(k) == v for k, v in expected.items()),
+            "sent": sent, "state": state}
+
+
+@mcp.tool()
 async def rig_save(timeout: float = 120.0) -> dict:
-    """Save the current SLAM map: full-res .ply mesh plus .tum trajectory."""
-    saved = await rig.request({"type": "save"}, expect="saved", timeout=timeout)
-    if saved is None:
-        return {"ok": False, "error": f"no save confirmation within {timeout}s "
-                                      "(is the rig in slam mode with a built map?)"}
-    return {"ok": True, "saved": saved}
+    """Deprecated: persistent export is now Detailed SLAM's capture sidecar."""
+    return {"ok": False, "error": "use rig_view(display='detailed', regenerate=True)"}

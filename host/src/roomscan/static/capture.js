@@ -202,9 +202,12 @@ export function createCapture(hub) {
     }
 
     function updatePos(frac) {
-        const total = session?.playback?.total_frames || 0;
+        const pb = session?.playback || {};
+        const total = pb.total_frames || 0;
         const idx = Math.round((frac || 0) * Math.max(0, total - 1));
-        if (posStatus) posStatus.textContent = total ? `frame ${idx} / ${total - 1}` : '—';
+        const elapsed = typeof pb.elapsed_s === 'number' ? pb.elapsed_s : (frac || 0) * (pb.duration_s || 0);
+        const duration = pb.duration_s || 0;
+        if (posStatus) posStatus.textContent = total ? `${fmtTime(elapsed)} / ${fmtTime(duration)} · frame ${idx} / ${total - 1}` : '—';
     }
 
     function renderList() {
@@ -221,9 +224,10 @@ export function createCapture(hub) {
         }
         for (const c of captures) {
             const active = (isReplay && c.name === current) ? ' active' : '';
+            const capability = c.has_stream_9 ? '' : ' · point cloud only';
             rows.push(`<div class="cap-row${active}" data-name="${escapeHtml(c.name)}">` +
                 `<span class="cap-row__name">${escapeHtml(c.name)}</span>` +
-                `<span class="cap-row__meta">${fmtBytes(c.bytes)}</span></div>`);
+                `<span class="cap-row__meta">${fmtBytes(c.bytes)} · ${fmtTime(c.duration_s || 0)}${capability}</span></div>`);
         }
         if (!rows.length) rows.push('<div class="cap-status">no captures yet</div>');
         capList.innerHTML = rows.join('');

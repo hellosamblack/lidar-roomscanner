@@ -56,9 +56,10 @@ Both transports serve the same tool definitions.
 | `rig_down()` | terminates it and drops the `/ws` connection |
 | `rig_command(name, param?)` | device COMMAND/ACK; `ok=false` when the ACK is an error |
 | `rig_record(on)` | records via the server, returning the capture path |
-| `rig_set(...)` | display/mode options; verifies the echo before reporting success |
+| `rig_set(...)` | legacy display options; verifies the echo before reporting success |
+| `rig_view(source?, display?, regenerate?)` | authoritative Live/View and Detailed-SLAM control |
 | `rig_playback(action, value?)` | `go_live` / `load_capture` / transport |
-| `rig_save()` | SLAM `.ply` + `.tum` |
+| `rig_save()` | deprecated; Detailed SLAM owns capture-keyed sidecars |
 
 **ui_\*** — headless Chrome, held open across calls.
 
@@ -79,6 +80,10 @@ ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, com
 `capture_skew(path, window_s?)`,
 `slam_rerender(capture, voxel_size?, block_count?, device?, max_frames?)`,
 `doctor()`, `orientation_probe(mode)`.
+
+`slam_loop_closure_gate(baseline, loop_closure)` applies the pre-registered paired 95% confidence gate to
+the two matched circuit ensembles; global loop closure stays disabled unless both
+circuits pass it without a tracking regression.
 
 `capture_skew` measures where a depth frame actually sits on the IMU's clock, from stream 13
 `IMU_SYNC` (BUG-031). ⚠ Its number is **window-dependent** — 18/38/150 µs RMS at `window_s`

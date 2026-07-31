@@ -751,10 +751,14 @@
     <div id="topbar" class="card">
         <span class="app-title">Roomscan</span>
         <div id="mode-switch-slot">
-            <!-- Real-Time ↔ SLAM (web Phase 4); active state driven from `state`. -->
-            <div class="segmented" id="seg-mode">
-                <button data-mode="realtime" class="active" title="Live point-cloud view from the device">Real-Time</button>
-                <button data-mode="slam" title="3D mapping mode — reconstructs a mesh from the stream">SLAM</button>
+            <div class="segmented segmented--sm" id="seg-source">
+                <button data-source="live" class="active" title="Use the wire device as the source">Live</button>
+                <button data-source="view" title="View a recorded capture">View</button>
+            </div>
+            <div class="segmented segmented--sm" id="seg-display">
+                <button data-display="point_cloud" class="active" title="Show the raw deprojected point cloud">Point cloud</button>
+                <button data-display="slam" title="Build an ephemeral realtime SLAM preview">SLAM</button>
+                <button data-display="detailed" title="Build or view the saved detailed reconstruction">Detailed</button>
             </div>
         </div>
         <!-- Owner maintenance actions. Both POST to /api/*; neither is part of

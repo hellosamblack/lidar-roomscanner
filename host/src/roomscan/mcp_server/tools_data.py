@@ -10,7 +10,6 @@ structured output stay one implementation with two front ends.
 """
 from __future__ import annotations
 
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +18,20 @@ from .paths import CAPTURES, HOST, RECORDINGS, REPO, VENV_PY, WEB_WS, rel
 from .server import mcp
 
 sys.path.insert(0, str(HOST))  # `tools` is a top-level package rooted at host/
+
+
+@mcp.tool()
+def slam_loop_closure_gate(baseline: list[dict], loop_closure: list[dict]) -> dict:
+    """Apply the required paired 95% loop-closure acceptance gate.
+
+    Pass the ten matched runs from each circuit separately. Every run needs
+    `horizontal_closure_m`, `lost`, and optional `died`; the tool returns the
+    deterministic paired bootstrap interval and an acceptance decision. A
+    positive mean alone is never enough: the lower 95% bound must be positive
+    and the global pass may not add loss or die.
+    """
+    from roomscan.slam.validation import paired_loop_gate
+    return paired_loop_gate(baseline, loop_closure)
 
 
 def _survey(path: Path, max_frames: int = 400) -> dict:

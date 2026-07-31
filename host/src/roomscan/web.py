@@ -99,6 +99,12 @@ from .sensors import (
 )
 from .motion import coherence
 from .sources import FileSource, Recorder, SerialSource, UdpSource, get_best_source
+from .slam.config import DetailedSlamPreset, preferred_device
+from .slam.detailed import (build_manifest, estimate_seconds, sidecar_paths,
+                            sidecar_status, write_manifest_atomic)
+from .slam.meshprep import MeshPrep
+from .slam.metrics import write_tum
+from .slam.showcase import PostProcessWorker
 from .viewer import Stats, resolve_args
 
 log = logging.getLogger("roomscan.web")
@@ -139,7 +145,9 @@ CAPTURES_DIR = "captures"          # where Record writes + the library browses
 # SLAM mode (web Phase 4).
 RESULTS_DIR = "results"            # where Save writes the full-res map + trajectory
 _TRAJ_TAIL_MAX = 256               # trajectory positions shipped in each `slam` message
-_VALID_MODES = ("realtime", "slam")
+_VALID_MODES = ("realtime", "slam")  # legacy inbound compatibility
+_VALID_SOURCES = ("live", "view")
+_VALID_DISPLAYS = ("point_cloud", "slam", "detailed")
 _VALID_WALL_MODES = ("solid", "split")
 # The playback speed segmented control maps ×0.5/×1/×2/Max onto these fps; a
 # capture's own cadence is ~28 Hz, so ×1 (30 fps) plays it near-native and Max
@@ -281,7 +289,13 @@ class UiState:
     # is only fed (and only constructed) while mode == "slam", so real-time mode
     # burns no GPU. The three display toggles ride the same one-way `state` echo
     # as color/IR, so a late-joining tab is brought current on connect.
+    # `mode` is retained as a short-lived compatibility alias for older MCP
+    # clients. The Live/View model is source + display; only `display == slam`
+    # arms the latest-wins live runner.
     mode: str = "realtime"
+    source: str = "live"              # "live" | "view" (not persisted)
+    display: str = "point_cloud"      # "point_cloud" | "slam" | "detailed"
+    selected_capture: str | None = None
     slam_trajectory: bool = True
     slam_walls: str = "split"          # "solid" | "split" -> MeshPrep wall_mode
     slam_follow: bool = True
@@ -1254,7 +1268,21 @@ def resolve_command(name: str, param) -> tuple[CommandCode, int, str] | None:
     return None
 
 
-def _state_message(ui: UiState) -> dict:
+def _state_message(ui: UiState, controller=None, detailed=None) -> dict:
+    """Authoritative presentation state.
+
+    ``mode`` is emitted for one release so existing automation remains usable;
+    new clients must use the unambiguous Live/View ``source`` + ``display``.
+    """
+    detail = None
+    if controller is not None and controller.mode == "replay" and controller.replay_path:
+        try:
+            detail = sidecar_status(controller.replay_path, RESULTS_DIR,
+                                    getattr(detailed, "preset", None))
+        except OSError:
+            detail = None
+    slam_available = not (controller is not None and controller.mode == "replay" and
+                          not controller.index.get("has_stream_9", False))
     return {"type": "state", "color_mode": ui.color_mode,
             "ir_colormap": ui.ir_colormap, "ir_freeze": ui.ir_freeze,
             "view_colormap": ui.view_colormap, "point_size": ui.point_size,
@@ -1266,7 +1294,10 @@ def _state_message(ui: UiState) -> dict:
             "view_cam": {m: asdict(c) for m, c in ui.view_cam.items()},
             "orbit_enabled": ui.orbit_enabled,
             "orbit_speed_deg_s": ui.orbit_speed_deg_s,
-            "mode": ui.mode, "slam_trajectory": ui.slam_trajectory,
+            "mode": ui.mode, "source": ui.source, "display": ui.display,
+            "selected_capture": ui.selected_capture, "detailed": detail,
+            "slam_available": slam_available,
+            "slam_trajectory": ui.slam_trajectory,
             "slam_walls": ui.slam_walls, "slam_follow": ui.slam_follow,
             "idle_enabled": ui.idle_enabled, "idle_level": ui.idle_level,
             "orientation_mode": ui.orientation_mode,
@@ -1435,8 +1466,56 @@ def sanitize_new_capture_name(name, captures_dir) -> str | None:
     return base
 
 
+_CAPTURE_INFO_CACHE: dict[tuple[str, int, int], dict] = {}
+
+
+def scan_capture_metadata(path) -> dict:
+    """Header-only library scan; avoids loading a multi-hundred-MB capture.
+
+    The selected capture still receives the CRC-verified ``build_capture_index``
+    needed for seek. This scan is display metadata only and stops safely at the
+    first malformed/truncated frame.
+    """
+    frames, times, have_imu = 0, [], False
+    with open(path, "rb") as f:
+        while True:
+            raw = f.read(HEADER_SIZE)
+            if len(raw) < HEADER_SIZE:
+                break
+            try:
+                hdr = FrameHeader.unpack(raw)
+            except ProtocolError:
+                break
+            if hdr.payload_len < 0:
+                break
+            f.seek(hdr.payload_len + 4, os.SEEK_CUR)
+            if hdr.frame_type != FrameType.DATA:
+                continue
+            have_imu = have_imu or hdr.stream_id == StreamId.IMU_QUAT
+            if hdr.stream_id in (StreamId.RAW_3DMD, StreamId.DEPTH_ZF32):
+                frames += 1
+                times.append(hdr.t_us)
+    valid = len(times) >= 2 and times[-1] > times[0] and all(b >= a for a, b in zip(times, times[1:]))
+    return {"frames": frames, "has_stream_9": have_imu,
+            "duration_s": round((times[-1] - times[0]) / 1e6 if valid else frames / 30.0, 3),
+            "timestamped": valid}
+
+
+def _capture_info(path) -> dict:
+    """Cached lightweight metadata for the View library."""
+    p = Path(path)
+    st = p.stat()
+    key = (str(p), st.st_size, st.st_mtime_ns)
+    cached = _CAPTURE_INFO_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
+    out = scan_capture_metadata(p)
+    _CAPTURE_INFO_CACHE[key] = out
+    return dict(out)
+
+
 def list_captures(captures_dir) -> list[dict]:
-    """`captures/*.bin` as [{name, bytes, mtime}], newest first. Missing dir -> []."""
+    """View-library entries including SLAM capability and real duration."""
     d = Path(captures_dir)
     if not d.is_dir():
         return []
@@ -1446,7 +1525,11 @@ def list_captures(captures_dir) -> list[dict]:
             st = p.stat()
         except OSError:
             continue
-        items.append({"name": p.name, "bytes": st.st_size, "mtime": round(st.st_mtime, 1)})
+        try:
+            info = _capture_info(p)
+        except (OSError, ProtocolError):
+            info = {"frames": 0, "has_stream_9": False, "duration_s": 0.0, "timestamped": False}
+        items.append({"name": p.name, "bytes": st.st_size, "mtime": round(st.st_mtime, 1), **info})
     items.sort(key=lambda x: x["mtime"], reverse=True)
     return items
 
@@ -1465,7 +1548,9 @@ def build_capture_index(path) -> dict:
     MAGIC that happens to fall inside a payload."""
     offsets: list[int] = []
     seqs: list[int] = []
+    timestamps_us: list[int] = []
     calib_spans: list[tuple[int, int]] = []
+    has_stream_9 = False
     with open(path, "rb") as f:
         data = f.read()
     n = len(data)
@@ -1487,20 +1572,24 @@ def build_capture_index(path) -> dict:
             i = j + 1                                # false magic inside a payload
             continue
         if hdr.frame_type == FrameType.DATA:
+            has_stream_9 = has_stream_9 or hdr.stream_id == StreamId.IMU_QUAT
             if hdr.stream_id == StreamId.CALIB:
                 calib_spans.append((j, j + total))
             elif hdr.stream_id in (StreamId.RAW_3DMD, StreamId.DEPTH_ZF32):
                 offsets.append(j)
                 seqs.append(hdr.seq)
+                timestamps_us.append(hdr.t_us)
         i = j + total
     return {"n_frames": len(offsets), "offsets": offsets, "seqs": seqs,
+            "timestamps_us": timestamps_us, "has_stream_9": has_stream_9,
             "calib_spans": calib_spans}
 
 
 def build_session_message(mode, source_label, has_live, *, rec_active, rec_path,
                           rec_elapsed_s, rec_bytes, is_replay, capture_name,
                           paused, speed_fps, loop, position, total_frames,
-                          rec_last_name=None) -> dict:
+                          rec_last_name=None, elapsed_s=None, duration_s=None,
+                          timestamped=False) -> dict:
     """Assemble the `session` message (§4) from primitives (pure, unit-tested)."""
     return {
         "type": "session",
@@ -1522,6 +1611,9 @@ def build_session_message(mode, source_label, has_live, *, rec_active, rec_path,
             "loop": loop,
             "position": position,
             "total_frames": total_frames,
+            "elapsed_s": elapsed_s,
+            "duration_s": duration_s,
+            "timestamped": bool(timestamped),
         },
     }
 
@@ -1737,6 +1829,149 @@ class SlamRunner:
     def close(self) -> None:
         with self._lock:
             self._teardown_locked()
+
+
+class DetailedRunner:
+    """Server-owned offline reconstruction job for one immutable capture.
+
+    Unlike ``SlamRunner`` this never receives the broadcaster's latest-wins
+    frames: it owns a ``PostProcessWorker`` loaded from the selected capture,
+    processes every frame, and exposes the same MESH presentation path.  The
+    job intentionally survives a source/display switch; only shutdown stops it.
+    """
+
+    def __init__(self, *, bus: LogBus, results_dir=RESULTS_DIR):
+        self._bus, self.results_dir = bus, Path(results_dir)
+        self._lock = threading.Lock()
+        self._worker = None
+        self._meshprep = None
+        self._capture = None
+        self._cached_mesh = None
+        self._last_mesh = object()
+        self._mesh_seq = 0
+        self._committed = False
+        self.preset = DetailedSlamPreset.load()
+
+    def start(self, capture, *, force: bool = False) -> dict:
+        capture = Path(capture)
+        with self._lock:
+            if self._worker is not None:
+                latest = self._worker.latest()
+                if latest is None or not latest.done:
+                    return {"started": False, "reason": "another Detailed build is running"}
+                # A completed job is only presentation state; release its
+                # worker so a manual Regenerate can start immediately.
+                for obj in (self._worker, self._meshprep):
+                    if obj is not None:
+                        obj.stop()
+                self._worker = self._meshprep = None
+            status = sidecar_status(capture, self.results_dir, self.preset)
+            if status["current"] and not force:
+                return {"started": False, "reason": "current sidecar exists", "status": status}
+            kw = self.preset.mapper_kwargs()
+            worker = PostProcessWorker.from_capture(str(capture), mesh_every=self.preset.mesh_every, **kw)
+            worker.start()
+            prep = MeshPrep(vertex_budget=150000, fps_budget_ms=8.0)
+            prep.start()
+            self._worker, self._meshprep, self._capture = worker, prep, capture
+            self._cached_mesh = None
+            self._last_mesh, self._mesh_seq, self._committed = object(), 0, False
+        self._bus.publish(f"[detailed] started {capture.name} ({self.preset.fingerprint()})")
+        return {"started": True, "estimate": estimate_seconds(
+            len(worker.timestamps), self.preset, cuda=preferred_device().startswith("CUDA"))}
+
+    def load_cached(self, capture) -> bool:
+        """Load a saved Detailed mesh for immediate View rendering."""
+        capture = Path(capture)
+        paths = sidecar_paths(capture, self.results_dir)
+        if not paths["ply"].is_file():
+            return False
+        import open3d as o3d
+        with self._lock:
+            if self._worker is not None:
+                return False
+            mesh = o3d.t.io.read_triangle_mesh(str(paths["ply"]))
+            prep = MeshPrep(vertex_budget=150000, fps_budget_ms=8.0)
+            prep.start()
+            self._meshprep, self._capture, self._cached_mesh = prep, capture, mesh
+            self._last_mesh, self._mesh_seq = object(), 0
+        return True
+
+    def status(self) -> dict | None:
+        with self._lock:
+            worker, capture = self._worker, self._capture
+        if worker is None or capture is None:
+            return None
+        progress = worker.latest()
+        if progress is None:
+            return {"capture": capture.name, "phase": "frames", "processed": 0,
+                    "total": len(worker.timestamps), "done": False}
+        return {"capture": capture.name, "phase": "offline_only" if progress.done else "frames",
+                "processed": round(progress.fraction * len(worker.timestamps)),
+                "total": len(worker.timestamps), "done": progress.done, "stats": progress.stats}
+
+    def poll(self, wall_mode: str) -> tuple[dict | None, bytes | None]:
+        with self._lock:
+            worker, prep, capture = self._worker, self._meshprep, self._capture
+        if prep is None or capture is None:
+            return None, None
+        if worker is None and self._cached_mesh is not None:
+            if self._cached_mesh is not self._last_mesh:
+                self._mesh_seq += 1
+                prep.submit(self._cached_mesh, mesh_seq=self._mesh_seq, glow_origin=None, wall_mode=wall_mode)
+                self._last_mesh = self._cached_mesh
+            packet = prep.latest()
+            return ({"type": "detailed", "capture": capture.name, "phase": "cached", "done": True,
+                     "mesh_seq": self._mesh_seq}, pack_mesh(packet) if packet is not None else None)
+        progress = worker.latest()
+        if progress is None:
+            return self.status(), None
+        if progress.mesh is not self._last_mesh:
+            self._mesh_seq += 1
+            prep.submit(progress.mesh, mesh_seq=self._mesh_seq, glow_origin=None, wall_mode=wall_mode)
+            self._last_mesh = progress.mesh
+        packet = prep.latest()
+        mesh = pack_mesh(packet) if packet is not None else None
+        state = self.status() or {}
+        state.update({"type": "detailed", "mesh_seq": self._mesh_seq})
+        if progress.done and not self._committed:
+            self._commit(capture, worker, progress)
+            self._committed = True
+        return state, mesh
+
+    def _commit(self, capture: Path, worker: PostProcessWorker, progress) -> None:
+        if progress.mesh is None:
+            self._bus.publish("[detailed] no mesh; sidecar not written")
+            return
+        import open3d as o3d
+        paths = sidecar_paths(capture, self.results_dir)
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+        # Keep the final suffix on temporaries: Open3D picks the encoder from
+        # the extension and refuses an opaque `.tmp` path.
+        ply_tmp = paths["ply"].with_name(paths["ply"].stem + ".tmp.ply")
+        tum_tmp = paths["tum"].with_name(paths["tum"].stem + ".tmp.tum")
+        mesh = progress.mesh.cpu() if hasattr(progress.mesh, "cpu") else progress.mesh
+        o3d.t.io.write_triangle_mesh(str(ply_tmp), mesh)
+        write_tum(str(tum_tmp), worker.timestamps, progress.trajectory)
+        os.replace(ply_tmp, paths["ply"])
+        os.replace(tum_tmp, paths["tum"])
+        est = estimate_seconds(len(worker.timestamps), self.preset,
+                               cuda=preferred_device().startswith("CUDA"))
+        manifest = build_manifest(capture, self.preset, stats=progress.stats or {}, estimate=est)
+        write_manifest_atomic(paths["manifest"], manifest)  # commit marker is deliberately last
+        self._bus.publish(f"[detailed] saved {paths['ply'].name}")
+
+    def close(self) -> None:
+        with self._lock:
+            worker, prep = self._worker, self._meshprep
+            self._worker = self._meshprep = None
+            self._cached_mesh = None
+        for obj in (worker, prep):
+            if obj is not None:
+                try:
+                    obj.stop()
+                except Exception:
+                    pass
 
 
 class SessionController:
@@ -2004,6 +2239,11 @@ class SessionController:
                 rec_bytes = 0
         is_replay = self.mode == "replay"
         total = self.index["n_frames"] if (is_replay and self.index) else 0
+        times = self.index.get("timestamps_us", []) if self.index else []
+        timestamped = (len(times) >= 2 and times[-1] > times[0] and
+                       all(b >= a for a, b in zip(times, times[1:])))
+        duration_s = ((times[-1] - times[0]) / 1e6 if timestamped else total / 30.0) if is_replay else None
+        elapsed_s = (None if position is None else round(float(position) * (duration_s or 0.0), 3))
         return build_session_message(
             self.mode, self.source_label, self.has_live,
             rec_active=rec_active, rec_path=rec_path,
@@ -2012,14 +2252,17 @@ class SessionController:
             is_replay=is_replay,
             capture_name=(os.path.basename(self.replay_path) if self.replay_path else None),
             paused=self.pacer.paused.is_set(), speed_fps=self.speed_fps, loop=self.loop,
-            position=position, total_frames=total)
+            position=position, total_frames=total, elapsed_s=elapsed_s,
+            duration_s=duration_s, timestamped=timestamped)
 
 
 def _replay_position(ctrl: SessionController, last_item) -> float | None:
-    """Current replay progress in [0,1] from the latest frame's seq vs the
-    capture index's seq range, or None when not applicable (§3)."""
+    """Current replay progress from TIM2 header time, then sequence fallback."""
     if ctrl is None or ctrl.mode != "replay" or not ctrl.index or last_item is None:
         return None
+    times = ctrl.index.get("timestamps_us", [])
+    if len(times) >= 2 and times[-1] > times[0] and all(b >= a for a, b in zip(times, times[1:])):
+        return max(0.0, min(1.0, (last_item[0].t_us - times[0]) / (times[-1] - times[0])))
     seqs = ctrl.index["seqs"]
     if not seqs:
         return None
@@ -2043,6 +2286,9 @@ async def _lifespan(app: FastAPI):
     task = getattr(app.state, "broadcast_task", None)
     if task is not None:
         task.cancel()
+    detailed = getattr(app.state, "detailed_runner", None)
+    if detailed is not None:
+        await asyncio.to_thread(detailed.close)
 
 
 app = FastAPI(lifespan=_lifespan)
@@ -2292,6 +2538,12 @@ async def _broadcast_session(state) -> None:
     ctrl = getattr(state, "controller", None)
     if ctrl is not None:
         await _broadcast_text(state.clients, json.dumps(ctrl.session_message(None, time.time())))
+
+
+async def _broadcast_state(state) -> None:
+    await _broadcast_text(state.clients, json.dumps(_state_message(
+        state.ui_state, getattr(state, "controller", None),
+        getattr(state, "detailed_runner", None))))
 
 
 async def _reset_slam(state) -> None:
@@ -2588,7 +2840,7 @@ async def _broadcaster() -> None:
             # the cloud with the reconstructed mesh.  Cache the packed bytes;
             # rebuild only when the frame, orientation, color mode, colormap, or
             # surface settings changed.
-            if ui.mode == "realtime":
+            if ui.display == "point_cloud":
                 surf_key = ((ui.surface_enabled, ui.surface_mode,
                              ui.surface_threshold_pct) if ui.surface_enabled
                             else None)
@@ -2618,7 +2870,7 @@ async def _broadcaster() -> None:
             # ship the latest `slam` message + (throttled) MESH. The feed/poll
             # touch off-thread workers; nothing blocks the event loop here.
             slam = getattr(state, "slam_runner", None)
-            if ui.mode == "slam" and slam is not None:
+            if ui.display == "slam" and slam is not None:
                 quat = state.sensor_state.fused_quat()
                 env = state.sensor_state.latest_env()
                 pressure = env.pressure_pa if env is not None else None
@@ -2630,6 +2882,17 @@ async def _broadcaster() -> None:
                     await _broadcast_bytes(clients, mesh_bytes)
                 if smsg is not None:
                     await _broadcast_text(clients, json.dumps(smsg))
+
+            # Detailed uses an offline worker, but publishes its progressive
+            # mesh through the same MESH channel. It deliberately does not
+            # consume the replay reader's latest frame here.
+            detailed = getattr(state, "detailed_runner", None)
+            if ui.display == "detailed" and detailed is not None:
+                dmsg, mesh_bytes = detailed.poll(ui.slam_walls)
+                if mesh_bytes is not None:
+                    await _broadcast_bytes(clients, mesh_bytes)
+                if dmsg is not None:
+                    await _broadcast_text(clients, json.dumps(dmsg))
 
             # IR_IMAGE on its own slower cadence.
             if now - last_ir >= IR_INTERVAL:
@@ -2731,7 +2994,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # Bring the new tab current immediately.
     try:
-        await websocket.send_text(json.dumps(_state_message(state.ui_state)))
+        await websocket.send_text(json.dumps(_state_message(
+            state.ui_state, getattr(state, "controller", None),
+            getattr(state, "detailed_runner", None))))
         ctrl = getattr(state, "controller", None)
         if ctrl is not None:
             await websocket.send_text(json.dumps(ctrl.session_message(None, time.time())))
@@ -2808,12 +3073,22 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             return
         await asyncio.to_thread(ctrl.switch_to_replay, path)
         await _reset_slam(state)          # fresh map for the new source
+        ui.source, ui.selected_capture = "view", path.name
+        if ui.display == "detailed":
+            ui.display = "point_cloud"
+        ui.mode = "realtime"
         await _broadcast_session(state)
+        await _broadcast_state(state)
 
     elif mtype == "go_live" and ctrl is not None:
         await asyncio.to_thread(ctrl.switch_to_live)
         await _reset_slam(state)
+        ui.source, ui.selected_capture = "live", None
+        if ui.display == "detailed":
+            ui.display = "point_cloud"
+        ui.mode = "realtime" if ui.display == "point_cloud" else "slam"
         await _broadcast_session(state)
+        await _broadcast_state(state)
 
     elif mtype == "transport" and ctrl is not None:
         action = msg.get("action")
@@ -2932,18 +3207,77 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             _persist_ui(state)
             await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
 
+    elif mtype == "set_source" and ctrl is not None:
+        source = msg.get("source")
+        if source not in _VALID_SOURCES:
+            log.warning("invalid set_source: %r", source)
+            return
+        if source == "live":
+            await asyncio.to_thread(ctrl.switch_to_live)
+            ui.source, ui.selected_capture = "live", None
+        elif ui.selected_capture:
+            path = sanitize_capture_name(ui.selected_capture, ctrl.captures_dir)
+            if path is not None:
+                await asyncio.to_thread(ctrl.switch_to_replay, path)
+                ui.source = "view"
+        else:
+            state.bus.publish("View -> select a capture first")
+            return
+        await _reset_slam(state)
+        ui.display, ui.mode = "point_cloud", "realtime"
+        await _broadcast_session(state)
+        await _broadcast_state(state)
+
+    elif mtype == "set_display":
+        display = msg.get("display")
+        if display not in _VALID_DISPLAYS:
+            log.warning("invalid set_display: %r", display)
+            return
+        if display != "point_cloud":
+            if ctrl is not None and ctrl.mode == "replay" and not ctrl.index.get("has_stream_9"):
+                state.bus.publish("SLAM -> unavailable: this legacy capture has no stream 9 orientation")
+                return
+            if display == "detailed" and (ctrl is None or ctrl.mode != "replay"):
+                state.bus.publish("Detailed SLAM -> select a capture in View first")
+                return
+        ui.display = display
+        ui.mode = "slam" if display == "slam" else "realtime"
+        slam = getattr(state, "slam_runner", None)
+        if slam is not None:
+            await asyncio.to_thread(slam.set_active, display == "slam")
+        if display == "detailed" and ctrl is not None and ctrl.replay_path:
+            runner = getattr(state, "detailed_runner", None)
+            if runner is not None:
+                await asyncio.to_thread(runner.load_cached, ctrl.replay_path)
+        await _broadcast_state(state)
+
+    elif mtype in ("generate_detailed", "regenerate_detailed") and ctrl is not None:
+        if ctrl.mode != "replay" or not ctrl.replay_path or not ctrl.index.get("has_stream_9"):
+            state.bus.publish("Detailed SLAM -> unavailable without a stream-9 capture in View")
+            return
+        runner = getattr(state, "detailed_runner", None)
+        if runner is None:
+            return
+        result = await asyncio.to_thread(runner.start, ctrl.replay_path,
+                                         force=(mtype == "regenerate_detailed"))
+        await _broadcast_text(state.clients, json.dumps({"type": "detailed", **result}))
+        await _broadcast_state(state)
+
     elif mtype == "set_mode":
         mode = msg.get("mode")
         if mode not in _VALID_MODES:
             log.warning("invalid set_mode: %r", mode)
             return
+        # Compatibility for existing rig clients: mode maps exactly onto the
+        # shared display control, never to Detailed.
+        ui.display = "slam" if mode == "slam" else "point_cloud"
         ui.mode = mode
         slam = getattr(state, "slam_runner", None)
         if slam is not None:
             # Arming is a cheap flag; disarming stops+joins the worker threads,
             # so do it off the event loop.
             await asyncio.to_thread(slam.set_active, mode == "slam")
-        await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+        await _broadcast_state(state)
 
     elif mtype == "slam_opt":
         if "trajectory" in msg:
@@ -3026,20 +3360,7 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
 
     elif mtype == "save":
-        slam = getattr(state, "slam_runner", None)
-        if slam is None or ui.mode != "slam":
-            state.bus.publish("save -> not available (enter SLAM mode first)")
-            return
-        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
-        ply = Path(RESULTS_DIR) / f"web_{stamp}.ply"
-        tum = Path(RESULTS_DIR) / f"web_{stamp}.tum"
-        try:
-            n = await asyncio.to_thread(slam.save, ply, tum)
-        except Exception as exc:
-            state.bus.publish(f"save -> ERROR {exc}")
-            return
-        state.bus.publish(f"saved {ply.name} ({n} verts)")
-        await _broadcast_text(state.clients, json.dumps(build_saved_message(RESULTS_DIR)))
+        state.bus.publish("save -> Detailed SLAM owns persistent sidecars; Realtime SLAM is preview-only")
 
     elif mtype == "reset_fusion":
         state.sensor_state.reset_fusion()
@@ -3238,6 +3559,9 @@ def main(argv=None) -> int:
     config = ViewerConfig.load()
     app.state.config = config
     app.state.ui_state = ui_from_config(config)
+    if controller.mode == "replay":
+        app.state.ui_state.source = "view"
+        app.state.ui_state.selected_capture = os.path.basename(controller.replay_path)
     app.state.sensor_state = sensor_state
     app.state.mag_cal = mag_cal
     # Magnetometer sweep modal (owner ask, 2026-07-29). `fusion` is held so a
@@ -3249,6 +3573,7 @@ def main(argv=None) -> int:
     app.state.magcal_clients = set()
     app.state.magcal_view = "current"
     app.state.slam_runner = slam_runner
+    app.state.detailed_runner = DetailedRunner(bus=bus, results_dir=RESULTS_DIR)
     app.state.deproj = None
     app.state.orientation_smoother = OrientationSmoother()
     app.state.orientation_jitter = OrientationJitter()

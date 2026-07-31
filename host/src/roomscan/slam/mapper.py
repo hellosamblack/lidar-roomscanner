@@ -53,6 +53,7 @@ class Mapper:
                  max_dist: float = 0.05,
                  icp_retry_dist: float = 0.10,
                  min_fitness: float = 0.3, max_rmse: float = 0.05,
+                 max_iter: int = 6,
                  min_confidence: float | None = _DEFAULT_MIN_CONFIDENCE,
                  weight_threshold: float = 3.0,
                  device: str | o3d.core.Device = "CPU:0",
@@ -76,7 +77,8 @@ class Mapper:
                              device=self._device,
                              release_cache_every=release_cache_every,
                              block_count=block_count)
-        self._gate = dict(max_dist=max_dist, min_fitness=min_fitness, max_rmse=max_rmse)
+        self._gate = dict(max_dist=max_dist, min_fitness=min_fitness, max_rmse=max_rmse,
+                          max_iter=max(1, int(max_iter)))
         self._retry_dist = icp_retry_dist
         # Frames where the tight radius failed and the wider retry was tried.
         # Expected to be ~0 on a clean scan; a non-trivial count means the scan

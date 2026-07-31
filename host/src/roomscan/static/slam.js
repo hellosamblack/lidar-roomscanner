@@ -112,7 +112,7 @@ export function createSlam(hub, sceneApi) {
         if (Array.isArray(p) && p.length === 16) head.position.set(p[3], p[7], p[11]);
 
         // Follow camera (server-computed eye/center/up).
-        if (state.mode === 'slam' && state.slam_follow && msg.follow) {
+        if ((state.display === 'slam' || state.mode === 'slam') && state.slam_follow && msg.follow) {
             sceneApi.setFollowTarget(msg.follow.eye, msg.follow.center, msg.follow.up);
         }
 
@@ -139,7 +139,10 @@ export function createSlam(hub, sceneApi) {
     // --- server `state` echo drives mode + toggles + visibility ----------
     hub.on('state', (msg) => {
         state = {
-            mode: msg.mode || 'realtime',
+            source: msg.source || 'live',
+            display: msg.display || (msg.mode === 'slam' ? 'slam' : 'point_cloud'),
+            slam_available: msg.slam_available !== false,
+            detailed: msg.detailed || null,
             slam_trajectory: msg.slam_trajectory !== false,
             slam_walls: msg.slam_walls || 'split',
             slam_follow: msg.slam_follow !== false,
@@ -148,7 +151,7 @@ export function createSlam(hub, sceneApi) {
     });
 
     function applyState() {
-        const slamOn = state.mode === 'slam';
+        const slamOn = state.display === 'slam' || state.display === 'detailed' || state.mode === 'slam';
         group.visible = slamOn;
         sceneApi.setPointsVisible(!slamOn);
         sceneApi.setFollow(slamOn && state.slam_follow);
@@ -156,7 +159,12 @@ export function createSlam(hub, sceneApi) {
         head.visible = slamOn;
 
         // Mode segmented + SLAM group / HUD visibility.
-        setActive($('seg-mode'), 'mode', state.mode);
+        setActive($('seg-source'), 'source', state.source);
+        setActive($('seg-display'), 'display', state.display);
+        for (const b of $('seg-display')?.querySelectorAll('button[data-display]') || []) {
+            b.disabled = (b.dataset.display === 'detailed' && state.source !== 'view') ||
+                (b.dataset.display !== 'point_cloud' && !state.slam_available);
+        }
         $('slam-group')?.classList.toggle('hidden', !slamOn);
         $('slam-hud')?.classList.toggle('hidden', !slamOn);
 
@@ -169,7 +177,7 @@ export function createSlam(hub, sceneApi) {
 
     function updateSaveEnabled() {
         const b = $('btn-save');
-        if (b) b.disabled = !(state.mode === 'slam' && lastVerts > 0);
+        if (b) b.disabled = true;
     }
 
     // --- saved-maps library ----------------------------------------------
@@ -185,9 +193,22 @@ export function createSlam(hub, sceneApi) {
     }
 
     // --- outbound controls ------------------------------------------------
-    $('seg-mode')?.addEventListener('click', (e) => {
-        const btn = e.target.closest('button[data-mode]');
-        if (btn) hub.send({ type: 'set_mode', mode: btn.dataset.mode });
+    $('seg-source')?.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-source]');
+        if (btn) hub.send({ type: 'set_source', source: btn.dataset.source });
+    });
+    $('seg-display')?.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-display]');
+        if (!btn || btn.disabled) return;
+        if (btn.dataset.display === 'detailed') {
+            const detail = state.detailed || {};
+            if (!detail.exists || detail.stale) {
+                const hint = detail.stale ? 'A stale sidecar exists. Regenerate it?' : 'Build Detailed SLAM for this capture?';
+                if (!window.confirm(hint)) return;
+                hub.send({ type: detail.stale ? 'regenerate_detailed' : 'generate_detailed' });
+            }
+        }
+        hub.send({ type: 'set_display', display: btn.dataset.display });
     });
     $('chk-slam-traj')?.addEventListener('change', (e) =>
         hub.send({ type: 'slam_opt', trajectory: e.target.checked }));
@@ -197,7 +218,15 @@ export function createSlam(hub, sceneApi) {
         const btn = e.target.closest('button[data-walls]');
         if (btn) hub.send({ type: 'slam_opt', walls: btn.dataset.walls });
     });
-    $('btn-save')?.addEventListener('click', () => hub.send({ type: 'save' }));
+    $('btn-save')?.addEventListener('click', () => {});
+
+    hub.on('detailed', (msg) => {
+        const done = !!msg.done;
+        const total = msg.total || 0;
+        const processed = msg.processed || 0;
+        const el = $('slam-frames');
+        if (el && total) el.textContent = `${processed} / ${total}${done ? ' done' : ''}`;
+    });
 
     // --- helpers ----------------------------------------------------------
     function setActive(seg, attr, value) {

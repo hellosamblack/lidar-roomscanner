@@ -134,6 +134,11 @@ class PostProcessWorker:
                 return None
             return Progress(p.fraction, p.mesh, list(p.trajectory), p.done, p.stats)
 
+    @property
+    def timestamps(self) -> list[float]:
+        """Capture header times paired with the offline trajectory."""
+        return [float(frame[5]) for frame in self._frames]
+
     # ---- worker side -----------------------------------------------------
     def _publish(self, mapper: Mapper, frames_done: int, total: int, done: bool) -> None:
         mesh = mapper.mesh()

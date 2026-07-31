@@ -7,6 +7,9 @@ Deliberately NO writer -- roomscan.config's single-table writer is off-limits
 from __future__ import annotations
 
 import tomllib
+import dataclasses
+import hashlib
+import json
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Optional
@@ -55,6 +58,9 @@ class SlamConfig:
     baro_authority: float = 0.05
     baro_tau_frames: int = 900
     max_dist: float = 0.05
+    # Six is the proven baseline. Detailed only adopts 8/10/12 after matched
+    # ensemble validation; a one-off circuit is intentionally not evidence.
+    max_iter: int = 6
     # Wider ICP correspondence radius retried ONLY when `max_dist` fails its
     # gate; 0 disables. A single fixed radius cannot be both accurate and
     # robust: 0.05 is the accuracy optimum, but one frame whose residual
@@ -152,3 +158,63 @@ class SlamConfig:
             return cls(**kwargs)
         except TypeError:
             return cls()
+
+
+@dataclass
+class DetailedSlamPreset:
+    """Resolved offline reconstruction preset.
+
+    The values intentionally live beside ``SlamConfig`` but are not inherited
+    implicitly: a Detailed sidecar must say exactly which quality settings made
+    it.  ``per_frame_ms`` and ``global_opt_ms`` are calibration values, not
+    claims; zero means **benchmark me** and the UI labels the estimate as such.
+    Loop closure is opt-in only after the two-circuit validation gate records an
+    accepted decision.
+    """
+    voxel_size: float = 0.005
+    block_count: int = 320000
+    max_iter: int = 6
+    max_dist: float = 0.05
+    retry_dist: float = 0.10
+    mesh_every: int = 25
+    per_frame_ms: float = 0.0
+    global_opt_ms: float = 0.0
+    loop_closure: bool = False
+    benchmark_note: str = "benchmark me on CUDA:0 with a full-room capture"
+
+    @classmethod
+    def load(cls, path: Optional[Path] = None) -> "DetailedSlamPreset":
+        path = Path(path) if path is not None else config_path()
+        try:
+            raw = tomllib.loads(path.read_text(encoding="utf-8"))
+            table = raw.get("slam", {}).get("detailed", {})
+        except (OSError, tomllib.TOMLDecodeError, AttributeError):
+            return cls()
+        if not isinstance(table, dict):
+            return cls()
+        known = {f.name for f in dataclasses.fields(cls)}
+        try:
+            return cls(**{k: v for k, v in table.items() if k in known})
+        except (TypeError, ValueError):
+            return cls()
+
+    def fingerprint(self) -> str:
+        payload = dataclasses.asdict(self)
+        return hashlib.sha256(json.dumps(payload, sort_keys=True,
+                                         separators=(",", ":")).encode()).hexdigest()[:16]
+
+    def mapper_kwargs(self, base: SlamConfig | None = None) -> dict:
+        base = base or SlamConfig.load()
+        # Detailed always has the wider retry available.  More than six ICP
+        # iterations is used only after the benchmark establishes it helps.
+        return {
+            "fov_h": base.fov_h, "fov_v": base.fov_v, "icp_mode": base.icp_mode,
+            "voxel_size": self.voxel_size, "block_count": self.block_count,
+            "max_dist": self.max_dist, "icp_retry_dist": self.retry_dist,
+            "max_iter": self.max_iter, "min_fitness": base.min_fitness,
+            "max_rmse": base.max_rmse, "min_confidence": base.min_confidence,
+            "weight_threshold": base.weight_threshold,
+            "baro_authority": base.baro_authority, "baro_tau_frames": base.baro_tau_frames,
+            "stationary_hold": False, "release_cache_every": base.release_cache_every,
+            "device": preferred_device(),
+        }

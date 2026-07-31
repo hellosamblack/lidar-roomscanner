@@ -70,6 +70,7 @@ def _run(frames, width, height, cfg, mode, device=None):
                     voxel_size=cfg.voxel_size, baro_authority=cfg.baro_authority,
                     baro_tau_frames=cfg.baro_tau_frames,
                     max_dist=cfg.max_dist, icp_retry_dist=cfg.icp_retry_dist,
+                    max_iter=getattr(cfg, "max_iter", 6),
                     min_fitness=cfg.min_fitness, max_rmse=cfg.max_rmse,
                     min_confidence=cfg.min_confidence, weight_threshold=cfg.weight_threshold,
                     release_cache_every=cfg.release_cache_every,
@@ -128,6 +129,9 @@ def main(argv=None) -> int:
                          "one-shot height nudge moves the final height error by 146 mm and the "
                          "loop closure by 0.37 m on a real circuit). Sweep it across an ensemble "
                          "of innocuous perturbations, not one run. See BUG-037.")
+    ap.add_argument("--max-iter", type=int, default=None,
+                    help="ICP iterations for this run. Values above the measured six-iteration "
+                         "baseline must be ensemble-validated before Detailed SLAM adopts them.")
     args = ap.parse_args(argv)
 
     cfg = SlamConfig.load()
@@ -137,6 +141,8 @@ def main(argv=None) -> int:
         cfg.voxel_size = args.voxel_size
     if args.block_count is not None:
         cfg.block_count = args.block_count
+    if args.max_iter is not None:
+        cfg.max_iter = max(1, int(args.max_iter))
     frames, width, height = _load_frames(args.capture, args.max_frames)
     if not frames:
         print("[slam] no depth frames decoded from capture", file=sys.stderr)
