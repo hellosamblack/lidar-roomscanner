@@ -10,7 +10,15 @@ Implemented in phases described by `docs/superpowers/plans/2026-07-31-web-live-v
 wire device and permits recording. **View** means a selected immutable capture.
 The shared display choice is `point_cloud` or `slam`; `detailed` is an additional
 View-only choice. Point cloud and SLAM are live previews; only Detailed writes a
-capture-keyed sidecar.
+**capture-keyed** sidecar.
+
+*Amended 2026-07-31 after review (BUG-043).* "Only Detailed persists" holds for
+**replay** SLAM, not for Live. Live SLAM keeps its existing one-shot `save` →
+`results/web_<ts>.ply`/`.tum`, because a live scan is unrepeatable: unless Record
+was running its frames are never stored, so dropping the map discards the only
+copy and there is nothing to re-run as Detailed. That export is a free-standing
+result, not keyed to a capture, so it never interacts with sidecar staleness.
+Replay SLAM refuses `save` with a reason naming Detailed.
 
 The server remains authoritative. `state` carries `source` (`live|view`) and
 `display` (`point_cloud|slam|detailed`); `session` remains the transport snapshot

@@ -15,6 +15,8 @@
 // Hub events:  subscribes "mesh" (binary), "slam", "state", "saved";
 //              sends set_mode / slam_opt / save.
 
+import { makeXrayMaterial } from './scene.js';
+
 export function createSlam(hub, sceneApi) {
     const D = (m, l) => { try { window.__diag && window.__diag('slam.js: ' + m, l); } catch (e) {} };
     if (!sceneApi || !sceneApi.THREE) { D('no sceneApi — SLAM disabled', 'error'); return {}; }
@@ -39,7 +41,21 @@ export function createSlam(hub, sceneApi) {
         new THREE.MeshBasicMaterial({ color: 0x7fffd4 }));
     group.add(nonWallMesh, wallMesh, floorLines, trajLine, head);
 
-    let state = { mode: 'realtime', slam_trajectory: true, slam_walls: 'split', slam_follow: true };
+    // See-through twins (owner ask, 2026-07-31). Same geometry, inverted depth
+    // test: the parts of the map hidden behind a nearer wall are blended back
+    // over it, so you can look into a room from outside without the near wall
+    // going opaque-blank. Mechanism + why not plain opacity: scene.js
+    // `makeXrayMaterial`. They live in `group`, so SLAM-mode gating is free.
+    const xrayNonWallMat = makeXrayMaterial(THREE, nonWallMat);
+    const xrayWallMat = makeXrayMaterial(THREE, wallMat);
+    const xrayNonWall = new THREE.Mesh(nonWallMesh.geometry, xrayNonWallMat);
+    const xrayWall = new THREE.Mesh(wallMesh.geometry, xrayWallMat);
+    xrayNonWall.visible = xrayWall.visible = false;
+    group.add(xrayNonWall, xrayWall);
+    let seeThrough = 0;
+
+    let state = { source: 'live', display: 'point_cloud', slam_available: true,
+        slam_trajectory: true, slam_walls: 'split', slam_follow: true };
     let lastVerts = 0;
 
     // --- MESH binary ingest ----------------------------------------------
@@ -62,13 +78,16 @@ export function createSlam(hub, sceneApi) {
         const fPos = take(Float32Array, 3 * nfp);
         const fIdx = take(Uint32Array, 2 * nfl);
 
-        applyMesh(nonWallMesh, nwPos, nwCol, nwIdx);
-        applyMesh(wallMesh, wPos, wCol, wIdx);
+        applyMesh(nonWallMesh, xrayNonWall, nwPos, nwCol, nwIdx);
+        applyMesh(wallMesh, xrayWall, wPos, wCol, wIdx);
         applyLines(floorLines, fPos, fIdx);
         if (!window.__gotMesh) { window.__gotMesh = true; D('first mesh: ' + nnwv + ' non-wall verts'); }
     });
 
-    function applyMesh(mesh, pos, col, idx) {
+    // `twin` is the see-through draw of the same map: it shares the geometry
+    // object (one set of GPU buffers, disposed once here), differing only in
+    // material.
+    function applyMesh(mesh, twin, pos, col, idx) {
         const g = mesh.geometry;
         g.dispose();                                   // free the old GPU buffers
         const ng = new THREE.BufferGeometry();
@@ -78,6 +97,7 @@ export function createSlam(hub, sceneApi) {
             if (idx.length) ng.setIndex(new THREE.BufferAttribute(new Uint32Array(idx), 1));
         }
         mesh.geometry = ng;
+        twin.geometry = ng;
     }
 
     function applyLines(obj, pos, idx) {
@@ -112,7 +132,7 @@ export function createSlam(hub, sceneApi) {
         if (Array.isArray(p) && p.length === 16) head.position.set(p[3], p[7], p[11]);
 
         // Follow camera (server-computed eye/center/up).
-        if ((state.display === 'slam' || state.mode === 'slam') && state.slam_follow && msg.follow) {
+        if (state.display === 'slam' && state.slam_follow && msg.follow) {
             sceneApi.setFollowTarget(msg.follow.eye, msg.follow.center, msg.follow.up);
         }
 
@@ -147,16 +167,23 @@ export function createSlam(hub, sceneApi) {
             slam_walls: msg.slam_walls || 'split',
             slam_follow: msg.slam_follow !== false,
         };
+        if (msg.see_through !== undefined) {
+            seeThrough = Math.min(1, Math.max(0, Number(msg.see_through) || 0));
+            xrayNonWallMat.opacity = xrayWallMat.opacity = seeThrough;
+        }
         applyState();
     });
 
     function applyState() {
-        const slamOn = state.display === 'slam' || state.display === 'detailed' || state.mode === 'slam';
+        const slamOn = state.display === 'slam' || state.display === 'detailed';
         group.visible = slamOn;
         sceneApi.setPointsVisible(!slamOn);
         sceneApi.setFollow(slamOn && state.slam_follow);
         trajLine.visible = state.slam_trajectory;
         head.visible = slamOn;
+        // Off at 0 so the renderer skips the pass entirely (the default costs
+        // nothing); `group.visible` already handles the realtime case.
+        xrayNonWall.visible = xrayWall.visible = seeThrough > 0;
 
         // Mode segmented + SLAM group / HUD visibility.
         setActive($('seg-source'), 'source', state.source);
@@ -176,8 +203,19 @@ export function createSlam(hub, sceneApi) {
     }
 
     function updateSaveEnabled() {
+        // Live SLAM only (owner decision, 2026-07-31): a live scan is
+        // unrepeatable, so its one-shot export stays. Replay SLAM is a preview
+        // -- Detailed is the capture-keyed sidecar -- so the button explains
+        // itself rather than silently doing nothing.
         const b = $('btn-save');
-        if (b) b.disabled = true;
+        if (!b) return;
+        const live = state.source === 'live' && state.display === 'slam';
+        b.disabled = !(live && lastVerts > 0);
+        b.title = state.display === 'detailed'
+            ? 'Detailed writes its own sidecar automatically'
+            : (state.source === 'live'
+                ? 'Export the reconstructed mesh as a PLY file'
+                : 'Replay SLAM is a preview — use Detailed to write a saved reconstruction');
     }
 
     // --- saved-maps library ----------------------------------------------
@@ -218,7 +256,7 @@ export function createSlam(hub, sceneApi) {
         const btn = e.target.closest('button[data-walls]');
         if (btn) hub.send({ type: 'slam_opt', walls: btn.dataset.walls });
     });
-    $('btn-save')?.addEventListener('click', () => {});
+    $('btn-save')?.addEventListener('click', () => hub.send({ type: 'save' }));
 
     hub.on('detailed', (msg) => {
         const done = !!msg.done;

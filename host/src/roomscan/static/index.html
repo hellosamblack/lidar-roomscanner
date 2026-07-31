@@ -142,7 +142,14 @@
             border-left: none; border-right: none; border-top: none;
         }
         .app-title { font-size: 1.05rem; font-weight: 600; letter-spacing: -0.02em; }
-        #mode-switch-slot { flex: 1; }   /* reserved for the Real-Time/SLAM switch */
+        /* Source (Live/View) + display (Point cloud/SLAM/Detailed), side by side.
+           `flex: 1` alone was written for ONE switch; with two children it stretched
+           each to the full 1175 px bar and stacked them into two banners. The slot
+           still takes the free space (so the admin buttons stay right-aligned) but
+           the switches size to their labels. */
+        #mode-switch-slot { flex: 1; display: flex; align-items: center; gap: 10px; }
+        #mode-switch-slot .segmented { flex: 0 0 auto; }
+        #mode-switch-slot .segmented button { flex: 0 0 auto; padding: 6px 14px; }
 
         /* Maintenance actions: deliberately small and low-contrast so they read
            as chrome, not as part of the instrument's primary controls. */
@@ -1013,6 +1020,11 @@
                 <div class="field-label">Point Size <span class="hud-val" id="point-size-val">0.025 m @1 m</span></div>
                 <input type="range" class="slider" id="sl-point-size" min="0.005" max="0.15" step="0.005" value="0.025" title="Adjust 3D point size — in Auto this is the size at 1 m of range">
                 <label class="toggle" title="Scale each point with its distance from the sensor, so near and far surfaces get equal coverage"><input type="checkbox" id="chk-point-auto" checked><span>Auto (scale with range)</span></label>
+                <!-- See-through (owner ask, 2026-07-31): geometry hidden behind
+                     other geometry is drawn back over its occluder at this
+                     alpha. Only occluded parts change; 0 is the opaque render. -->
+                <div class="field-label">See-Through <span class="hud-val" id="see-through-val">Off</span></div>
+                <input type="range" class="slider" id="sl-see-through" min="0" max="1" step="0.05" value="0" title="Look through whatever is in front: anything hidden behind nearer geometry is blended back over it at this strength. Applies to points, surface and the SLAM map; 0 is fully opaque">
                 <div class="field-label">Render</div>
                 <div class="segmented" id="seg-render">
                     <button data-render="points" title="Draw each zone as an individual dot">Points</button>

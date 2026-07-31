@@ -1920,3 +1920,63 @@ The loop is sensor-rate-limited (30.3 Hz) and spends ~20 ms of each 33 ms period
 `platform_wait_for_event`'s spin, so this buys **headroom, not throughput** — there is no fps change
 to observe. It is worth having because it is the enabling margin for on-MCU compression, where
 compressing before the CRC also shrinks what the CRC must cover.
+
+## BUG-043 — Live SLAM lost its Save, so an unrecorded live scan became unrecoverable
+
+- **Status:** **fixed** 2026-07-31 · **Reported:** 2026-07-31 (found reviewing the Live/View consolidation) · **Area:** host/web
+- **Where:** `host/src/roomscan/web.py` `_handle_inbound` `"save"`, `static/slam.js` `updateSaveEnabled`, `mcp_server/tools_rig.py` `rig_save`
+
+The Live/View consolidation made Detailed SLAM the owner of persistent reconstructions and, in doing
+so, deleted `save` outright: the handler became a single bus line, `updateSaveEnabled` hard-coded
+`b.disabled = true`, the click listener was replaced with `() => {}`, and `rig_save` returned a flat
+error. The intended rule was only that **replay** SLAM is preview-only — Detailed is the
+capture-keyed sidecar there — but the rule was applied to Live as well.
+
+That case is exactly the one that cannot be redone. A live SLAM map is built from frames that are
+never stored unless Record happened to be running, so dropping the map discards the only copy;
+"re-run it as Detailed" has nothing to re-run. Nothing failed loudly either — the button simply sat
+greyed with its original "Export the reconstructed mesh as a PLY file" tooltip.
+
+**Fix:** `save` is gated on `source == "live" and display == "slam"`; replay SLAM refuses with a
+reason naming Detailed, and Detailed writes its own artifacts. The button re-enables only for Live
+SLAM with a non-empty map and retitles itself in the other two cases, so a disabled button explains
+which one it is. `rig_save` works again and reports the offending `source`/`display` on timeout.
+Pinned by `test_save_is_live_slam_only`, verified by reintroducing the defect.
+
+## BUG-044 — Any unrelated control re-advertised SLAM on a capture that cannot do SLAM
+
+- **Status:** **fixed** 2026-07-31 · **Reported:** 2026-07-31 (same review) · **Area:** host/web
+- **Where:** `host/src/roomscan/web.py` `_state_message` / `_broadcast_state`
+
+`_state_message(ui, controller, detailed)` derives two fields from the loaded capture:
+`slam_available` (false when a legacy capture carries no stream 9, so there is no rotation prior) and
+`detailed` (the sidecar present/stale status). Both default to the permissive value when the extra
+arguments are omitted — and eight echo sites still called the bare `_state_message(ui)`.
+
+Because the frontend drives *all* disabled state from this echo and never optimistically (the
+one-way-flow invariant), changing the colour, point size, IR colormap, orientation mode or yaw offset
+re-enabled the SLAM and Detailed segments on a capture that cannot run SLAM, and cleared the stale
+badge. The next click then bounced off a server-side refusal, so the UI contradicted itself.
+
+**Fix:** all eight sites go through `_broadcast_state(state)`, which always supplies the controller
+and Detailed runner; its docstring says why the context is not optional. Pinned by
+`test_state_echo_keeps_capability_context_on_an_unrelated_control`, verified by reintroducing the
+defect on the `set_color` path.
+
+## BUG-045 — The capture library scanned 1 GB of headers on the event loop
+
+- **Status:** **fixed** 2026-07-31 · **Reported:** 2026-07-31 (same review) · **Area:** host/web
+- **Where:** `host/src/roomscan/web.py` `list_captures` / `_broadcast_captures`
+
+`list_captures` grew a per-capture header walk (frame count, real duration, stream-9 capability) to
+feed the View library. It is cached on `(path, size, mtime)`, but every call site ran it **on the
+event loop**: the websocket connect handler and the three `captures` broadcasts.
+
+Measured cold over the current library — 25 files, 1.06 GB — at **501 ms** (0.4 ms warm). That is
+half a second of stalled broadcaster, dropping ~15 frames for every already-connected tab whenever a
+new tab connects. The worst case is the one that matters most: a just-stopped recording is
+guaranteed cache-cold, and it is the largest file in the directory.
+
+**Fix:** a `_broadcast_captures(state, ctrl)` helper dispatches the scan via `asyncio.to_thread`, as
+the "off-loop for blocking work" invariant in `docs/web-protocol.md` already required; the
+connect-time `captures` and `saved` sends do the same.

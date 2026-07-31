@@ -185,6 +185,10 @@ _CAM_ROTATION_RANGE = (-180.0, 180.0)  # degrees; positive swings the eye right
 # is why the client hands it to OrbitControls' own `autoRotate` rather than
 # animating `rotation_deg` (that would also churn the persisted value at 30 Hz).
 _ORBIT_SPEED_RANGE = (-60.0, 60.0)     # deg/s; negative reverses
+# See-through (x-ray) strength. 0 is off and is the DEFAULT, so nothing about
+# the render changes until it is asked for; 1 draws the occluded layer at full
+# alpha over its occluder. Validated on the wire AND on config load.
+_SEE_THROUGH_RANGE = (0.0, 1.0)
 
 
 @dataclass
@@ -311,6 +315,16 @@ class UiState:
                                        # zone's splat subtends the same solid angle (the zone
                                        # pitch grows as r*dtheta, so one fixed size cannot cover
                                        # a near and a far surface at once)
+    # See-through / x-ray (owner ask, 2026-07-31): whenever geometry occludes
+    # other geometry, let the hidden layer show through its occluder. Strength
+    # 0..1; 0 is off and reproduces the opaque render exactly (so the client
+    # draws NO extra pass at 0 -- see scene.js). It is deliberately not a plain
+    # material opacity: dialling opacity down would fade every surface against
+    # the background, including the ones hiding nothing. Instead the client
+    # redraws the same geometry with the depth test INVERTED, so only fragments
+    # that lost the depth test -- i.e. exactly the occluded ones -- are blended
+    # back over their occluder at this alpha. Unoccluded surfaces are untouched.
+    see_through: float = 0.0
     surface_enabled: bool = False      # surface interpolation (triangulated mesh)
     surface_mode: str = "grid"         # "grid" (relative depth %) | "spatial" (3D Euclidean)
     surface_threshold_pct: float = 4.0 # grid: max depth gap %; spatial: % of mean depth -> metres
@@ -1287,6 +1301,7 @@ def _state_message(ui: UiState, controller=None, detailed=None) -> dict:
             "ir_colormap": ui.ir_colormap, "ir_freeze": ui.ir_freeze,
             "view_colormap": ui.view_colormap, "point_size": ui.point_size,
             "point_size_auto": ui.point_size_auto,
+            "see_through": ui.see_through,
             "surface_enabled": ui.surface_enabled,
             "surface_mode": ui.surface_mode,
             "surface_threshold_pct": ui.surface_threshold_pct,
@@ -1335,6 +1350,12 @@ def ui_from_config(cfg: ViewerConfig) -> UiState:
     if 0.001 <= float(cfg.web_point_size) <= 1.0:   # same range `set_view` enforces
         ui.point_size = float(cfg.web_point_size)
     ui.point_size_auto = bool(cfg.web_point_size_auto)
+    try:
+        see = float(cfg.web_see_through)
+    except (TypeError, ValueError):
+        see = None
+    if see is not None and _SEE_THROUGH_RANGE[0] <= see <= _SEE_THROUGH_RANGE[1]:
+        ui.see_through = see
     ui.surface_enabled = bool(cfg.surface_enabled)
     if cfg.surface_mode in _VALID_SURFACE_MODES:
         ui.surface_mode = cfg.surface_mode
@@ -1384,6 +1405,7 @@ def apply_ui_to_config(ui: UiState, cfg: ViewerConfig) -> None:
     cfg.view_colormap = ui.view_colormap
     cfg.web_point_size = float(ui.point_size)
     cfg.web_point_size_auto = bool(ui.point_size_auto)
+    cfg.web_see_through = float(ui.see_through)
     cfg.surface_enabled = bool(ui.surface_enabled)
     cfg.surface_mode = ui.surface_mode
     cfg.surface_threshold_pct = float(ui.surface_threshold_pct)
@@ -2567,9 +2589,28 @@ async def _broadcast_session(state) -> None:
 
 
 async def _broadcast_state(state) -> None:
+    """Push the authoritative `state`, *with* the controller + Detailed context.
+
+    Every echo must carry it. `slam_available` and `detailed` are derived from
+    the loaded capture, so a context-free `_state_message(ui)` reports the
+    permissive defaults (SLAM available, no sidecar) -- and because the client
+    drives its disabled state purely from this echo (one-way flow), an unrelated
+    colour or point-size change would silently re-enable the SLAM segments on a
+    legacy stream-9-less capture and clear the stale badge."""
     await _broadcast_text(state.clients, json.dumps(_state_message(
         state.ui_state, getattr(state, "controller", None),
         getattr(state, "detailed_runner", None))))
+
+
+async def _broadcast_captures(state, ctrl) -> None:
+    """Push a fresh `captures` list, scanned OFF the event loop.
+
+    `list_captures` now header-walks every capture for frame count, duration and
+    stream-9 capability. Measured 501 ms cold over the current 25-file / 1.06 GB
+    library (0.4 ms warm, cached on size+mtime) -- half a second of stalled
+    broadcaster, and a just-stopped recording is guaranteed cache-cold."""
+    msg = await asyncio.to_thread(build_captures_message, ctrl.captures_dir)
+    await _broadcast_text(state.clients, json.dumps(msg))
 
 
 async def _reset_slam(state) -> None:
@@ -3028,8 +3069,10 @@ async def websocket_endpoint(websocket: WebSocket):
         ctrl = getattr(state, "controller", None)
         if ctrl is not None:
             await websocket.send_text(json.dumps(ctrl.session_message(None, time.time())))
-            await websocket.send_text(json.dumps(build_captures_message(ctrl.captures_dir)))
-        await websocket.send_text(json.dumps(build_saved_message(RESULTS_DIR)))
+            caps = await asyncio.to_thread(build_captures_message, ctrl.captures_dir)
+            await websocket.send_text(json.dumps(caps))
+        saved = await asyncio.to_thread(build_saved_message, RESULTS_DIR)
+        await websocket.send_text(json.dumps(saved))
     except Exception:
         await _drop_client(clients, websocket)
         return
@@ -3082,17 +3125,17 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         else:
             ctrl.stop_record()
         await _broadcast_session(state)
-        await _broadcast_text(state.clients, json.dumps(build_captures_message(ctrl.captures_dir)))
+        await _broadcast_captures(state, ctrl)
 
     elif mtype == "list_captures" and ctrl is not None:
-        await _broadcast_text(state.clients, json.dumps(build_captures_message(ctrl.captures_dir)))
+        await _broadcast_captures(state, ctrl)
 
     elif mtype == "rename_capture" and ctrl is not None:
         new_name = await asyncio.to_thread(ctrl.rename_last_recording, msg.get("name"))
         if new_name is None:
             state.bus.publish("rename -> invalid name or already exists")
         await _broadcast_session(state)
-        await _broadcast_text(state.clients, json.dumps(build_captures_message(ctrl.captures_dir)))
+        await _broadcast_captures(state, ctrl)
 
     elif mtype == "load_capture" and ctrl is not None:
         path = sanitize_capture_name(msg.get("name"), ctrl.captures_dir)
@@ -3145,7 +3188,7 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             return
         ui.color_mode = mode
         _persist_ui(state)
-        await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+        await _broadcast_state(state)
 
     elif mtype == "set_ir":
         colormap = msg.get("colormap", ui.ir_colormap)
@@ -3160,7 +3203,7 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             ui.ir_freeze_range = None
         ui.ir_freeze = freeze
         _persist_ui(state)
-        await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+        await _broadcast_state(state)
 
     elif mtype == "set_view":
         changed = False
@@ -3178,6 +3221,15 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         if "point_size_auto" in msg:
             ui.point_size_auto = bool(msg["point_size_auto"])
             changed = True
+        if "see_through" in msg:
+            try:
+                st = float(msg["see_through"])
+            except (TypeError, ValueError):
+                log.warning("invalid set_view see_through: %r", msg.get("see_through"))
+                st = None
+            if st is not None and _SEE_THROUGH_RANGE[0] <= st <= _SEE_THROUGH_RANGE[1]:
+                ui.see_through = st
+                changed = True
         if "surface" in msg:
             ui.surface_enabled = bool(msg["surface"])
             changed = True
@@ -3233,7 +3285,7 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
                 changed = True
         if changed:
             _persist_ui(state)
-            await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+            await _broadcast_state(state)
 
     elif mtype == "set_source" and ctrl is not None:
         source = msg.get("source")
@@ -3318,7 +3370,7 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         if "follow" in msg:
             ui.slam_follow = bool(msg["follow"])
         _persist_ui(state)
-        await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+        await _broadcast_state(state)
 
     elif mtype == "set_idle":
         # Runtime control of the sensor auto-idle (persisted like the display
@@ -3337,7 +3389,7 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             _persist_ui(state)
             if not ui.idle_enabled:
                 _cancel_idle_timer(state)   # a pending idle must not fire once disabled
-            await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+            await _broadcast_state(state)
 
     elif mtype == "set_orientation":
         # Orientation decomposition mode + custom axis labels (owner ask,
@@ -3354,7 +3406,7 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             changed = True
         if changed:
             _persist_ui(state)
-            await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+            await _broadcast_state(state)
 
     elif mtype == "zero_yaw":
         # "Zero yaw here" (owner ask, 2026-07-29): the SFLP-derived yaw has an
@@ -3379,16 +3431,38 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             return
         ui.yaw_offset_deg = _YAW_GRAFT_SIGN[ui.orientation_mode] * float(raw_yaw)
         _persist_ui(state)
-        await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+        await _broadcast_state(state)
 
     elif mtype == "clear_yaw_offset":
         # Explicit reset back to the raw (un-offset) SFLP yaw.
         ui.yaw_offset_deg = 0.0
         _persist_ui(state)
-        await _broadcast_text(state.clients, json.dumps(_state_message(ui)))
+        await _broadcast_state(state)
 
     elif mtype == "save":
-        state.bus.publish("save -> Detailed SLAM owns persistent sidecars; Realtime SLAM is preview-only")
+        # Save survives ONLY for Live SLAM (owner decision, 2026-07-31). A live
+        # scan is unrepeatable -- if Record wasn't running, the frames are gone
+        # the moment the map is dropped -- so the one-shot export has to stay.
+        # Replay SLAM is explicitly preview-only (re-run it, or build Detailed,
+        # which is the capture-keyed sidecar), and Detailed writes its own.
+        slam = getattr(state, "slam_runner", None)
+        if ui.display != "slam" or slam is None:
+            state.bus.publish("save -> not available (switch the display to SLAM first)")
+            return
+        if ui.source != "live":
+            state.bus.publish("save -> replay SLAM is a preview; use Detailed to write a sidecar")
+            return
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        ply = Path(RESULTS_DIR) / f"web_{stamp}.ply"
+        tum = Path(RESULTS_DIR) / f"web_{stamp}.tum"
+        try:
+            n = await asyncio.to_thread(slam.save, ply, tum)
+        except Exception as exc:
+            state.bus.publish(f"save -> ERROR {exc}")
+            return
+        state.bus.publish(f"saved {ply.name} ({n} verts)")
+        saved = await asyncio.to_thread(build_saved_message, RESULTS_DIR)
+        await _broadcast_text(state.clients, json.dumps(saved))
 
     elif mtype == "reset_fusion":
         state.sensor_state.reset_fusion()

@@ -198,8 +198,16 @@ class DetailedSlamPreset:
         except (TypeError, ValueError):
             return cls()
 
+    # Fields that describe how long a build TAKES, not what it PRODUCES. They
+    # are excluded from the fingerprint on purpose: calibrating the estimate --
+    # which is the explicitly planned next step -- must not mark every existing
+    # sidecar stale. A staleness flag that fires on unrelated changes is one the
+    # user learns to ignore, and then it cannot warn about a real one.
+    _NON_RECONSTRUCTION_FIELDS = ("per_frame_ms", "global_opt_ms", "benchmark_note")
+
     def fingerprint(self) -> str:
-        payload = dataclasses.asdict(self)
+        payload = {k: v for k, v in dataclasses.asdict(self).items()
+                   if k not in self._NON_RECONSTRUCTION_FIELDS}
         return hashlib.sha256(json.dumps(payload, sort_keys=True,
                                          separators=(",", ":")).encode()).hexdigest()[:16]
 

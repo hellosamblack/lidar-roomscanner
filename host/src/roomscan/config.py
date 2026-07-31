@@ -75,6 +75,9 @@ class ViewerConfig:
     web_cam_mirror_rotation_deg: float = 0.0
     web_orbit_enabled: bool = False    # world view only: slow auto-orbit (azimuth only)
     web_orbit_speed_deg_s: float = 6.0 # 60 s per revolution; negative reverses
+    web_see_through: float = 0.0       # x-ray strength 0..1: how strongly geometry hidden BEHIND
+                                       # other geometry is drawn back over its occluder. 0 = off
+                                       # (opaque, the historical look), 1 = the hidden layer wins
     imu_gizmo: bool = True             # show the orientation gizmo in the scene
     sensors_panel: bool = True         # show the Sensors panel group
     gizmo_scale: float = 0.15          # gizmo axis length (metres)

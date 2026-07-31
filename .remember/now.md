@@ -7,5 +7,5 @@
 
 # Next steps
 - Monitor stability of Ethernet stream.
-- Run browser/server integration outside the sandbox (local sockets are denied here), benchmark Detailed timing
-  plus the 8/10/12 ICP variants on CUDA:0, and only then implement/enable the pose-graph pass if both circuits pass.
+- Run browser/server integration with elevated local-socket permission, benchmark Detailed timing plus the
+  6/8/10/12 ICP variants on CUDA:0, and only then implement/enable the pose-graph pass if both circuits pass.

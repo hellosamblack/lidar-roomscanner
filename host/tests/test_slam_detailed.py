@@ -14,6 +14,23 @@ def test_detailed_preset_fingerprint_changes_with_effective_params():
     assert a.mapper_kwargs()["icp_retry_dist"] == a.retry_dist
 
 
+def test_fingerprint_ignores_timing_calibration():
+    """Calibrating the estimate must not invalidate every existing sidecar.
+
+    `per_frame_ms`/`global_opt_ms`/`benchmark_note` describe how long a build
+    TAKES, not what it PRODUCES -- and populating them is the explicitly planned
+    next step. Hashing them would mark every reconstruction stale the moment the
+    benchmark lands, and a staleness flag that fires on unrelated changes is one
+    the user learns to ignore, so it can no longer warn about a real one.
+    """
+    base = DetailedSlamPreset()
+    calibrated = DetailedSlamPreset(per_frame_ms=9.4, global_opt_ms=420.0,
+                                    benchmark_note="measured on CUDA:0 2026-07-31")
+    assert calibrated.fingerprint() == base.fingerprint()
+    # ...but a real reconstruction parameter still moves it.
+    assert DetailedSlamPreset(max_iter=8).fingerprint() != base.fingerprint()
+
+
 def test_sidecar_is_current_only_when_manifest_matches(tmp_path):
     capture = tmp_path / "take.bin"
     capture.write_bytes(b"raw wire bytes")

@@ -59,7 +59,7 @@ Both transports serve the same tool definitions.
 | `rig_set(...)` | legacy display options; verifies the echo before reporting success |
 | `rig_view(source?, display?, regenerate?)` | authoritative Live/View and Detailed-SLAM control |
 | `rig_playback(action, value?)` | `go_live` / `load_capture` / transport |
-| `rig_save()` | deprecated; Detailed SLAM owns capture-keyed sidecars |
+| `rig_save()` | export the **Live** SLAM map (`.ply` + `.tum`). Live SLAM only — a live scan is unrepeatable, so its one-shot export stays; for a recorded capture the persistent artifact is the sidecar from `rig_view(display="detailed", regenerate=True)` |
 
 **ui_\*** — headless Chrome, held open across calls.
 

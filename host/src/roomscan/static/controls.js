@@ -44,6 +44,8 @@ export function createControls(hub) {
     const slPointSize = $('sl-point-size');
     const chkPointAuto = $('chk-point-auto');
     const pointSizeVal = $('point-size-val');
+    const slSeeThrough = $('sl-see-through');
+    const seeThroughVal = $('see-through-val');
     const segRender = $('seg-render');
     const surfaceOpts = $('surface-opts');
     const segSurfaceMode = $('seg-surface-mode');
@@ -90,6 +92,9 @@ export function createControls(hub) {
     });
     chkPointAuto?.addEventListener('change', () => {
         sendView({ point_size_auto: chkPointAuto.checked });
+    });
+    slSeeThrough?.addEventListener('input', () => {
+        sendView({ see_through: parseFloat(slSeeThrough.value) });
     });
     segRender?.addEventListener('click', (e) => {
         const btn = e.target.closest('button[data-render]');
@@ -161,6 +166,13 @@ export function createControls(hub) {
             // In auto the slider is a per-metre-of-range gain, so say so.
             const auto = chkPointAuto ? chkPointAuto.checked : false;
             pointSizeVal.textContent = msg.point_size.toFixed(3) + ' m' + (auto ? ' @1 m' : '');
+        }
+        if (msg.see_through !== undefined) {
+            if (slSeeThrough) slSeeThrough.value = msg.see_through;
+            if (seeThroughVal) {
+                seeThroughVal.textContent = msg.see_through > 0
+                    ? Math.round(msg.see_through * 100) + '%' : 'Off';
+            }
         }
         setActive(segRender, 'render', msg.surface_enabled ? 'surface' : 'points');
         if (surfaceOpts) surfaceOpts.classList.toggle('hidden', !msg.surface_enabled);

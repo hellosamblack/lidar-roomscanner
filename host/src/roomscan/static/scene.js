@@ -17,6 +17,7 @@
 // would, and the level horizon comes from the server, not from `camera.up`.
 //
 // Public surface:
+//   makeXrayMaterial(THREE, material) -> the see-through twin of a material
 //   createScene(hub) -> { resetCamera, THREE, scene, camera,
 //                         setPointsVisible(bool), setFollow(bool),
 //                         setFollowTarget(eye, center, up),
@@ -32,6 +33,44 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 const D = (m, l) => { try { window.__diag && window.__diag('scene.js: ' + m, l); } catch (e) {} };
 
 const MAX_POINTS = 300000;                 // large buffer for later SLAM maps
+
+// --- see-through / x-ray (owner ask, 2026-07-31) -------------------------
+// "Whenever any voxel occludes another, give it transparency so we can see
+// through it." The naive reading -- turn material.opacity down -- is NOT that:
+// it fades every surface against the background, including the ones hiding
+// nothing, so the scene gets dimmer overall while the interesting case (a near
+// wall hiding the room behind it) only half improves.
+//
+// Instead each geometry gets a SECOND draw of the same buffers with the depth
+// test inverted (`GreaterDepth`) and depth writing off. That pass shades
+// exactly the fragments the normal pass rejected -- i.e. precisely the occluded
+// ones -- and alpha-blends them back over their occluder at `see_through`.
+// Un-occluded surfaces are byte-identical to before, because nothing failed the
+// depth test in front of them. The blend that lands on an occluded pixel is
+// `a*hidden + (1-a)*occluder`, which is the same result as making the occluder
+// itself transparent, but only where it actually occludes something.
+//
+// Cost is one extra draw call per object, and only while see-through is on:
+// at 0 (the default) the x-ray objects are `visible = false` and the renderer
+// skips them entirely, so the historical render is untouched.
+//
+// Shared with slam.js, which x-rays its own mesh materials the same way.
+export function makeXrayMaterial(THREE, source) {
+    const x = source.clone();
+    // clone() -> copy() has a fixed field list and does NOT carry an
+    // onBeforeCompile override, which for the point material is the whole
+    // auto-size shader patch. Re-point it at the same function: it is also the
+    // material's customProgramCacheKey, so sharing the function means sharing
+    // the compiled program (and the uniform objects it was handed) rather than
+    // paying for a second one.
+    x.onBeforeCompile = source.onBeforeCompile;
+    x.transparent = true;
+    x.opacity = 0;                        // set by setSeeThrough / the state echo
+    x.depthWrite = false;                 // an x-ray layer must never occlude anything itself
+    x.depthFunc = THREE.GreaterDepth;     // ONLY where the normal pass lost the depth test
+    x.needsUpdate = true;                 // `transparent`/`depthFunc` are program+state changes
+    return x;
+}
 
 // --- camera framing: one baseline, three offsets -------------------------
 // Every view is described relative to ONE reference — the FPV ground truth, a
@@ -183,6 +222,42 @@ export function createScene(hub) {
     scene.add(uncovPoints);
     let surfaceOn = false;
 
+    // See-through twins: the same geometry buffers drawn again with an inverted
+    // depth test, so only the occluded fragments come back through. See
+    // `makeXrayMaterial` above. Hidden (and free) until see_through > 0.
+    const xrayPointMat = makeXrayMaterial(THREE, material);
+    const xraySurfaceMat = makeXrayMaterial(THREE, meshMat);
+    const xrayPoints = new THREE.Points(geometry, xrayPointMat);
+    const xrayUncov = new THREE.Points(uncovGeom, xrayPointMat);
+    const xraySurface = new THREE.Mesh(meshGeom, xraySurfaceMat);
+    let seeThrough = 0;
+    for (const o of [xrayPoints, xrayUncov, xraySurface]) {
+        o.frustumCulled = false;              // same stale-bounding-sphere trap as `points`
+        o.visible = false;
+        scene.add(o);
+    }
+    let cloudShown = true;                    // slam.js hides the real-time cloud in SLAM mode
+
+    // One place decides what is drawn: the render mode (points vs surface), the
+    // SLAM-mode hide, and whether the x-ray pass is armed at all.
+    function applyVisibility() {
+        points.visible = cloudShown && !surfaceOn;
+        surfaceMesh.visible = cloudShown && surfaceOn;
+        uncovPoints.visible = cloudShown && surfaceOn;
+        const xray = seeThrough > 0;
+        xrayPoints.visible = xray && points.visible;
+        xraySurface.visible = xray && surfaceMesh.visible;
+        xrayUncov.visible = xray && uncovPoints.visible;
+    }
+
+    function setSeeThrough(v) {
+        seeThrough = Math.min(1, Math.max(0, Number(v) || 0));
+        xrayPointMat.opacity = seeThrough;
+        xraySurfaceMat.opacity = seeThrough;
+        applyVisibility();
+    }
+    applyVisibility();                        // one defined starting state
+
     // --- SLAM follow camera (web Phase 4) ---------------------------------
     // When follow is on, slam.js pushes an eye/center/up each frame and this
     // loop lerps the camera to it with OrbitControls disabled; when off,
@@ -194,15 +269,8 @@ export function createScene(hub) {
     const followUp = new THREE.Vector3(0, -1, 0);
     let haveFollowTarget = false;
     function setPointsVisible(v) {
-        if (v) {
-            points.visible = !surfaceOn;
-            surfaceMesh.visible = surfaceOn;
-            uncovPoints.visible = surfaceOn;
-        } else {
-            points.visible = false;
-            surfaceMesh.visible = false;
-            uncovPoints.visible = false;
-        }
+        cloudShown = !!v;
+        applyVisibility();
     }
     function setFollow(on) {
         followOn = !!on;
@@ -408,14 +476,16 @@ export function createScene(hub) {
             orbitOn = !!msg.orbit_enabled;
             controls.autoRotate = orbitOn && viewMode === 'world';
         }
-        if (msg.point_size !== undefined) material.size = msg.point_size;
+        if (msg.point_size !== undefined) {
+            material.size = msg.point_size;
+            xrayPointMat.size = msg.point_size;    // the twin must stay the same shape
+        }
         // Uniform-only: toggling auto never recompiles the program.
         if (msg.point_size_auto !== undefined) pointUniforms.uAutoSize.value = msg.point_size_auto ? 1.0 : 0.0;
+        if (msg.see_through !== undefined) setSeeThrough(msg.see_through);
         if (msg.surface_enabled !== undefined) {
             surfaceOn = !!msg.surface_enabled;
-            points.visible = !surfaceOn;
-            surfaceMesh.visible = surfaceOn;
-            uncovPoints.visible = surfaceOn;
+            applyVisibility();
         }
     });
 

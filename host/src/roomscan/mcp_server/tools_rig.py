@@ -27,6 +27,7 @@ DISPLAY_SETTERS = {
     "ir_colormap": ("set_ir", "colormap", "ir_colormap"),
     "ir_freeze": ("set_ir", "freeze", "ir_freeze"),
     "point_size": ("set_view", "point_size", "point_size"),
+    "see_through": ("set_view", "see_through", "see_through"),
     "surface": ("set_view", "surface", "surface_enabled"),
     "mode": ("set_mode", "mode", "mode"),
     "trajectory": ("slam_opt", "trajectory", "slam_trajectory"),
@@ -240,18 +241,22 @@ async def rig_record(on: bool, timeout: float = 10.0) -> dict:
 @mcp.tool()
 async def rig_set(mode: str = "", color: str = "", ir_colormap: str = "",
                   ir_freeze: bool | None = None, point_size: float | None = None,
+                  see_through: float | None = None,
                   surface: bool | None = None, orientation: str = "",
                   trajectory: bool | None = None, walls: bool | None = None,
                   follow: bool | None = None, timeout: float = 5.0) -> dict:
     """Set display and mode options; only the arguments you pass are sent.
 
-    `mode` is realtime|slam. `color` picks the point-cloud color plane. The SLAM
-    display toggles (trajectory/walls/follow) apply in slam mode. Returns the
+    `mode` is realtime|slam. `color` picks the point-cloud color plane.
+    `see_through` (0..1, 0 = off) blends geometry hidden behind other geometry
+    back over its occluder, so a near wall stops hiding the room behind it. The
+    SLAM display toggles (trajectory/walls/follow) apply in slam mode. Returns the
     server's echoed `state` -- the server is authoritative, so trust that over the
     values you sent.
     """
     values = {"mode": mode, "color": color, "ir_colormap": ir_colormap,
-              "ir_freeze": ir_freeze, "point_size": point_size, "surface": surface,
+              "ir_freeze": ir_freeze, "point_size": point_size,
+              "see_through": see_through, "surface": surface,
               "orientation": orientation, "trajectory": trajectory,
               "walls": walls, "follow": follow}
     requested = {k: v for k, v in values.items() if v != "" and v is not None}
@@ -401,5 +406,24 @@ async def rig_view(source: str = "", display: str = "", regenerate: bool = False
 
 @mcp.tool()
 async def rig_save(timeout: float = 120.0) -> dict:
-    """Deprecated: persistent export is now Detailed SLAM's capture sidecar."""
-    return {"ok": False, "error": "use rig_view(display='detailed', regenerate=True)"}
+    """Save the LIVE SLAM map: full-res .ply mesh plus .tum trajectory.
+
+    Live SLAM only -- `source == "live"` and `display == "slam"`. A live scan is
+    unrepeatable, so if Record wasn't running its frames are gone the moment the
+    map is dropped, which is why this one-shot export exists.
+
+    For a recorded capture this is the wrong tool: replay SLAM is a preview, and
+    the persistent artifact is the capture-keyed sidecar built by
+    `rig_view(display="detailed", regenerate=True)`.
+    """
+    saved = await rig.request({"type": "save"}, expect="saved", timeout=timeout)
+    if saved is None:
+        # The server refuses with a bus line rather than a `saved` echo, so a
+        # timeout here is usually "wrong source/display", not a slow write.
+        state = rig.latest.get("state") or {}
+        where = f"source={state.get('source')!r} display={state.get('display')!r}"
+        return {"ok": False, "state": state or None,
+                "error": f"no save confirmation within {timeout}s ({where}); save is "
+                         "Live SLAM only -- for a capture use "
+                         "rig_view(display='detailed', regenerate=True)"}
+    return {"ok": True, "saved": saved}

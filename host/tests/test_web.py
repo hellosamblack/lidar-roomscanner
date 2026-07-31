@@ -2490,6 +2490,62 @@ def test_set_view_ignores_out_of_range_point_size():
     assert state.ui_state.point_size == web.UiState().point_size
 
 
+# --- see-through / x-ray: state echo + persistence (owner ask, 2026-07-31) --
+
+def test_see_through_defaults_off_everywhere():
+    """The default must reproduce the opaque render: 0 in UiState, 0 in the
+    config, and the client skips the extra pass entirely at 0."""
+    assert web.UiState().see_through == 0.0
+    assert ViewerConfig().web_see_through == 0.0
+    assert web._state_message(web.UiState())["see_through"] == 0.0
+
+
+def test_state_message_carries_see_through():
+    assert web._state_message(web.UiState(see_through=0.4))["see_through"] == 0.4
+
+
+def test_set_view_see_through_updates_and_persists(tmp_path):
+    """End-to-end through the real inbound handler: the strength lands in
+    UiState, in the `state` echo, and in roomscan.toml."""
+    import types
+    import roomscan.config as config_mod
+    p = tmp_path / "roomscan.toml"
+    state = types.SimpleNamespace(config=ViewerConfig(), ui_state=web.UiState(),
+                                  clients=set(), controller=None)
+    orig = config_mod.config_path
+    config_mod.config_path = lambda: p
+    try:
+        asyncio.run(web._handle_inbound(state, {"type": "set_view", "see_through": 0.35}))
+    finally:
+        config_mod.config_path = orig
+    assert state.ui_state.see_through == 0.35
+    assert web._state_message(state.ui_state)["see_through"] == 0.35
+    assert ViewerConfig.load(p).web_see_through == 0.35
+
+
+def test_set_view_ignores_bad_see_through():
+    """Out-of-range and non-numeric values are dropped, keeping the current one."""
+    import types
+    state = types.SimpleNamespace(config=None, ui_state=web.UiState(see_through=0.5),
+                                  clients=set(), controller=None)
+    for bad in (1.5, -0.2, "opaque", None):
+        asyncio.run(web._handle_inbound(state, {"type": "set_view", "see_through": bad}))
+        assert state.ui_state.see_through == 0.5
+
+
+def test_ui_from_config_maps_see_through_and_rejects_out_of_range():
+    assert web.ui_from_config(ViewerConfig(web_see_through=0.6)).see_through == 0.6
+    default = web.UiState().see_through
+    assert web.ui_from_config(ViewerConfig(web_see_through=2.0)).see_through == default
+    assert web.ui_from_config(ViewerConfig(web_see_through="x")).see_through == default
+
+
+def test_apply_ui_to_config_writes_see_through():
+    cfg = ViewerConfig()
+    web.apply_ui_to_config(web.UiState(see_through=0.25), cfg)
+    assert cfg.web_see_through == 0.25
+
+
 # --- view mode: state echo + persistence (owner ask, 2026-07-29) ------------
 
 def test_state_message_carries_view_mode():
@@ -2817,3 +2873,102 @@ def test_transport_counters_reports_udp_fragment_health(monkeypatch):
         "frames_incomplete": 2, "frags_lost": 3,
         "frags_reordered": 11, "frags_duplicate": 1, "frags_invalid": 0,
     }
+
+
+# --- 14. Live/View source + display (2026-07-31) ----------------------------
+#
+# The Live/View consolidation landed with no handler-level tests at all, and
+# each of the three below fails if its defect is reintroduced -- verified by
+# reverting the fix and watching it go red.
+
+class _FakeCtrl:
+    """Minimal SessionController stand-in for the inbound handlers."""
+    def __init__(self, *, mode="replay", has_stream_9=True, captures_dir="captures",
+                 replay_path="take.bin"):
+        self.mode = mode
+        self.replay_path = replay_path if mode == "replay" else None
+        self.index = {"n_frames": 3, "seqs": [1, 2, 3], "has_stream_9": has_stream_9}
+        self.captures_dir = captures_dir
+        self.switched_to = None
+
+    def switch_to_live(self):
+        self.mode, self.replay_path, self.switched_to = "live", None, "live"
+
+
+def _inbound_state(ui, ctrl):
+    import types
+    published = []
+    bus = types.SimpleNamespace(publish=published.append)
+    return types.SimpleNamespace(config=None, ui_state=ui, clients=set(),
+                                 controller=ctrl, bus=bus, slam_runner=None,
+                                 detailed_runner=None), published
+
+
+def test_state_echo_keeps_capability_context_on_an_unrelated_control():
+    """A colour change must not re-advertise SLAM on a legacy capture.
+
+    The client drives its disabled state purely from this echo (one-way flow),
+    so a context-free `_state_message(ui)` -- which defaults `slam_available`
+    to True -- would silently re-enable the SLAM segments on a stream-9-less
+    capture and clear the Detailed badge.
+    """
+    import asyncio, json
+    ui = web.UiState(source="view", display="point_cloud", selected_capture="old.bin")
+    ctrl = _FakeCtrl(has_stream_9=False)
+    state, _ = _inbound_state(ui, ctrl)
+    sent = []
+
+    async def drive():
+        async def capture_text(clients, text):
+            sent.append(json.loads(text))
+        orig, web._broadcast_text = web._broadcast_text, capture_text
+        try:
+            await web._handle_inbound(state, {"type": "set_color", "mode": "depth"})
+        finally:
+            web._broadcast_text = orig
+
+    asyncio.run(drive())
+    echoes = [m for m in sent if m.get("type") == "state"]
+    assert echoes, "set_color must echo state"
+    assert echoes[-1]["slam_available"] is False
+
+
+def test_save_is_live_slam_only():
+    """Live SLAM keeps its one-shot export (owner decision, 2026-07-31): an
+    unrecorded live scan is unrepeatable. Replay SLAM is a preview and must
+    refuse with a reason rather than silently writing or silently doing
+    nothing."""
+    import asyncio
+    saved = []
+
+    class _Slam:
+        def save(self, ply, tum):
+            saved.append(ply.name)
+            return 1234
+
+    # Replay + SLAM -> refused, nothing written.
+    ui = web.UiState(source="view", display="slam")
+    state, published = _inbound_state(ui, _FakeCtrl())
+    state.slam_runner = _Slam()
+    asyncio.run(web._handle_inbound(state, {"type": "save"}))
+    assert not saved
+    assert any("preview" in line for line in published), published
+
+    # Live + SLAM -> writes.
+    ui = web.UiState(source="live", display="slam")
+    state, published = _inbound_state(ui, _FakeCtrl(mode="live"))
+    state.slam_runner = _Slam()
+    asyncio.run(web._handle_inbound(state, {"type": "save"}))
+    assert len(saved) == 1 and saved[0].endswith(".ply")
+    assert any("1234 verts" in line for line in published), published
+
+
+def test_set_display_refuses_slam_on_a_legacy_capture():
+    """A capture with no stream 9 has no rotation prior, so SLAM would build an
+    empty map. Refuse with an explanation and leave the display untouched."""
+    import asyncio
+    ui = web.UiState(source="view", display="point_cloud")
+    state, published = _inbound_state(ui, _FakeCtrl(has_stream_9=False))
+    asyncio.run(web._handle_inbound(state, {"type": "set_display", "display": "slam"}))
+    assert ui.display == "point_cloud"
+    assert any("stream 9" in line for line in published), published

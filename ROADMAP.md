@@ -1228,6 +1228,61 @@ independently 2026-07-30 while closing BUG-037: elevation matches to 0.17°/0.04
 `captures/roomSweepFull20260730.bin` has **no** bookend — it ends mid-sweep — so its height and
 closure numbers have no ground truth and must not be quoted as drift.)
 
+**Live/View Detailed-SLAM follow-ups (recorded 2026-07-31).** The Live/View playback foundation is
+landed: server-authoritative `source`/`display` state, TIM2-based replay timing, stream-9 capability
+gating, capture-keyed Detailed sidecars, progressive `MESH` updates, and the pure paired-gate helper.
+The following work is deliberately still open; do not describe the fallback preset as a validated
+loop-closure implementation.
+
+1. **End-to-end browser/server verification.** Run the websocket integration and headless-browser
+   flows with a permission profile that permits local port binding. Exercise Live↔View source swaps,
+   recording only in Live, legacy no-stream-9 capture messaging, timestamp seek/`mm:ss` labels,
+   Detailed build progress, cached-current sidecar load, stale-sidecar badge, and manual regenerate.
+2. **Calibrate Detailed cost and iteration choice on CUDA:0.** Populate the clearly labelled
+   `[slam.detailed]` per-frame and global-optimization estimate constants from real runs. Evaluate
+   max ICP iterations **6, 8, 10, and 12** on both `coffeeRoomCircuitNoMnt.bin` and
+   `coffeeRoomCircuitMnt.bin`, each with the matched ten innocuous perturbations. Retain the
+   measured six-iteration setting unless a higher count passes the same tracking/closure guard.
+3. **Implement and evaluate the offline pose-graph pass.** Build keyframes from offline tracking,
+   find non-adjacent pose-proximity revisits, verify candidate edges with strict ICP, globally
+   optimize, and re-integrate every raw frame against the optimized/interpolated trajectory before
+   exporting the Detailed artifacts. Relocalization remains explicitly out of scope.
+4. **Enable loop closure only through the paired gate.** Accept it only when *both* circuits have a
+   positive paired 95% confidence interval for reduced horizontal closure, with no run that dies and
+   no increased tracking loss. On failure, preserve the same Detailed UX and sidecar contract with
+   `loop_closure.enabled=false`, and record the measurements/reason in each manifest and validation
+   report. Never auto-regenerate a stale sidecar.
+
+**Review pass on the landed foundation (2026-07-31).** Three defects that had already reached `main`
+in `452b275`, all fixed, all now pinned by tests that were verified by reintroducing the defect
+(`BUG-043`/`044`/`045`):
+
+- **Save was deleted, not narrowed (BUG-043).** "Only Detailed writes a persistent sidecar" was meant
+  to apply to *replay* SLAM; it was applied to Live too, leaving a greyed button and a no-op click
+  handler. **Live SLAM keeps its one-shot export** (owner decision, 2026-07-31): its frames are never
+  stored unless Record was running, so dropping the map discards the only copy and there is nothing
+  to re-run as Detailed. Replay SLAM stays preview-only and now refuses with a reason.
+- **Capability context was dropped from eight `state` echoes (BUG-044).** `slam_available` and
+  `detailed` default permissive, so changing the colour or point size re-enabled the SLAM/Detailed
+  segments on a stream-9-less capture and cleared the stale badge — the client drives disabled state
+  purely from this echo.
+- **The View library scanned on the event loop (BUG-045).** `list_captures`' new header walk measured
+  **501 ms cold over 25 files / 1.06 GB** (0.4 ms warm), stalling the broadcaster on every tab
+  connect and after every recording stop.
+
+Also: the two top-bar switches were each stretching to the full 1175 px bar and stacking into
+banners (`#mode-switch-slot { flex: 1 }` was written for one control); they now size to their labels.
+
+Two things the review did **not** settle, both feeding item 2 above. The preset tracks *and* maps at
+`voxel_size = 0.005`, so 5 mm reaches the trajectory — and 5 mm tracking is the one setting this repo
+has measured going **backwards** (`docs/phase6-slam-validation.md`: gap 1.095 m at 10 mm vs 2.052 m
+at 5 mm, though that is CPU-era, pre-frustum-raycast, on a different capture). Decoupling the
+tracking voxel from the map voxel — track at 10 mm, reconstruct at 5 mm — would make the finding
+irrelevant by construction rather than requiring it to be re-litigated; worth measuring before the
+preset is called validated. Separately, `DetailedSlamPreset.fingerprint()` now **excludes**
+`per_frame_ms`/`global_opt_ms`/`benchmark_note`: they describe how long a build takes, not what it
+produces, and hashing them would have marked every existing sidecar stale the moment item 2 lands.
+
 #### Sub-phase 6.G — SLAM GPU-memory hardening (long-scan OOM)  ← **✅ Complete (2026-07-29)**
 
 The GPU SLAM path OOMed on a long scan: over a 68 m walk, CUDA memory crept to **~11.7 GB** and hit a
