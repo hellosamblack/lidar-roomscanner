@@ -52,7 +52,6 @@
         'diag': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M20,4H4A2,2 0 0,0 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V6A2,2 0 0,0 20,4M20,18H4V6H20V18M6,8L10,12L6,16V14L8.5,12L6,10V8M11,15H17V17H11V15Z"/></svg>',
         'device': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M9,4V6H11V4H9M13,4V6H15V4H13M9,18V20H11V18H9M13,18V20H15V18H13M4,9H6V11H4V9M4,13H6V15H4V13M18,9H20V11H18V9M18,13H20V15H18V13Z"/></svg>',
         'view': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22C13.1,22 14,21.1 14,20C14,19.5 13.8,19.05 13.47,18.7C13.12,18.33 12.92,17.84 12.92,17.3C12.92,16.2 13.82,15.3 14.92,15.3H16C19.31,15.3 22,12.61 22,9.3C22,5.27 17.52,2 12,2M6.5,11.5A1.5,1.5 0 0,1 5,10A1.5,1.5 0 0,1 6.5,8.5A1.5,1.5 0 0,1 8,10A1.5,1.5 0 0,1 6.5,11.5M9.5,7.5A1.5,1.5 0 0,1 8,6A1.5,1.5 0 0,1 9.5,4.5A1.5,1.5 0 0,1 11,6A1.5,1.5 0 0,1 9.5,7.5M14.5,7.5A1.5,1.5 0 0,1 13,6A1.5,1.5 0 0,1 14.5,4.5A1.5,1.5 0 0,1 16,6A1.5,1.5 0 0,1 14.5,7.5M17.5,11.5A1.5,1.5 0 0,1 16,10A1.5,1.5 0 0,1 17.5,8.5A1.5,1.5 0 0,1 19,10A1.5,1.5 0 0,1 17.5,11.5Z"/></svg>',
-        'ir-ctrl': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4V20A8,8 0 0,0 20,12A8,8 0 0,0 12,4Z"/></svg>',
         'capture': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M18,4L20,8H17L15,4H13L15,8H12L10,4H8L10,8H7L5,4H4A2,2 0 0,0 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V4H18M10,10L16,13L10,16V10Z"/></svg>',
         'slam-ctrl': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12,2L4.5,20.29L5.21,21L12,18L18.79,21L19.5,20.29L12,2Z"/></svg>',
         'log': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M19,3H5C3.89,3 3,3.89 3,5V19C3,20.1 3.89,21 5,21H19C20.1,21 21,20.1 21,19V5C21,3.89 20.1,3 19,3M7,7H17V9H7V7M7,11H17V13H7V11M7,15H14V17H7V15Z"/></svg>'
@@ -66,12 +65,16 @@
         'diag': 'Diagnostics',
         'device': 'Device',
         'view': 'View',
-        'ir-ctrl': 'IR Monitor',
         'capture': 'Capture & Playback',
         'slam-ctrl': 'SLAM',
         'log': 'Event Log'
     };
 
+    // The rail is a stable map of every panel that CAN exist, not a list of
+    // what's missing: every registered card gets a permanent button, dimmed or
+    // lit by its collapse state. `.hidden` is reserved for cards that are
+    // genuinely absent from the DOM right now (e.g. slam-hud/slam-ctrl before
+    // SLAM arms) -- a button for a card that cannot exist is a dead control.
     function updateSquircles() {
         var docks = document.querySelectorAll('.dock');
         for (var d = 0; d < docks.length; d++) {
@@ -98,17 +101,37 @@
                     btn.type = 'button';
                     btn.className = 'squircle-btn';
                     btn.setAttribute('data-for', cardId);
-                    btn.setAttribute('title', CARD_TITLES[cardId] || cardId);
                     btn.innerHTML = CARD_ICONS[cardId];
                     bar.appendChild(btn);
                 }
 
-                if (isCollapsed && !isHidden) {
-                    btn.classList.remove('hidden');
-                } else {
-                    btn.classList.add('hidden');
-                }
+                btn.classList.toggle('hidden', isHidden);
+                var isOpen = !isCollapsed && !isHidden;
+                btn.classList.toggle('is-open', isOpen);
+                btn.classList.toggle('is-dim', !isOpen);
+                var title = (CARD_TITLES[cardId] || cardId) + (isOpen ? ' (click to collapse)' : ' (click to expand)');
+                btn.setAttribute('title', title);
             }
+        }
+    }
+
+    var HEADER_SELECTOR = '.control-group__header, .diag__header, .log-console__header, .ir-card__header';
+
+    // Same SVG as the squircle rail (CARD_ICONS is the single source -- do not
+    // duplicate the markup into index.html, the two copies would drift), sized
+    // down via the `.card-icon` CSS class. Idempotent: safe to call repeatedly.
+    function injectCardIcons() {
+        var cards = document.querySelectorAll('[data-card-id]');
+        for (var i = 0; i < cards.length; i++) {
+            var card = cards[i];
+            var id = card.getAttribute('data-card-id');
+            if (!id || !CARD_ICONS[id]) continue;
+            var header = card.querySelector(HEADER_SELECTOR);
+            if (!header) continue;
+            if (header.querySelector('.card-icon')) continue;
+            header.insertAdjacentHTML('afterbegin', CARD_ICONS[id]);
+            var icon = header.firstElementChild;
+            if (icon) icon.classList.add('card-icon');
         }
     }
 
@@ -143,6 +166,7 @@
                 sg.open = (sgPref === '1');
             }
         }
+        injectCardIcons();
         updateSquircles();
     }
 
@@ -163,7 +187,10 @@
                 var cardId = sqBtn.getAttribute('data-for');
                 var card = document.querySelector('[data-card-id="' + cardId + '"]');
                 if (card) {
-                    card.classList.remove('collapsed');
+                    // Toggle: a dim (collapsed) squircle expands its card, a
+                    // bright (open) one collapses it -- the rail is a map AND
+                    // a control, not just a "restore" button anymore.
+                    card.classList.toggle('collapsed');
                     saveCardState(card);
                     updateSquircles();
                     schedule();

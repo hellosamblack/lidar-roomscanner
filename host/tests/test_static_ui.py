@@ -17,10 +17,23 @@ import pytest
 
 STATIC = Path(__file__).parent.parent / "src" / "roomscan" / "static"
 INDEX = STATIC / "index.html"
+LAYOUT_JS = STATIC / "layout.js"
 
 
 def _index() -> str:
     return INDEX.read_text(encoding="utf-8")
+
+
+def _js_object_keys(js: str, var_name: str) -> set:
+    """Quoted top-level keys of `var <var_name> = { 'k': ..., ... };` in layout.js.
+
+    Cheap enough for a classic-script object literal (no nested braces before a
+    key): scoped to the text between the var's opening `{` and its closing `};`
+    so a same-named key elsewhere in the file can't leak in.
+    """
+    m = re.search(re.escape(var_name) + r"\s*=\s*\{(.*?)\n\s*\};", js, re.DOTALL)
+    assert m is not None, f"could not find `var {var_name} = {{...}};` in layout.js"
+    return set(re.findall(r"'([a-zA-Z0-9_-]+)'\s*:", m.group(1)))
 
 
 # Collapse headers are exempt from the tooltip rule: the header's entire visible
@@ -114,4 +127,35 @@ def test_readonly_text_sinks_opt_back_into_selection(selector):
     assert any(selector in sel for sel in granting), (
         f"{selector} is not covered by a `user-select: text` rule; "
         f"granting selectors were: {granting}"
+    )
+
+
+def test_every_card_id_has_a_squircle_icon_and_title():
+    """Every `data-card-id` in index.html must appear in BOTH `CARD_ICONS` and
+    `CARD_TITLES` in layout.js.
+
+    This is the real invariant behind the squircle rail: `updateSquircles()`
+    does `if (!cardId || !CARD_ICONS[cardId]) continue;`, so a card with no
+    `CARD_ICONS` entry gets no squircle button at all -- and once that card is
+    collapsed there is no way back to it in the UI (short of clearing
+    localStorage). A missing `CARD_TITLES` entry degrades more quietly (the
+    button falls back to the raw id as its `title`), but it's the same class of
+    drift, so both are checked together.
+    """
+    card_ids = sorted(set(re.findall(r'data-card-id="([^"]+)"', _index())))
+    assert card_ids, "no data-card-id attributes found in index.html -- test is broken"
+
+    js = LAYOUT_JS.read_text(encoding="utf-8")
+    icon_keys = _js_object_keys(js, "CARD_ICONS")
+    title_keys = _js_object_keys(js, "CARD_TITLES")
+
+    missing_icons = [c for c in card_ids if c not in icon_keys]
+    missing_titles = [c for c in card_ids if c not in title_keys]
+    assert not missing_icons, (
+        f"data-card-id values with no CARD_ICONS entry in layout.js (their "
+        f"squircle button silently never gets created): {missing_icons}"
+    )
+    assert not missing_titles, (
+        f"data-card-id values with no CARD_TITLES entry in layout.js (their "
+        f"squircle button's title falls back to the raw id): {missing_titles}"
     )

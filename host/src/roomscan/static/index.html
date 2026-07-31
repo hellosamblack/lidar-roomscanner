@@ -396,7 +396,7 @@
             width: 300px; padding: 14px 16px; overflow: hidden;
         }
         .control-group__header {
-            display: flex; align-items: center; justify-content: space-between;
+            display: flex; align-items: center; justify-content: flex-start; gap: 8px;
             width: 100%;
             background: none; border: none; padding: 0 0 2px 0;
             color: var(--text-muted);
@@ -406,7 +406,11 @@
             border-bottom: 1px solid var(--panel-border);
         }
         .control-group__header:hover { color: var(--text-main); }
-        .control-group__header .chevron { transition: transform 0.2s ease; font-size: 0.7rem; }
+        /* chevron is always the visually-last item; margin-left:auto pushes it to
+           the header's right edge regardless of whether a .card-icon was injected
+           before the title span (was justify-content:space-between, which only
+           worked for exactly 2 children). */
+        .control-group__header .chevron { transition: transform 0.2s ease; font-size: 0.7rem; margin-left: auto; }
         .control-group.collapsed .chevron, .card.collapsed .chevron { transform: rotate(-90deg); }
         /* min-height:0 + overflow-y lets a group taller than the dock band
            scroll inside itself instead of pushing past the console. */
@@ -468,6 +472,12 @@
             box-sizing: border-box;
         }
 
+        /* Icon injected by layout.js's initCardStates() as the first child of
+           each card's header — reuses the exact CARD_ICONS SVG the squircle rail
+           draws (single source, see layout.js) so the two can't drift apart.
+           Sized down from the squircle's 20px so header rows don't grow. */
+        .card-icon { width: 14px; height: 14px; flex-shrink: 0; display: block; }
+
         /* ---- squircle-bar (single horizontal row of collapsed card squircles at top of dock) ---- */
         .squircle-bar {
             display: flex; flex-direction: row; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -499,6 +509,21 @@
         }
         .squircle-btn svg { display: block; width: 20px; height: 20px; }
         .squircle-btn.hidden { display: none !important; }
+        /* is-open: the card is on screen right now -- full-strength colour/border,
+           like a pressed tab. is-dim: the card is collapsed -- muted, so the two
+           are readable at a glance without reading the tooltip. Clicking either
+           toggles (layout.js setupCollapseDelegation). */
+        .squircle-btn.is-open {
+            background: rgba(255, 255, 255, 0.16);
+            border-color: var(--accent, rgba(255, 255, 255, 0.55));
+            color: var(--text-main);
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+        }
+        .squircle-btn.is-dim {
+            opacity: 0.45;
+            color: var(--text-muted);
+        }
+        .squircle-btn.is-dim:hover { opacity: 0.85; }
 
         /* User-collapsed top-level cards hide their main card container */
         .dock .card.collapsed { display: none !important; }
@@ -757,13 +782,15 @@
             max-height: 28vh;
         }
         .log-console__header {
-            display: flex; align-items: center; justify-content: space-between;
+            display: flex; align-items: center; justify-content: flex-start; gap: 8px;
             padding: 8px 20px;
             font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em;
             color: var(--text-muted); font-weight: 600; cursor: pointer;
         }
         .log-console__header:hover { color: var(--text-main); }
-        .log-console__chevron { transition: transform 0.2s ease; }
+        /* see .control-group__header .chevron for why this is margin-left:auto
+           rather than the container's justify-content */
+        .log-console__chevron { transition: transform 0.2s ease; margin-left: auto; }
         #log-console.collapsed .log-console__chevron { transform: rotate(180deg); }
         .log-console__body {
             overflow-y: auto;
@@ -787,14 +814,16 @@
            silent module/import failure is still visible without devtools. */
         #diag-card { width: 300px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
         .diag__header {
-            display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            display: flex; align-items: center; justify-content: flex-start; gap: 8px;
             width: 100%; background: none; border: none; padding: 0;
             font-family: 'Inter', sans-serif;
             font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;
             color: var(--text-muted); cursor: pointer;
         }
         .diag__header:hover { background: none; color: var(--text-main); }
-        .diag__header .chevron { transition: transform 0.2s ease; font-size: 0.7rem; }
+        /* see .control-group__header .chevron for why this is margin-left:auto
+           rather than the container's justify-content */
+        .diag__header .chevron { transition: transform 0.2s ease; font-size: 0.7rem; margin-left: auto; }
         #diag-card.collapsed .chevron, #diag-card.auto-collapsed .chevron { transform: rotate(-90deg); }
         .diag__count { font-family: 'JetBrains Mono', monospace; font-size: 0.66rem; color: var(--text-muted); }
         #diag-card.has-error .diag__count { color: var(--danger); }
