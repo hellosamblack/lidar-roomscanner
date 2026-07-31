@@ -881,6 +881,58 @@ streams exist — good ordering), and the zero-config link; none of it blocks th
     resolves it (fallback: the fixed /30 device address). `SerialSource`-style auto-find for the network.
   - PTP master on the PC, as before.
 
+### Phase 5.5 (interlude) — Transport hardening & compression  ← **partly done, two decisions open** (2026-07-31)
+
+Landed this pass (all on-rig verified): **BUG-040** — the web UI's Drops/Gaps rows were structurally
+pinned at 0, so the primary UI could not see transport loss at all. **BUG-041** — the firmware burst
+all 11 fragments of a depth frame into an 8-deep TX descriptor ring and *abandoned the frame
+mid-burst* on any failure; now a slot FIFO metered from `ETH_Process()`, strictly in order, retrying
+rather than abandoning. **BUG-042** — host reassembly required `frag_idx == expected`, so a merely
+*reordered* datagram destroyed a whole 14.8 KB frame exactly like a lost one, and counted nothing;
+now indexed slots plus counters that separate reorder / loss / duplicate / invalid, reported on the
+`metrics` message. Plus a table-driven `rs_crc32` (**measured 2.21×**, 125.2 → 56.7 µs/frame on x86).
+
+**Open item 1 — the pacer's benefit is still unmeasured, and cannot be manufactured.** The RavPower
+bridge is now in path (ping RTT 5.9–8.0 ms vs sub-ms wired, stream jitter 0.6 → ~2.0 ms) and the link
+measures **zero loss**: 131 seq gaps over ~567,000 frames (0.023%) across a 5 h uptime, then 0 gaps in
+60 s, then 0 gaps / 0 incomplete / 0 reordered in 45 s after a restart. Good for the rig, null result
+for the change. Re-measure only if loss actually appears — the counters will then say *which* fault it
+is, which is the thing that was impossible before.
+
+**Open item 2 — compression, go/no-go.** Investigated 2026-07-31 with real codecs (lz4, zstandard,
+heatshrink2 installed and measured; no proxies).
+
+- **In transit — recommended.** Payload is 16-bit LE (proven from byte-lane entropy: 6.25 bits on even
+  offsets vs 2.99 on odd). LZ4 on raw bytes is nearly worthless (66%); a **2-byte de-interleave first**
+  takes it to 49.8% on one capture, **54.3% pooled over 1,400 frames from four captures** — quote the
+  pooled figure. That is 11 fragments → 6–7, i.e. a **~1.6× reduction in frame-loss probability, not
+  the 11× the amplification figure suggests** (loss scales with fragment count, so the gain is bounded
+  by the ratio). Link 466 → 265 KB/s. CPU is ≈free because compressing *before* the CRC shrinks what
+  the CRC covers; net −0.7 … +0.6 ms/frame (**estimated**, nothing built) against a 33 ms period that
+  already spends ~20 ms spinning in `platform_wait_for_event`. **Reject the inter-frame delta**: 4.6 pp
+  for the same worst-case fragment count, and it propagates a single lost datagram into multi-frame
+  corruption — the exact failure it is meant to fix. Ship as a **new `stream_id` 14** (additive:
+  `docs/protocol.md` requires decoders to skip unknown stream ids, so no version bump), CRC *after*
+  compression, with an uncompressed fallback so the worst case stays bounded. Note this turns a stream
+  fixed-length since Phase 2 into a variable-length one — `native.py`'s `len(raw) == 14842` assert and
+  the pacer's slot sizing both inherit that. Full `protocol-change` checklist applies.
+- **At rest — not worth it.** The number that settles it: the whole corpus is **1.10 GB**. Best
+  realistic inline scheme is ~2.3× on real scans (~620 MB saved) and pays for it by making `Recorder`
+  protocol-aware (it is deliberately protocol-blind, fed arbitrary chunks), breaking the documented
+  *readable mid-recording* invariant, and adding an offset-mapping layer to `FileSource`,
+  `build_capture_index`, `seek`, `_survey`, `analyze_capture` and `slam/cli`. Corrects a natural
+  intuition: CALIB *is* byte-identical across all 49 copies, but that is **0.225%** of a file — the real
+  redundancy is *positional* inside RAW_3DMD (2,367 of 14,842 byte positions never change across 3,163
+  frames = 15% of the file), which is why long-window matching buys 3% and dictionary priming 0.2%.
+  Roughly half the file is irreducible sensor noise. If disk pressure ever arrives: an out-of-band
+  `capture_archive` MCP tool, not inline compression. Measured aside: **zstd-9 strictly dominates
+  zlib-6** here (ratio 1.868 vs 1.808, 2× faster compress, 4.5× faster decompress) — use it if inline
+  is ever mandated.
+- **They interact.** `Recorder` tees verbatim wire bytes, so compressing on the MCU makes captures
+  compressed *for free* — no container format, no seek work. That is an argument for doing transport
+  and leaving captures alone, at the cost of an LZ4 decompress at `decoder.py` plus
+  `web.build_capture_index` and the `native.py` size assert.
+
 ### Phase 6 — Real-time SLAM (PC)  ← **in progress**
 
 SFLP quaternion as rotation prior → 3-DoF constrained **point-to-plane ICP, frame-to-model** against the
@@ -1143,6 +1195,27 @@ Three findings that change what 6.D should do next, in priority order:
 3. **Yaw drift is not the bottleneck at this timescale.** The datasheet's SFLP spec (Table 1) is
    5.9°/5 min heading drift at high dynamics — ~1.2° over a 62 s circuit, ≈8 cm over the 3.7 m max
    excursion. Deliverable (2) is still worth shipping, but it cannot be what limits these runs.
+
+**⬜ Open — BUG-036's fix has never actually been exercised on a live handheld scan (2026-07-31).**
+The owner hit the classic failure that day: a SLAM run "started out great", degraded, then gave up.
+Post-mortem on the saved trajectory (`results/web_20260731-070730.tum`) showed translation frozen at
+**idx 333 / t = 11.89 s** while rotation kept tracking off the SFLP prior — the signature of
+`predict_pose` holding `t_prev` on a lost frame. **391 of 725 poses (54%) were dead**, and the run
+still reported a plausible-looking 0.764 m closure. The trigger was two fast frames (39 mm then
+52 mm ≈ 1.5 m/s against a median 16.9 mm) overrunning the fixed 0.05 m ICP correspondence radius.
+
+That is exactly BUG-036, **fixed the day before** — the run failed only because the `roomscan-web`
+process had been up since Jul 29 and was executing pre-fix code (`block_count = 40000`, plain
+`register`, no `lost_flags`). Restarting it picked up BUG-035/036/037. So the fix is live but
+**unvalidated in the field**: the escalating retry survives a bad *frame*, not a bad *second*, and
+there is still **no relocalization**. Next step is a fresh handheld scan with deliberately brisk
+motion, checking `tracking_stats` / `lost_flags` rather than eyeballing the mesh — a dead run looks
+fine until the trajectory is read. Cheap first pass: replay an existing capture through the fixed
+pipeline before asking the owner to walk a room.
+
+*Process note worth keeping:* a long-lived server silently pinning old code is its own failure mode.
+Both a stale-process check and the "● Restart Server" top-bar button (2026-07-31) exist because of
+this.
 
 **Ground truth without instrumentation, opportunistically.** Both captures start and end parked on
 the ceiling at identical elevation (80.1°/80.2°, 89.2°/89.2°) and identical range (1420/1420 mm,
