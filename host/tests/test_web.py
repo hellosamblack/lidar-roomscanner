@@ -2788,3 +2788,32 @@ def test_admin_endpoints_are_post_only():
     for path, methods in found.items():
         assert "POST" in methods, path
         assert "GET" not in methods, path
+
+
+def test_transport_counters_none_when_not_udp():
+    """Replay and serial sources have no fragment layer; the field must be null
+    rather than fabricated zeros, which would read as a healthy UDP link."""
+    class _S: pass
+    s = _S(); s.controller = None
+    assert web.transport_counters(s) is None
+    s.controller = _S(); s.controller._live_underlying = object()
+    assert web.transport_counters(s) is None
+
+
+def test_transport_counters_reports_udp_fragment_health(monkeypatch):
+    """`gaps` says a frame vanished; these say why. reordered vs lost is the
+    split that makes "did the pacer help?" answerable at all (BUG-042)."""
+    class _FakeUdp(web.UdpSource):
+        def __init__(self):   # bypass socket/mDNS setup
+            self.frames_incomplete = 2
+            self.frags_lost = 3
+            self.frags_reordered = 11
+            self.frags_duplicate = 1
+            self.frags_invalid = 0
+
+    class _S: pass
+    s = _S(); s.controller = _S(); s.controller._live_underlying = _FakeUdp()
+    assert web.transport_counters(s) == {
+        "frames_incomplete": 2, "frags_lost": 3,
+        "frags_reordered": 11, "frags_duplicate": 1, "frags_invalid": 0,
+    }

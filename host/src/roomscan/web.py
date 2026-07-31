@@ -2328,6 +2328,32 @@ BRIDGE_TIMEOUT_S = 45.0
 RESTART_DELAY_S = 2.0
 
 
+def transport_counters(state) -> dict | None:
+    """UDP fragment-level health, or None when the source isn't UDP.
+
+    `gaps` says a frame went missing; these say *why*, which the seq counter
+    structurally cannot. `reordered` is the one that used to be indistinguishable
+    from loss -- before BUG-042 a reordered datagram destroyed its frame, so it
+    showed up as a gap and looked exactly like a dropped packet. Splitting them
+    is what makes "did the pacer help?" answerable: pacing changes loss, not
+    reordering.
+
+    Reported here rather than on a HUD row because it is a diagnostic surface
+    (rig_status / MCP), and the left dock is already at its height budget.
+    """
+    controller = getattr(state, "controller", None)
+    src = getattr(controller, "_live_underlying", None) if controller else None
+    if not isinstance(src, UdpSource):
+        return None
+    return {
+        "frames_incomplete": src.frames_incomplete,
+        "frags_lost": src.frags_lost,
+        "frags_reordered": src.frags_reordered,
+        "frags_duplicate": src.frags_duplicate,
+        "frags_invalid": src.frags_invalid,
+    }
+
+
 def run_bridge_mode(script: Path = BRIDGE_SCRIPT,
                     timeout_s: float = BRIDGE_TIMEOUT_S) -> dict:
     """Run the FileHub bridge-mode script and report what actually happened.
@@ -2973,7 +2999,9 @@ async def _broadcaster() -> None:
             stats = getattr(state, "stats", None)
             if stats is not None:
                 snap = replace(snap, drops=stats.dropped_flags, gaps=stats.seq_gaps)
-            await _broadcast_text(clients, json.dumps(build_metrics_message(snap)))
+            msg = build_metrics_message(snap)
+            msg["transport"] = transport_counters(state)
+            await _broadcast_text(clients, json.dumps(msg))
             ctrl = getattr(state, "controller", None)
             if ctrl is not None:
                 pos = _replay_position(ctrl, last_item)
