@@ -26,6 +26,14 @@ datasheet AF table, and eight captures in `captures/`.
    heading error term drops the same number to **0.017° mean / 0.053° p95 (100×)**. So the filter is
    *incomplete*, not merely untuned, and the only shipped evidence that it beats fp16
    (`test_fused_is_quieter_than_fp16_quat_path`) is synthetic.
+   > **Fixed 2026-07-30 (BUG-039).** `_correct_yaw` now uses `sensors.graft_yaw_error_deg`, the
+   > world-Z swing-twist of the residual — `graft_yaw`'s exact inverse. The substitution this
+   > section predicted was confirmed to the digit (stationary 1.689/2.218 → **0.017/0.053**) and
+   > extended to a seven-capture ensemble, in `BUGS.md` → BUG-039. **This reason for the verdict is
+   > spent, but the verdict is not: reasons 2 and 3 stand untouched, and the filter is still gated
+   > off.** What the fix changes is §4.1 — the precondition is now *measurable* rather than
+   > *unmeasured*. It is still unmet: §2.2's saturation and §5's absence of ground truth are exactly
+   > as they were, so "does host fusion beat SFLP?" remains unanswered, not answered "yes".
 2. **The improvement that *is* real turns out to be a phase correction, and it is obtainable without
    giving up SFLP.** Stream 9's quaternion is effectively timestamped at the **gyro batch midpoint**
    (measured: within 2.3 ms on four captures), i.e. **~15.4 ms before the batch end** — because the
@@ -171,6 +179,28 @@ The shipped loop's error is insensitive to loop gain — the signature of a wron
 mistuned one. This is a ~5-line fix, but it is unfixed today, and **it is why the answer to "does
 host fusion beat SFLP" is currently *no*.**
 
+> **FIXED 2026-07-30 — BUG-039.** The world-Z row above is now what ships:
+> `sensors.graft_yaw_error_deg(target, quat)` = `2·atan2(rel_z, rel_w)` of `rel = target ⊗ quat*`,
+> the swing-twist about world Z, which is the exact inverse of the `graft_yaw` the loop corrects
+> with. Both rows of this table reproduced to the digit on an independent harness before the change
+> (1.6892 / 2.2178 with the shipped term, matching the 1.689 / 2.217 recorded here), and the
+> substituted term landed on 0.0171 / 0.0534 against the predicted 0.017 / 0.053.
+>
+> Two things this section could not see, added by the fix's own ensemble (seven captures, in
+> `BUGS.md` → BUG-039):
+> - **The two zero-pitch captures come out bit-identical.** The misreading scales as
+>   `tilt × tan(pitch)` — 0.04° at level, ~7° at 86° — so this was a frame error at *this device's*
+>   attitudes, not a general retune. Worth knowing before generalising the 100×: on the moving
+>   captures, whose pitch swings through the whole range, the gain is only **1.1–1.8×**.
+> - **`YawFusion` already defended against the same degeneracy** with a `gimbal_margin_deg = 15°`
+>   gate — which would have gated the entire 86.2° stationary capture out. `imufusion` reused
+>   `quat_yaw_deg` without inheriting that gate. The new term needs none.
+>
+> **The verdict of this note is unchanged.** Reason 1 above is spent; reasons 2 and 3 are untouched,
+> the filter is still gated off, and §2.2 / §5 still stand — no capture in this repo can adjudicate
+> the two estimators under motion, and none contains orientation ground truth. §4.1's remaining
+> requirement is now the *re-measure with ground truth*, not the fix.
+
 This matters more than it looks: `Mapper` re-injects the prior's **absolute** attitude every frame
 (`predict_pose(quat, self._t_prev)`), and ICP's rotation correction is *not carried forward* —
 `self._t_prev` keeps translation only. ICP does correct rotation against the raycast model within
@@ -275,10 +305,11 @@ Detrended relative offset jitter between the two clocks: **1314 µs RMS** moving
 
 In rough order of how much each would move it:
 
-1. **Fix `_correct_yaw` to use a world-Z heading error and re-measure.** Offline, ~5 lines, no
-   hardware. That alone takes the stationary heading error from 2.22° p95 to 0.053° p95. Until it is
-   done, the precondition is not merely unmet — it is unmeasured, because the shipped filter's
-   heading is dominated by a defect rather than by physics.
+1. ~~**Fix `_correct_yaw` to use a world-Z heading error and re-measure.**~~ **Done 2026-07-30
+   (BUG-039)** — stationary heading error 2.22° → 0.053° p95, confirmed on a seven-capture ensemble.
+   The precondition is now *measurable*; it is still **unmet**, because the re-measure that would
+   decide it needs item 2's ground truth. Nothing about the answer changed, only its status: it went
+   from *unmeasurable* to *unmeasured*.
 2. **A ground-truth capture.** Every "which is right" question here is unanswerable because no
    capture has an independent attitude reference. A braced fixed-heading tilt sweep (already required
    by resume §4.6) plus a controlled pan against a known angle would let the two estimators be

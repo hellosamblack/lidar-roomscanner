@@ -397,6 +397,45 @@ def graft_yaw(quat, delta_deg: float) -> tuple[float, float, float, float]:
     return (w / n, x / n, y / n, z / n)
 
 
+def graft_yaw_error_deg(target, quat) -> float:
+    """Degrees about WORLD +Z that carry `quat` as close as possible to `target`.
+
+    The exact inverse of `graft_yaw`: ``graft_yaw(quat, graft_yaw_error_deg(t, quat))``
+    is the closest orientation to `t` reachable from `quat` by a pure heading change,
+    and ``graft_yaw_error_deg(graft_yaw(q, d), q) == wrap180(d)`` for every `q`, `d`.
+
+    **Use this, not a difference of `quat_yaw_deg`, for any heading-error loop**
+    (BUG-039). `quat_yaw_deg` is ZYX yaw — the heading of body **Z** — and this
+    device's SFLP body frame has **X = Up**, so at the attitudes it actually flies
+    (86 deg ZYX pitch on the stationary capture, 3.8 deg from gimbal lock) the ZYX
+    decomposition is ill-conditioned: a small tilt perturbation reads as a large
+    apparent yaw, and a loop nulling that difference injects real heading error.
+    Measured on `captures/stationary_stream11_20260728_190311.bin`, feeding
+    `ImuFusion` the same bytes either way: ZYX 1.689 deg mean / 2.217 deg p95 of
+    world-Z heading error, this term 0.017 / 0.053.
+
+    Derivation (why it is the *optimal* pure-yaw correction, not merely a different
+    one): `graft_yaw` pre-multiplies by ``qz(d)``, so we want ``qz(d) (x) quat`` to be
+    closest to `target`, i.e. ``qz(d)`` closest to the world-frame residual
+    ``rel = target (x) quat*``. Maximising ``|cos(d/2) rel_w + sin(d/2) rel_z|``
+    gives ``d = 2*atan2(rel_z, rel_w)`` — the swing-twist twist of `rel` about
+    world Z. It has no singularity at any attitude; it degenerates only when the
+    residual is a 180 deg turn about a horizontal axis, which no tracking loop reaches.
+    """
+    tw, tx, ty, tz = _unit_quat(target)
+    qw, qx, qy, qz_ = _unit_quat(quat)
+    rel = quat_mul((tw, tx, ty, tz), (qw, -qx, -qy, -qz_))
+    return wrap180(math.degrees(2.0 * math.atan2(rel[3], rel[0])))
+
+
+def _unit_quat(quat) -> tuple[float, float, float, float]:
+    w, x, y, z = (float(c) for c in quat)
+    n = math.sqrt(w * w + x * x + y * y + z * z)
+    if n < 1e-12:
+        return (1.0, 0.0, 0.0, 0.0)
+    return (w / n, x / n, y / n, z / n)
+
+
 def tilt_compensated_heading(
     quat: tuple[float, float, float, float],
     mag_ut: tuple[float, float, float],

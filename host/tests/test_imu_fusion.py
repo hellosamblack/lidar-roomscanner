@@ -35,8 +35,12 @@ from roomscan.protocol import (
 from roomscan.sensors import (
     SensorState,
     YawFusion,
+    graft_yaw,
+    graft_yaw_error_deg,
     quat_mul,
     quat_to_matrix,
+    quat_yaw_deg,
+    wrap180,
 )
 
 GY_LSB_DPS = IMU_RAW_GY_MDPS_PER_LSB / 1000.0        # 0.0175 dps
@@ -288,6 +292,92 @@ def test_fused_step_noise_far_below_fp16_under_real_motion():
     assert jitter(fused_steps) < jitter(fp16_steps) / 20.0
     # and it is not quiet by being wrong: it tracks the true motion, it does not damp it
     assert fused_steps.mean() == pytest.approx(true_steps.mean(), rel=0.05)
+
+
+# ------------------------------------------------------- the yaw axis (BUG-039)
+def _zyx_quat(yaw, pitch, roll):
+    return quat_mul(quat_mul(q_from_axis_angle((0, 0, 1), yaw),
+                             q_from_axis_angle((0, 1, 0), pitch)),
+                    q_from_axis_angle((1, 0, 0), roll))
+
+
+#: An attitude with body **X** 4 deg off world +Z. SFLP body X is Up, so this is
+#: where the device actually sits (86.2 deg ZYX pitch measured on
+#: `captures/stationary_stream11_20260728_190311.bin`) -- and it is 4 deg from the
+#: ZYX gimbal lock at 90 deg. All four components stay O(0.1-0.7), so the fp16
+#: reference quantisation below is realistic rather than flattered.
+NEAR_LOCK_Q = _zyx_quat(37.0, 86.0, 23.0)
+
+
+def _legacy_correct_yaw(self, yaw_ref, dt):
+    """The pre-BUG-039 heading error term, verbatim: ZYX yaw, i.e. body Z."""
+    from roomscan.sensors import graft_yaw, quat_yaw_deg, wrap180
+    if yaw_ref is None:
+        return
+    err = wrap180(quat_yaw_deg(yaw_ref) - quat_yaw_deg(self._q))
+    self._q = graft_yaw(self._q, dt / (self.tau_yaw_s + dt) * err)
+
+
+def _heading_errors(q0, seed, **kw):
+    _, truths, ests = run_truth(q0, lambda t: (0.0, 0.0, 0.0), 300, seed=seed,
+                                yaw_ref_mode="fp16", **kw)
+    return np.array([abs(graft_yaw_error_deg(t, e)) for t, e in zip(truths, ests)])
+
+
+def test_yaw_loop_measures_heading_about_world_z_not_body_z(monkeypatch):
+    """THE AXIS TEST (BUG-039).
+
+    Held still at the device's real attitude, the only thing wrong with the
+    stream-9 reference is its fp16 tilt quantisation -- a *static* error, so it
+    biases the loop rather than averaging out (which is why the rig's 1.69 deg was
+    insensitive to `tau_yaw`: a wrong measurement, not a mistuned gain).
+
+    4 deg from ZYX gimbal lock that tilt quantisation reads as a large apparent
+    body-Z yaw, and a loop nulling it grafts that misreading on as REAL heading
+    error. The expected size is derived from the fixture, not hard-coded: it is
+    exactly the ZYX-yaw difference between the fp16 reference and the truth.
+    """
+    misreading = abs(wrap180(quat_yaw_deg(fp16_quat(NEAR_LOCK_Q))
+                             - quat_yaw_deg(NEAR_LOCK_Q)))
+    assert misreading > 0.1, "fixture no longer exercises the singularity"
+
+    fixed = _heading_errors(NEAR_LOCK_Q, seed=11)
+    monkeypatch.setattr(ImuFusion, "_correct_yaw", _legacy_correct_yaw)
+    legacy = _heading_errors(NEAR_LOCK_Q, seed=11)
+
+    # the body-Z term converges to its own misreading -- it nulls the wrong thing
+    assert legacy[-1] == pytest.approx(misreading, rel=0.05)
+    # the world-Z term does not see a heading error that is not there
+    assert float(np.percentile(fixed, 95)) < 0.01
+    assert float(np.percentile(fixed, 95)) < float(np.percentile(legacy, 95)) / 20.0
+
+
+def test_yaw_loop_still_follows_a_real_heading_offset(monkeypatch):
+    """The other half: the fix must not have made the loop deaf. A genuine 30 deg
+    heading offset (not a multiple of 90, where a sign error hides) is still
+    tracked out, at the same attitude, and its sign is not inverted."""
+    ref = graft_yaw(NEAR_LOCK_Q, 30.0)
+    f = ImuFusion()
+    for k in range(0, 400, 8):
+        f.update(make_batch(gyro_dps=np.zeros((8, 3)),
+                            gravity_g=np.tile(body_up(NEAR_LOCK_Q), (8, 1)),
+                            ticks=np.arange(k, k + 8) * TICKS_PER_SAMPLE), yaw_ref=ref)
+    assert graft_yaw_error_deg(ref, f.fused_quat()) == pytest.approx(0.0, abs=0.05)
+    assert tilt_error_deg(f.fused_quat(), NEAR_LOCK_Q) < 0.05      # tilt untouched
+
+
+def test_yaw_axis_fix_is_a_no_op_far_from_gimbal_lock(monkeypatch):
+    """The control. At a level attitude the ZYX misreading scales by tan(pitch) and
+    all but vanishes, so the two terms agree -- which is exactly what the
+    before/after ensemble showed (the two zero-pitch captures came out
+    bit-identical; the 86 deg one moved 100x). This pins the defect as a frame
+    error at THIS device's attitudes, not a general retune."""
+    level = _zyx_quat(37.0, 5.0, 23.0)
+    fixed = _heading_errors(level, seed=12)
+    monkeypatch.setattr(ImuFusion, "_correct_yaw", _legacy_correct_yaw)
+    legacy = _heading_errors(level, seed=12)
+    assert float(np.percentile(fixed, 95)) == pytest.approx(
+        float(np.percentile(legacy, 95)), abs=0.005)
 
 
 def test_tracks_known_rotation_one_to_one():

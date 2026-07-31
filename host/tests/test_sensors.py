@@ -15,6 +15,7 @@ from roomscan.sensors import (
     SensorState,
     boresight_view_deg,
     graft_yaw,
+    graft_yaw_error_deg,
     gravity_body_from_imu_raw,
     ir_gravity_rot,
     quat_mul,
@@ -157,6 +158,82 @@ def test_graft_yaw_zero_is_noop():
     q = (0.9238795, 0.0, 0.0, 0.3826834)  # 45 deg about Z
     g = graft_yaw(q, 0.0)
     assert np.allclose(g, q, atol=1e-6)
+
+
+# --- graft_yaw_error_deg: the world-Z heading error term (BUG-039) -----------
+#
+# `_NEAR_LOCK_Q` puts body **X** within 4 deg of world +Z -- the attitude this
+# device actually flies (SFLP body X = Up), and where the ZYX decomposition
+# `quat_yaw_deg` uses is within 4 deg of gimbal lock. Every test below that
+# discriminates between the two conventions is evaluated there; a level attitude
+# cannot see the difference (see the last test, which pins exactly that).
+_NEAR_LOCK_Q = _axis_angle_quat((0.0, 1.0, 0.0), 86.0)          # ZYX pitch ~86 deg
+_LEVEL_Q = _axis_angle_quat((0.0, 1.0, 0.0), 5.0)               # ZYX pitch ~5 deg
+
+
+def test_graft_yaw_error_is_the_exact_inverse_of_graft_yaw():
+    """The defining property: it recovers the heading `graft_yaw` put in, at any
+    attitude and for angles that are NOT multiples of 90 deg (where a sign error
+    hides -- engineering-practices "Verifying a rotation")."""
+    for q in (_LEVEL_Q, _NEAR_LOCK_Q, _axis_angle_quat((0.4, 0.6, 0.7), 100.0),
+              _axis_angle_quat((1.0, 0.0, 0.0), 89.9)):
+        for delta in (30.0, -30.0, 137.0, -172.0, 0.25):
+            assert graft_yaw_error_deg(graft_yaw(q, delta), q) == pytest.approx(
+                wrap180(delta), abs=1e-9)
+
+
+def test_graft_yaw_error_is_the_best_reachable_correction():
+    """It is optimal, not merely consistent: no other pure-world-Z rotation gets
+    closer to the target, including near gimbal lock."""
+    target = quat_mul(_axis_angle_quat((0.0, 0.0, 1.0), 12.0),
+                      graft_yaw(_NEAR_LOCK_Q, 3.0))     # heading + a little tilt
+    best = graft_yaw_error_deg(target, _NEAR_LOCK_Q)
+
+    def miss(delta):
+        g = graft_yaw(_NEAR_LOCK_Q, delta)
+        return math.degrees(2.0 * math.acos(min(1.0, abs(sum(
+            a * b for a, b in zip(g, target))))))
+
+    for delta in np.linspace(best - 20.0, best + 20.0, 81):
+        assert miss(float(delta)) >= miss(best) - 1e-9
+
+
+def test_graft_yaw_error_reads_a_pure_tilt_residual_as_no_heading():
+    """THE AXIS TEST. Near gimbal lock, perturbing an orientation about a
+    HORIZONTAL axis is pure tilt -- zero heading change -- but the ZYX-yaw
+    difference reports it as a large apparent yaw. That misreading is BUG-039.
+    """
+    tilted = quat_mul(_axis_angle_quat((1.0, 0.0, 0.0), 0.5), _NEAR_LOCK_Q)
+    zyx_says = wrap180(quat_yaw_deg(tilted) - quat_yaw_deg(_NEAR_LOCK_Q))
+    assert abs(zyx_says) > 5.0                     # ~7 deg: 0.5 deg * tan(86 deg)
+    assert graft_yaw_error_deg(tilted, _NEAR_LOCK_Q) == pytest.approx(0.0, abs=0.02)
+
+
+def test_zyx_misreading_of_tilt_scales_as_tan_pitch():
+    """Why BUG-039 is an attitude-dependent defect and not a general retune: the
+    ZYX-yaw difference misreads a pure tilt residual by ~tilt * tan(pitch), so it
+    is 0.04 deg at a level attitude and 7 deg at 86 deg. That 164x is why the two
+    zero-pitch captures in the before/after ensemble came out bit-identical while
+    the 86 deg stationary one moved 100x."""
+    for q in (_LEVEL_Q, _NEAR_LOCK_Q):
+        tilted = quat_mul(_axis_angle_quat((1.0, 0.0, 0.0), 0.5), q)
+        zyx_says = wrap180(quat_yaw_deg(tilted) - quat_yaw_deg(q))
+        assert zyx_says == pytest.approx(
+            0.5 * math.tan(math.radians(quat_pitch_deg(q))), rel=0.02)
+        # ...while the truth, at both attitudes, is that there is no heading in it.
+        assert graft_yaw_error_deg(tilted, q) == pytest.approx(0.0, abs=0.02)
+
+
+def test_pure_heading_residual_reads_the_same_both_ways_which_is_why_this_hid():
+    """The trap that let the defect ship: on a residual that IS pure heading, the
+    two conventions agree exactly even AT gimbal lock, because a world-Z graft
+    shifts ZYX yaw one-for-one. A test built from a clean heading offset -- the
+    obvious one to write -- passes either way and proves nothing about the axis."""
+    for q in (_LEVEL_Q, _NEAR_LOCK_Q):
+        target = graft_yaw(q, 30.0)
+        assert wrap180(quat_yaw_deg(target) - quat_yaw_deg(q)) == pytest.approx(
+            30.0, abs=1e-6)
+        assert graft_yaw_error_deg(target, q) == pytest.approx(30.0, abs=1e-6)
 
 
 def test_quat_mul_identity():

@@ -127,6 +127,13 @@ screenshots used a synthetic fixture. Record a real 30 s tumble via the `/ws` `r
 `capture.py --udp` — it starves the live UI).
 
 ### 4.2 Wire `imufusion` into the live display and A/B it
+> **2026-07-30 (BUG-039):** until today this A/B would have scored a **broken** filter —
+> `_correct_yaw` measured heading about body Z (ZYX yaw) on a body frame whose X is Up, i.e. within
+> 4° of gimbal lock at the attitudes this device flies, costing 1.69° mean heading error that no
+> `tau_yaw` could touch. Now fixed (`sensors.graft_yaw_error_deg`), **still gated off**. The A/B
+> below is now worth running; it was not before. Note the ensemble caveat: the 100× is a *stationary,
+> one-attitude* figure, and on the moving captures the same fix is worth only 1.1–1.8×.
+
 The filter is built, tested, and off. To land it: enable it behind the existing opt-in, then A/B
 against the fp16 path using `orientation_probe.py jitter` with the smoother bypassed. Predicted gain
 is **1.8× conservative / 6–18× optimistic** — the spread is genuine and only real-data measurement

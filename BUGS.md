@@ -50,7 +50,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-036 | fixed   | host/slam     | A single fixed ICP correspondence radius (0.05) made one bad frame terminal — 423 frames (22% of a room circuit) silently dead-reckoned; fixed by retrying only on failure at 0.10 |
 | BUG-037 | fixed   | host/slam     | `baro_weight = 0.05` fed the barometer's ~267 mm RMS of per-frame white noise straight into the pose — ~35% of reported path was invented vertical motion (flattering every %-of-path drift figure) and a drifting baro owned the height outright; replaced by a low-passed, bounded-authority complementary correction |
 | BUG-038 | fixed   | host/web      | The live point cloud is frustum-culled against a stale, zero-radius `boundingSphere` — latent in World view, fatal in FPV (filed as a duplicate "BUG-033"; renumbered 2026-07-30) |
-| BUG-039 | open    | host/sensors  | `imufusion._correct_yaw` measures heading error about **body Z** on a body frame whose X is Up — 3.76° from gimbal lock, giving 1.69° mean heading error that loop gain cannot fix |
+| BUG-039 | fixed   | host/sensors  | `imufusion._correct_yaw` measured heading error about **body Z** on a body frame whose X is Up — 3.76° from gimbal lock, giving 1.69° mean heading error that loop gain could not fix; replaced by a world-Z swing-twist term (2.218° → 0.053° p95, bit-identical at level attitudes). Filter still gated off |
 
 ---
 
@@ -1129,7 +1129,9 @@ predicted "tens of µs". Note the measurement itself has a ~600 µs floor (it co
 
 **Costed 2026-07-30 → recommendation: keep SFLP, do not take ODR-triggered mode.** Full note:
 `docs/odr-triggered-sync-costing-2026-07-30.md`. (a) The gating precondition is untested — the
-host-side alternative has a broken heading loop (**BUG-039**). (b) INT2 *is* routed and free
+host-side alternative had a broken heading loop (**BUG-039**; *fixed 2026-07-30, and the
+recommendation is unchanged* — the precondition went from unmeasurable to merely unmeasured, since
+no capture in the repo carries orientation ground truth). (b) INT2 *is* routed and free
 (CN9.5 → PE14 = TIM1_CH4), so availability does not settle it — but AN5763 Table 15's **40 ms
 minimum T_ref** vs our very stable **33.00 ms** frame period forbids 1:1, and **480 Hz is absent
 from the ODR-triggered ODRsel set**. (c) Losing SFLP also removes gravity *and* gbias from stream 11:
@@ -1733,18 +1735,54 @@ and ICP's own vertical jitter, which is what the remaining ~19 m of vertical pat
 
 ## BUG-039 — Host IMU fusion measures heading error about the wrong axis (near gimbal lock)
 
-- **Status:** **open** · **Reported:** 2026-07-30 (found while costing ODR-triggered sync, BUG-031) ·
-  **Area:** host/sensors
-- **Where:** `roomscan.imufusion` (`_correct_yaw`), which is currently **gated off**
+- **Status:** **fixed** 2026-07-30 · **Reported:** 2026-07-30 (found while costing ODR-triggered
+  sync, BUG-031) · **Area:** host/sensors
+- **Where:** `host/src/roomscan/imufusion.py` (`_correct_yaw`),
+  `host/src/roomscan/sensors.py` (`graft_yaw_error_deg`, new). The filter remains **gated off** —
+  see the warning at the end of this entry.
 - **Found by:** `docs/odr-triggered-sync-costing-2026-07-30.md` §1
 
-`_correct_yaw` measures its heading error with `quat_yaw_deg` — ZYX yaw, i.e. rotation about **body
+`_correct_yaw` measured its heading error with `quat_yaw_deg` — ZYX yaw, i.e. rotation about **body
 Z** — but this device's SFLP body frame has **X = Up**. On the stationary capture the ZYX pitch is
-86.2°, which is **3.76° from gimbal lock**, so the quantity the loop is nulling is not heading.
+86.2°, which is **3.76° from gimbal lock**, so the quantity the loop was nulling is not heading.
 
 Measured heading error vs SFLP: **1.689° mean / 2.217° p95**. Shortening `tau_yaw` to 0.3 s barely
-moves it (1.703°) — the signature of a *wrong measurement*, not a mistuned gain. Substituting a
-world-Z heading error term gives **0.017° / 0.053°**, a ~100× improvement.
+moved it (1.703°) — the signature of a *wrong measurement*, not a mistuned gain.
+
+**The fix.** New `sensors.graft_yaw_error_deg(target, quat)` — the world-Z **swing-twist** of the
+residual `target ⊗ quat*`, i.e. `2·atan2(rel_z, rel_w)`. That is the exact inverse of `graft_yaw`
+(the loop's own actuator), so the loop now nulls precisely the quantity it can correct, and it is the
+*optimal* pure-heading correction rather than merely a different one. It has no singularity at any
+attitude, so unlike `YawFusion` — which defends against the same ZYX degeneracy with a
+`gimbal_margin_deg = 15°` gate that would have gated this whole capture out — it needs no gate.
+`_correct_yaw` is a one-line change on top.
+
+**Measured, before → after, world-Z heading error vs SFLP, same bytes both ways** (`tau_yaw` 1.0 s;
+the whole ensemble, not one capture — single-run metrics in this repo have proven chaotic):
+
+| capture | ZYX pitch p95 | before mean/p95 | after mean/p95 |
+|---|---|---|---|
+| `stationary_stream11_20260728_190311` (3000 fr) | 86.2° | 1.689 / 2.218 | **0.017 / 0.053** |
+| `stream11_verify` (304 fr) | 80.8° | 0.014 / 0.037 | **0.006 / 0.016** |
+| `coffeeRoomCircuitNoMnt` (1988 fr) | 85.0° | 0.994 / 2.826 | **0.573 / 1.550** |
+| `coffeeRoomCircuitMnt` (1928 fr) | 74.6° | 0.775 / 2.120 | **0.549 / 1.538** |
+| `roomSweepFull20260730` (3000 fr) | 77.3° | 0.573 / 1.430 | **0.509 / 1.266** |
+| `tilt_sweep_20260729` (3000 fr) | −0.1° | 0.011 / 0.026 | 0.011 / 0.026 |
+| `web_20260730_181252` (2780 fr) | −0.2° | 0.003 / 0.015 | 0.003 / 0.015 |
+
+The two **zero-pitch captures are bit-identical** before and after. That is the control, and it is
+the point: the misreading scales as `tilt × tan(pitch)`, so it is 0.04° at level and ~7° at 86°.
+This is a frame error at the attitudes this device actually flies, not a general retune.
+
+**Tests that would have caught it** (`test_imu_fusion.py::test_yaw_loop_measures_heading_about_
+world_z_not_body_z`, plus four in `test_sensors.py`). Verified by re-running the suite with the old
+term monkeypatched back in globally: the axis test fails at 0.138° against a `< 0.01°` bound, and
+nothing else in 1079 tests notices. The fixture holds the device still 4° from gimbal lock and lets
+the reference's *static* fp16 tilt quantisation be the only error; the expected legacy failure is
+**derived from the fixture** (it converges to exactly the ZYX-yaw misreading of that quantisation),
+not hard-coded. A companion test records the trap that let this ship: on a residual that is *pure
+heading*, both conventions agree exactly even at gimbal lock — so the obvious test, a clean 30°
+heading offset, passes either way and proves nothing about the axis.
 
 **Why it matters beyond the filter itself.** `imufusion` beating SFLP is the stated precondition for
 trading SFLP away for hardware ODR-triggered sync (BUG-031). While this defect stands, that
@@ -1757,3 +1795,11 @@ win is measured at **one attitude, stationary**, and under motion the accel-refe
 **saturates** (SFLP 0.879°, imufusion 0.864°, SFLP-gravity 0.868° — all within 2%). **No capture in
 the repo can adjudicate the two under motion**, and there is no orientation ground truth anywhere in
 the repo. Fixing the axis makes the comparison *meaningful*; it does not make it *decided*.
+
+**The gate is therefore deliberately unchanged** (2026-07-30): `SensorState(imu_fusion=None)` is
+still the default and nothing in the repo constructs an `ImuFusion` outside its own module and tests
+— verified by grep, and by the unchanged `test_slam_non_regression_*` guards. Note also what the
+numbers above are and are not: they are *agreement with SFLP*, not accuracy. The table says the
+filter's heading now follows its own anchor instead of fighting it; it says nothing about whether
+either estimator points the right way. **Heading direction remains unvalidated repo-wide** (resume
+doc §4.6) and nothing here touches it.

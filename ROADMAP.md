@@ -931,7 +931,15 @@ channel, barometer as soft 1-DoF Z constraint.
 >
 > **Host:** `roomscan.imufusion` — complementary filter (gyro propagation on LSM timestamps with gbias
 > subtracted, gravity tilt correction, stream-9 yaw anchor), **gated OFF by default** with an explicit
-> SLAM non-regression test. Synthetic gain 6.2× on tilt in the under-dithered regime. UI gained raw
+> SLAM non-regression test. Synthetic gain 6.2× on tilt in the under-dithered regime.
+> *(2026-07-30, **BUG-039**: its yaw loop measured heading about **body Z** — ZYX yaw — on a body
+> frame whose X is Up, so at this device's attitudes it was nulling a quantity 4° from gimbal lock:
+> 1.689° mean / 2.217° p95 of real heading error, insensitive to loop gain. Replaced by a world-Z
+> swing-twist term, `sensors.graft_yaw_error_deg` — stationary 0.017° / 0.053°, and bit-identical on
+> the two zero-pitch captures of a seven-capture ensemble, because the misreading scales as
+> tilt × tan(pitch). **Still gated off**: this makes the SFLP-vs-`imufusion` comparison meaningful,
+> not decided — no capture in the repo carries orientation ground truth.)*
+> UI gained raw
 > orientation readouts, per-signal p95/mean jitter, **four orientation decomposition modes**
 > (zyx / zxy / boresight / world = gravity+mag) with renamable labels and a near-singularity warning,
 > a **zero-yaw** control (SFLP yaw has an arbitrary origin — no magnetic input), and a **magnetometer

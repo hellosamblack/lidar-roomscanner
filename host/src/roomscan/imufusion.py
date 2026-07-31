@@ -58,7 +58,7 @@ import math
 import numpy as np
 
 from .protocol import IMU_RAW_TICK_US, ImuRawBatch
-from .sensors import graft_yaw, quat_mul, quat_to_matrix, quat_yaw_deg, wrap180
+from .sensors import graft_yaw, graft_yaw_error_deg, quat_mul, quat_to_matrix
 
 # --------------------------------------------------------------------------------------
 # Tuning constants.  NOT FINAL - see "How these were derived" below.  Every number here
@@ -422,9 +422,21 @@ class ImuFusion:
 
     def _correct_yaw(self, yaw_ref, dt: float) -> None:
         """First-order pull of our heading toward the stream-9 / YawFusion heading.
-        Uses `graft_yaw`, i.e. a pure world-Z rotation, so tilt is untouched."""
+        Uses `graft_yaw`, i.e. a pure world-Z rotation, so tilt is untouched.
+
+        The error is measured with `graft_yaw_error_deg` — the world-Z twist of the
+        residual, which is `graft_yaw`'s own inverse, so the loop nulls exactly the
+        quantity it can correct. It used to be a difference of `quat_yaw_deg` (ZYX
+        yaw, i.e. the heading of body **Z**), which is the wrong axis for a body
+        frame whose **X is Up**: at this device's real attitudes the ZYX
+        decomposition sits within a few degrees of gimbal lock, so tilt noise read
+        as huge apparent yaw and the loop grafted that noise on as real heading
+        error. Measured on `captures/stationary_stream11_20260728_190311.bin`:
+        1.689 deg mean / 2.217 deg p95 world-Z heading error before, 0.017 / 0.053
+        after — and the old term was insensitive to `tau_yaw`, the signature of a
+        wrong measurement rather than a mistuned gain (BUG-039)."""
         if yaw_ref is None:
             return
-        err = wrap180(quat_yaw_deg(yaw_ref) - quat_yaw_deg(self._q))
+        err = graft_yaw_error_deg(yaw_ref, self._q)
         gain = dt / (self.tau_yaw_s + dt)
         self._q = graft_yaw(self._q, gain * err)
