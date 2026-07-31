@@ -9,60 +9,74 @@
 //   - pressure / temperature sparklines: min/max-autoscaled polyline over the
 //     history arrays + a live value readout.
 //
-// Card structure (decluttered 2026-07-29): the always-visible tiers are the two
-// widgets above, the SELECTED orientation readout (mode picker + 3 values +
-// warnings), the mag-fusion state with its two buttons, and Environment. The
-// diagnostic readouts — mode note, yaw offset + buttons, full-precision raw ZYX,
-// jitter table — sit inside the collapsed-by-default `#sensor-diag` <details>.
-// Nothing here cares whether it is open; every element is bound the same way.
+// Card structure (decluttered 2026-07-29; pinned to World-only 2026-07-31):
+// the always-visible tiers are the two widgets above, the World orientation
+// readout (3 values + warnings — the decomposition picker is gone, the owner
+// only ever used World), the mag-fusion state + its help line + two buttons,
+// and Environment. The diagnostic readouts — World's note, yaw offset +
+// buttons, full-precision raw ZYX, jitter table — sit inside the
+// collapsed-by-default `#sensor-diag` <details>. Nothing here cares whether
+// it is open; every element is bound the same way.
 //
 // Plus a fusion-status line, and (owner ask, 2026-07-28) two more readouts:
 //   - Raw Orientation: `orientation_raw` — the fused quat + Euler roll/pitch/yaw
 //     + heading at FULL PRECISION, pre-OrientationSmoother (same raw signal as
 //     `rot`/`heading` above, just not rounded for a gizmo/compass draw). ALWAYS
-//     ZYX Tait-Bryan, regardless of the Orientation View mode below.
+//     ZYX Tait-Bryan, regardless of the World readout above.
 //   - Jitter: `jitter` — server-computed rolling-window frame-to-frame noise
 //     (p95 and mean as two columns of a grid, deg/frame) for roll/pitch/yaw/heading and
 //     the overall orientation step. Computed server-side from full precision —
 //     never re-derive this client-side from the rounded `rot`/`heading` fields.
-//     roll/pitch/yaw follow the selected Orientation View mode; heading/orientation
-//     are always the same (convention-independent) regardless of mode.
-//   - Orientation View: `orientation_view` — the SELECTED decomposition mode
-//     (mode picker + 3 renamable axis-label inputs, both sent via `set_orientation`
-//     and echoed back through `state`) plus a near-singularity warning and, in
-//     World mode, a mag-validity/motion warning. Presentation-only: this never
-//     changes what's rendered in the 3D view, only how the Sensors card reads out
-//     the SAME orientation. See docs/web-protocol.md "Orientation decomposition
-//     modes" for the math + where each mode's singularity sits.
+//   - Orientation View: `orientation_view` — the World decomposition (3
+//     renamable axis-label inputs, sent via `set_orientation {labels}` and
+//     echoed back through `state`) plus a near-singularity warning and a
+//     mag-validity/motion warning. Presentation-only: this never changes what's
+//     rendered in the 3D view, only how the Sensors card reads out the SAME
+//     orientation. `set_orientation {mode}` and the zyx/zxy/boresight math
+//     stay on the wire for the deprecated desktop panel — see
+//     docs/web-protocol.md "Orientation decomposition modes".
+//   - Fusion help (owner ask, 2026-07-31): `fusion_key` -> a remedy string from
+//     FUSION_HELP below, shown under the Fusion row and mirrored into its
+//     title. Hidden when fusion is `active`. No protocol change — the server
+//     already sent `fusion_key`, only the label was rendered before.
 //   - Zero Yaw Here (owner ask, 2026-07-29): the SFLP yaw has no magnetometer
 //     input, so its zero is an arbitrary power-on attitude that free-runs with
 //     gyro drift. "Zero Yaw Here" sends `zero_yaw`, which captures the CURRENT
 //     attitude as the new relative-yaw reference (server-side, via
 //     `sensors.graft_yaw` -- see docs/web-protocol.md); "Clear" sends
 //     `clear_yaw_offset` to go back to raw. Both echo through `state`'s
-//     `yaw_offset_deg`. Disabled/no-op in World mode: that mode's yaw slot is
-//     the ABSOLUTE magnetic heading, not offsettable.
+//     `yaw_offset_deg`. Disabled/no-op in World mode (i.e. always, now that
+//     the card is pinned to it): World's yaw slot is the ABSOLUTE magnetic
+//     heading, not offsettable.
 // All draws/writes are guarded so a null-field message (a ToF-only or
 // pre-calibration session, or before the jitter window has 2+ samples) renders
 // placeholders and never throws.
 //
-// Everything else is read-only (pointer-events:none left rail); the mode
-// select + label inputs + yaw-offset buttons are the exceptions
-// (pointer-events:auto, see index.html's .sensor-select/.sensor-label-input/
-// .sensor-btn rules).
+// Everything else is read-only (pointer-events:none left rail); the label
+// inputs + yaw-offset buttons are the exceptions (pointer-events:auto, see
+// index.html's .sensor-label-input/.sensor-btn rules).
 //
 // Public surface:  createSensors(hub) -> {}
-// Hub events:  subscribes "sensor", "state"; sends "set_orientation",
-//   "zero_yaw", "clear_yaw_offset"
-
-const ORIENT_MODE_DESC = {
-    zyx: 'ZYX Tait-Bryan. Singularity: pitch to +-90 deg (body Up axis to vertical — device aimed steeply up/down).',
-    zxy: 'Alt Euler (ZXY). Singularity: pitch to +-90 deg (body Right axis to vertical — device rolled onto its side).',
-    boresight: 'ToF optical axis az/el/roll — meaningful under any grip. Singularity: elevation to +-90 deg (pointing at ceiling/floor).',
-    world: 'Gravity+magnetometer reference (drift-free, grip-independent, but degrades while moving). Singularity: tilt to +-90 deg.',
-};
+// Hub events:  subscribes "sensor", "state"; sends "set_orientation" (labels
+//   only), "zero_yaw", "clear_yaw_offset"
 
 const D = (m, l) => { try { window.__diag && window.__diag('sensors.js: ' + m, l); } catch (e) {} };
+
+// fusion_key -> what to do about it (owner ask, 2026-07-31). Wording tracks the
+// actual gates in sensors.py's YawFusion.update and their thresholds in
+// config.py: gimbal margin 15 deg, motion 40 deg/s, anomaly 30% of the
+// calibrated field. `active` isn't listed -- the caller hides the line then.
+// The tripod note on `gated:anomaly` is not incidental: BUG-034 (by-design)
+// measured the tripod alone adding 15-27 uT, which trips this gate on its own
+// regardless of calibration quality.
+const FUSION_HELP = {
+    init: 'Waiting for the first valid magnetometer sample — hold steady a moment.',
+    off: 'Yaw fusion is disabled in config — set [viewer] yaw_fusion = true.',
+    'gated:no-cal': 'No magnetometer calibration loaded — run Calibrate Mag.',
+    'gated:gimbal': 'Aimed within 15° of straight up/down, where yaw is undefined — tilt back toward horizontal.',
+    'gated:motion': 'Turning faster than 40°/s — slow the sweep.',
+    'gated:anomaly': 'Field strength is >30% off the calibrated value — move away from metal/magnets; take it off the tripod.',
+};
 
 // Match index.html's design tokens (canvas can't read CSS vars directly).
 const AXIS_COLORS = ['#ef4444', '#10b981', '#3b82f6'];   // X red, Y green, Z blue
@@ -239,6 +253,7 @@ export function createSensors(hub) {
     const compass = $('sensor-compass');
     const headingEl = $('sensor-heading');
     const fusionEl = $('sensor-fusion');
+    const fusionHelpEl = $('sensor-fusion-help');
     const pressSpark = $('sensor-press-spark');
     const pressVal = $('sensor-press-val');
     const tempSpark = $('sensor-temp-spark');
@@ -260,8 +275,6 @@ export function createSensors(hub) {
     const jitterLabelEls = {
         roll: $('jitter-label-roll'), pitch: $('jitter-label-pitch'), yaw: $('jitter-label-yaw'),
     };
-    const modeSelect = $('orient-mode-select');
-    const modeDesc = $('orient-mode-desc');
     const labelInputs = [$('orient-label-0'), $('orient-label-1'), $('orient-label-2')];
     const valEls = [$('orient-val-0'), $('orient-val-1'), $('orient-val-2')];
     const singularityWarn = $('orient-singularity-warn');
@@ -286,18 +299,17 @@ export function createSensors(hub) {
     // #sensor-mag-cal is owned by magcal.js (it enables the button and opens the
     // calibration modal); nothing to bind here.
 
-    // --- Orientation View: mode select + renamable axis labels -----------
+    // --- Orientation View: renamable axis labels (World-only) ------------
     // One-way state flow (same as controls.js): a change here just SENDS
-    // set_orientation; the displayed mode/labels are driven from the
+    // set_orientation {labels}; the displayed labels are driven from the
     // server's `state` echo below, not from local click state, so every
-    // open tab stays in sync.
-    modeSelect?.addEventListener('change', () => {
-        hub.send({ type: 'set_orientation', mode: modeSelect.value });
-    });
+    // open tab stays in sync. There is no mode picker any more (owner ask,
+    // 2026-07-31: the card is pinned to World) -- `set_orientation {mode}`
+    // itself stays on the wire for the deprecated desktop panel.
     labelInputs.forEach((input, i) => {
         if (!input) return;
         const commit = () => {
-            const labels = labelInputs.map((el, j) => (el ? el.value : ['Roll', 'Pitch', 'Yaw'][j]));
+            const labels = labelInputs.map((el, j) => (el ? el.value : ['Roll', 'Tilt', 'Heading'][j]));
             hub.send({ type: 'set_orientation', labels });
         };
         input.addEventListener('change', commit);   // blur / Enter
@@ -319,12 +331,6 @@ export function createSensors(hub) {
     }
 
     hub.on('state', (msg) => {
-        if (modeSelect && msg.orientation_mode && document.activeElement !== modeSelect) {
-            modeSelect.value = msg.orientation_mode;
-        }
-        if (modeDesc && msg.orientation_mode) {
-            modeDesc.textContent = ORIENT_MODE_DESC[msg.orientation_mode] || '';
-        }
         if (Array.isArray(msg.orientation_labels)) {
             msg.orientation_labels.forEach((lbl, i) => {
                 const input = labelInputs[i];
@@ -366,10 +372,28 @@ export function createSensors(hub) {
             drawCompass(compass, msg.heading);
             if (headingEl) headingEl.textContent =
                 (msg.heading === null || msg.heading === undefined) ? '—' : msg.heading.toFixed(1) + '°';
+            // Fusion help (owner ask, 2026-07-31): say what's wrong and how to
+            // fix it, not just the state label. Hidden on `active` -- nothing
+            // to say. Mirrored into the Fusion row's title too, so it reads the
+            // same whether the reader looks at the row or the line under it.
+            // Muted small text (.hud-note) normally; a real fault (any
+            // `gated:*` key) gets the warning styling (.hud-warn) -- `init`/
+            // `off` are transient/configuration states, not faults.
+            const help = FUSION_HELP[msg.fusion_key] || '';
+            const isFault = typeof msg.fusion_key === 'string' && msg.fusion_key.startsWith('gated');
+            const fusionTitle = msg.fusion_key
+                ? 'YawFusion status: ' + msg.fusion_key + (help ? ' — ' + help : '')
+                : '';
             if (fusionEl) {
                 fusionEl.textContent = msg.fusion || 'Off';
                 fusionEl.className = fusionClass(msg.fusion_key);
-                fusionEl.title = msg.fusion_key ? 'YawFusion status: ' + msg.fusion_key : '';
+                fusionEl.title = fusionTitle;
+            }
+            if (fusionHelpEl) {
+                fusionHelpEl.textContent = help;
+                fusionHelpEl.className = isFault ? 'hud-warn' : 'hud-note';
+                fusionHelpEl.classList.toggle('hidden', !help);
+                fusionHelpEl.title = fusionTitle;
             }
             if (pressVal) pressVal.textContent =
                 (msg.pressure_pa === null || msg.pressure_pa === undefined) ? '—' : Math.round(msg.pressure_pa) + ' Pa';

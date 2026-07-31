@@ -185,6 +185,14 @@ _CAM_ROTATION_RANGE = (-180.0, 180.0)  # degrees; positive swings the eye right
 # is why the client hands it to OrbitControls' own `autoRotate` rather than
 # animating `rotation_deg` (that would also churn the persisted value at 30 Hz).
 _ORBIT_SPEED_RANGE = (-60.0, 60.0)     # deg/s; negative reverses
+# Oscillate mode (owner ask, 2026-07-31): a triangle wave about the azimuth
+# where oscillation started -- run one way for N deg, reverse and run 2N deg,
+# reverse and run 2N deg, repeat, so the camera swings between -N and +N of the
+# start azimuth. `scene.js` owns the wave itself (it tracks
+# `controls.getAzimuthalAngle()` client-side); the server just stores/validates
+# the mode + amplitude like any other `set_view` field.
+_VALID_ORBIT_MODES = ("continuous", "oscillate")
+_ORBIT_AMPLITUDE_RANGE = (5.0, 180.0)  # degrees; matches the UI slider's range
 # See-through (x-ray) strength. 0 is off and is the DEFAULT, so nothing about
 # the render changes until it is asked for; 1 draws the occluded layer at full
 # alpha over its occluder. Validated on the wire AND on config load.
@@ -233,7 +241,16 @@ def default_view_cam() -> dict[str, ViewCam]:
 # "Alternate orientation decompositions" section for the per-mode math and
 # exactly where each one's gimbal lock sits.
 _VALID_ORIENTATION_MODES = ("zyx", "zxy", "boresight", "world")
-DEFAULT_AXIS_LABELS = ("Roll", "Pitch", "Yaw")
+# The Sensors card is pinned to World (owner ask, 2026-07-31: the decomposition
+# picker is gone, the owner only ever used World) -- and in World the three
+# slots are NOT Roll/Pitch/Yaw. `orientation_view`'s World branch returns
+# `roll_deg = triad_roll_deg` (roll about the boresight vs true vertical),
+# `pitch_deg = tilt_from_down_deg` (boresight angle from horizontal), and
+# `yaw_deg = heading` (absolute magnetic heading). The other modes (zyx/zxy/
+# boresight) stay on the wire for the deprecated desktop panel and keep their
+# own math unchanged -- only the DEFAULT labels, which the World-only web UI
+# actually shows, change here.
+DEFAULT_AXIS_LABELS = ("Roll", "Tilt", "Heading")
 _MAX_LABEL_LEN = 24
 
 # "Zero yaw here" (owner ask, 2026-07-29): which modes have a free-running,
@@ -339,6 +356,12 @@ class UiState:
     # Slow auto-orbit of the world view (owner ask, 2026-07-30). Azimuth only.
     orbit_enabled: bool = False
     orbit_speed_deg_s: float = 6.0     # 60 s per revolution
+    # Oscillate mode (owner ask, 2026-07-31): "continuous" is the original
+    # behaviour above; "oscillate" swings +-orbit_amplitude_deg of the azimuth
+    # where oscillation started (a triangle wave, driven client-side in
+    # scene.js). See `_VALID_ORBIT_MODES` / `_ORBIT_AMPLITUDE_RANGE`.
+    orbit_mode: str = "continuous"
+    orbit_amplitude_deg: float = 45.0
     idle_enabled: bool = True
     idle_level: str = "soft"           # "soft" | "hard"
     # Orientation decomposition (owner ask, 2026-07-28): which VIEW of the
@@ -1309,6 +1332,8 @@ def _state_message(ui: UiState, controller=None, detailed=None) -> dict:
             "view_cam": {m: asdict(c) for m, c in ui.view_cam.items()},
             "orbit_enabled": ui.orbit_enabled,
             "orbit_speed_deg_s": ui.orbit_speed_deg_s,
+            "orbit_mode": ui.orbit_mode,
+            "orbit_amplitude_deg": ui.orbit_amplitude_deg,
             "mode": ui.mode, "source": ui.source, "display": ui.display,
             "selected_capture": ui.selected_capture, "detailed": detail,
             "slam_available": slam_available,
@@ -1378,6 +1403,14 @@ def ui_from_config(cfg: ViewerConfig) -> UiState:
         speed = None
     if speed is not None and _ORBIT_SPEED_RANGE[0] <= speed <= _ORBIT_SPEED_RANGE[1]:
         ui.orbit_speed_deg_s = speed
+    if cfg.web_orbit_mode in _VALID_ORBIT_MODES:
+        ui.orbit_mode = cfg.web_orbit_mode
+    try:
+        amplitude = float(cfg.web_orbit_amplitude_deg)
+    except (TypeError, ValueError):
+        amplitude = None
+    if amplitude is not None and _ORBIT_AMPLITUDE_RANGE[0] <= amplitude <= _ORBIT_AMPLITUDE_RANGE[1]:
+        ui.orbit_amplitude_deg = amplitude
     ui.slam_trajectory = bool(cfg.slam_trajectory)
     if cfg.slam_walls in _VALID_WALL_MODES:
         ui.slam_walls = cfg.slam_walls
@@ -1385,8 +1418,13 @@ def ui_from_config(cfg: ViewerConfig) -> UiState:
     ui.idle_enabled = bool(cfg.sensor_idle_enabled)
     if cfg.sensor_idle_level in _VALID_IDLE_LEVELS:
         ui.idle_level = cfg.sensor_idle_level
-    if cfg.orientation_mode in _VALID_ORIENTATION_MODES:
-        ui.orientation_mode = cfg.orientation_mode
+    # The Sensors card's decomposition picker is gone (owner ask, 2026-07-31:
+    # the owner only used World) -- coerce ANY stored value to "world" so a
+    # config written before this change (e.g. still "zyx") can't leave the UI
+    # pinned to a mode it no longer offers a picker for. `set_orientation
+    # {mode}` still accepts any `_VALID_ORIENTATION_MODES` value on the wire
+    # for the deprecated desktop panel, but a fresh boot always starts World.
+    ui.orientation_mode = "world"
     ui.orientation_labels = _sanitize_axis_labels(cfg.orientation_labels.split(","))
     try:
         ui.yaw_offset_deg = float(cfg.yaw_offset_deg)
@@ -1416,6 +1454,8 @@ def apply_ui_to_config(ui: UiState, cfg: ViewerConfig) -> None:
             setattr(cfg, key, float(getattr(cam, attr)))
     cfg.web_orbit_enabled = bool(ui.orbit_enabled)
     cfg.web_orbit_speed_deg_s = float(ui.orbit_speed_deg_s)
+    cfg.web_orbit_mode = ui.orbit_mode
+    cfg.web_orbit_amplitude_deg = float(ui.orbit_amplitude_deg)
     cfg.slam_trajectory = bool(ui.slam_trajectory)
     cfg.slam_walls = ui.slam_walls
     cfg.slam_follow = bool(ui.slam_follow)
@@ -3282,6 +3322,21 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
                 s = None
             if s is not None and _ORBIT_SPEED_RANGE[0] <= s <= _ORBIT_SPEED_RANGE[1]:
                 ui.orbit_speed_deg_s = s
+                changed = True
+        if "orbit_mode" in msg:
+            if msg["orbit_mode"] not in _VALID_ORBIT_MODES:
+                log.warning("invalid set_view orbit_mode: %r", msg.get("orbit_mode"))
+                return
+            ui.orbit_mode = msg["orbit_mode"]
+            changed = True
+        if "orbit_amplitude" in msg:
+            try:
+                a = float(msg["orbit_amplitude"])
+            except (TypeError, ValueError):
+                log.warning("invalid set_view orbit_amplitude: %r", msg.get("orbit_amplitude"))
+                a = None
+            if a is not None and _ORBIT_AMPLITUDE_RANGE[0] <= a <= _ORBIT_AMPLITUDE_RANGE[1]:
+                ui.orbit_amplitude_deg = a
                 changed = True
         if changed:
             _persist_ui(state)

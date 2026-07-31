@@ -1097,7 +1097,7 @@ def test_orientation_view_unknown_mode_falls_back_to_zyx():
 
 def test_sanitize_axis_labels_defaults_on_bad_input():
     assert web._sanitize_axis_labels(None) == web.DEFAULT_AXIS_LABELS
-    assert web._sanitize_axis_labels(["", "  ", "Pan"]) == ("Roll", "Pitch", "Pan")
+    assert web._sanitize_axis_labels(["", "  ", "Pan"]) == ("Roll", "Tilt", "Pan")
     assert web._sanitize_axis_labels(["Tilt", "Swing", "Twist"]) == ("Tilt", "Swing", "Twist")
 
 
@@ -1107,17 +1107,23 @@ def test_sanitize_axis_labels_truncates_long_strings():
     assert len(out[0]) == web._MAX_LABEL_LEN
 
 
-def test_ui_from_config_maps_orientation_mode_and_labels():
+def test_ui_from_config_maps_orientation_labels_but_pins_mode_to_world():
+    """The Sensors card's decomposition picker is gone (owner ask, 2026-07-31:
+    the owner only ever used World) -- ui_from_config coerces ANY stored
+    orientation_mode to "world", even a valid one, so a config written before
+    this change can't strand a fresh boot in a mode with no picker to change
+    it back from. Labels still map through untouched -- they're presentation
+    only and independent of mode."""
     cfg = ViewerConfig(orientation_mode="boresight", orientation_labels="Tilt,Pan,Twist")
     ui = web.ui_from_config(cfg)
-    assert ui.orientation_mode == "boresight"
+    assert ui.orientation_mode == "world"
     assert ui.orientation_labels == ("Tilt", "Pan", "Twist")
 
 
 def test_ui_from_config_rejects_bad_orientation_mode():
     cfg = ViewerConfig(orientation_mode="nonsense")
     ui = web.ui_from_config(cfg)
-    assert ui.orientation_mode == web.UiState().orientation_mode
+    assert ui.orientation_mode == "world"
 
 
 def test_apply_ui_to_config_orientation_round_trips():
@@ -2745,6 +2751,82 @@ def test_set_view_rejects_out_of_range_orbit_speed():
 def test_ui_from_config_rejects_corrupt_orbit_speed():
     assert web.ui_from_config(ViewerConfig(web_orbit_speed_deg_s=1e6)).orbit_speed_deg_s == 6.0
     assert web.ui_from_config(ViewerConfig(web_orbit_speed_deg_s="quick")).orbit_speed_deg_s == 6.0
+
+
+# --- Oscillate mode (owner ask, 2026-07-31) ----------------------------------
+
+def test_orbit_mode_defaults_to_continuous():
+    ui = web.UiState()
+    assert ui.orbit_mode == "continuous"
+    assert ui.orbit_amplitude_deg == 45.0
+
+
+def test_state_message_carries_orbit_mode_and_amplitude():
+    m = web._state_message(web.UiState(orbit_mode="oscillate", orbit_amplitude_deg=30.0))
+    assert m["orbit_mode"] == "oscillate"
+    assert m["orbit_amplitude_deg"] == 30.0
+
+
+def test_set_view_orbit_mode_updates_and_persists(tmp_path):
+    import types
+    import roomscan.config as config_mod
+    p = tmp_path / "roomscan.toml"
+    state = types.SimpleNamespace(config=ViewerConfig(), ui_state=web.UiState(),
+                                  clients=set(), controller=None)
+    orig = config_mod.config_path
+    config_mod.config_path = lambda: p
+    try:
+        asyncio.run(web._handle_inbound(
+            state, {"type": "set_view", "orbit_mode": "oscillate", "orbit_amplitude": 30.0}))
+    finally:
+        config_mod.config_path = orig
+    assert state.ui_state.orbit_mode == "oscillate"
+    assert state.ui_state.orbit_amplitude_deg == 30.0
+    back = ViewerConfig.load(p)
+    assert back.web_orbit_mode == "oscillate" and back.web_orbit_amplitude_deg == 30.0
+    assert web.ui_from_config(back).orbit_mode == "oscillate"
+    assert web.ui_from_config(back).orbit_amplitude_deg == 30.0
+
+
+def test_set_view_rejects_bad_orbit_mode():
+    """Unknown mode: logged and dropped, current value untouched -- same
+    reject/no-op shape as `set_view` colormap/surface_mode/view_mode."""
+    import types
+    state = types.SimpleNamespace(config=None, ui_state=web.UiState(orbit_mode="continuous"),
+                                  clients=set(), controller=None)
+    asyncio.run(web._handle_inbound(state, {"type": "set_view", "orbit_mode": "spiral"}))
+    assert state.ui_state.orbit_mode == "continuous"
+
+
+def test_set_view_rejects_out_of_range_orbit_amplitude():
+    """Out-of-range or non-numeric amplitude is dropped, keeping the current
+    value -- same shape as the orbit-speed reject test above."""
+    import types
+    state = types.SimpleNamespace(config=None, ui_state=web.UiState(orbit_amplitude_deg=45.0),
+                                  clients=set(), controller=None)
+    for bad in (0.0, 4.9, 180.1, 999.0, "wide", None):
+        asyncio.run(web._handle_inbound(state, {"type": "set_view", "orbit_amplitude": bad}))
+        assert state.ui_state.orbit_amplitude_deg == 45.0
+    # ...and the slider's own boundaries ARE in range.
+    asyncio.run(web._handle_inbound(state, {"type": "set_view", "orbit_amplitude": 5.0}))
+    assert state.ui_state.orbit_amplitude_deg == 5.0
+    asyncio.run(web._handle_inbound(state, {"type": "set_view", "orbit_amplitude": 180.0}))
+    assert state.ui_state.orbit_amplitude_deg == 180.0
+
+
+def test_ui_from_config_maps_orbit_mode_and_amplitude():
+    cfg = ViewerConfig(web_orbit_mode="oscillate", web_orbit_amplitude_deg=90.0)
+    ui = web.ui_from_config(cfg)
+    assert ui.orbit_mode == "oscillate"
+    assert ui.orbit_amplitude_deg == 90.0
+
+
+def test_ui_from_config_rejects_corrupt_orbit_mode_and_amplitude():
+    cfg = ViewerConfig(web_orbit_mode="spiral", web_orbit_amplitude_deg="wide")
+    ui = web.ui_from_config(cfg)
+    assert ui.orbit_mode == "continuous"
+    assert ui.orbit_amplitude_deg == 45.0
+    assert web.ui_from_config(ViewerConfig(web_orbit_amplitude_deg=999.0)).orbit_amplitude_deg == 45.0
 
 
 def test_ui_from_config_rejects_corrupt_view_cam_values():

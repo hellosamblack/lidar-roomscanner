@@ -291,15 +291,13 @@
         .sensor-state.is-gated { color: var(--warning); }
         .sensor-state.is-off { color: var(--text-muted); font-weight: 400; }
 
-        /* Orientation decomposition mode + labels (owner ask, 2026-07-28). */
-        .sensor-select, .sensor-label-input {
+        /* Orientation axis labels (owner ask, 2026-07-28; decomposition picker
+           removed 2026-07-31 -- the card is pinned to World). */
+        .sensor-label-input {
             pointer-events: auto !important; background: rgba(255,255,255,0.06);
             border: 1px solid rgba(255,255,255,0.15); border-radius: 4px;
             color: var(--text-main); font-size: 0.72rem; font-family: inherit;
         }
-        /* Full-width on its own line: squeezed beside a "Mode" label it clipped
-           its own longest option ("Roll-Pitch-Yaw (ZYX)") mid-word. */
-        .sensor-select { padding: 3px 4px; width: 100%; }
         /* The axis labels stay renamable but stop *looking* like form fields
            until pointed at — three boxed inputs in the primary readout were a
            big part of the visual noise. */
@@ -937,32 +935,35 @@
                     </div>
                 </div>
 
-                <!-- Orientation decomposition mode + custom axis labels + singularity
-                     warning (owner ask, 2026-07-28; world-mode follow-up same day).
-                     Presentation-only view of the SAME fused quat as the ZYX
-                     reference under Diagnostics -- see docs/web-protocol.md
-                     "Orientation decomposition modes" for the math + where each
-                     mode's singularity sits. This is the card's PRIMARY readout;
-                     the mode's prose note now lives under Diagnostics, since the
-                     singularity *warning* below fires on its own when it matters. -->
-                <select id="orient-mode-select" class="sensor-select" title="Which decomposition of the orientation quaternion to display">
-                    <option value="zyx">Roll-Pitch-Yaw (ZYX)</option>
-                    <option value="zxy">Alt Euler (ZXY)</option>
-                    <option value="boresight">Boresight (Az/El/Roll)</option>
-                    <option value="world">World (Gravity + North)</option>
-                </select>
+                <!-- Orientation readout: custom axis labels + singularity warning
+                     (owner ask, 2026-07-28; pinned to World-only, 2026-07-31 --
+                     the decomposition picker is gone, the owner only ever used
+                     World). Presentation-only view of the SAME fused quat as the
+                     ZYX reference under Diagnostics -- see docs/web-protocol.md
+                     "Orientation decomposition modes" for the math. This is the
+                     card's PRIMARY readout; World's prose note lives under
+                     Diagnostics, since the singularity *warning* below fires on
+                     its own when it matters. The three slots are NOT Roll/Pitch/
+                     Yaw in World: `roll_deg` is roll about the boresight vs true
+                     vertical, `pitch_deg` is the boresight's tilt from horizontal,
+                     `yaw_deg` is absolute magnetic heading -- see web.py's
+                     `orientation_view` World branch. -->
                 <div class="hud-row"><span><input id="orient-label-0" class="sensor-label-input" maxlength="24" value="Roll" title="Rename this axis"></span><span class="hud-val" id="orient-val-0">—</span></div>
-                <div class="hud-row"><span><input id="orient-label-1" class="sensor-label-input" maxlength="24" value="Pitch" title="Rename this axis"></span><span class="hud-val" id="orient-val-1">—</span></div>
-                <div class="hud-row"><span><input id="orient-label-2" class="sensor-label-input" maxlength="24" value="Yaw" title="Rename this axis"></span><span class="hud-val" id="orient-val-2">—</span></div>
+                <div class="hud-row"><span><input id="orient-label-1" class="sensor-label-input" maxlength="24" value="Tilt" title="Rename this axis"></span><span class="hud-val" id="orient-val-1">—</span></div>
+                <div class="hud-row"><span><input id="orient-label-2" class="sensor-label-input" maxlength="24" value="Heading" title="Rename this axis"></span><span class="hud-val" id="orient-val-2">—</span></div>
                 <div id="orient-singularity-warn" class="hud-warn hidden">⚠ Near singularity — values unreliable</div>
                 <div id="orient-world-warn" class="hud-warn hidden">⚠ World mode invalid</div>
 
                 <!-- Magnetometer/heading state and the two actions that change it,
-                     together (they were three blocks apart). -->
+                     together (they were three blocks apart). The help line under
+                     it (owner ask, 2026-07-31) turns the fusion_key the server
+                     already sends into what's wrong and how to fix it -- filled
+                     client-side, no protocol change, see FUSION_HELP below. -->
                 <div class="hud-row">
                     <span title="Magnetometer yaw-fusion state (YawFusion.status)">Fusion</span>
                     <span class="sensor-state is-off" id="sensor-fusion">Off</span>
                 </div>
+                <div id="sensor-fusion-help" class="hud-note hidden"></div>
                 <div class="sensor-actions">
                     <button id="sensor-reset-heading" class="sensor-btn" title="Reset heading fusion — snaps to magnetometer on next valid sample">Reset Heading</button>
                     <!-- Enabled by magcal.js once the modal is wired, so a broken
@@ -984,12 +985,14 @@
                      open/close resizes the card, which layout.js's ResizeObserver
                      already watches. -->
                 <details class="sensor-details" id="sensor-diag">
-                    <summary title="Full-precision numerics, jitter statistics, yaw offset, and the selected mode's singularity note">Diagnostics</summary>
+                    <summary title="Full-precision numerics, jitter statistics, yaw offset, and World mode's singularity note">Diagnostics</summary>
                     <div class="sensor-details__body">
-                        <!-- One note, not two: the old #orient-world-note said the
-                             same thing as ORIENT_MODE_DESC.world does here, so in
-                             World mode the drawer printed the caveat twice. -->
-                        <div id="orient-mode-desc" class="hud-note">ZYX Tait-Bryan. Singularity: pitch to +-90 deg (device aimed steeply up/down).</div>
+                        <!-- The card is pinned to World mode (2026-07-31, decomposition
+                             picker removed) -- this note is now unconditional, not
+                             selected by a mode the UI no longer offers. One note, not
+                             two: the old #orient-world-note said the same thing, so the
+                             drawer printed the caveat twice. -->
+                        <div id="orient-mode-desc" class="hud-note">Gravity+magnetometer reference (drift-free, grip-independent, but degrades while moving). Singularity: tilt to +-90 deg.</div>
 
                         <!-- "Zero yaw here" (owner ask, 2026-07-29): the SFLP yaw has no
                              magnetometer input, so its zero point is an arbitrary power-on
@@ -1124,6 +1127,16 @@
                         <label class="toggle" title="Slowly circle the scene. World view only; height and distance are unchanged"><input type="checkbox" id="chk-orbit"><span>Auto-orbit (World)</span></label>
                         <div class="field-label field-label--sub">Orbit Speed <span class="hud-val" id="orbit-speed-val">6&deg;/s</span></div>
                         <input type="range" class="slider" id="sl-orbit-speed" min="-60" max="60" step="0.5" value="6" title="Degrees per second; negative reverses direction, 0 parks it">
+                        <!-- Oscillate mode (owner ask, 2026-07-31): instead of circling forever,
+                             swing back and forth about the azimuth where oscillation started. Same
+                             worldOnly gate as the two controls above (controls.js). -->
+                        <div class="field-label field-label--sub">Orbit Mode</div>
+                        <div class="segmented segmented--sm" id="seg-orbit-mode">
+                            <button data-orbitmode="continuous" title="Circle the scene continuously in one direction">Continuous</button>
+                            <button data-orbitmode="oscillate" title="Swing back and forth between +-amplitude of the azimuth where oscillation started, instead of circling forever">Oscillate</button>
+                        </div>
+                        <div class="field-label field-label--sub">Oscillate Amplitude <span class="hud-val" id="orbit-amplitude-val">45&deg;</span></div>
+                        <input type="range" class="slider" id="sl-orbit-amplitude" min="5" max="180" step="1" value="45" title="Oscillate mode: how far the camera swings each side of the start azimuth (degrees)">
                         <button id="btn-reset-cam" title="Reset the 3D camera to the default viewpoint">Reset Camera</button>
                     </div>
                 </details>

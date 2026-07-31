@@ -303,6 +303,15 @@ export function createScene(hub) {
     const AUTOROTATE_PER_DEG_S = 1 / 6;
     let orbitOn = false;
     let viewMode = 'world';
+    // Oscillate mode (owner ask, 2026-07-31): "continuous" is the orbit above;
+    // "oscillate" is a triangle wave about the azimuth where oscillation
+    // started -- run N deg one way, reverse and run 2N deg, reverse and run
+    // 2N deg, repeat, netting a swing of +-N about the start. Built entirely
+    // on top of `controls.autoRotate`/`autoRotateSpeed` above: this only
+    // flips the SIGN of `autoRotateSpeed` each time the accumulated offset
+    // passes +-N; OrbitControls does the actual rotating.
+    let orbitMode = 'continuous';
+    let orbitAmplitudeDeg = 45.0;
     const viewCam = {};                     // live per-mode framing, from `state.view_cam`
     for (const m of Object.keys(DEFAULT_VIEW_CAM)) viewCam[m] = { ...DEFAULT_VIEW_CAM[m] };
 
@@ -370,6 +379,64 @@ export function createScene(hub) {
         // this keeps the flag honest rather than relying on that.)
         controls.autoRotate = orbitOn && m === 'world';
         D('view mode -> ' + m);
+    }
+
+    // --- Oscillate steering (owner ask, 2026-07-31) -------------------------
+    // Edge-triggered: `oscActive` tracks whether the wave is CURRENTLY running
+    // (auto-orbit on, mode is oscillate, in World) each frame, so the start
+    // azimuth is captured exactly when oscillation begins -- whether that's
+    // because the mode was just switched to oscillate, auto-orbit was just
+    // turned on, or World was just entered -- and never at module load
+    // (`oscActive` starts false, same as `orbitOn`).
+    let oscActive = false;
+    let oscLastAzimuth = 0;    // previous frame's WRAPPED azimuth (rad), for the unwrap step
+    let oscUnwrappedDeg = 0;   // signed, UNWRAPPED offset from the start azimuth (deg)
+    // The wave's travel direction lives HERE, not in the sign of
+    // `controls.autoRotateSpeed`. `state` is re-broadcast on every unrelated
+    // setting change (see mergeViewCam's note below), and its handler assigns
+    // autoRotateSpeed outright from `orbit_speed_deg_s` -- so storing direction
+    // in that sign meant clicking a colour mid-sweep snapped the camera back to
+    // forward travel and truncated the return leg. Magnitude comes from the
+    // server; direction is ours.
+    let oscDir = 1;
+
+    function isOscillating() {
+        return orbitOn && orbitMode === 'oscillate' && viewMode === 'world';
+    }
+
+    // `OrbitControls.getAzimuthalAngle()` wraps to (-PI, PI]. Summing RAW
+    // frame-to-frame differences across that wrap misreads the step: e.g.
+    // +179deg -> -179deg is really +2deg of travel, not a ~-358deg jump. Left
+    // unwrapped, that phantom jump either fires a spurious reversal near the
+    // wrap or, for amplitudes at/above 180deg, keeps the accumulator from ever
+    // reaching +-N at all -- the wave latches going one direction forever.
+    // Fixed by unwrapping each frame's OWN step into (-PI, PI] before adding
+    // it to a running total that is NOT itself wrapped, so the total tracks
+    // actual angular travel past the start, however many times around it goes.
+    function updateOscillate() {
+        const active = isOscillating();
+        if (active && !oscActive) {               // rising edge: (re)start the wave here
+            oscLastAzimuth = controls.getAzimuthalAngle();
+            oscUnwrappedDeg = 0;
+            // Start out travelling whichever way the speed slider points, so a
+            // negative Orbit Speed still means "sweep left first".
+            oscDir = controls.autoRotateSpeed < 0 ? -1 : 1;
+        }
+        oscActive = active;
+        if (!oscActive) return;
+        const cur = controls.getAzimuthalAngle();
+        let step = cur - oscLastAzimuth;
+        if (step > Math.PI) step -= 2 * Math.PI;
+        else if (step < -Math.PI) step += 2 * Math.PI;
+        oscLastAzimuth = cur;
+        oscUnwrappedDeg += step * 180 / Math.PI;
+        const n = Math.max(1e-6, orbitAmplitudeDeg);
+        if (oscUnwrappedDeg >= n) oscDir = -1;
+        else if (oscUnwrappedDeg <= -n) oscDir = 1;
+        // Re-assert direction every frame rather than only on a crossing: an
+        // unrelated `state` echo may have overwritten autoRotateSpeed since the
+        // last frame, and one frame of wrong-way travel is visible.
+        controls.autoRotateSpeed = Math.abs(controls.autoRotateSpeed) * oscDir;
     }
 
     // Merge a `state.view_cam` payload; true only if a number actually moved.
@@ -476,6 +543,8 @@ export function createScene(hub) {
             orbitOn = !!msg.orbit_enabled;
             controls.autoRotate = orbitOn && viewMode === 'world';
         }
+        if (msg.orbit_mode !== undefined) orbitMode = msg.orbit_mode;
+        if (msg.orbit_amplitude_deg !== undefined) orbitAmplitudeDeg = msg.orbit_amplitude_deg;
         if (msg.point_size !== undefined) {
             material.size = msg.point_size;
             xrayPointMat.size = msg.point_size;    // the twin must stay the same shape
@@ -525,7 +594,10 @@ export function createScene(hub) {
     function animate() {
         requestAnimationFrame(animate);
         const dt = frameDelta();
-        if (!renderActive) { if (viewMode === 'world') controls.update(dt); return; }
+        if (!renderActive) {
+            if (viewMode === 'world') { updateOscillate(); controls.update(dt); }
+            return;
+        }
         if (followOn && haveFollowTarget) {
             controls.enabled = false;
             // Velocity-adaptive lerp: fast when the sensor moves, steady when still.
@@ -540,6 +612,7 @@ export function createScene(hub) {
             // damping keeps easing toward the controls' own internal spherical
             // state even while `enabled` is false, which would drift the pose.
         } else {
+            updateOscillate();   // may flip autoRotateSpeed's sign before this update
             controls.update(dt);
         }
         renderer.render(scene, camera);
@@ -554,6 +627,10 @@ export function createScene(hub) {
     }
     animate();
 
-    return { resetCamera, THREE, scene, camera, setPointsVisible, setFollow,
+    // `controls` exposed for diagnostics only (e.g. sampling
+    // getAzimuthalAngle() from the console to verify the oscillate wave) --
+    // nothing external should mutate it; the state echo above is the only
+    // supported way to drive it.
+    return { resetCamera, THREE, scene, camera, controls, setPointsVisible, setFollow,
              setFollowTarget, setRenderActive };
 }

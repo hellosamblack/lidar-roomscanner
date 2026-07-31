@@ -38,6 +38,7 @@ createAdmin(hub);
 // scene.js returns a handle (Three.js context + follow-camera hooks); slam.js
 // renders the SLAM mesh/trajectory into that same scene (web Phase 4).
 const sceneApi = createScene(hub);
+window.__scene = sceneApi;   // diagnostics only, see scene.js's `controls` comment
 createSlam(hub, sceneApi);
 // Magnetometer-calibration modal (opened from the Sensors card). It takes the
 // scene handle only to PAUSE the main render while the modal occludes it — it

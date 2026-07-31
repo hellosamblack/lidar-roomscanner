@@ -108,11 +108,26 @@ def capture_list(surveyed: bool = True) -> dict:
 @mcp.tool()
 def capture_analyze(path: str, min_zero_run: int = 50, zero_scan_frames: int = 8,
                     dump_bytes: int = 0, include_frame_log: bool = False) -> dict:
-    """Byte-exact forensics over a capture: CRC failures, skip runs, truncation.
+    """Byte-exact forensics plus stream continuity: CRC, skip runs, truncation, lost frames.
 
     Every anomaly is pinned to a file offset and carries the decoded header fields.
     `include_frame_log` adds the full per-frame inventory, which is thousands of
     entries on a real capture -- leave it off unless you need it.
+
+    **`clean` and `continuity.complete` are different questions.** `clean` says the
+    bytes that arrived decode end to end; `continuity` says whether everything the
+    device sent actually arrived. A capture can be `clean: true` and still be missing
+    seconds of frames -- the three 2026-07-31 multi-room captures were byte-perfect
+    while losing 2.3% / 4.3% / 9.4% of RAW frames, one in a single 215-frame (7.1 s)
+    hole. Check `continuity.complete` before trusting a capture's coverage, and
+    before quoting any SLAM result computed over it.
+
+    `continuity.whole_group_lost` vs `partial_group_lost` separates two real faults:
+    a seq absent from every stream is a link outage, while one absent only from
+    RAW_3DMD is fragment loss on the ~15 KB datagram (its 20-byte siblings survived).
+    `device_fps` (seq span over elapsed `t_us`) against `received_fps` shows what the
+    device produced versus what the recorder kept. CALIB/IMU_CAL are censused against
+    their 64-frame cadence instead, under `continuity.cadenced`.
 
     Wraps `host/tools/analyze_capture.py::scan()`.
     """

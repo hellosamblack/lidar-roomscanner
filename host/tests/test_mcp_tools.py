@@ -85,6 +85,87 @@ def test_scan_flags_a_frame_truncated_at_eof(tmp_path):
     assert "TRUNCATED_AT_EOF" in kinds
 
 
+# --- stream continuity -------------------------------------------------------
+#
+# A capture can be byte-perfect and still be missing seconds of frames: that is what
+# `clean` could not see, and what let three 2026-07-31 multi-room captures read as
+# fine while losing 2.3-9.4% of RAW frames. `clean` and `continuity.complete` are
+# deliberately separate properties -- these tests pin that separation.
+
+def test_a_byte_clean_capture_with_lost_frames_is_not_complete(tmp_path):
+    p = tmp_path / "lossy.bin"
+    p.write_bytes(b"".join(_frame(seq=i) for i in [0, 1, 2, 9, 10]))
+
+    r = scan(str(p))
+
+    assert r["clean"] is True, "the bytes present decode fine"
+    c = r["continuity"]
+    assert c["complete"] is False, "but six frames never arrived"
+    assert c["frames_lost"] == 6
+    raw = c["streams"]["RAW_3DMD"]
+    assert raw["span"] == 11 and raw["received"] == 5
+    assert raw["max_gap"] == 6
+    assert raw["worst_gaps"][0]["after_seq"] == 2
+
+
+def test_continuity_separates_whole_group_loss_from_single_stream_loss(tmp_path):
+    # seq 2 vanishes everywhere (a link outage); seq 4 loses only the big RAW
+    # datagram while its small sibling arrives (fragment loss).
+    frames = []
+    for seq in range(6):
+        if seq != 2:
+            frames.append(_frame(stream=9, seq=seq))
+        if seq not in (2, 4):
+            frames.append(_frame(stream=7, seq=seq))
+    p = tmp_path / "mixed.bin"
+    p.write_bytes(b"".join(frames))
+
+    c = scan(str(p))["continuity"]
+
+    assert c["whole_group_lost"] == 1
+    assert c["partial_group_lost"] == 1
+    assert c["streams"]["RAW_3DMD"]["missing"] == 2
+    assert c["streams"]["IMU_QUAT"]["missing"] == 1
+
+
+def test_cadenced_streams_are_not_counted_as_gaps(tmp_path):
+    # CALIB rides a 64-frame cadence, so spacing 64 is the design, not loss.
+    frames = [_frame(stream=7, seq=i) for i in range(129)]
+    frames += [_frame(stream=8, seq=i) for i in (0, 64, 128)]
+    p = tmp_path / "calib.bin"
+    p.write_bytes(b"".join(frames))
+
+    c = scan(str(p))["continuity"]
+
+    assert c["complete"] is True
+    assert c["cadenced"]["CALIB"]["missed"] == 0
+    assert c["cadenced"]["CALIB"]["spacings_seen"] == [64]
+
+
+def test_a_missed_calib_retransmit_is_reported(tmp_path):
+    frames = [_frame(stream=7, seq=i) for i in range(129)]
+    frames += [_frame(stream=8, seq=i) for i in (0, 128)]  # the seq-64 CALIB was lost
+    p = tmp_path / "calibgap.bin"
+    p.write_bytes(b"".join(frames))
+
+    c = scan(str(p))["continuity"]
+
+    assert c["cadenced"]["CALIB"]["missed"] == 1
+    assert c["complete"] is False
+
+
+def test_continuity_ignores_non_data_frames(tmp_path):
+    # EVENT/ACK carry their own seq space; counting them would invent a huge gap.
+    p = tmp_path / "evt.bin"
+    p.write_bytes(b"".join(_frame(stream=7, seq=i) for i in range(4))
+                  + _frame(stream=7, seq=9999, ftype=2))
+
+    c = scan(str(p))["continuity"]
+
+    assert c["complete"] is True
+    assert c["streams"]["RAW_3DMD"]["span"] == 4
+
+
 def test_scan_omits_raw_bytes_so_results_stay_small(tmp_path):
     p = tmp_path / "big.bin"
     p.write_bytes(b"".join(_frame(seq=i, payload=b"\x00" * 4096) for i in range(20)))

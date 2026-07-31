@@ -83,6 +83,17 @@ export function createControls(hub) {
     const orbitSpeedVal = $('orbit-speed-val');
     chkOrbit?.addEventListener('change', () => sendView({ orbit: chkOrbit.checked }));
     slOrbitSpeed?.addEventListener('input', () => sendView({ orbit_speed: parseFloat(slOrbitSpeed.value) }));
+
+    // Oscillate mode (owner ask, 2026-07-31): same World-only gate as the two
+    // controls above, driven from the `state` echo below, never local clicks.
+    const segOrbitMode = $('seg-orbit-mode');
+    const slOrbitAmplitude = $('sl-orbit-amplitude');
+    const orbitAmplitudeVal = $('orbit-amplitude-val');
+    segOrbitMode?.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-orbitmode]');
+        if (btn) sendView({ orbit_mode: btn.dataset.orbitmode });
+    });
+    slOrbitAmplitude?.addEventListener('input', () => sendView({ orbit_amplitude: parseFloat(slOrbitAmplitude.value) }));
     segViewColormap?.addEventListener('click', (e) => {
         const btn = e.target.closest('button[data-colormap]');
         if (btn) sendView({ colormap: btn.dataset.colormap });
@@ -138,11 +149,18 @@ export function createControls(hub) {
             if (slOrbitSpeed) slOrbitSpeed.value = msg.orbit_speed_deg_s;
             if (orbitSpeedVal) orbitSpeedVal.textContent = msg.orbit_speed_deg_s.toFixed(1) + '°/s';
         }
+        setActive(segOrbitMode, 'orbitmode', msg.orbit_mode);
+        if (msg.orbit_amplitude_deg !== undefined) {
+            if (slOrbitAmplitude) slOrbitAmplitude.value = msg.orbit_amplitude_deg;
+            if (orbitAmplitudeVal) orbitAmplitudeVal.textContent = Math.round(msg.orbit_amplitude_deg) + '°';
+        }
         // Orbiting only means something in World — a locked view has nothing to
         // circle, so grey the controls out rather than let them look armed.
         const worldOnly = msg.view_mode === 'world' && msg.mode !== 'slam';
         if (chkOrbit) chkOrbit.disabled = !worldOnly;
         if (slOrbitSpeed) slOrbitSpeed.disabled = !worldOnly;
+        if (segOrbitMode) for (const b of segOrbitMode.querySelectorAll('button')) b.disabled = !worldOnly;
+        if (slOrbitAmplitude) slOrbitAmplitude.disabled = !worldOnly;
         setActive(segViewColormap, 'colormap', msg.view_colormap);
         if (slPointSize && msg.point_size !== undefined) slPointSize.value = msg.point_size;
         if (chkPointAuto && msg.point_size_auto !== undefined) chkPointAuto.checked = !!msg.point_size_auto;

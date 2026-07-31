@@ -75,6 +75,10 @@ class ViewerConfig:
     web_cam_mirror_rotation_deg: float = 0.0
     web_orbit_enabled: bool = False    # world view only: slow auto-orbit (azimuth only)
     web_orbit_speed_deg_s: float = 6.0 # 60 s per revolution; negative reverses
+    web_orbit_mode: str = "continuous" # "continuous" (the original behaviour) | "oscillate"
+                                       # (owner ask, 2026-07-31): a triangle wave about the
+                                       # azimuth where oscillation started, +-web_orbit_amplitude_deg
+    web_orbit_amplitude_deg: float = 45.0  # oscillate mode's half-swing, degrees
     web_see_through: float = 0.0       # x-ray strength 0..1: how strongly geometry hidden BEHIND
                                        # other geometry is drawn back over its occluder. 0 = off
                                        # (opaque, the historical look), 1 = the hidden layer wins
@@ -109,11 +113,20 @@ class ViewerConfig:
     yaw_anomaly_frac: float = 0.3           # |mag| deviation from field to reject
     yaw_motion_rate_dps: float = 40.0       # quat angular rate above which to freeze
     yaw_gimbal_margin_deg: float = 15.0     # freeze within this of |pitch|=90
-    orientation_mode: str = "zyx"           # selected orientation decomposition (owner ask,
-                                            # 2026-07-28): "zyx" | "zxy" | "boresight" | "world"
-    orientation_labels: str = "Roll,Pitch,Yaw"  # user-renamable axis labels, comma-joined (the
+    orientation_mode: str = "world"         # selected orientation decomposition (owner ask,
+                                            # 2026-07-28): "zyx" | "zxy" | "boresight" | "world".
+                                            # Defaulted to "world" 2026-07-31 -- the Sensors card's
+                                            # decomposition picker was removed (the owner only ever
+                                            # used World); the other modes stay valid on the wire
+                                            # for the deprecated desktop panel, but a fresh install
+                                            # (and `ui_from_config` coercing any stored non-world
+                                            # value, so an old config can't strand the UI in a mode
+                                            # it no longer offers a picker for) now starts here.
+    orientation_labels: str = "Roll,Tilt,Heading"  # user-renamable axis labels, comma-joined (the
                                             # flat-TOML writer is scalar-only -- no list/array
-                                            # support, see the module docstring)
+                                            # support, see the module docstring). In World mode
+                                            # these are NOT Roll/Pitch/Yaw -- see
+                                            # web.py's DEFAULT_AXIS_LABELS.
     yaw_offset_deg: float = 0.0             # "Zero yaw here" (owner ask, 2026-07-29): a
                                             # user-set world-Z graft applied to the relative
                                             # yaw-like slot of zyx/zxy/boresight ONLY -- World
