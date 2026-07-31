@@ -66,6 +66,17 @@ reason; that test fails on any script which is neither exposed nor excluded. Two
 server never binds the device stream (`roomscan-web` owns it — recording goes through
 `rig_record()`), and every tool reports what actually happened rather than what was requested.
 
+**New dependencies are allowed (owner, 2026-07-31):** *"we are okay with installing new dependencies
+if there is a material benefit."* **Do not self-impose a stdlib-only constraint, and never substitute
+a proxy for the library whose performance is the actual question.** (Said after an investigation was
+told to skip `zstd`/`lz4` if absent and approximate LZ4 with "zlib level 1" — that would have based a
+firmware decision on a stand-in number.) Install the real thing and measure it. The dependency's cost
+is a genuine input to the recommendation, so *report* it — footprint, build/runtime burden, whether it
+is even shippable on the target — rather than treating it as a precondition that rules out the best
+option before anything is measured. Weigh host and firmware separately: something unremarkable in
+`host/` (Python, ample CPU/RAM) may be unshippable on the Cortex-M33, where RAM footprint beats ratio.
+If a real implementation genuinely cannot be obtained, say so plainly instead of proxying.
+
 Throughout this doc, **`<APP>`** = `firmware/vendor/53L9A1/Projects/NUCLEO-H563ZI/Applications/53L9A1/53L9A1_PostprocessSingle/` (the reference firmware app dir). File references like `Src/vl53l9_app.c` are relative to `<APP>`.
 
 ## The reference firmware (`<APP>`)
