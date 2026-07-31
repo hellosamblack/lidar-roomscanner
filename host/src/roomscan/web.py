@@ -22,6 +22,7 @@ import math
 import os
 import queue
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -38,7 +39,7 @@ from pathlib import Path
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .colors import gray, turbo
@@ -2065,6 +2066,119 @@ async def root_redirect() -> RedirectResponse:
     return RedirectResponse(url="/static/index.html", status_code=307)
 
 
+# --- admin endpoints: FileHub bridge mode + server restart ------------------
+#
+# Two owner-facing maintenance actions surfaced as top-bar buttons. Both are
+# POST-only so a stray GET (prefetch, crawler, refresh) can never fire them.
+#
+# DELIBERATELY UNAUTHENTICATED (owner's call, 2026-07-31), and the server binds
+# 0.0.0.0 -- so anyone who can reach port 8000 can run the bridge script or
+# bounce the process. That is acceptable on this isolated rig LAN; it would not
+# be on a shared network. If this ever moves, gate on request.client.host.
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+BRIDGE_SCRIPT = REPO_ROOT / "filehub-bridgemode.sh"
+BRIDGE_TIMEOUT_S = 45.0
+RESTART_DELAY_S = 2.0
+
+
+def run_bridge_mode(script: Path = BRIDGE_SCRIPT,
+                    timeout_s: float = BRIDGE_TIMEOUT_S) -> dict:
+    """Run the FileHub bridge-mode script and report what actually happened.
+
+    Pure-ish helper (no FastAPI types) so it is testable and reusable. Returns
+    {ok, returncode, output, error}. Never raises: every failure mode -- missing
+    script, missing `expect`, timeout, non-zero exit -- comes back as a dict the
+    UI can render, because the whole point of the button is to tell the owner
+    whether the router is bridged, not to 500 at them.
+
+    NOTE this is only step 3 of the owner's 4-step recovery (unplug Ethernet ->
+    power-cycle the FileHub -> run this -> replug). Running it out of order
+    makes the FileHub treat the port as WAN; the UI states the sequence.
+    """
+    if not script.is_file():
+        return {"ok": False, "returncode": None, "output": "",
+                "error": f"script not found: {script}"}
+    if shutil.which("expect") is None:
+        return {"ok": False, "returncode": None, "output": "",
+                "error": "'expect' is not installed on this host (apt install expect)"}
+    try:
+        proc = subprocess.run(
+            ["bash", str(script)], cwd=str(REPO_ROOT), capture_output=True,
+            text=True, timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "returncode": None, "output": "",
+                "error": f"script did not finish within {timeout_s:g}s "
+                         f"(is the FileHub powered on and reachable?)"}
+    except OSError as exc:
+        return {"ok": False, "returncode": None, "output": "", "error": str(exc)}
+    output = (proc.stdout or "") + (proc.stderr or "")
+    return {"ok": proc.returncode == 0, "returncode": proc.returncode,
+            "output": output.strip(), "error": None}
+
+
+def restart_argv() -> list[str]:
+    """The command that relaunches this server.
+
+    Rebuilt as `-m roomscan.web` rather than reusing sys.argv[0]: under `python
+    -m`, argv[0] is the expanded path to web.py, and re-running THAT executes
+    the module as __main__ outside its package, which breaks its relative
+    imports. Flags after argv[0] are preserved so a restart keeps --port etc.
+    """
+    return [sys.executable, "-m", "roomscan.web", *sys.argv[1:]]
+
+
+def restart_command(delay_s: float = RESTART_DELAY_S) -> list[str]:
+    """The detached `sh -c` argv that relaunches the server after `delay_s`.
+
+    Split out from the endpoint so it is testable: exercising /api/restart in a
+    test would run the endpoint's os._exit(0) and kill the test runner.
+    """
+    quoted = " ".join(shlex.quote(a) for a in restart_argv())
+    return ["sh", "-c", f"sleep {delay_s:g}; exec {quoted}"]
+
+
+@app.post("/api/bridge-mode", include_in_schema=False)
+async def api_bridge_mode() -> JSONResponse:
+    """Put the RavPower FileHub back into transparent-bridge mode."""
+    result = await asyncio.to_thread(run_bridge_mode)
+    bus = getattr(app.state, "bus", None)
+    if bus is not None:
+        bus.publish(f"[bridge] {'ok' if result['ok'] else 'FAILED'}: "
+                    f"{result['error'] or 'bridge mode applied'}")
+    return JSONResponse(result)
+
+
+@app.post("/api/restart", include_in_schema=False)
+async def api_restart() -> JSONResponse:
+    """Relaunch the server process.
+
+    Spawns a detached child that waits for this process to release port 8000,
+    then execs a fresh server; this process exits once the response is on the
+    wire. stdout/stderr are inherited so the new process keeps writing to
+    whatever log the old one had (e.g. /tmp/web-live.log).
+    """
+    argv = restart_argv()
+    try:
+        subprocess.Popen(
+            restart_command(), cwd=str(REPO_ROOT), start_new_session=True,
+            stdin=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+    async def _exit_soon() -> None:
+        # Long enough for the JSON response to flush to the client; the child is
+        # already scheduled, so the port is free well before it tries to bind.
+        await asyncio.sleep(0.3)
+        os._exit(0)
+
+    asyncio.create_task(_exit_soon())
+    return JSONResponse({"ok": True, "restart_in_s": RESTART_DELAY_S,
+                         "argv": argv})
+
+
 # --- sensor auto-idle (SET_STANDBY, laser-wear reduction) -------------------
 #
 # The device streams continuously once a host attaches, firing the VCSEL every
@@ -2586,6 +2700,16 @@ async def _broadcaster() -> None:
         if now - last_metrics >= METRICS_INTERVAL:
             last_metrics = now
             snap = metrics.snapshot(now)
+            # MetricsRegistry knows nothing about frame sequencing, so drops/gaps
+            # come from the reader's Stats (panel.py did this; the web path never
+            # did, leaving the HUD's Drops/Gaps rows pinned at the dataclass
+            # default 0). That is not a cosmetic gap: a UDP fragment loss makes
+            # the host discard the whole frame (sources.py reassembly), which
+            # shows up ONLY as a header seq gap -- so without this the web UI
+            # cannot see transport loss at all.
+            stats = getattr(state, "stats", None)
+            if stats is not None:
+                snap = replace(snap, drops=stats.dropped_flags, gaps=stats.seq_gaps)
             await _broadcast_text(clients, json.dumps(build_metrics_message(snap)))
             ctrl = getattr(state, "controller", None)
             if ctrl is not None:

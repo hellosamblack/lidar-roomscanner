@@ -51,6 +51,8 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-037 | fixed   | host/slam     | `baro_weight = 0.05` fed the barometer's ~267 mm RMS of per-frame white noise straight into the pose — ~35% of reported path was invented vertical motion (flattering every %-of-path drift figure) and a drifting baro owned the height outright; replaced by a low-passed, bounded-authority complementary correction |
 | BUG-038 | fixed   | host/web      | The live point cloud is frustum-culled against a stale, zero-radius `boundingSphere` — latent in World view, fatal in FPV (filed as a duplicate "BUG-033"; renumbered 2026-07-30) |
 | BUG-039 | fixed   | host/sensors  | `imufusion._correct_yaw` measured heading error about **body Z** on a body frame whose X is Up — 3.76° from gimbal lock, giving 1.69° mean heading error that loop gain could not fix; replaced by a world-Z swing-twist term (2.218° → 0.053° p95, bit-identical at level attitudes). Filter still gated off |
+| BUG-040 | fixed   | host/web      | The web UI's Drops/Gaps HUD rows were structurally pinned at 0 — `web.py` read `MetricsSnapshot.drops/gaps` (dataclass default 0) and nothing ever merged the reader's `Stats`; only the deprecated `panel.py` did. Since a lost UDP fragment makes the host discard the whole frame, a seq gap is the ONLY evidence of transport loss, so the primary UI could not see packet loss at all |
+| BUG-041 | fixed   | firmware/eth  | `ETH_SendFrame_Gather` burst all 11 fragments of a depth frame back-to-back into an 8-deep TX descriptor ring, and **abandoned the frame mid-burst** on any `udp_sendto`/`pbuf_alloc` failure — the already-sent fragments then being guaranteed waste. Replaced by a slot-FIFO pacer that meters fragments from `ETH_Process()` and retries rather than abandoning |
 
 ---
 
@@ -1803,3 +1805,73 @@ numbers above are and are not: they are *agreement with SFLP*, not accuracy. The
 filter's heading now follows its own anchor instead of fighting it; it says nothing about whether
 either estimator points the right way. **Heading direction remains unvalidated repo-wide** (resume
 doc §4.6) and nothing here touches it.
+
+---
+
+## BUG-040 — Web UI cannot see transport loss (Drops/Gaps always 0)
+
+- **Status:** **fixed** 2026-07-31 · **Reported:** 2026-07-31 (owner, while diagnosing a SLAM run) · **Area:** host/web
+- **Where:** `host/src/roomscan/web.py` `_broadcaster` / `build_metrics_message`
+
+`MetricsRegistry` measures rates and bandwidth; it has no notion of frame *sequencing*, so
+`MetricsSnapshot.drops`/`.gaps` keep their dataclass default of `0`. The desktop panel filled them
+in (`panel.py:2978`, `replace(snap, drops=..., gaps=...)` off the reader's `Stats`), but the web
+broadcaster never did — it passed the raw snapshot straight to `build_metrics_message`. The reader
+*was* maintaining the counters correctly the whole time (`reader.py:121` calls `stats.update`);
+only the hand-off was missing.
+
+Why it matters more than a cosmetic zero: the Ethernet transport splits a 14,878-byte depth frame
+into 11 UDP datagrams, and the host's reassembly (`sources.py`) requires every fragment of a `seq`
+**in order** — one lost or reordered datagram silently discards the whole frame. The discarded
+frame never reaches the decoder, so the loss surfaces *only* as a header sequence gap. With that
+row pinned at 0, `roomscan-web` — the primary, supported UI — had no way to show packet loss.
+
+**Fix:** merge the reader's `Stats` into the snapshot in the broadcaster, guarded with `getattr`
+so a partially-built `app.state` (tests, replay harnesses) still broadcasts.
+
+**Test:** `test_metrics_broadcast_reports_reader_drops_and_gaps` drives a real uvicorn server over
+a websocket and asserts the counters arrive; removing the `replace(...)` fails it with `0 != 7`.
+
+---
+
+## BUG-041 — UDP fragments burst into an 8-deep TX ring, and a failed send abandoned the frame
+
+- **Status:** **fixed** 2026-07-31 · **Reported:** 2026-07-31 (owner: "is UDP the right transport?") · **Area:** firmware/eth
+- **Where:** `firmware/scanner-stream/Src/ethernet_transport.c` `ETH_SendFrame_Gather`
+
+Two defects in one loop:
+
+1. **Burst.** A depth frame is `RS_HEADER_SIZE + 14842 + CRC` = 14,878 B → 11 datagrams, pushed
+   back-to-back with no pacing. `ETH_TX_DESC_CNT` is **8** (`stm32h5xx_hal_conf.h:186`), and at
+   250 MHz the CPU enqueues a 1400 B memcpy far faster than the DMA drains a descriptor (~112 µs
+   each at 100 Mbit), so the ring can be overrun by the frame's own fragments. Through a Wi-Fi
+   bridge the same burst shape is what overflows a cheap AP's queue.
+2. **Mid-frame abandon.** On `pbuf_alloc` returning NULL or `udp_sendto` returning non-`ERR_OK`,
+   the old code `return false`d immediately — leaving fragments 0..k-1 already on the wire. Those
+   are guaranteed waste: the host needs every fragment of a `seq`, so a partial frame is a lost
+   frame *plus* wasted bandwidth.
+
+Loss here is amplified ~11× (one datagram kills a 14.8 KB frame) and is not benign for SLAM: a
+dropped depth frame doubles the inter-frame motion ICP has to solve, which is the same failure
+mode as BUG-036 (a 52 mm step against a 0.05 m correspondence radius killed 54% of a run).
+
+**Fix:** frames are copied into a fixed slot FIFO (8 × 15,104 B) and their fragments metered out
+from `ETH_Process()`. Two invariants: frames drain **strictly in order, one at a time** (the host
+resets its reassembly buffer the instant a different `seq` arrives, so interleaving would destroy
+both frames), and a refused send **retries** rather than abandoning. Back-pressure on a full FIFO
+drains synchronously rather than dropping, because the caller's raw double-buffer is about to be
+reused. The per-call fragment budget is adaptive — sized from the outstanding count so the queue
+clears inside `ETH_TX_WINDOW_MS` (25 ms) regardless of how coarsely `ETH_Process` is called
+(`platform_wait_for_event` busy-waits in 5 ms slices, so a fixed inter-fragment gap would
+under-drain and the backlog would grow without bound).
+
+Cost: `bss` 54,256 → 175,200 B (184 KB static of 640 KB; 456 KB still free), `text` +424 B.
+
+**Verified on-rig (2026-07-31):** flashed and soaked 90 s — 15,909 frames, **0 CRC failures, 0
+bytes skipped, no anomalies**, device rate 30.303 Hz (identical to the pre-flash baseline),
+0 drops / 0 gaps.
+
+**Not yet demonstrated:** the loss *reduction*. The rig was on a direct cable for this test (the
+RavPower FileHub was powered on but not bridged), so there was no loss to remove — the soak proves
+no regression, not benefit. Re-measure with the Wi-Fi bridge in path, now that BUG-040 makes the
+Gaps row readable.

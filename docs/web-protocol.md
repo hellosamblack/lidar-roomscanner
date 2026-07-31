@@ -450,9 +450,31 @@ process with no live source.
   the map on both sides; a purely *ephemeral* one stays out of the file. Persistence never adds a message —
   it rides the existing connect-time `state` echo, so the one-way-flow invariant is untouched.
 
+## Outside the socket — `/api/*` maintenance endpoints
+
+Two owner actions are **plain HTTP POSTs, not `/ws` messages** (2026-07-31). They act on the server
+process and its host rather than on instrument state, and `/api/restart` could not use the socket
+anyway — the socket is what it destroys.
+
+| Endpoint | Method | Returns | Notes |
+|---|---|---|---|
+| `/api/bridge-mode` | POST | `{ok, returncode, output, error}` | Runs `filehub-bridgemode.sh` (RavPower FileHub → transparent bridge). Never raises: missing script, missing `expect`, timeout and non-zero exit all come back as a readable `error`/`output`. |
+| `/api/restart` | POST | `{ok, restart_in_s, argv}` | Spawns a detached `sh -c 'sleep N; exec …'` child, then `os._exit(0)`. `ws.js`'s reconnect-with-backoff brings the UI back on its own. |
+
+Both are **POST-only** so a prefetch, crawler or browser refresh can never fire them, and both are
+**unauthenticated by owner decision** while the server binds `0.0.0.0` — anyone who can reach port
+8000 can trigger them. Acceptable on the isolated rig LAN; gate on `request.client.host` if that
+ever changes. Driven by `admin.js`, which takes the hub only to watch `conn` (so the Restart button
+can clear its busy state when the socket returns) and otherwise stays off the protocol entirely.
+
+Bridge Mode is behind a confirm modal on purpose: the script is **step 3 of a 4-step physical
+sequence** (unplug Ethernet → power-cycle the FileHub → run script → replug), and running it out of
+order makes the FileHub treat its LAN port as WAN. The modal states the ordering rather than letting
+one click imply "fix it".
+
 ## Frontend consumers
 
-10 vanilla ES modules under `host/src/roomscan/static/`, wired through a hub in `app.js` (no build step,
+11 vanilla ES modules under `host/src/roomscan/static/`, wired through a hub in `app.js` (no build step,
 no framework), plus `layout.js` — a deliberately *classic* (non-module) script owning the two-dock
 column-wrapping layout and the diagnostics panel, so both survive a failure of the module graph
 (see `docs/web-ui-testing.md` -> "The dock layout"). Binary tags are demuxed in `ws.js`; each JSON `type` is routed to its module

@@ -16,6 +16,7 @@ import { createSensors } from './sensors.js';
 import { createMagcal } from './magcal.js';
 import { createCapture } from './capture.js';
 import { createSlam } from './slam.js';
+import { createAdmin } from './admin.js';
 
 const D = (m, l) => { try { window.__diag && window.__diag('app.js: ' + m, l); } catch (e) {} };
 D('composition root loaded');
@@ -30,6 +31,10 @@ createControls(hub);
 createSensors(hub);
 createCapture(hub);
 createIr(hub);
+// Top-bar maintenance actions. Talks to /api/* over fetch, not the hub — it
+// takes `hub` only to watch 'conn' so the Restart button can clear its busy
+// state when the socket comes back.
+createAdmin(hub);
 // scene.js returns a handle (Three.js context + follow-camera hooks); slam.js
 // renders the SLAM mesh/trajectory into that same scene (web Phase 4).
 const sceneApi = createScene(hub);

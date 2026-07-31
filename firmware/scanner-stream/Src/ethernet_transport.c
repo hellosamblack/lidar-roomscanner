@@ -57,6 +57,9 @@ typedef enum {
 static dhcp_state_t dhcp_state = DHCP_STATE_INIT;
 static uint32_t dhcp_start_time = 0;
 
+/* Defined with the paced-TX block further down; ETH_Process (above it) drives it. */
+static void eth_tx_pump(void);
+
 static void Netif_Config(void)
 {
     ip4_addr_t ipaddr;
@@ -130,6 +133,10 @@ void ETH_Init(void)
 
 void ETH_Process(void)
 {
+    /* Before the RX/timeout work: the queued fragments are time-critical (they
+     * must clear inside the frame period) and ethernetif_input can run long. */
+    eth_tx_pump();
+
     ethernetif_input(&gnetif);
     sys_check_timeouts();
     
@@ -219,82 +226,193 @@ bool ETH_IsUp(void)
     return eth_link_up;
 }
 
+/* ===================== paced fragment TX =====================
+ *
+ * A depth frame is RS_HEADER_SIZE + 14842 + CRC = 14878 B, which this splits
+ * into 11 datagrams. Those used to go out back-to-back in a tight loop, which
+ * is wrong twice over:
+ *
+ *   1. The TX descriptor ring is only ETH_TX_DESC_CNT (8) deep, and at 250 MHz
+ *      the CPU enqueues a 1400 B memcpy far faster than the DMA drains one
+ *      (~112 us each at 100 Mbit). On overrun udp_sendto returned ERR_MEM and
+ *      the old code ABANDONED the frame mid-burst -- the fragments already
+ *      sent are then guaranteed waste, because the host's reassembly (see
+ *      sources.py) needs every fragment of a seq, in order.
+ *   2. Through a Wi-Fi bridge, 11 packets arriving in ~1.3 ms is exactly the
+ *      burst shape that overflows a cheap AP's queue. Loss there is not
+ *      cosmetic: one lost datagram costs the WHOLE 14.8 KB frame, i.e. ~11x
+ *      loss amplification, and a dropped depth frame doubles the inter-frame
+ *      motion that ICP has to solve (BUG-036 territory).
+ *
+ * So frames are copied into a slot FIFO and their fragments are metered out
+ * from ETH_Process(). Two invariants:
+ *
+ *   - STRICTLY IN ORDER, one frame at a time. The host keys reassembly on a
+ *     single `seq` and resets its buffer the moment a different seq arrives,
+ *     so interleaving fragments from two frames would destroy BOTH.
+ *   - Never abandon a partially-sent frame. A send failure leaves next_frag
+ *     put and retries on the next pump.
+ *
+ * Fixed slots rather than a byte ring: the wrap arithmetic is the only place
+ * this could grow a memory-corruption bug, and at 573 KB free the ~118 KB the
+ * slots cost is affordable insurance.
+ */
+
+#define ETH_TX_FRAG_BYTES   1400u
+#define ETH_TX_SLOT_BYTES   15104u  /* >= 32 hdr + 14842 payload + 4 CRC */
+#define ETH_TX_SLOTS        8u      /* one acquisition iteration queues <= 6 frames */
+/* Drain whatever is queued within this window. Shorter than the 33 ms frame
+ * period so the queue is empty again before the next frame lands. */
+#define ETH_TX_WINDOW_MS    25u
+
+typedef struct {
+    uint8_t  data[ETH_TX_SLOT_BYTES];
+    uint32_t len;
+    uint32_t seq;
+    uint8_t  total_frags;
+    uint8_t  next_frag;
+} eth_tx_slot_t;
+
+static eth_tx_slot_t eth_tx_slots[ETH_TX_SLOTS];
+static uint8_t  eth_tx_head = 0;    /* next slot to write */
+static uint8_t  eth_tx_tail = 0;    /* oldest queued slot  */
+static uint8_t  eth_tx_count = 0;
+static uint32_t eth_tx_last_pump = 0;
+static uint32_t eth_tx_dropped = 0; /* frames discarded (link lost) */
+
+/* Emit ONE fragment of the tail slot. Returns false if the stack refused it,
+ * leaving the slot's next_frag untouched so the same fragment is retried. */
+static bool eth_tx_emit_one(void)
+{
+    if (eth_tx_count == 0) return false;
+    eth_tx_slot_t *s = &eth_tx_slots[eth_tx_tail];
+
+    uint32_t offset = (uint32_t)s->next_frag * ETH_TX_FRAG_BYTES;
+    uint32_t chunk = s->len - offset;
+    if (chunk > ETH_TX_FRAG_BYTES) chunk = ETH_TX_FRAG_BYTES;
+
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, chunk + 6, PBUF_RAM);
+    if (!p) return false;            /* pool pressure: retry next pump */
+
+    uint8_t *p_out = (uint8_t *)p->payload;
+    p_out[0] = (uint8_t)(s->seq & 0xFF);
+    p_out[1] = (uint8_t)((s->seq >> 8) & 0xFF);
+    p_out[2] = (uint8_t)((s->seq >> 16) & 0xFF);
+    p_out[3] = (uint8_t)((s->seq >> 24) & 0xFF);
+    p_out[4] = s->next_frag;
+    p_out[5] = s->total_frags;
+    memcpy(&p_out[6], &s->data[offset], chunk);
+
+    err_t err = udp_sendto(upcb, p, &target_ip, 5000);
+    pbuf_free(p);
+    if (err != ERR_OK) return false; /* ring full: retry, do NOT abandon */
+
+    s->next_frag++;
+    if (s->next_frag >= s->total_frags) {
+        eth_tx_tail = (uint8_t)((eth_tx_tail + 1u) % ETH_TX_SLOTS);
+        eth_tx_count--;
+    }
+    return true;
+}
+
+/* Fragments still owed across every queued slot -- the quantity the pacing
+ * budget has to clear inside ETH_TX_WINDOW_MS. */
+static uint32_t eth_tx_pending_frags(void)
+{
+    uint32_t n = 0;
+    for (uint8_t i = 0; i < eth_tx_count; i++) {
+        const eth_tx_slot_t *s = &eth_tx_slots[(eth_tx_tail + i) % ETH_TX_SLOTS];
+        n += (uint32_t)(s->total_frags - s->next_frag);
+    }
+    return n;
+}
+
+/* Send everything queued, as fast as the stack accepts it. Used when the FIFO
+ * is full (back-pressure) and when the link drops. Bounded: it gives up after
+ * a fixed number of refusals rather than spinning on a wedged MAC. */
+static void eth_tx_flush_blocking(void)
+{
+    uint32_t stalls = 0;
+    while (eth_tx_count > 0 && stalls < 1000u) {
+        if (!eth_tx_emit_one()) stalls++;
+    }
+}
+
+/* Meter queued fragments onto the wire. Called from ETH_Process().
+ *
+ * The budget is adaptive because the call cadence is coarse and not ours to
+ * set: platform_wait_for_event busy-waits in 5 ms slices, so ETH_Process may
+ * only run every ~5 ms. A fixed inter-fragment gap would therefore under-drain
+ * (2 frags/5 ms = 13 per frame period, against the ~17 a CALIB iteration
+ * queues) and the backlog would grow without bound. Sizing the per-call budget
+ * from the OUTSTANDING count instead guarantees the queue clears inside the
+ * window whatever the cadence, while still spreading a small backlog out. */
+static void eth_tx_pump(void)
+{
+    if (eth_tx_count == 0) { eth_tx_last_pump = HAL_GetTick(); return; }
+
+    if (!eth_link_up || !upcb || target_ip.addr == 0) {
+        /* Nowhere to send: discard rather than stall the acquisition loop
+         * behind a queue that can never drain. */
+        eth_tx_dropped += eth_tx_count;
+        eth_tx_head = eth_tx_tail = eth_tx_count = 0;
+        return;
+    }
+
+    uint32_t now = HAL_GetTick();
+    uint32_t elapsed = now - eth_tx_last_pump;
+    if (elapsed == 0) return;
+    eth_tx_last_pump = now;
+
+    uint32_t pending = eth_tx_pending_frags();
+    uint32_t budget = (pending * elapsed + ETH_TX_WINDOW_MS - 1u) / ETH_TX_WINDOW_MS;
+    if (budget == 0) budget = 1;     /* always make forward progress */
+
+    while (budget-- > 0) {
+        if (!eth_tx_emit_one()) break;
+    }
+}
+
 bool ETH_SendFrame_Gather(const uint8_t *hdr, uint32_t hdr_len, const uint8_t *payload, uint32_t payload_len, const uint8_t *tail, uint32_t tail_len)
 {
     if (!eth_link_up || !upcb) return false;
     if (target_ip.addr == 0) return false; // Wait for host to send a packet first!
-     
+
     uint32_t total_len = hdr_len + payload_len + tail_len;
-    uint32_t offset = 0;
-    uint8_t frag_idx = 0;
-    uint8_t total_frags = (total_len + 1400 - 1) / 1400;
-    
-    while (offset < total_len)
-    {
-        uint32_t chunk = total_len - offset;
-        if (chunk > 1400) chunk = 1400;
-
-        struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, chunk + 6, PBUF_RAM);
-        if (!p) return false;
-
-        uint8_t *p_out = (uint8_t *)p->payload;
-        
-        p_out[0] = (uint8_t)(frame_seq_num & 0xFF);
-        p_out[1] = (uint8_t)((frame_seq_num >> 8) & 0xFF);
-        p_out[2] = (uint8_t)((frame_seq_num >> 16) & 0xFF);
-        p_out[3] = (uint8_t)((frame_seq_num >> 24) & 0xFF);
-        p_out[4] = frag_idx;
-        p_out[5] = total_frags;
-        
-        uint32_t out_idx = 6;
-        uint32_t remain = chunk;
-        
-        /* Copy from hdr, payload, tail based on offset */
-        if (offset < hdr_len && remain > 0) {
-            uint32_t copy_len = hdr_len - offset;
-            if (copy_len > remain) copy_len = remain;
-            memcpy(&p_out[out_idx], &hdr[offset], copy_len);
-            out_idx += copy_len;
-            remain -= copy_len;
-            offset += copy_len;
-        }
-        
-        uint32_t payload_offset = offset > hdr_len ? offset - hdr_len : 0;
-        if (payload_offset < payload_len && remain > 0) {
-            uint32_t copy_len = payload_len - payload_offset;
-            if (copy_len > remain) copy_len = remain;
-            memcpy(&p_out[out_idx], &payload[payload_offset], copy_len);
-            out_idx += copy_len;
-            remain -= copy_len;
-            offset += copy_len;
-        }
-        
-        uint32_t tail_offset = offset > (hdr_len + payload_len) ? offset - (hdr_len + payload_len) : 0;
-        if (tail_offset < tail_len && remain > 0) {
-            uint32_t copy_len = tail_len - tail_offset;
-            if (copy_len > remain) copy_len = remain;
-            memcpy(&p_out[out_idx], &tail[tail_offset], copy_len);
-            out_idx += copy_len;
-            remain -= copy_len;
-            offset += copy_len;
-        }
-
-        err_t err = udp_sendto(upcb, p, &target_ip, 5000);
-        if (err != ERR_OK)
-        {
-            printf("[ETH] udp_sendto failed: %d (frag %d)\n", err, frag_idx);
-            pbuf_free(p);
-            return false;
-        }
-
-        pbuf_free(p);
-        frag_idx++;
+    if (total_len == 0 || total_len > ETH_TX_SLOT_BYTES) {
+        printf("[ETH] frame too large to queue: %lu\n", (unsigned long)total_len);
+        return false;
     }
-    
-    // printf("[ETH] Sent frame %lu\n", frame_seq_num);
-    frame_seq_num++;
+
+    /* Back-pressure, not loss: the caller's payload buffer is about to be
+     * reused (raw double-buffering), so the bytes must be taken now. Draining
+     * the queue synchronously costs latency on this one frame; dropping would
+     * cost the host a whole frame. */
+    if (eth_tx_count >= ETH_TX_SLOTS) {
+        eth_tx_flush_blocking();
+        if (eth_tx_count >= ETH_TX_SLOTS) return false;
+    }
+
+    eth_tx_slot_t *s = &eth_tx_slots[eth_tx_head];
+    memcpy(&s->data[0], hdr, hdr_len);
+    memcpy(&s->data[hdr_len], payload, payload_len);
+    memcpy(&s->data[hdr_len + payload_len], tail, tail_len);
+    s->len = total_len;
+    s->seq = frame_seq_num++;
+    s->total_frags = (uint8_t)((total_len + ETH_TX_FRAG_BYTES - 1u) / ETH_TX_FRAG_BYTES);
+    s->next_frag = 0;
+
+    eth_tx_head = (uint8_t)((eth_tx_head + 1u) % ETH_TX_SLOTS);
+    eth_tx_count++;
+
+    /* Send the first fragment inline so a single-fragment frame (IMU/env, the
+     * latency-sensitive ones) still leaves immediately and pays nothing for
+     * the pacer. */
+    eth_tx_emit_one();
     return true;
 }
+
+uint32_t ETH_TxDroppedFrames(void) { return eth_tx_dropped; }
 
 bool ETH_HasTarget(void)
 {

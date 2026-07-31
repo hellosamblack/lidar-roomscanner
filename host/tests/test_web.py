@@ -1610,6 +1610,60 @@ def test_broadcaster_fanout_two_clients_same_frames(tmp_path):
     assert len(set(a)) >= 2
 
 
+def test_metrics_broadcast_reports_reader_drops_and_gaps(tmp_path):
+    """The `metrics` message must carry the READER's drops/gaps counters.
+
+    MetricsRegistry has no notion of frame sequencing, so `MetricsSnapshot`
+    leaves drops/gaps at 0 and the broadcaster has to merge in the reader's
+    `Stats`. The web path never did, so the HUD's Drops/Gaps rows were pinned
+    at 0 no matter what the link did -- and since a lost UDP fragment makes the
+    host discard the whole frame, a seq gap is the ONLY evidence of transport
+    loss the UI ever gets. Reintroducing the bug (dropping the `replace(...)`
+    in the broadcaster) makes this fail with 0 != 7.
+    """
+    import uvicorn
+    import websockets
+
+    cap = tmp_path / "depth.bin"
+    _make_depth_capture(cap, n_frames=10)
+    pacer = _build_app_state(cap, replay_fps=20.0)
+
+    # Stand in for a lossy link: the reader thread owns these counters at
+    # runtime, so seed them directly rather than trying to corrupt a capture.
+    web.app.state.stats.seq_gaps = 7
+    web.app.state.stats.dropped_flags = 3
+
+    port = _free_port()
+    config = uvicorn.Config(web.app, host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=lambda: asyncio.run(server.serve()), daemon=True)
+    thread.start()
+
+    deadline = time.time() + 10.0
+    while not server.started and time.time() < deadline:
+        time.sleep(0.02)
+    assert server.started, "uvicorn server did not start"
+
+    async def first_metrics():
+        async with websockets.connect(f"ws://127.0.0.1:{port}/ws") as ws:
+            pacer.paused.clear()
+            while True:
+                m = await asyncio.wait_for(ws.recv(), timeout=8.0)
+                if isinstance(m, str):
+                    msg = json.loads(m)
+                    if msg.get("type") == "metrics":
+                        return msg
+
+    try:
+        msg = asyncio.run(asyncio.wait_for(first_metrics(), timeout=20.0))
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10.0)
+
+    assert msg["gaps"] == 7
+    assert msg["drops"] == 3
+
+
 # =============================================================================
 # 9. Recording & playback (Web Phase 3)
 # =============================================================================
@@ -2657,3 +2711,80 @@ def test_root_redirects_to_static_index():
     resp = asyncio.run(web.root_redirect())
     assert resp.status_code == 307
     assert resp.headers["location"] == "/static/index.html"
+
+
+# =============================================================================
+# 13. Admin endpoints -- FileHub bridge mode + server restart (2026-07-31)
+# =============================================================================
+
+def test_bridge_mode_reports_missing_script(tmp_path):
+    """A missing script must come back as a readable reason, not an exception:
+    the button's whole job is to say what happened."""
+    res = web.run_bridge_mode(script=tmp_path / "nope.sh")
+    assert res["ok"] is False
+    assert "not found" in res["error"]
+    assert res["returncode"] is None
+
+
+def test_bridge_mode_captures_output_and_success(tmp_path):
+    script = tmp_path / "fake-bridge.sh"
+    script.write_text("#!/bin/bash\necho 'bridge applied'\nexit 0\n")
+    script.chmod(0o755)
+    res = web.run_bridge_mode(script=script)
+    assert res["ok"] is True
+    assert res["returncode"] == 0
+    assert "bridge applied" in res["output"]
+    assert res["error"] is None
+
+
+def test_bridge_mode_reports_nonzero_exit_as_failure(tmp_path):
+    """A script that runs but fails is NOT ok -- an earlier draft keyed success
+    off "did it execute", which would report a dead router as a fixed one."""
+    script = tmp_path / "fail.sh"
+    script.write_text("#!/bin/bash\necho 'cannot reach router' >&2\nexit 1\n")
+    script.chmod(0o755)
+    res = web.run_bridge_mode(script=script)
+    assert res["ok"] is False
+    assert res["returncode"] == 1
+    assert "cannot reach router" in res["output"]
+
+
+def test_bridge_mode_times_out_without_hanging(tmp_path):
+    script = tmp_path / "hang.sh"
+    script.write_text("#!/bin/bash\nsleep 30\n")
+    script.chmod(0o755)
+    res = web.run_bridge_mode(script=script, timeout_s=0.5)
+    assert res["ok"] is False
+    assert "did not finish" in res["error"]
+
+
+def test_restart_argv_uses_module_form_not_argv0():
+    import sys
+    """Under `python -m roomscan.web`, sys.argv[0] is the expanded path to
+    web.py; re-running that executes the module outside its package and its
+    relative imports blow up. The relaunch must use -m."""
+    argv = web.restart_argv()
+    assert argv[0] == sys.executable
+    assert argv[1:3] == ["-m", "roomscan.web"]
+    assert not argv[1].endswith("web.py")
+
+
+def test_restart_command_defers_and_execs():
+    """The child must outlive this process and bind only after the port frees,
+    so it sleeps first and `exec`s (no lingering sh in the process tree)."""
+    cmd = web.restart_command(delay_s=2.0)
+    assert cmd[:2] == ["sh", "-c"]
+    assert cmd[2].startswith("sleep 2;")
+    assert " exec " in cmd[2]
+    assert "-m roomscan.web" in cmd[2]
+
+
+def test_admin_endpoints_are_post_only():
+    """POST-only so a prefetch, crawler, or browser refresh can never restart
+    the server or reconfigure the router."""
+    paths = {"/api/bridge-mode", "/api/restart"}
+    found = {r.path: r.methods for r in web.app.routes if getattr(r, "path", "") in paths}
+    assert set(found) == paths
+    for path, methods in found.items():
+        assert "POST" in methods, path
+        assert "GET" not in methods, path

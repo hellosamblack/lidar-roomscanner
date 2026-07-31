@@ -24,4 +24,9 @@ bool ETH_SendFrame_Gather(const uint8_t *hdr, uint32_t hdr_len, const uint8_t *p
  * inside ETH_Process, also on the main loop -- no ISR concurrency). */
 uint32_t ETH_ReadCommands(uint8_t *dst, uint32_t max);
 
+/* Frames discarded by the paced TX queue because the link/target went away
+ * before they could be sent. Monotonic; 0 on a healthy link. Distinct from
+ * host-side seq gaps, which also count datagrams lost in the network. */
+uint32_t ETH_TxDroppedFrames(void);
+
 #endif

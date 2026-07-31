@@ -144,6 +144,20 @@
         .app-title { font-size: 1.05rem; font-weight: 600; letter-spacing: -0.02em; }
         #mode-switch-slot { flex: 1; }   /* reserved for the Real-Time/SLAM switch */
 
+        /* Maintenance actions: deliberately small and low-contrast so they read
+           as chrome, not as part of the instrument's primary controls. */
+        .topbar-admin { display: flex; gap: 8px; }
+        .topbar-btn {
+            padding: 5px 11px; font-size: 0.75rem; font-weight: 500;
+            color: var(--text-muted); border-radius: 6px;
+        }
+        .topbar-btn:hover { color: var(--text-main); }
+        .topbar-btn.busy { opacity: 0.5; cursor: progress; }
+        .topbar-btn:disabled, .topbar-btn:disabled:hover {
+            opacity: 0.4; cursor: default; color: var(--text-muted);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
         .status-indicator {
             display: flex; align-items: center; gap: 8px;
             font-size: 0.85rem; font-weight: 500; color: var(--text-muted);
@@ -569,6 +583,22 @@
 
         /* ---- record-name modal (post-recording naming prompt) ---- */
         #record-name-modal .modal { width: min(440px, 96vw); }
+
+        /* ---- bridge-mode confirm ---- */
+        #bridge-modal .modal { width: min(520px, 96vw); }
+        .bridge-steps {
+            margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 5px;
+            font-size: 0.78rem; line-height: 1.45; color: var(--text-muted);
+        }
+        .bridge-steps strong { color: var(--text-main); font-weight: 600; }
+        .bridge-output {
+            margin: 0; padding: 10px; max-height: 220px; overflow: auto;
+            background: rgba(0, 0, 0, 0.35); border: 1px solid var(--panel-border);
+            border-radius: 6px; font-size: 0.7rem; line-height: 1.4;
+            white-space: pre-wrap; word-break: break-word; color: var(--text-muted);
+        }
+        .bridge-output.ok { color: var(--success); }
+        .bridge-output.err { color: var(--danger); }
         .record-name-row { display: flex; align-items: center; gap: 8px; }
         .record-name-row input[type="text"] {
             flex: 1; min-width: 0;
@@ -726,6 +756,15 @@
                 <button data-mode="realtime" class="active" title="Live point-cloud view from the device">Real-Time</button>
                 <button data-mode="slam" title="3D mapping mode — reconstructs a mesh from the stream">SLAM</button>
             </div>
+        </div>
+        <!-- Owner maintenance actions. Both POST to /api/*; neither is part of
+             the /ws protocol. Bridge Mode opens a confirm modal because it is
+             only step 3 of a 4-step physical sequence (see the modal body). -->
+        <div class="topbar-admin">
+            <button id="btn-bridge" class="topbar-btn"
+                    title="Re-apply transparent bridge mode on the RavPower FileHub">Bridge Mode</button>
+            <button id="btn-restart" class="topbar-btn"
+                    title="Relaunch the roomscan-web server process">Restart Server</button>
         </div>
         <div class="status-indicator">
             <span id="conn-text">Offline</span>
@@ -1211,6 +1250,37 @@ cover the whole sphere from this viewpoint, and a gap behind you still has to be
                 <div class="btn-row">
                     <button id="record-name-skip">Skip</button>
                     <button id="record-name-save" class="primary">Save</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bridge-mode confirm. The script is only step 3 of a physical sequence,
+         and running it out of order makes the FileHub treat its LAN port as
+         WAN -- so the ordered steps are stated here rather than firing on a
+         single click. -->
+    <div id="bridge-modal" class="modal-backdrop hidden">
+        <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="bridge-title">
+            <div class="modal__header">
+                <h2 class="modal__title" id="bridge-title">FileHub Bridge Mode</h2>
+                <button id="bridge-close" class="modal__close" title="Cancel (Esc)">&times;</button>
+            </div>
+            <div class="modal__body">
+                <p class="modal__intro">
+                    This runs <strong>step 3 only</strong>. The FileHub treats its port as
+                    <strong>WAN</strong> if these are done out of order, so confirm the first
+                    two are already complete:
+                </p>
+                <ol class="bridge-steps">
+                    <li>Unplug the Ethernet cable from the FileHub.</li>
+                    <li>Power-cycle the FileHub and wait for it to finish booting.</li>
+                    <li><strong>Run the bridge script</strong> &larr; this button.</li>
+                    <li>Replug the Ethernet cable.</li>
+                </ol>
+                <pre class="bridge-output hidden" id="bridge-output"></pre>
+                <div class="btn-row">
+                    <button id="bridge-cancel">Cancel</button>
+                    <button id="bridge-run" class="primary">Run step 3</button>
                 </div>
             </div>
         </div>
