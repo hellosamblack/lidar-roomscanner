@@ -126,6 +126,22 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
   `go_live` that no-ops on a `--replay` server, and a record that silently refuses in replay. Each
   returned success. If a tool sends a request, check the resulting state actually changed.
 
+- **Prove a regression test by reintroducing the defect — and check the injection landed.** A test
+  written after the fix has never been seen to fail, so it is an assertion about nothing until you
+  put the bug back. Two failure modes, both hit on 2026-07-31: an injection whose anchor text didn't
+  match left the test passing, which is indistinguishable from a weak test; and an injection that
+  *did* apply left the test still passing, correctly revealing the fix had **no** coverage at all
+  (`DetailedSlamPreset.fingerprint`). So assert the edit applied (`assert s.count(old) == 1`)
+  separately from the pytest result — only then does green-after-restore mean anything.
+- **Verify a backup before the step that needs it, and never at a guessable path.** Restoring a file
+  from `/tmp/<name>.bak` overwrote uncommitted work with *another session's* leftover copy: the
+  backup `cp` had silently failed (the Bash cwd had drifted, so the repo-relative path missed) while
+  the restore `cp` succeeded against the pre-existing file. `set -e` doesn't cover a failing command
+  in a compound line. Use `mktemp`, gate on `test -s`, use absolute paths in any script that mutates
+  files, and prefer git (`git checkout HEAD -- <f>`, a scratch commit, `git diff > patch`) over an
+  ad-hoc backup — in a shared checkout the obvious `/tmp` name is not yours. Commit valuable
+  uncommitted work *before* experimenting on it.
+
 - **Do not write down a mechanism you have not tested.** BUG-035 shipped with the explanation "the
   VoxelBlockGrid pre-allocates and does not grow", which was never checked and is false — a CUDA grid
   rehashes 40,000 → 80,000 at 99.2% load. The *effect* (560 lost frames at 40k vs 11 at 120k) and the
