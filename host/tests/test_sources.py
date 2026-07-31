@@ -342,3 +342,108 @@ def test_pump_leaves_inactive_recorder_untouched_when_not_started(tmp_path):
     frames = list(pump(FileSource(src_file), StreamDecoder(), recorder=rec))
     assert len(frames) == 2
     assert not rec.active   # pump never called start(); write() was a no-op
+
+
+# --- UdpSource fragment reassembly: order-independent, and counted ----------
+#
+# The device splits a frame into 1400-byte fragments carrying
+# {u32 seq, u8 frag_idx, u8 total_frags}. Reassembly used to require
+# frag_idx == expected and append, so a REORDERED datagram destroyed the frame
+# exactly like a lost one -- and silently. These pin the fix.
+
+def _frag(seq: int, idx: int, total: int, payload: bytes) -> bytes:
+    return struct.pack("<IBB", seq, idx, total) + payload
+
+
+class _ScriptedSocket:
+    """Feeds a fixed list of datagrams to UdpSource.read(), then times out."""
+    def __init__(self, datagrams):
+        self._queue = list(datagrams)
+
+    def recvfrom(self, n):
+        if not self._queue:
+            raise socket.timeout()
+        return self._queue.pop(0), ("10.0.0.9", 5000)
+
+    def sendto(self, *a, **k): pass
+    def close(self): pass
+    def setsockopt(self, *a, **k): pass
+    def settimeout(self, *a, **k): pass
+
+
+def _udp_with(datagrams):
+    src = UdpSource(port=0, zeroconf_factory=_FakeZeroconf)
+    src.sock.close()
+    src.sock = _ScriptedSocket(datagrams)
+    src._maybe_keepalive = lambda: None   # no wake traffic in tests
+    return src
+
+
+def _drain(src, n_reads):
+    return [r for r in (src.read() for _ in range(n_reads)) if r]
+
+
+def test_reassembly_accepts_out_of_order_fragments():
+    """The regression that motivated this: fragments 0,2,1 must still yield the
+    frame. Under the old append-if-expected logic this returned nothing at all
+    and the frame was lost -- for a reorder, not a loss."""
+    body = [b"A" * 1400, b"B" * 1400, b"C" * 20]
+    src = _udp_with([_frag(5, 0, 3, body[0]),
+                     _frag(5, 2, 3, body[2]),
+                     _frag(5, 1, 3, body[1])])
+    try:
+        assert _drain(src, 3) == [b"".join(body)]
+        assert src.frags_reordered == 1     # frag 1 arrived after frag 2
+        assert src.frames_incomplete == 0   # nothing was actually lost
+    finally:
+        src.close()
+
+
+def test_reassembly_still_handles_in_order_fragments():
+    body = [b"x" * 1400, b"y" * 7]
+    src = _udp_with([_frag(1, 0, 2, body[0]), _frag(1, 1, 2, body[1])])
+    try:
+        assert _drain(src, 2) == [b"".join(body)]
+        assert src.frags_reordered == 0
+    finally:
+        src.close()
+
+
+def test_reassembly_counts_a_genuinely_lost_fragment():
+    """A hole that never fills must be COUNTED, not just silently dropped --
+    otherwise transport loss is invisible (the frame never reaches the decoder,
+    so the only downstream trace is a header seq gap)."""
+    src = _udp_with([_frag(7, 0, 3, b"a" * 1400),
+                     _frag(7, 2, 3, b"c" * 10),        # frag 1 never arrives
+                     _frag(8, 0, 1, b"next frame")])
+    try:
+        assert _drain(src, 3) == [b"next frame"]
+        assert src.frames_incomplete == 1
+        assert src.frags_lost == 1
+    finally:
+        src.close()
+
+
+def test_reassembly_ignores_duplicate_fragment():
+    src = _udp_with([_frag(3, 0, 2, b"p" * 1400),
+                     _frag(3, 0, 2, b"p" * 1400),   # echo / retransmit
+                     _frag(3, 1, 2, b"q" * 5)])
+    try:
+        assert _drain(src, 3) == [b"p" * 1400 + b"q" * 5]
+        assert src.frags_duplicate == 1
+    finally:
+        src.close()
+
+
+def test_reassembly_rejects_inconsistent_total_frags():
+    """Corrupt framing must not resize the frame mid-flight and silently
+    truncate it."""
+    src = _udp_with([_frag(4, 0, 3, b"a" * 1400),
+                     _frag(4, 1, 9, b"b" * 1400),   # disagrees with the seq
+                     _frag(4, 1, 3, b"b" * 1400),
+                     _frag(4, 2, 3, b"c" * 3)])
+    try:
+        assert _drain(src, 4) == [b"a" * 1400 + b"b" * 1400 + b"c" * 3]
+        assert src.frags_invalid == 1
+    finally:
+        src.close()

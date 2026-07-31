@@ -53,6 +53,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-039 | fixed   | host/sensors  | `imufusion._correct_yaw` measured heading error about **body Z** on a body frame whose X is Up — 3.76° from gimbal lock, giving 1.69° mean heading error that loop gain could not fix; replaced by a world-Z swing-twist term (2.218° → 0.053° p95, bit-identical at level attitudes). Filter still gated off |
 | BUG-040 | fixed   | host/web      | The web UI's Drops/Gaps HUD rows were structurally pinned at 0 — `web.py` read `MetricsSnapshot.drops/gaps` (dataclass default 0) and nothing ever merged the reader's `Stats`; only the deprecated `panel.py` did. Since a lost UDP fragment makes the host discard the whole frame, a seq gap is the ONLY evidence of transport loss, so the primary UI could not see packet loss at all |
 | BUG-041 | fixed   | firmware/eth  | `ETH_SendFrame_Gather` burst all 11 fragments of a depth frame back-to-back into an 8-deep TX descriptor ring, and **abandoned the frame mid-burst** on any `udp_sendto`/`pbuf_alloc` failure — the already-sent fragments then being guaranteed waste. Replaced by a slot-FIFO pacer that meters fragments from `ETH_Process()` and retries rather than abandoning |
+| BUG-042 | fixed   | host/sources  | UDP reassembly required `frag_idx == expected` and appended, so a merely **reordered** datagram — which UDP explicitly permits — discarded the whole 14.8 KB frame exactly like a lost one, and counted nothing. Now reassembled into indexed slots, with counters separating reorder / loss / duplicate / invalid |
 
 ---
 
@@ -1875,3 +1876,47 @@ bytes skipped, no anomalies**, device rate 30.303 Hz (identical to the pre-flash
 RavPower FileHub was powered on but not bridged), so there was no loss to remove — the soak proves
 no regression, not benefit. Re-measure with the Wi-Fi bridge in path, now that BUG-040 makes the
 Gaps row readable.
+
+---
+
+## BUG-042 — A reordered UDP datagram destroyed a whole frame, silently
+
+- **Status:** **fixed** 2026-07-31 · **Reported:** 2026-07-31 (found while costing transport compression) · **Area:** host/sources
+- **Where:** `host/src/roomscan/sources.py` `UdpSource.read`
+
+A depth frame is 11 UDP datagrams. Reassembly accepted a fragment only when
+`frag_idx == self._expected_frag` and then *appended* it, so position was implied by arrival order.
+UDP guarantees neither ordering nor delivery — a reordered pair therefore discarded the entire frame
+just as surely as a lost datagram would, and nothing counted it. The frame never reached the decoder,
+so the only downstream trace was a header sequence gap, which BUG-040 had left unwired in the web UI.
+Net effect: the two most likely transport faults were both invisible, and one of them was
+self-inflicted.
+
+**Fix:** reassemble into indexed slots — fragment *k* always lands at index *k*, and the frame
+completes when the last hole fills, in any arrival order. Joining slots `0..n-1` reconstructs the
+frame exactly because the sender chunks at a fixed 1400 B with only the tail short, so the index
+alone determines position. Added `frames_incomplete` / `frags_lost` (real loss),
+`frags_reordered` (recovered, previously fatal), `frags_duplicate` and `frags_invalid`, which
+separate causes that used to be indistinguishable. A fragment whose `total_frags` disagrees with the
+rest of its seq is rejected rather than resizing the frame mid-flight.
+
+Safe because the firmware's paced TX (BUG-041) drains frames strictly in order, one at a time, so
+fragments of two seqs never interleave — a single in-flight frame buffer is sufficient.
+
+**Tests:** `test_reassembly_*` in `host/tests/test_sources.py`. Reintroducing the strict-order check
+fails `accepts_out_of_order_fragments` and `counts_a_genuinely_lost_fragment`.
+
+**Related, same commit — CRC32 made table-driven.** `rs_crc32` (`firmware/scanner-stream/Src/rs_protocol.c`)
+was table-free bit-serial: 8 shift/xor iterations per byte over header+payload for every frame
+(~119,000 inner iterations at 14,874 B). Replaced with a 16-entry nibble table (64 B). Measured
+**2.21× faster** on x86 -O2 (125.2 → 56.7 µs/frame) — note this is *below* the ~5× an earlier
+estimate assumed, so the on-target saving is likely ~1.2–1.8 ms/frame, not 2.2–3.2. Bit-exactness
+verified natively over 3,857 cases (all single bytes, all lengths 0–600, 3,000 full-frame trials
+using the firmware's incremental `rs_crc32(rs_crc32(0,hdr,32), payload, …)` seeding, plus the
+standard `CRC32("123456789") == 0xCBF43926` vector), then confirmed on-target: 13,434 frames
+streamed with **0 CRC failures** — a single divergent bit would have failed every frame.
+
+The loop is sensor-rate-limited (30.3 Hz) and spends ~20 ms of each 33 ms period in
+`platform_wait_for_event`'s spin, so this buys **headroom, not throughput** — there is no fps change
+to observe. It is worth having because it is the enabling margin for on-MCU compression, where
+compressing before the CRC also shrinks what the CRC must cover.

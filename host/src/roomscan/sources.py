@@ -95,10 +95,23 @@ class UdpSource:
         self.target_ip = None
         self.target_port = 5000
 
-        self._reassembly_buffer = bytearray()
+        # Fragment reassembly (see read()). One frame in flight at a time: the
+        # firmware's paced TX drains frames strictly in order, one at a time, so
+        # fragments of two different seqs never interleave on the wire.
         self._current_seq = None
-        self._expected_frag = 0
         self._total_frags = 0
+        self._frags: list[bytes | None] = []
+        self._frag_count = 0
+        self._max_frag_seen = -1
+
+        # Transport health. `frames_incomplete` is the one that matters: it is
+        # the count of frames abandoned with holes, i.e. actual datagram loss.
+        # The others separate the causes that used to look identical.
+        self.frames_incomplete = 0   # frames dropped with >=1 fragment missing
+        self.frags_lost = 0          # fragments missing from those frames
+        self.frags_reordered = 0     # arrived out of order but still usable
+        self.frags_duplicate = 0
+        self.frags_invalid = 0       # bad index / inconsistent total_frags
 
         # Keepalive: the board unicasts frames to whichever host last sent it a
         # datagram (`target_ip`, set in its udp_recv callback), and only clears
@@ -174,6 +187,18 @@ class UdpSource:
             except Exception:
                 pass
 
+    def _retire_partial_frame(self) -> None:
+        """Account for a frame abandoned because a new seq started.
+
+        The sender never interleaves frames, so the arrival of a different seq
+        is proof the previous one will never complete. Counting it here is what
+        makes datagram loss *visible* -- it is otherwise inferable only from a
+        header seq gap downstream.
+        """
+        if self._frag_count and self._frag_count < self._total_frags:
+            self.frames_incomplete += 1
+            self.frags_lost += self._total_frags - self._frag_count
+
     def read(self) -> bytes:
         self._maybe_keepalive()
         try:
@@ -196,20 +221,55 @@ class UdpSource:
 
             seq_num, frag_idx, total_frags = struct.unpack("<IBB", data[:6])
             payload = data[6:]
-            
+
+            # Reassemble into INDEXED SLOTS, not an append-in-order buffer.
+            #
+            # This used to require `frag_idx == self._expected_frag` and append,
+            # so a merely REORDERED datagram -- which UDP explicitly permits and
+            # never has to explain -- discarded the whole 14.8 KB frame just as
+            # surely as a lost one, and silently. Nothing counted it: the frame
+            # simply never reached the decoder, so the only trace was a header
+            # seq gap (which BUG-040 had also left unwired).
+            #
+            # Slots make ordering irrelevant: fragment k always lands at index k
+            # and the frame completes when the last hole fills, whatever order
+            # they arrive in. Joining slots 0..n-1 reconstructs the frame exactly
+            # because the sender chunks at a fixed 1400 B (only the tail is
+            # short), so index alone determines position.
             if seq_num != self._current_seq:
+                self._retire_partial_frame()
                 self._current_seq = seq_num
-                self._reassembly_buffer = bytearray()
-                self._expected_frag = 0
                 self._total_frags = total_frags
-                
-            if frag_idx == self._expected_frag:
-                self._reassembly_buffer.extend(payload)
-                self._expected_frag += 1
-                if self._expected_frag == self._total_frags:
-                    res = bytes(self._reassembly_buffer)
-                    self._reassembly_buffer = bytearray()
-                    return res
+                self._frags = [None] * total_frags
+                self._frag_count = 0
+                self._max_frag_seen = -1
+
+            # A fragment whose total_frags disagrees with the rest of its seq is
+            # corrupt framing, not a reorder -- drop it rather than resizing and
+            # silently truncating a frame.
+            if total_frags != self._total_frags or not (0 <= frag_idx < total_frags):
+                self.frags_invalid += 1
+                return b""
+            if self._frags[frag_idx] is not None:
+                self.frags_duplicate += 1   # retransmit or a network echo
+                return b""
+
+            # Purely diagnostic: counts fragments arriving before one already
+            # missing, i.e. genuine reordering. Distinguishes "the network
+            # shuffled it" from "the network lost it" -- previously identical.
+            if frag_idx < self._max_frag_seen:
+                self.frags_reordered += 1
+            self._max_frag_seen = max(self._max_frag_seen, frag_idx)
+
+            self._frags[frag_idx] = payload
+            self._frag_count += 1
+            if self._frag_count == self._total_frags:
+                res = b"".join(self._frags)
+                self._frags = []
+                self._current_seq = None
+                self._total_frags = 0
+                self._frag_count = 0
+                return res
             return b""
         except socket.timeout:
             return b""

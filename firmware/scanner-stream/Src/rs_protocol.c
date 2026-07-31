@@ -17,13 +17,38 @@ static void put_u64(uint8_t *p, uint64_t v) {
     rs_put_u32(p + 4, (uint32_t)(v >> 32));
 }
 
+/* CRC-32 (IEEE, reflected, poly 0xEDB88320) -- NIBBLE table, 16 entries / 64 B.
+ *
+ * This was a table-free bit-serial loop: 8 shift/xor iterations per byte, run
+ * over header+payload for EVERY frame. At 14,874 bytes/frame that is ~119,000
+ * inner iterations, an estimated 2.4-3.6 ms of the 33 ms frame period -- the
+ * single largest piece of arithmetic in the acquisition loop, and pure
+ * overhead. Two table lookups per byte replace the eight iterations.
+ *
+ * A nibble table rather than the usual 256-entry byte table because 64 bytes is
+ * small enough to verify by eye, and the byte table's extra ~2x buys speed the
+ * loop does not need. Entries are generated, not transcribed:
+ *     t[n] = n folded 4 times through (c>>1) ^ (poly if c&1)
+ *
+ * BIT-EXACT with the previous implementation by construction -- same
+ * polynomial, same reflection, same pre/post inversion. That is not taken on
+ * faith: the host verifies this CRC on every frame it receives, so any
+ * divergence shows up immediately as a 100% CRC-failure rate rather than as a
+ * subtle drift.
+ */
+static const uint32_t rs_crc32_nibble[16] = {
+    0x00000000u, 0x1DB71064u, 0x3B6E20C8u, 0x26D930ACu,
+    0x76DC4190u, 0x6B6B51F4u, 0x4DB26158u, 0x5005713Cu,
+    0xEDB88320u, 0xF00F9344u, 0xD6D6A3E8u, 0xCB61B38Cu,
+    0x9B64C2B0u, 0x86D3D2D4u, 0xA00AE278u, 0xBDBDF21Cu,
+};
+
 uint32_t rs_crc32(uint32_t crc, const uint8_t *data, size_t len) {
     crc = ~crc;
     while (len--) {
         crc ^= *data++;
-        for (int k = 0; k < 8; k++) {
-            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
-        }
+        crc = (crc >> 4) ^ rs_crc32_nibble[crc & 0x0Fu];
+        crc = (crc >> 4) ^ rs_crc32_nibble[crc & 0x0Fu];
     }
     return ~crc;
 }
