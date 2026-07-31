@@ -133,6 +133,40 @@ responding entirely** — no ping, no command ACK, `device_hz: None`, though SWD
 `ping` → `OK applied=1`, and 614 recorded frames with 0 CRC failures. Cause of the original hang not
 investigated — worth watching for a recurrence.
 
+## Data-collection queue — owner-collected captures (2026-07-31)
+
+Everything on this roadmap and in `BUGS.md` that is blocked on **data only the owner can collect**.
+Stable IDs: refer to these as **DC-A … DC-I** in later sessions. Update the Status column when one
+lands; do not renumber.
+
+**Session prep for all of them.** Restart `roomscan-web` first — a long-lived server pins the code
+from whenever it *started*, which is what faked the 2026-07-31 "SLAM gave up" (see 6.D). Record
+through the web UI's Record button (`/ws {"type":"record"}`), **not** `capture.py --udp` — both bind
+the device stream. Stay **off the tripod** for anything touching heading (BUG-034: +15–27 µT).
+Ceiling bookends are welcome when a capture happens to have them and are **never** a required
+protocol (walking to park the device puts the operator in the FOV — owner, 2026-07-30).
+
+| # | Capture | Unblocks | Protocol | Acceptance gate | Status |
+|---|---|---|---|---|---|
+| **DC-A** | **Brisk-motion handheld scan** — one room, 60–90 s | Phase 6.D: BUG-036's escalating ICP retry has **never run in the field** (the run that exposed it was executing pre-fix code). Also probes the open "no relocalization" hole | Normal-pace sweep with 3–4 deliberate **fast** whips (~1.5 m/s ≈ 50 mm between frames, vs the 16.9 mm median that BUG-036 measured). Don't be gentle — the point is to trigger the retry | 0 CRC, stream 9 present. On replay: `tracking_stats` shows **escalations > 0**, `died == false`, no frozen-translation segment in the `.tum` | ⬜ open |
+| **DC-B** | **Multi-room closed loop ×2** — 2–3 rooms or a corridor circuit, 3–5 min each, two takes of the *same* route | Phase 6.D items 3–4, the loop-closure go/no-go. The baseline is single-room only (~3% over 24 m) and the paired 95%-CI gate has only the two coffee-room circuits to score. Loop closure is supposed to earn its keep on **multi-room** trajectories — nothing in `captures/` tests that | Start parked on a marked pose, walk the route, return to the **same** marked pose. Revisit at least one area mid-route (that is what a pose-proximity edge needs). Two takes so the gate is paired | 0 lost frames, stream 9, byte-clean. ~135 MB per 5 min | ⬜ open |
+| **DC-C** | **Tracking-loss stress scan** — one room, ~90 s | Relocalization (Phase 6.D, explicitly open: the retry survives a bad *frame*, not a bad *second*). No capture contains a real tracking-kill event | Mid-scan, kill tracking deliberately 2–3×: palm over the sensor ~2 s, or point at a blank surface <20 cm away — then **return to already-mapped geometry** and continue | Byte-clean; the kill events identifiable on replay. This is a fixture, not a good scan — it should look bad | ⬜ open |
+| **DC-D** | **Flat-field pan** — 20 s over a uniform matte surface | Phase 2.5 follow-up: reflectance carries ~18% per-zone FPN and the correction is **built and shipped-disabled** waiting only on this (`docs/flatfield-calibration.md`) | Blank painted wall / foam board / grey card at ~0.5–1 m, roughly perpendicular, **slowly panning the whole time**. A static capture is invalid — it bakes scene texture into the "correction" | ≥100 panned frames; `build_flatfield` residual in the low tens of percent, gains comfortably inside [0.5, 1.6]. Gains near the [0.33, 3.0] clip bounds ⇒ recapture | ⬜ open |
+| **DC-E** | **Braced fixed-heading tilt sweep** — ~2 min | `docs/superpowers/plans/2026-07-29-orientation-resume.md` §4.6: BUG-030's closure proved the calibration's **magnitude**, not its **direction**. An ellipsoid fit is ambiguous up to a rotation (DT0103) — every sample on a perfect sphere while the field vector is systematically rotated. Bounded at ~2.5° by the near-spherical soft iron; measured at nothing | Hand-held, off the tripod. Pick **one fixed compass bearing** and keep pointing at it. Sweep tilt level → 45° → vertical, **holding each ~15 s**. Two cycles | `mag_check` tilt table flat (expected) **and** `absolute_heading` agreeing across every hold. Disagreement ⇒ implement DT0103's accelerometer-assisted fit | ⬜ open |
+| **DC-F** | **Controlled pan set** — 3 takes × ~60 s | The two claims currently inferred from stationary data plus arithmetic: applying the measured **+7.76 ms quat phase lead** (on the wire since BUG-031, nothing consumes it — now the largest motion-error term), and the `imufusion` A/B (built, gated off, no capture carries orientation ground truth). Also resume-doc §4.5 | Brace against a repeatable start (a corner, taped marks), pan to a repeatable end, hold. One take each at roughly **slow ~20 °/s / medium ~50 °/s / fast ~100 °/s**. 10 s stationary at both ends of every take | Endpoints repeatable enough that A→B is the same rotation across takes; 0 CRC; stream 11 present. The stationary bookends give the noise floor for free | ⬜ open |
+| **DC-G** | **Recorded magnetometer tumble** — 30–45 s | Magcal regression fixtures. The tumble that closed BUG-030 went straight through the modal, so **no capture contains one** — covered-shell tests still use a synthetic fixture (`tilt_sweep_20260729.bin` fills 2 of 92 cells, `web_20260729_061440.bin` fills 6) | Open the calibration modal, hit Record, free-tumble to good coverage, stop | ≥60 of 92 shell cells covered. Low priority — test data, not a decision | ⬜ open |
+| **DC-H** | **USB CDC connect transient** — 5 × 15 s | **BUG-005**: fix implemented 2026-07-30, **the code path has never executed**. `CAFE:4001` does not enumerate on the headless host (USB_USER is powered from the battery bridge) and `/dev/ttyACM*` return `root:root` mode 0 after every replug | Needs the board's USB_USER cable into a machine that can open the port (udev rule or run as root). Fresh connect, `host/tools/capture.py --seconds 15`, five times | `capture_analyze` reports **0** CRC failures in the connect region (today: exactly 1) and the first frame after connect is CALIB | ⬜ open |
+| **DC-I** | **Phase 7 seed set** | COLMAP pose priors + depth-regularized 3DGS | **Do not collect yet** — needs a rigid phone/webcam mount and a hand-eye extrinsic calibration, neither of which is designed. Listed so it is not a surprise when Phase 6 closes | — | ⬜ blocked on design |
+
+**Explicitly NOT owner-data-blocked** (do not add these to the queue): compression go/no-go and the
+pacer measurement (Phase 5.5 — the link measures zero loss over ~567k frames and loss must **not** be
+manufactured); Detailed-SLAM iteration calibration and the track-at-10 mm/reconstruct-at-5 mm
+question (6.D item 2 — runs against `coffeeRoomCircuit*.bin`); Allan-variance characterisation
+(`captures/stationary_stream11_20260728_190311.bin`, 900 s, already recorded); SHT40 humidity
+(firmware work gated on a consumer existing). One non-data blocker: 6.D's end-to-end browser/server
+verification needs an agent permission profile that allows local port binding — a settings change,
+not a capture.
+
 ## Phases
 
 ### Phase 0 — ✅ Complete
@@ -955,7 +989,7 @@ channel, barometer as soft 1-DoF Z constraint.
 > ~~**0.150 m over 32.5 m (0.46%)**~~ **0.74 ± 0.19 m over 23.9 m (~3%)** with 0 lost frames — the
 > old figure was a lucky single run over a barometer-inflated path, corrected by BUG-037 — and
 > `captures/coffeeRoomCircuitMnt.bin` is the failure case — see the 6.D block below) and the on-rig flat-field capture
-> (Phase 2.5 follow-up) gating reflectance-quality work.
+> (Phase 2.5 follow-up, **DC-D**) gating reflectance-quality work.
 
 > **Orientation accuracy for handheld use (2026-07-29)** — a full pass on the orientation path,
 > triggered by BUG-027's leftover "beat the fp16 floor" item and then **re-prioritised by the owner's
@@ -968,8 +1002,8 @@ channel, barometer as soft 1-DoF Z constraint.
 > | magnetometer calibration, direction-dependent | up to **~90°** heading error | **fixed 2026-07-30** — owner re-fit, BUG-030 |
 > | LSM tick uncalibrated (2.98% scale) | ~2.7° on a 90° pan | **fixed** — stream 12 `IMU_CAL` |
 > | ToF↔IMU frame-stamp skew | 0.19° → 0.107° → **0.002°** RMS | **fixed 2026-07-30** — stream 13 `IMU_SYNC`, BUG-031 |
-> | stream-9 quat is a batch MEAN, valid +7.8 ms after the frame | **~0.30°** at 38.5 °/s | **measured & on the wire, not yet corrected** — `quat_mid_ticks`, BUG-031 |
-> | fp16 SFLP quantization | 0.018–0.027°/frame | transport shipped (stream 11); fusion built, **not wired in** |
+> | stream-9 quat is a batch MEAN, valid +7.8 ms after the frame | **~0.30°** at 38.5 °/s | **measured & on the wire, not yet corrected** — `quat_mid_ticks`, BUG-031; needs **DC-F** |
+> | fp16 SFLP quantization | 0.018–0.027°/frame | transport shipped (stream 11); fusion built, **not wired in** — the A/B needs **DC-F** |
 >
 > **Shipped:** **stream 11 `RS_STREAM_IMU_RAW`** — 480 Hz verbatim FIFO pass-through (GY 0x01 / XL 0x02 /
 > TIMESTAMP 0x04 / SFLP-gbias 0x16 / SFLP-gravity 0x17, 8-byte records, tag byte rebuilt as
@@ -1063,7 +1097,7 @@ channel, barometer as soft 1-DoF Z constraint.
 > with a 59 µT hard-iron error scores "good" on it while ramping 3.5× across the detrend-free tilt table,
 > so `mag_check` takes the worse of the two. **Still unproven: heading *direction*** (magnitude flatness
 > cannot see DT0103's rotation ambiguity; ~2.5° bound from the near-spherical soft iron) — needs a
-> braced, fixed-compass-heading tilt sweep.
+> braced, fixed-compass-heading tilt sweep: **DC-E**. A recorded tumble fixture is **DC-G**.
 >
 > **Measurement method matters here** — three plausible readings were wrong before the right one
 > emerged; see the `orientation-noise-floor` memory for the five traps (notably: use **p95**, never the
@@ -1211,7 +1245,8 @@ process had been up since Jul 29 and was executing pre-fix code (`block_count = 
 there is still **no relocalization**. Next step is a fresh handheld scan with deliberately brisk
 motion, checking `tracking_stats` / `lost_flags` rather than eyeballing the mesh — a dead run looks
 fine until the trajectory is read. Cheap first pass: replay an existing capture through the fixed
-pipeline before asking the owner to walk a room.
+pipeline before asking the owner to walk a room. That scan is **DC-A** in the data-collection queue;
+**DC-C** (deliberate tracking-kill events) is the fixture for the relocalization gap it leaves.
 
 *Process note worth keeping:* a long-lived server silently pinning old code is its own failure mode.
 Both a stale-process check and the "● Restart Server" top-bar button (2026-07-31) exist because of
@@ -1243,7 +1278,9 @@ loop-closure implementation.
    max ICP iterations **6, 8, 10, and 12** on both `coffeeRoomCircuitNoMnt.bin` and
    `coffeeRoomCircuitMnt.bin`, each with the matched ten innocuous perturbations. Retain the
    measured six-iteration setting unless a higher count passes the same tracking/closure guard.
-3. **Implement and evaluate the offline pose-graph pass.** Build keyframes from offline tracking,
+3. **Implement and evaluate the offline pose-graph pass** (needs **DC-B** — the paired gate below has
+   only the two single-room circuits today, and loop closure is supposed to earn its keep on
+   multi-room trajectories). Build keyframes from offline tracking,
    find non-adjacent pose-proximity revisits, verify candidate edges with strict ICP, globally
    optimize, and re-integrate every raw frame against the optimized/interpolated trajectory before
    exporting the Detailed artifacts. Relocalization remains explicitly out of scope.

@@ -219,7 +219,8 @@
            (.auto-collapsed, applied only to break a dock collision).
            !important because .hud-card .card-body below re-asserts display:flex
            at equal specificity — collapse must win wherever it lands. */
-        .collapsed > .card-body, .auto-collapsed > .card-body { display: none !important; }
+        .collapsed > .card-body, .auto-collapsed > .card-body,
+        .collapsed > .control-group__body, .auto-collapsed > .control-group__body { display: none !important; }
         /* A card with no collapse control of its own says why its body vanished. */
         .hud-card.auto-collapsed::after, #ir-card.auto-collapsed::after {
             content: 'body hidden — window too narrow';
@@ -235,6 +236,7 @@
         }
         .dock > .hud-card { pointer-events: none; }   /* the working #metrics-overlay pattern */
         .hud-card * { pointer-events: none; }         /* and everything inside it (§8.1) */
+        .hud-card .control-group__header { pointer-events: auto !important; } /* allow header click */
         .hud-card .card-body { display: flex; flex-direction: column; gap: 6px; }
 
         .hud-row { display: flex; justify-content: space-between; gap: 16px; font-size: 0.8rem; color: var(--text-muted); }
@@ -405,10 +407,10 @@
         }
         .control-group__header:hover { color: var(--text-main); }
         .control-group__header .chevron { transition: transform 0.2s ease; font-size: 0.7rem; }
-        .control-group.collapsed .chevron { transform: rotate(-90deg); }
+        .control-group.collapsed .chevron, .card.collapsed .chevron { transform: rotate(-90deg); }
         /* min-height:0 + overflow-y lets a group taller than the dock band
            scroll inside itself instead of pushing past the console. */
-        .control-group__body { display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow-y: auto; }
+        .control-group__body { display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow-y: auto; overflow-x: hidden; }
         .control-group.collapsed .control-group__body { display: none; }
 
         .field-label { font-size: 0.7rem; color: var(--text-muted); font-weight: 500; }
@@ -422,6 +424,84 @@
         .debug-section > summary::after { content: ' \25B8'; font-size: 0.6rem; }
         .debug-section[open] > summary::after { content: ' \25BE'; }
         .debug-section__body { display: flex; flex-direction: column; gap: 10px; padding-top: 10px; }
+
+        /* ---- component: control-subgroup (collapsible sub-area inside cards) ---- */
+        .control-subgroup {
+            border-top: 1px solid var(--panel-border);
+            padding-top: 8px;
+            margin-top: 4px;
+            overflow-x: hidden;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .control-subgroup:first-child {
+            border-top: none;
+            padding-top: 0;
+            margin-top: 0;
+        }
+        .control-subgroup > summary {
+            cursor: pointer;
+            list-style: none;
+            font-family: 'Inter', sans-serif;
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 600;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            user-select: none;
+            padding: 2px 0;
+        }
+        .control-subgroup > summary:hover { color: var(--text-main); }
+        .control-subgroup > summary::-webkit-details-marker { display: none; }
+        .control-subgroup > summary .chevron { transition: transform 0.2s ease; font-size: 0.7rem; }
+        .control-subgroup:not([open]) > summary .chevron { transform: rotate(-90deg); }
+        .control-subgroup__body {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding-top: 8px;
+            overflow-x: hidden;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        /* ---- squircle-bar (single horizontal row of collapsed card squircles at top of dock) ---- */
+        .squircle-bar {
+            display: flex; flex-direction: row; align-items: center; gap: 8px; flex-wrap: wrap;
+            width: max-content; max-width: 100%; pointer-events: auto; z-index: 15; margin-bottom: 4px;
+        }
+        .dock--left .squircle-bar { justify-content: flex-start; }
+        .dock--right .squircle-bar { justify-content: flex-end; }
+        .squircle-bar:empty { display: none; }
+        .squircle-btn {
+            width: 42px; height: 42px; padding: 0;
+            border-radius: 12px;
+            background: var(--panel-bg);
+            backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--panel-border);
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+            color: var(--text-muted);
+            cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            pointer-events: auto;
+            flex-shrink: 0;
+        }
+        .squircle-btn:hover {
+            background: rgba(255, 255, 255, 0.14);
+            border-color: rgba(255, 255, 255, 0.3);
+            color: var(--text-main);
+            transform: translateY(-1px);
+            box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+        }
+        .squircle-btn svg { display: block; width: 20px; height: 20px; }
+        .squircle-btn.hidden { display: none !important; }
+
+        /* User-collapsed top-level cards hide their main card container */
+        .dock .card.collapsed { display: none !important; }
 
         /* ---- component: button (default + primary) ---- */
         button {
@@ -725,6 +805,16 @@
             white-space: pre-wrap; word-break: break-word;
         }
 
+        /* Selectable readouts. `body { user-select: none }` above keeps drags on
+           the 3D canvas from painting text selections across the whole overlay,
+           but it also made every diagnostic uncopyable -- you could read a quat
+           or a stack trace and not get it into a bug report. These four are pure
+           read-only text sinks with nothing draggable in them, so they opt back
+           in; the rest of the UI stays unselectable. */
+        #diag-log, .log-console__body, .sensor-block-val, .jitter-table {
+            user-select: text; -webkit-user-select: text; cursor: text;
+        }
+
         /* Toast layer — floats ABOVE the collapsible console (always visible). */
         #toast-layer {
             position: fixed;
@@ -787,23 +877,26 @@
          Blocks flow top-down and wrap into a new column when the band between
          the top bar and the event-log console runs out — never overlapping. -->
     <div id="left-dock" class="dock dock--left">
-        <div id="left-rail" class="card hud-card">
-            <div class="hud-row"><span>View FPS</span><span class="hud-val" id="hud-view-fps">--</span></div>
-            <div class="hud-row"><span>Device FPS</span><span class="hud-val" id="hud-device-fps">--</span></div>
-            <div class="hud-section-label">Streams</div>
-            <div id="hud-streams"></div>
-            <div class="hud-section-label">Link</div>
-            <div class="hud-row"><span>Bandwidth</span><span class="hud-val" id="hud-link-value">--</span></div>
-            <div class="hud-bar"><div class="hud-bar__fill" id="hud-link-fill"></div></div>
-            <div class="hud-row"><span>Drops</span><span class="hud-val" id="hud-drops">0</span></div>
-            <div class="hud-row"><span>Gaps</span><span class="hud-val" id="hud-gaps">0</span></div>
+        <div id="left-rail" class="card hud-card control-group" data-card-id="telemetry">
+            <button class="control-group__header" type="button"><span>Telemetry</span><span class="chevron">&#9662;</span></button>
+            <div class="card-body control-group__body">
+                <div class="hud-row" title="How fast this browser is painting the 3D view. Independent of the sensor — a low number here is a rendering limit, not a data one."><span>View FPS</span><span class="hud-val" id="hud-view-fps">--</span></div>
+                <div class="hud-row" title="How fast depth frames are arriving from the scanner. The sensor's ceiling is about 28 fps."><span>Device FPS</span><span class="hud-val" id="hud-device-fps">--</span></div>
+                <div class="hud-section-label" title="One row per sensor stream: how often it arrives here, and how uneven the spacing is.">Streams</div>
+                <div id="hud-streams"></div>
+                <div class="hud-section-label">Link</div>
+                <div class="hud-row" title="Bytes per second arriving over the USB or Ethernet link, averaged over the last 2 seconds. The bar is scaled to 2 MB/s."><span>Bandwidth</span><span class="hud-val" id="hud-link-value">--</span></div>
+                <div class="hud-bar"><div class="hud-bar__fill" id="hud-link-fill"></div></div>
+                <div class="hud-row" title="Frames on which the scanner admitted it had to throw earlier frames away — it captured faster than the link could carry. A hint, not a count of what was lost; use Gaps for that."><span>Drops</span><span class="hud-val" id="hud-drops">0</span></div>
+                <div class="hud-row" title="Frames that never arrived: missing sequence numbers in the stream. This is the authoritative loss count. Anything above 0 means the link is dropping data."><span>Gaps</span><span class="hud-val" id="hud-gaps">0</span></div>
+            </div>
         </div>
 
         <!-- Sensors (streams 9/10) — gizmo · compass · orientation · environment
              (Web Phase 2), with the diagnostic numerics behind a disclosure. -->
-        <div id="sensors-card" class="card hud-card">
-            <div class="hud-section-label">Sensors</div>
-            <div class="card-body">
+        <div id="sensors-card" class="card hud-card control-group collapsed" data-card-id="sensors">
+            <button class="control-group__header" type="button"><span>Sensors</span><span class="chevron">&#9662;</span></button>
+            <div class="card-body control-group__body">
                 <div class="sensor-widgets">
                     <div class="sensor-widget">
                         <canvas id="sensor-gizmo" width="1" height="1"></canvas>
@@ -912,9 +1005,9 @@
         </div>
 
         <!-- SLAM HUD (web Phase 4): shown only in SLAM mode (slam.js toggles). -->
-        <div id="slam-hud" class="card hud-card hidden">
-            <div class="hud-section-label">SLAM</div>
-            <div class="card-body">
+        <div id="slam-hud" class="card hud-card control-group collapsed hidden" data-card-id="slam-hud">
+            <button class="control-group__header" type="button"><span>SLAM HUD</span><span class="chevron">&#9662;</span></button>
+            <div class="card-body control-group__body">
                 <div class="hud-row"><span>Tracking</span><span class="hud-val" id="slam-track">—</span></div>
                 <div class="hud-row"><span>Fitness</span><span class="hud-val" id="slam-fitness">—</span></div>
                 <div class="hud-row"><span>RMSE</span><span class="hud-val" id="slam-rmse">—</span></div>
@@ -925,14 +1018,15 @@
         </div>
 
         <!-- IR monitor canvas card (§7.3), independently toggleable. -->
-        <div id="ir-card" class="card">
-            <div class="ir-card__header">
+        <div id="ir-card" class="card collapsed" data-card-id="ir-view">
+            <div class="ir-card__header control-group__header">
                 <span class="ir-card__title">IR Monitor</span>
                 <div class="segmented segmented--sm" id="ir-card-colormap">
                     <button data-colormap="gray" title="Grayscale IR intensity">Gray</button>
                     <button data-colormap="turbo" title="Turbo false-color IR heatmap">Turbo</button>
                 </div>
                 <label class="toggle toggle--sm" title="Lock the IR intensity range instead of auto-scaling"><input type="checkbox" id="ir-card-freeze"><span>Freeze</span></label>
+                <span class="chevron">&#9662;</span>
                 <button class="ir-card__close" id="ir-card-close" title="Hide the IR monitor card">&times;</button>
             </div>
             <div id="ir-frame" class="card-body">
@@ -943,7 +1037,7 @@
         <!-- Diagnostic feed (populated by window.__diag). Collapsed by default;
              opens itself on the first error so a failure stays traceable without
              devtools. #diag-log is the text sink the inline head script writes. -->
-        <div id="diag-card" class="card collapsed">
+        <div id="diag-card" class="card collapsed" data-card-id="diag">
             <button class="diag__header" id="diag-toggle" type="button">
                 <span>Diagnostics</span>
                 <span class="diag__count" id="diag-count"></span>
@@ -956,7 +1050,7 @@
     <!-- Right dock (§8.1): interactive control panel — one card per collapsible
          group, wrapping into extra columns (rightwards-anchored) when tall. -->
     <div id="right-rail" class="dock dock--right">
-        <div class="control-group card">
+        <div class="control-group card collapsed" data-card-id="device">
             <button class="control-group__header"><span>Device</span><span class="chevron">&#9662;</span></button>
             <div class="control-group__body">
                 <div class="field-label">Usecase</div>
@@ -977,89 +1071,91 @@
             </div>
         </div>
 
-        <div class="control-group card">
+        <div class="control-group card" data-card-id="view">
             <button class="control-group__header"><span>View</span><span class="chevron">&#9662;</span></button>
             <div class="control-group__body">
-                <!-- Real-time view mode (owner ask, 2026-07-29). The frame swap
-                     happens server-side (web.py `view_rotation`); the client just
-                     locks its camera. Disabled in SLAM mode. -->
-                <div class="field-label">View</div>
-                <div class="segmented" id="seg-view-mode">
-                    <button data-viewmode="world" title="Orbit a gravity-aligned world — the scene stays upright however the board is held">World</button>
-                    <button data-viewmode="fpv" title="Lock the camera to the sensor's own viewpoint — the scene tilts with the board">FPV</button>
-                    <button data-viewmode="mirror" title="Like FPV but flipped left-right, so you can look at yourself; also mirrors the IR pane">Mirror</button>
-                </div>
-                <!-- Camera framing for the SELECTED view mode, as an offset from
-                     the FPV baseline (a camera at the sensor looking down its
-                     boresight: all zeros reproduces it exactly). Persisted per
-                     mode, so each view keeps its own framing. -->
-                <div class="field-label">Camera <span class="hud-val" id="cam-mode-val">World</span></div>
-                <div class="field-label field-label--sub">Distance <span class="hud-val" id="cam-distance-val">4.2 m</span></div>
-                <input type="range" class="slider" id="sl-cam-distance" min="0" max="15" step="0.05" value="4.2" title="How far the camera sits back along the view axis — 0 puts it at the sensor, where the view goes flat for lack of parallax">
-                <div class="field-label field-label--sub">Height <span class="hud-val" id="cam-height-val">2.6 m</span></div>
-                <input type="range" class="slider" id="sl-cam-height" min="-3" max="8" step="0.05" value="2.6" title="How far the camera sits above the sensor">
-                <div class="field-label field-label--sub">Rotation <span class="hud-val" id="cam-rotation-val">0&deg;</span></div>
-                <input type="range" class="slider" id="sl-cam-rotation" min="-180" max="180" step="1" value="0" title="Swing the camera around the aim point — positive moves it to the right">
-                <button id="btn-cam-reset" title="Restore this view mode's default framing">Default Framing</button>
-                <!-- World-only: a slow automatic orbit. Azimuth only — height
-                     and distance stay exactly where the sliders above put them. -->
-                <label class="toggle" title="Slowly circle the scene. World view only; height and distance are unchanged"><input type="checkbox" id="chk-orbit"><span>Auto-orbit (World)</span></label>
-                <div class="field-label field-label--sub">Orbit Speed <span class="hud-val" id="orbit-speed-val">6&deg;/s</span></div>
-                <input type="range" class="slider" id="sl-orbit-speed" min="-60" max="60" step="0.5" value="6" title="Degrees per second; negative reverses direction, 0 parks it">
-                <div class="field-label">Color Mode</div>
-                <div class="segmented" id="seg-color">
-                    <button data-mode="depth" title="Color points by distance from the sensor">Depth</button>
-                    <button data-mode="reflectance" title="Color points by surface reflectance (IR return strength)">Reflect</button>
-                    <button data-mode="confidence" title="Color points by measurement confidence">Confid</button>
-                </div>
-                <div class="field-label">Colormap</div>
-                <div class="segmented" id="seg-view-colormap">
-                    <button data-colormap="turbo" title="Turbo false-color (blue → green → yellow → red)">Turbo</button>
-                    <button data-colormap="gray" title="Grayscale intensity">Gray</button>
-                </div>
-                <div class="field-label">Point Size <span class="hud-val" id="point-size-val">0.025 m @1 m</span></div>
-                <input type="range" class="slider" id="sl-point-size" min="0.005" max="0.15" step="0.005" value="0.025" title="Adjust 3D point size — in Auto this is the size at 1 m of range">
-                <label class="toggle" title="Scale each point with its distance from the sensor, so near and far surfaces get equal coverage"><input type="checkbox" id="chk-point-auto" checked><span>Auto (scale with range)</span></label>
-                <!-- See-through (owner ask, 2026-07-31): geometry hidden behind
-                     other geometry is drawn back over its occluder at this
-                     alpha. Only occluded parts change; 0 is the opaque render. -->
-                <div class="field-label">See-Through <span class="hud-val" id="see-through-val">Off</span></div>
-                <input type="range" class="slider" id="sl-see-through" min="0" max="1" step="0.05" value="0" title="Look through whatever is in front: anything hidden behind nearer geometry is blended back over it at this strength. Applies to points, surface and the SLAM map; 0 is fully opaque">
-                <div class="field-label">Render</div>
-                <div class="segmented" id="seg-render">
-                    <button data-render="points" title="Draw each zone as an individual dot">Points</button>
-                    <button data-render="surface" title="Connect adjacent zones into a triangulated surface">Surface</button>
-                </div>
-                <div id="surface-opts" class="hidden">
-                    <div class="field-label">Surface Mode</div>
-                    <div class="segmented segmented--sm" id="seg-surface-mode">
-                        <button data-smode="grid" title="Relative depth-gap threshold (% of nearer depth)">Grid</button>
-                        <button data-smode="spatial" title="3D Euclidean distance threshold (adaptive to mean depth)">Spatial</button>
+                <!-- Camera & Pose sub-area -->
+                <details class="control-subgroup" data-subgroup-id="view-camera" open>
+                    <summary><span>Camera &amp; Pose</span><span class="chevron">&#9662;</span></summary>
+                    <div class="control-subgroup__body">
+                        <div class="field-label">View Mode</div>
+                        <div class="segmented" id="seg-view-mode">
+                            <button data-viewmode="world" title="Orbit a gravity-aligned world — the scene stays upright however the board is held">World</button>
+                            <button data-viewmode="fpv" title="Lock the camera to the sensor's own viewpoint — the scene tilts with the board">FPV</button>
+                            <button data-viewmode="mirror" title="Like FPV but flipped left-right, so you can look at yourself; also mirrors the IR pane">Mirror</button>
+                        </div>
+                        <div class="field-label">Camera <span class="hud-val" id="cam-mode-val">World</span></div>
+                        <div class="field-label field-label--sub">Distance <span class="hud-val" id="cam-distance-val">4.2 m</span></div>
+                        <input type="range" class="slider" id="sl-cam-distance" min="0" max="15" step="0.05" value="4.2" title="How far the camera sits back along the view axis — 0 puts it at the sensor, where the view goes flat for lack of parallax">
+                        <div class="field-label field-label--sub">Height <span class="hud-val" id="cam-height-val">2.6 m</span></div>
+                        <input type="range" class="slider" id="sl-cam-height" min="-3" max="8" step="0.05" value="2.6" title="How far the camera sits above the sensor">
+                        <div class="field-label field-label--sub">Rotation <span class="hud-val" id="cam-rotation-val">0&deg;</span></div>
+                        <input type="range" class="slider" id="sl-cam-rotation" min="-180" max="180" step="1" value="0" title="Swing the camera around the aim point — positive moves it to the right">
+                        <button id="btn-cam-reset" title="Restore this view mode's default framing">Default Framing</button>
+                        <label class="toggle" title="Slowly circle the scene. World view only; height and distance are unchanged"><input type="checkbox" id="chk-orbit"><span>Auto-orbit (World)</span></label>
+                        <div class="field-label field-label--sub">Orbit Speed <span class="hud-val" id="orbit-speed-val">6&deg;/s</span></div>
+                        <input type="range" class="slider" id="sl-orbit-speed" min="-60" max="60" step="0.5" value="6" title="Degrees per second; negative reverses direction, 0 parks it">
+                        <button id="btn-reset-cam" title="Reset the 3D camera to the default viewpoint">Reset Camera</button>
                     </div>
-                    <div class="field-label">Threshold <span class="hud-val" id="surface-threshold-val">4.0%</span></div>
-                    <input type="range" class="slider" id="sl-surface-threshold" min="0.5" max="15.0" step="0.5" value="4.0" title="Maximum depth gap to connect adjacent zones">
-                </div>
-                <button id="btn-reset-cam" title="Reset the 3D camera to the default viewpoint">Reset Camera</button>
+                </details>
+
+                <!-- Color & Points sub-area -->
+                <details class="control-subgroup" data-subgroup-id="view-color">
+                    <summary><span>Color &amp; Points</span><span class="chevron">&#9662;</span></summary>
+                    <div class="control-subgroup__body">
+                        <div class="field-label">Color Mode</div>
+                        <div class="segmented" id="seg-color">
+                            <button data-mode="depth" title="Color points by distance from the sensor">Depth</button>
+                            <button data-mode="reflectance" title="Color points by surface reflectance (IR return strength)">Reflect</button>
+                            <button data-mode="confidence" title="Color points by measurement confidence">Confid</button>
+                        </div>
+                        <div class="field-label">Colormap</div>
+                        <div class="segmented" id="seg-view-colormap">
+                            <button data-colormap="turbo" title="Turbo false-color (blue → green → yellow → red)">Turbo</button>
+                            <button data-colormap="gray" title="Grayscale intensity">Gray</button>
+                        </div>
+                        <div class="field-label">Point Size <span class="hud-val" id="point-size-val">0.025 m @1 m</span></div>
+                        <input type="range" class="slider" id="sl-point-size" min="0.005" max="0.15" step="0.005" value="0.025" title="Adjust 3D point size — in Auto this is the size at 1 m of range">
+                        <label class="toggle" title="Scale each point with its distance from the sensor, so near and far surfaces get equal coverage"><input type="checkbox" id="chk-point-auto" checked><span>Auto (scale with range)</span></label>
+                        <div class="field-label">See-Through <span class="hud-val" id="see-through-val">Off</span></div>
+                        <input type="range" class="slider" id="sl-see-through" min="0" max="1" step="0.05" value="0" title="Look through whatever is in front: anything hidden behind nearer geometry is blended back over it at this strength. Applies to points, surface and the SLAM map; 0 is fully opaque">
+                    </div>
+                </details>
+
+                <!-- Surface & Mesh sub-area -->
+                <details class="control-subgroup" data-subgroup-id="view-surface">
+                    <summary><span>Surface &amp; Mesh</span><span class="chevron">&#9662;</span></summary>
+                    <div class="control-subgroup__body">
+                        <div class="field-label">Render</div>
+                        <div class="segmented" id="seg-render">
+                            <button data-render="points" title="Draw each zone as an individual dot">Points</button>
+                            <button data-render="surface" title="Connect adjacent zones into a triangulated surface">Surface</button>
+                        </div>
+                        <div id="surface-opts" class="hidden">
+                            <div class="field-label">Surface Mode</div>
+                            <div class="segmented segmented--sm" id="seg-surface-mode">
+                                <button data-smode="grid" title="Relative depth-gap threshold (% of nearer depth)">Grid</button>
+                                <button data-smode="spatial" title="3D Euclidean distance threshold (adaptive to mean depth)">Spatial</button>
+                            </div>
+                            <div class="field-label">Threshold <span class="hud-val" id="surface-threshold-val">4.0%</span></div>
+                            <input type="range" class="slider" id="sl-surface-threshold" min="0.5" max="15.0" step="0.5" value="4.0" title="Maximum depth gap to connect adjacent zones">
+                        </div>
+                    </div>
+                </details>
             </div>
         </div>
 
-        <div class="control-group card">
-            <button class="control-group__header"><span>IR Monitor</span><span class="chevron">&#9662;</span></button>
-            <div class="control-group__body">
-                <label class="toggle" title="Show or hide the IR monitor image in the left dock"><input type="checkbox" id="chk-ir-show" checked><span>Show IR card</span></label>
-                <div class="field-label">Colormap</div>
-                <div class="segmented" id="seg-ir-colormap">
-                    <button data-colormap="gray" title="Grayscale IR intensity">Gray</button>
-                    <button data-colormap="turbo" title="Turbo false-color IR heatmap">Turbo</button>
-                </div>
-                <label class="toggle" title="Lock the IR intensity range instead of auto-scaling each frame"><input type="checkbox" id="chk-ir-freeze"><span>Freeze range</span></label>
-            </div>
-        </div>
+        <!-- The IR Monitor control group used to live here, duplicating the
+             colormap + freeze controls the IR card already carries inline in its
+             own header (left dock). Removed 2026-07-31: two copies of one control
+             is two places to look and one more thing to keep in sync. The card's
+             × button now collapses it into the squircle rail, which is also how
+             it comes back -- so the "Show IR card" checkbox is not needed either. -->
 
         <!-- Capture & Playback (Web Phase 3): record live, browse + load captures,
              transport controls in replay. Active/disabled state is driven from the
              server's session/captures echo (one-way flow), never local clicks. -->
-        <div class="control-group card">
+        <div class="control-group card collapsed" data-card-id="capture">
             <button class="control-group__header"><span>Capture &amp; Playback</span><span class="chevron">&#9662;</span></button>
             <div class="control-group__body">
                 <button id="btn-record" title="Start or stop recording the live stream to a capture file">&#9679; Record</button>
@@ -1073,7 +1169,7 @@
                     <button class="primary" id="btn-golive" title="Stop playback and return to the live device stream">&#9679; Go Live</button>
                     <div class="btn-row">
                         <button id="btn-playpause" title="Pause or resume capture playback">Pause</button>
-                        <button id="btn-restart" title="Jump back to the start of the capture">&#8676; Restart</button>
+                        <button id="btn-transport-restart" title="Jump back to the start of the capture">&#8676; Restart</button>
                     </div>
                     <div class="field-label">Speed</div>
                     <div class="segmented segmented--sm" id="seg-speed">
@@ -1091,7 +1187,7 @@
 
         <!-- SLAM (web Phase 4): mesh display options + save. Shown only in SLAM
              mode; all state driven from the server `state`/`saved` echo. -->
-        <div class="control-group card hidden" id="slam-group">
+        <div class="control-group card hidden collapsed" id="slam-group" data-card-id="slam-ctrl">
             <button class="control-group__header"><span>SLAM</span><span class="chevron">&#9662;</span></button>
             <div class="control-group__body">
                 <label class="toggle" title="Show or hide the path the device has traveled"><input type="checkbox" id="chk-slam-traj" checked><span>Trajectory trail</span></label>
@@ -1109,7 +1205,7 @@
     </div>
 
     <!-- Bottom (§7.1): collapsible full-width event-log console. -->
-    <div id="log-console" class="card">
+    <div id="log-console" class="card collapsed" data-card-id="log">
         <div class="log-console__header" id="log-toggle">
             <span>Event Log</span>
             <span class="log-console__chevron">&#9662;</span>
@@ -1224,8 +1320,8 @@ cover the whole sphere from this viewpoint, and a gap behind you still has to be
                         <div class="magcal-col" id="magcal-candidate"></div>
                         <div class="hud-section-label">Colour the map by</div>
                         <div class="segmented segmented--sm" id="magcal-view-seg">
-                            <button data-cal="current" class="active">Saved cal</button>
-                            <button data-cal="candidate">Candidate</button>
+                            <button data-cal="current" class="active" title="Colour the shell using the calibration currently in use — a hue that changes with direction is a real calibration error">Saved cal</button>
+                            <button data-cal="candidate" title="Colour the shell using the fit just measured, to preview it before saving">Candidate</button>
                         </div>
                         <div class="magcal-note">
                             Colouring by the saved calibration turns the map into a diagnostic: a hue that
@@ -1235,8 +1331,8 @@ cover the whole sphere from this viewpoint, and a gap behind you still has to be
                 </div>
 
                 <div class="magcal-actions">
-                    <button id="magcal-start" class="primary">Start</button>
-                    <button id="magcal-stop" disabled>Stop &amp; Fit</button>
+                    <button id="magcal-start" class="primary" title="Begin collecting magnetometer samples — then turn the device to sweep the marker over the gaps">Start</button>
+                    <button id="magcal-stop" disabled title="Stop collecting and fit a candidate calibration from the samples. Nothing is saved until you press Save &amp; apply.">Stop &amp; Fit</button>
                     <span class="magcal-spacer"></span>
                     <button id="magcal-discard" disabled title="Reject the candidate but KEEP the samples, so you can keep tumbling into the same cloud">Discard fit</button>
                     <button id="magcal-clear" disabled title="Throw away every collected sample and start over">Clear samples</button>
@@ -1264,8 +1360,8 @@ cover the whole sphere from this viewpoint, and a gap behind you still has to be
                 </div>
                 <div class="record-name-error" id="record-name-error"></div>
                 <div class="btn-row">
-                    <button id="record-name-skip">Skip</button>
-                    <button id="record-name-save" class="primary">Save</button>
+                    <button id="record-name-skip" title="Keep the automatic timestamp name. The recording is already saved either way.">Skip</button>
+                    <button id="record-name-save" class="primary" title="Rename the recording to the name above">Save</button>
                 </div>
             </div>
         </div>
@@ -1295,8 +1391,8 @@ cover the whole sphere from this viewpoint, and a gap behind you still has to be
                 </ol>
                 <pre class="bridge-output hidden" id="bridge-output"></pre>
                 <div class="btn-row">
-                    <button id="bridge-cancel">Cancel</button>
-                    <button id="bridge-run" class="primary">Run step 3</button>
+                    <button id="bridge-cancel" title="Close without running anything">Cancel</button>
+                    <button id="bridge-run" class="primary" title="Run the bridge script on the FileHub. Only do this after steps 1 and 2 above.">Run step 3</button>
                 </div>
             </div>
         </div>

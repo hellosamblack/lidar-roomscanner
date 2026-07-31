@@ -54,6 +54,8 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-040 | fixed   | host/web      | The web UI's Drops/Gaps HUD rows were structurally pinned at 0 — `web.py` read `MetricsSnapshot.drops/gaps` (dataclass default 0) and nothing ever merged the reader's `Stats`; only the deprecated `panel.py` did. Since a lost UDP fragment makes the host discard the whole frame, a seq gap is the ONLY evidence of transport loss, so the primary UI could not see packet loss at all |
 | BUG-041 | fixed   | firmware/eth  | `ETH_SendFrame_Gather` burst all 11 fragments of a depth frame back-to-back into an 8-deep TX descriptor ring, and **abandoned the frame mid-burst** on any `udp_sendto`/`pbuf_alloc` failure — the already-sent fragments then being guaranteed waste. Replaced by a slot-FIFO pacer that meters fragments from `ETH_Process()` and retries rather than abandoning |
 | BUG-042 | fixed   | host/sources  | UDP reassembly required `frag_idx == expected` and appended, so a merely **reordered** datagram — which UDP explicitly permits — discarded the whole 14.8 KB frame exactly like a lost one, and counted nothing. Now reassembled into indexed slots, with counters separating reorder / loss / duplicate / invalid |
+| BUG-046 | open    | host/web      | Mag-cal coverage runs *backwards* on Fit — "92/92 cells" drops to 91/92, because fitting the candidate replaces the calibration the coverage cells are binned with, moving every sample's direction ~3° |
+| BUG-047 | fixed   | host/web      | `id="btn-restart"` named **two** buttons — the top bar's "Restart Server" and the playback "Restart". `getElementById` takes the first, so playback Restart was dead and its transport handler landed on Restart Server, which therefore fired a transport restart *and* `POST /api/restart` |
 
 ---
 
@@ -179,7 +181,8 @@ Ethernet path, which is what the rig actually runs on.
 
 To verify, on a machine with the board's USB_USER cable attached: capture with
 `host/tools/capture.py --seconds 15`, and check `capture_analyze` reports **0** CRC failures in
-the connect region (today: exactly 1) and that the first frame after connect is CALIB.
+the connect region (today: exactly 1) and that the first frame after connect is CALIB. Tracked as
+**DC-H** in `ROADMAP.md` → "Data-collection queue".
 
 ## BUG-006 — One 100 s post-flash boot-recovery hang
 
@@ -1980,3 +1983,82 @@ guaranteed cache-cold, and it is the largest file in the directory.
 **Fix:** a `_broadcast_captures(state, ctrl)` helper dispatches the scan via `asyncio.to_thread`, as
 the "off-loop for blocking work" invariant in `docs/web-protocol.md` already required; the
 connect-time `captures` and `saved` sends do the same.
+
+## BUG-046 — Mag-cal coverage counts down on Fit: 92/92 complete becomes 91/92
+
+- **Status:** **open** · **Reported:** 2026-07-31 (owner, using the Calibrate Mag modal) · **Area:** host/web
+- **Where:** `host/src/roomscan/magsweep.py` `MagSweepSession.binning_calibration` / `sync_occupied` /
+  `build_report`; surfaced by `static/magcal.js` + `magcal3d.js`
+
+**Symptom (owner).** Tumble until the modal reads **92/92 cells complete**, press **Fit** (the
+`Stop & Fit` button, `magcal` action `stop`), and the coverage immediately reads **91/92** — the
+sweep un-completes itself at exactly the moment it was finished. The shell view correspondingly
+un-fills a cell.
+
+**Mechanism.** Coverage is not measured on the raw samples; it is measured on their *calibrated*
+directions — `build_report` does `dirs = calibrated_directions(x, session.binning_calibration(current))`
+→ `assign_cells(dirs)` → `coverage_stats`. And `binning_calibration` prefers **the candidate if one
+exists**, else the saved calibration, else a provisional hard-iron estimate. Pressing Fit creates the
+candidate, so the frame the cells are binned in changes *underneath the tally*: every sample's
+direction moves, some samples cross a cell boundary, and any cell whose occupancy rested on those
+samples empties. `sync_occupied(cov["counts"])` then overwrites the incrementally-marked
+`session.occupied` set with the recomputed truth (its docstring already anticipates this — "e.g.
+after the binning calibration changed and every direction moved"), so the UI number drops.
+
+**Reproduced numerically** (not yet on the rig): synthetic 600-sample tumbles binned first with a
+saved calibration that is stale by a few µT — the situation that makes you recalibrate at all — then
+re-binned with the `fit_ellipsoid` candidate. Mean direction shift on refit **3.35°** against ~24°-wide
+cells; over 30 seeds, **3 runs went 92/92 → 91/92**, and others moved 90→92 or 91→92 (100–125 of 600
+samples changed cell each time). With an already-good saved calibration the shift is ~0.01° and
+occupancy never moves, which matches this only being visible after a real re-fit.
+
+So the count is *arguably* correct in both frames — it is the comparison across a frame change that
+is meaningless, and the UI presents it as a monotonic progress bar ("complete"). Two consequences
+beyond the confusion: chasing the missing cell re-fits again on the next Stop, which can move the
+boundary again (the last cell is not reliably reachable), and a user who reads 91/92 as "keep
+tumbling" may reject a candidate that was in fact fitted from a fully-covered cloud.
+
+**Not yet decided (fix options).**
+1. Bin coverage in a **frozen** frame for the life of the sweep — e.g. always the calibration in
+   force when `start()` was pressed — so the progress number never changes meaning mid-sweep, and
+   only `reset()` re-frames it. Quality metrics keep using the candidate as they do now.
+2. Keep the re-binning but make the regression legible rather than silent: report both counts
+   (`92/92 under the saved calibration, 91/92 under the candidate`) and drop the word "complete".
+3. Treat coverage as a high-water mark once reached (rejected on sight — it would hide a genuine gap
+   that only the corrected frame can see, which is the whole reason the coverage map exists).
+
+Option 1 looks right because the cell map is a *collection-guidance* instrument, not a quality
+metric; but it needs an on-rig pass, since which cell empties depends on the real cloud's boundary
+samples. Whatever lands should be pinned by a test that re-bins a fixed cloud under two calibrations
+and asserts the reported progress does not go backwards — and proved by reintroducing the swap.
+
+## BUG-047 — One id, two buttons: "Restart Server" also fired a playback restart
+
+**Status:** fixed 2026-07-31 · **Area:** host/web · **Found by:** a structural check added while
+auditing tooltips, not by either feature misbehaving.
+
+`host/src/roomscan/static/index.html` used `id="btn-restart"` twice: the top bar's **Restart Server**
+(an `/api/restart` POST, owned by `admin.js`) and the Capture card's playback **Restart** (a
+`transport/restart` message, owned by `capture.js`). `document.getElementById` returns the **first**
+match in document order, and the top bar is declared first.
+
+Two consequences, neither of which points at the real cause:
+
+1. The playback **Restart** button was inert. `capture.js` bound its handler to an element on the
+   other side of the screen, so clicking Restart during replay did nothing at all.
+2. **Restart Server** carried *both* handlers. Pressing it sent `{"type":"transport","action":"restart"}`
+   over `/ws` and then restarted the server process. In live mode the transport message is a no-op so
+   the damage was invisible; during a replay it seeked to frame 0 immediately before the process died,
+   which reads as "the restart lost my playback position".
+
+**Fix.** The playback button is now `id="btn-transport-restart"` (`index.html`, `capture.js`).
+
+**Regression test.** `host/tests/test_static_ui.py::test_no_duplicate_element_ids` — a whole-file
+check that no `id=` appears twice, rather than a test of either button. Neither symptom above would
+have led anyone to write a test for *this*, and the next duplicate id will not resemble this one
+either. Proved by reintroducing the duplicate and confirming the test fails.
+
+**Lesson.** Two modules can each look up "their" element by id and one of them silently gets the other
+module's button. The failure surfaces as a cross-feature side effect — a maintenance action firing an
+unrelated playback command — so it is worth an invariant over the whole document rather than a test
+per control.

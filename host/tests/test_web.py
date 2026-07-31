@@ -2972,3 +2972,75 @@ def test_set_display_refuses_slam_on_a_legacy_capture():
     asyncio.run(web._handle_inbound(state, {"type": "set_display", "display": "slam"}))
     assert ui.display == "point_cloud"
     assert any("stream 9" in line for line in published), published
+
+
+def test_rail_cards_data_attributes_and_default_collapsed_states():
+    """Verify that all rail cards have data-card-id attributes and start with most
+    collapsed by default (keeping telemetry and view expanded)."""
+    html_path = Path(__file__).parent.parent / "src" / "roomscan" / "static" / "index.html"
+    content = html_path.read_text(encoding="utf-8")
+
+    expected_cards = {
+        "telemetry": False,  # Expanded
+        "sensors": True,     # Collapsed
+        "slam-hud": True,    # Collapsed
+        "ir-view": True,     # Collapsed
+        "diag": True,        # Collapsed
+        "device": True,      # Collapsed
+        "view": False,       # Expanded
+        "capture": True,     # Collapsed
+        "slam-ctrl": True,   # Collapsed
+        "log": True,         # Collapsed
+    }
+
+    import re
+    # Match element tags with data-card-id="..." and inspect their class string
+    pattern = re.compile(r'<([a-z0-9]+)\s+[^>]*data-card-id="([^"]+)"[^>]*>', re.IGNORECASE)
+    matches = pattern.findall(content)
+    found = {card_id for _, card_id in matches}
+
+    assert expected_cards.keys() <= found, f"Missing data-card-id tags: {expected_cards.keys() - found}"
+    assert found <= expected_cards.keys(), (
+        f"Cards present in index.html but not listed here: {found - expected_cards.keys()}. "
+        "Add them to expected_cards (and to CARD_ICONS/CARD_TITLES in layout.js).")
+
+    # Verify collapse status in initial HTML. Driven from `expected_cards`, not
+    # from the regex matches: iterating the matches and indexing the dict raises
+    # KeyError on any new card, which reads as a crash rather than a test failure.
+    tags = {card_id: tag for tag, card_id in
+            ((m.group(0), m.group("id")) for m in re.finditer(
+                r'<[a-z0-9]+\s+[^>]*data-card-id="(?P<id>[^"]+)"[^>]*>', content, re.IGNORECASE))}
+    for card_id, expected_collapsed in expected_cards.items():
+        tag_str = tags[card_id]
+        class_attr = tag_str.split('class="')[1].split('"')[0] if 'class="' in tag_str else ""
+        has_collapsed_class = "collapsed" in class_attr.split()
+        assert has_collapsed_class == expected_collapsed, f"Card '{card_id}' expected collapsed={expected_collapsed}, got {has_collapsed_class}"
+
+
+def test_view_section_subgroups():
+    """Verify that the View section is broken into collapsible sub-areas with data-subgroup-id."""
+    html_path = Path(__file__).parent.parent / "src" / "roomscan" / "static" / "index.html"
+    content = html_path.read_text(encoding="utf-8")
+
+    import re
+    pattern = re.compile(r'<details\s+[^>]*data-subgroup-id="([^"]+)"[^>]*>', re.IGNORECASE)
+    matches = set(pattern.findall(content))
+
+    expected_subgroups = {"view-camera", "view-color", "view-surface"}
+    assert expected_subgroups <= matches, f"Missing view subgroups: {expected_subgroups - matches}"
+
+
+def test_squircles_and_overflow_prevention():
+    """Verify squircle styling & layout icons logic and overflow-x prevention."""
+    static_dir = Path(__file__).parent.parent / "src" / "roomscan" / "static"
+    index_html = (static_dir / "index.html").read_text(encoding="utf-8")
+    layout_js = (static_dir / "layout.js").read_text(encoding="utf-8")
+
+    assert ".squircle-bar" in index_html
+    assert ".squircle-btn" in index_html
+    assert "overflow-x: hidden;" in index_html
+    assert "CARD_ICONS" in layout_js
+    assert "updateSquircles" in layout_js
+
+
+

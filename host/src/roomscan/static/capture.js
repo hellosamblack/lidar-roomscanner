@@ -28,7 +28,12 @@ export function createCapture(hub) {
     const transport = $('transport');
     const btnGoLive = $('btn-golive');
     const btnPlayPause = $('btn-playpause');
-    const btnRestart = $('btn-restart');
+    // NOT `btn-restart` -- that id was shared with the top bar's "Restart Server"
+    // button, and getElementById returns the FIRST match in document order. This
+    // playback Restart was therefore dead, and its transport handler was bound to
+    // Restart Server, so pressing that fired a transport restart AND POST
+    // /api/restart. See BUGS.md BUG-047.
+    const btnRestart = $('btn-transport-restart');
     const segSpeed = $('seg-speed');
     const chkLoop = $('chk-loop');
     const seek = $('seek');

@@ -68,10 +68,5 @@ export function createLog(hub) {
         }, TOAST_MS);
     }
 
-    // Collapse toggle: flip a class on the console; header stays visible.
-    if (toggleEl && consoleEl) {
-        toggleEl.addEventListener('click', () => consoleEl.classList.toggle('collapsed'));
-    }
-
     return {};
 }

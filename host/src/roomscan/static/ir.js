@@ -148,11 +148,20 @@ export function createIr(hub) {
         });
     }
 
-    // Show/hide: local presentation only (not server state). Driven from the
-    // right rail's IR group via the hub, plus the card's own close button.
-    function setVisible(v) { card.classList.toggle('hidden', !v); }
-    hub.on('ir_show', (v) => setVisible(!!v));
-    if (btnClose) btnClose.addEventListener('click', () => { setVisible(false); hub.emit('ir_shown', false); });
+    // Close: COLLAPSE, don't hide. The right rail's "Show IR card" checkbox was
+    // the only way back from a hidden card, and it went with the duplicated IR
+    // control group (2026-07-31). Collapsing routes the card through layout.js's
+    // squircle rail instead, which is both the way back and a persisted choice —
+    // `.hidden` is neither. Click-bubbling to the header would also toggle, so
+    // stop propagation rather than let the two fight.
+    if (btnClose) {
+        btnClose.addEventListener('click', (e) => {
+            e.stopPropagation();
+            card.classList.add('collapsed');
+            try { localStorage.setItem('roomscan.card.ir-view.collapsed', '1'); } catch (err) {}
+            window.dispatchEvent(new Event('resize'));   // let layout.js re-flow the dock
+        });
+    }
 
     return {};
 }

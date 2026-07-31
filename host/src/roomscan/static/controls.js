@@ -108,29 +108,13 @@ export function createControls(hub) {
         sendView({ surface_threshold: parseFloat(slSurfaceThreshold.value) });
     });
 
-    // --- IR Monitor group: colormap + freeze (server-driven) + card show/hide ---
-    const segIrColormap = $('seg-ir-colormap');
-    const chkIrFreeze = $('chk-ir-freeze');
-    const chkIrShow = $('chk-ir-show');
-
-    function sendIr(colormap, freeze) { hub.send({ type: 'set_ir', colormap, freeze }); }
-    segIrColormap?.addEventListener('click', (e) => {
-        const btn = e.target.closest('button[data-colormap]');
-        if (btn) sendIr(btn.dataset.colormap, chkIrFreeze ? chkIrFreeze.checked : false);
-    });
-    chkIrFreeze?.addEventListener('change', () => {
-        const active = segIrColormap && segIrColormap.querySelector('button.active');
-        sendIr(active ? active.dataset.colormap : 'gray', chkIrFreeze.checked);
-    });
-    // Card show/hide is local presentation; relay it to ir.js over the hub.
-    chkIrShow?.addEventListener('change', () => hub.emit('ir_show', chkIrShow.checked));
-    hub.on('ir_shown', (v) => { if (chkIrShow) chkIrShow.checked = !!v; });   // card's own close btn
+    // The IR Monitor group lived here and duplicated the colormap + freeze
+    // controls the IR card already carries in its own header. Removed
+    // 2026-07-31; `ir.js` owns those controls and their `set_ir`/state echo.
 
     // --- server state echo drives active segments (§7.2) ---
     hub.on('state', (msg) => {
         setActive(segColor, 'mode', msg.color_mode);
-        setActive(segIrColormap, 'colormap', msg.ir_colormap);
-        if (chkIrFreeze) chkIrFreeze.checked = !!msg.ir_freeze;
         // View: view mode, colormap, point size, render mode, surface
         setActive(segViewMode, 'viewmode', msg.view_mode);
         // The view mode only governs the real-time cloud — SLAM mode replaces it
@@ -191,15 +175,6 @@ export function createControls(hub) {
             b.classList.toggle('active', b.dataset[attr] === value);
         }
     }
-
-    // --- generic control-group collapse (delegated on the right rail) ---
-    const rail = $('right-rail');
-    rail?.addEventListener('click', (e) => {
-        const header = e.target.closest('.control-group__header');
-        if (header && rail.contains(header)) {
-            header.parentElement.classList.toggle('collapsed');
-        }
-    });
 
     return {};
 }

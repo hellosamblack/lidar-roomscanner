@@ -12,6 +12,20 @@
 
 const LINK_BAR_MAX = 2 * 1024 * 1024;   // client-side visual cap: 2 MB/s (§7.4)
 
+// Per-stream tooltips. Keyed on `stream_id`, NOT on `label`: metrics.py maps two
+// different ids (DEPTH_ZF32=0 replay, RAW_3DMD=7 live) onto the same "ToF" label,
+// so a label-keyed map could not tell a replay apart from a live capture. Ids are
+// the wire protocol's own (docs/protocol.md); the labels are only presentation.
+const STREAM_HELP = {
+    0: 'Processed depth frames (ZF32) from a Phase-1 recording — one per rendered point cloud. About 28 per second.',
+    7: 'Raw sensor frames (3DMD) straight off the ToF imager; the depth pipeline runs here on the host. About 28 per second.',
+    9: 'Orientation: the IMU’s fused quaternion, averaged over the samples taken during each depth frame. One per frame, so about 30 per second.',
+    10: 'Environment: barometric pressure, temperature and the magnetometer, read through the IMU’s sensor hub. One per depth frame.',
+    11: 'IMU raw: the unfiltered 480 Hz accelerometer and gyroscope batch behind the fused orientation. Recorded for offline analysis; the live view does not use it.',
+    12: 'IMU clock calibration — the measured error of the IMU’s own oscillator, used to convert its timestamps to real seconds. Sent rarely.',
+    13: 'IMU sync: the IMU clock read at the instant the depth frame was ready, so a frame can be placed on the IMU timeline to within tens of microseconds.',
+};
+
 function fmtHz(hz) {
     if (hz === null || hz === undefined) return '-';
     return hz < 10 ? hz.toFixed(1) : hz.toFixed(0);
@@ -57,6 +71,11 @@ export function createHud(hub) {
                 row.className = 'hud-stream';
                 const jitter = (s.jitter_ms === null || s.jitter_ms === undefined)
                     ? '-' : Number(s.jitter_ms).toFixed(1) + ' ms';
+                // What the stream is, then what the two numbers beside it mean.
+                // An unknown id still gets the column legend rather than nothing.
+                const help = STREAM_HELP[s.stream_id];
+                row.title = (help ? help + '\n\n' : '')
+                    + 'Left: arrival rate measured here. Right: jitter — how unevenly spaced the arrivals are.';
                 row.innerHTML =
                     `<span class="hud-stream__label">${s.label ?? '?'}</span>` +
                     `<span class="hud-stream__hz">${fmtHz(s.host_hz)} Hz</span>` +
