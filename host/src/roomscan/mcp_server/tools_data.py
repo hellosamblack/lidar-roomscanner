@@ -207,6 +207,145 @@ def capture_skew(path: str, window_s: float = 2.0) -> dict:
 
 
 @mcp.tool()
+def slam_ensemble(capture: str, n: int = 10, device: str = "", voxel_size: float = 0.0,
+                  block_count: int = 0, icp_mode: str = "", max_frames: int = 0,
+                  include_runs: bool = True, timeout_s: int = 3600) -> dict:
+    """Score a capture with an ensemble of SLAM runs -- one run is NOT a measurement.
+
+    Frame-to-model tracking is chaotic at centimetre scale: a deliberate 3 mm
+    height nudge moves a real circuit's loop closure by 0.37 m (BUG-037), and this
+    tool's own validation run spread 0.477-0.966 m across ten numerically innocuous
+    perturbations of the SAME capture. `ROADMAP.md` therefore requires drift figures
+    be ensemble means +/- sd over ~10 perturbations. Use this, not `slam_rerender`,
+    whenever a number is going to be quoted or compared.
+
+    Perturbations are deterministic and innocuous: start one frame later, and nudge
+    the ICP correspondence radius by +/-1e-4 m (0.2% of 0.05 m). Device is not
+    perturbed -- mixing CPU and CUDA adds no chaos coverage and confounds timing.
+
+    `summary.horizontal_closure_m` is the headline, and is the field
+    `slam_loop_closure_gate` consumes. It is the start-to-end gap projected onto the
+    horizontal plane (up is -Y here), kept separate from `vertical_error_m` because
+    the two have different error sources -- vertical is barometer plus ICP drift,
+    horizontal is pure odometry drift.
+
+    Two things to check before quoting any of it. `runs_died` > 0 means at least one
+    run froze its pose and dead-reckoned the tail, so its closure is where the
+    estimate quit rather than drift (BUG-036). `any_saturated` means a run outgrew
+    its block grid and map growth stalled mid-scan (BUG-035). And closure is only
+    DRIFT if the operator actually returned to the start pose -- on a non-closing
+    capture it is just the distance between two different places.
+
+    Cost: roughly (frames x n x 7 ms) on CUDA:0, so a 5000-frame capture at n=10 is
+    about 5 minutes. Drop `n` to 5 for a triage pass; keep 10 for anything a formal
+    decision rides on.
+
+    Wraps `host/tools/slam_ensemble.py::run_ensemble()`.
+    """
+    import json
+    import tempfile
+
+    p = (REPO / capture) if not Path(capture).is_absolute() else Path(capture)
+    if not p.is_file():
+        return {"error": f"no such capture: {rel(p)}"}
+    # Subprocess, not in-process: the ensemble holds a TSDF grid on the compute
+    # device for minutes, and the MCP server must not carry that allocation.
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "ensemble.json"
+        cmd = [str(VENV_PY), str(HOST / "tools" / "slam_ensemble.py"), str(p),
+               "-n", str(n), "--json", str(out), "--quiet"]
+        for flag, val in (("--device", device), ("--icp-mode", icp_mode)):
+            if val:
+                cmd += [flag, val]
+        for flag, val in (("--voxel-size", voxel_size), ("--block-count", block_count),
+                          ("--max-frames", max_frames)):
+            if val:
+                cmd += [flag, str(val)]
+        try:
+            proc = subprocess.run(cmd, cwd=str(REPO), timeout=timeout_s,
+                                  capture_output=True, text=True)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "cmd": " ".join(cmd),
+                    "error": f"timed out after {timeout_s}s -- lower n, or bound the run "
+                             "with max_frames"}
+        if proc.returncode != 0 or not out.exists():
+            return {"ok": False, "cmd": " ".join(cmd), "returncode": proc.returncode,
+                    "stdout": proc.stdout[-2000:], "stderr": proc.stderr[-2000:]}
+        r = json.loads(out.read_text())
+
+    r["ok"] = True
+    r["capture"] = rel(p)
+    if not include_runs:
+        r.pop("runs", None)
+    if r.get("runs_died"):
+        r["warning"] = (
+            f"{r['runs_died']}/{r['n']} runs died (worst trailing lost "
+            f"{r['worst_trailing_lost']}): those runs' closure is where the estimate "
+            f"froze, not measured drift (BUG-036).")
+    elif r.get("worst_longest_lost_run", 0) >= 30:
+        # `died` is trailing-only. A run that freezes mid-scan and then re-registers
+        # passes it while carrying a dead-reckoned hole: DebugCapB2 froze for 628
+        # frames (21.2 s, 15.5% of the run) and still reported died=False.
+        r["warning"] = (
+            f"no run died, but the worst froze for {r['worst_longest_lost_run']} frames "
+            f"MID-RUN before recovering. `died` is trailing-only and does not catch that; "
+            f"the frozen segment is dead-reckoned, so path length and closure are "
+            f"contaminated even though the tail is healthy.")
+    elif r.get("any_saturated"):
+        r["warning"] = ("a run saturated its block grid: map growth stalled mid-scan "
+                        "and tracking collapses after that point (BUG-035).")
+    return r
+
+
+@mcp.tool()
+def capture_motion(path: str, hold_deg_s: float = 0.0, fast_deg_s: float = 0.0,
+                   min_hold_s: float = 0.0, min_take_s: float = 0.0,
+                   include_segments: bool = True) -> dict:
+    """What the operator physically DID during a capture: holds, pans, whips, tilt.
+
+    Several ROADMAP data-collection gates are conditions on motion rather than on
+    data integrity -- DC-F wants "3 takes ... 10 s stationary at both ends of every
+    take", DC-E "level -> 45 deg -> vertical, holding each ~15 s. Two cycles", DC-D
+    "slowly panning the whole time" (a static flat-field capture is invalid: it
+    bakes scene texture into the correction), DC-A "3-4 deliberate fast whips".
+    This answers those directly instead of by eyeballing a replay.
+
+    `segments` alternates `hold` and `move` runs, which IS the take/bookend
+    structure; `starts_with_hold`/`ends_with_hold` are the bookend check, `takes`
+    counts deliberate pans, and `fast_events` counts excursions above `fast_deg_s`
+    (DC-A's gate). Per-hold `mean_tilt_deg` is what shows DC-E's tilt cycles.
+
+    Two things it will not do. Rate is computed over the MEASURED dt, not a nominal
+    1/30 s, because frames are lost on this link and a two-frame step would
+    otherwise report a phantom doubling of speed. And a gap longer than `max_dt`
+    is marked unmeasured rather than interpolated across -- `unmeasured_frac`
+    says how much of the capture's motion is simply unknown, which on a lossy
+    capture is the caveat on everything else here.
+
+    Tilt is degrees from straight up in the SFLP quaternion's own Z-up world, the
+    same convention as `capture_magcheck`'s tilt table -- 0 = pointing at the
+    ceiling, 90 = horizontal. Zero-valued numeric arguments mean "use the default".
+
+    Wraps `host/tools/capture_motion.py::describe()`.
+    """
+    from tools.capture_motion import (DEFAULT_FAST_DEG_S, DEFAULT_HOLD_DEG_S,
+                                      DEFAULT_MIN_HOLD_S, DEFAULT_MIN_TAKE_S, describe)
+
+    p = (REPO / path) if not Path(path).is_absolute() else Path(path)
+    if not p.is_file():
+        return {"error": f"no such capture: {rel(p)}"}
+    r = describe(p,
+                 hold_deg_s=hold_deg_s or DEFAULT_HOLD_DEG_S,
+                 fast_deg_s=fast_deg_s or DEFAULT_FAST_DEG_S,
+                 min_hold_s=min_hold_s or DEFAULT_MIN_HOLD_S,
+                 min_take_s=min_take_s or DEFAULT_MIN_TAKE_S)
+    r["path"] = rel(p)
+    if not include_segments:
+        r.pop("segments", None)
+    return r
+
+
+@mcp.tool()
 def doctor(build: bool = False, net: bool = True) -> dict:
     """Run the headless-host bring-up checks and return each verdict.
 

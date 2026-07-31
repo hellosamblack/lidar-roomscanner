@@ -27,10 +27,12 @@ PYPROJECT = REPO / "host" / "pyproject.toml"
 # script -> the MCP tool(s) that cover it
 EXPOSED: dict[str, tuple[str, ...]] = {
     "analyze_capture.py": ("capture_analyze",),
+    "capture_motion.py": ("capture_motion",),
     "headless_doctor.py": ("doctor",),
     "mag_check.py": ("capture_magcheck",),
     "orientation_probe.py": ("orientation_probe",),
     "skew_check.py": ("capture_skew",),
+    "slam_ensemble.py": ("slam_ensemble",),
     "web_ui_shot.py": ("ui_screenshot", "ui_eval", "ui_wait_for", "ui_reset"),
 }
 

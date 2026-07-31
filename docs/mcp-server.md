@@ -77,19 +77,53 @@ function*, not a state object -- read what it logged via `ui_screenshot`'s tail.
 
 **data** — `capture_list()` (includes `has_stream_9`, which SLAM and orientation work
 ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, compare?)`,
-`capture_skew(path, window_s?)`,
+`capture_skew(path, window_s?)`, `capture_motion(path)`,
 `slam_rerender(capture, voxel_size?, block_count?, device?, max_frames?)`,
+`slam_ensemble(capture, n?, device?, voxel_size?, block_count?)`,
 `doctor()`, `orientation_probe(mode)`.
 
 `slam_loop_closure_gate(baseline, loop_closure)` applies the pre-registered paired 95% confidence gate to
 the two matched circuit ensembles; global loop closure stays disabled unless both
 circuits pass it without a tracking regression.
 
+`slam_ensemble` is what produces those matched ensembles, and is the right tool
+whenever a drift number is going to be **quoted or compared** — `slam_rerender` runs
+once, and one run is not a measurement. Its own validation pass spread 0.477–0.966 m
+of closure across ten numerically innocuous perturbations of the *same* capture
+(mean 0.670 ± 0.154 m, reproducing the recorded 0.74 ± 0.19 m baseline), which is
+BUG-037's chaos made visible. It reports `summary.horizontal_closure_m` — the gate's
+required input, which nothing else in the repo computed — split from
+`vertical_error_m` on the real world-up axis (**−Y**, not −Z). Check `runs_died` and
+`any_saturated` before quoting anything; and remember closure is only *drift* if the
+operator actually returned to the start pose. Budget ≈ frames × n × 7 ms on CUDA:0.
+
 `capture_skew` measures where a depth frame actually sits on the IMU's clock, from stream 13
 `IMU_SYNC` (BUG-031). ⚠ Its number is **window-dependent** — 18/38/150 µs RMS at `window_s`
 2/5/20 — because what survives the fix is the two oscillators drifting apart, not per-frame skew
 (lag-1 autocorrelation 0.992). Quote the window alongside the figure, or use the window-free
 10–11 µs. It also reports the quaternion's phase offset, which is a **+7.8 ms lead**, not a lag.
+
+`capture_analyze` answers **two** questions that are easy to conflate. `clean` means the
+bytes that arrived decode end to end; `continuity.complete` means everything the device
+sent actually arrived. A capture can be `clean: true` and still be missing seconds of
+frames — the three 2026-07-31 multi-room captures were byte-perfect while losing
+2.3 % / 4.3 % / 9.4 % of RAW frames, one in a single 215-frame (7.1 s) hole, which is why
+the census exists. `whole_group_lost` (a seq absent from every stream ⇒ link outage) and
+`partial_group_lost` (absent only from RAW_3DMD ⇒ fragment loss on the ~15 KB datagram)
+separate two different faults, and `device_fps` against `received_fps` shows what the
+device produced versus what the recorder kept. **Check it before quoting any SLAM result
+computed over a capture.**
+
+`capture_motion` reports what the operator physically did — `segments` alternating
+`hold`/`move` runs, `takes`, `fast_events`, bookend flags, per-hold tilt. Several
+data-collection gates are conditions on motion, not on data (DC-F's stationary bookends,
+DC-E's 15 s tilt holds, DC-D's "panning the whole time", DC-A's fast whips), and this
+checks them directly. Rate uses the measured `dt`, never a nominal 1/30 s — with frames
+being lost, a two-frame step would otherwise read as a phantom doubling of speed — and
+long gaps are reported as `unmeasured_frac` rather than interpolated across. Tilt is
+degrees from straight up in the SFLP quaternion's Z-up world (0 = ceiling, 90 =
+horizontal), matching `capture_magcheck`'s tilt table; deriving it in the renderer's Y-up
+frame instead turns a pan into an apparent 90° tilt sweep.
 
 `slam_rerender` is the offline high-detail pass. A capture stores raw ToF frames, not a
 map, so the live scan is only a preview and the pipeline can be re-run at any resolution
