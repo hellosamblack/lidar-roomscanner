@@ -251,6 +251,11 @@ _VALID_ORIENTATION_MODES = ("zyx", "zxy", "boresight", "world")
 # own math unchanged -- only the DEFAULT labels, which the World-only web UI
 # actually shows, change here.
 DEFAULT_AXIS_LABELS = ("Roll", "Tilt", "Heading")
+# The default before the Sensors card was pinned to World (2026-07-31). World's
+# three slots are triad roll, boresight tilt from horizontal, and absolute
+# magnetic heading -- so "Pitch"/"Yaw" named the wrong quantities. Kept only so
+# `ui_from_config` can recognise a stored copy of it as un-customised.
+_LEGACY_AXIS_LABELS = ("Roll", "Pitch", "Yaw")
 _MAX_LABEL_LEN = 24
 
 # "Zero yaw here" (owner ask, 2026-07-29): which modes have a free-running,
@@ -1425,7 +1430,17 @@ def ui_from_config(cfg: ViewerConfig) -> UiState:
     # {mode}` still accepts any `_VALID_ORIENTATION_MODES` value on the wire
     # for the deprecated desktop panel, but a fresh boot always starts World.
     ui.orientation_mode = "world"
-    ui.orientation_labels = _sanitize_axis_labels(cfg.orientation_labels.split(","))
+    # One-time migration off the pre-World label default. `_persist_ui` writes
+    # every field on ANY UI change, so a config that has never had its labels
+    # touched still carries "Roll,Pitch,Yaw" -- and without this the World
+    # relabelling would be invisible to exactly the installs that need it, since
+    # the stored value shadows the new default forever. Only the exact old
+    # default migrates; any other stored value is a real customization and is
+    # left alone, and retyping "Roll/Pitch/Yaw" by hand re-migrates only on the
+    # next boot, which is a fair price for not stranding the wrong labels.
+    stored_labels = _sanitize_axis_labels(cfg.orientation_labels.split(","))
+    ui.orientation_labels = (DEFAULT_AXIS_LABELS if stored_labels == _LEGACY_AXIS_LABELS
+                             else stored_labels)
     try:
         ui.yaw_offset_deg = float(cfg.yaw_offset_deg)
     except (TypeError, ValueError):

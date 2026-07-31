@@ -2,6 +2,8 @@
 
 **Status:** design, not implemented. **Date:** 2026-07-29.
 **Revised 2026-07-30 — the hero camera moved to first-person; see §4.1, which is amended in place.**
+**Revised 2026-07-31 — the hero and Steering views are MERGED into one canvas, and the device model is
+now the real instrument rather than a board silhouette; see §4.1, amended in place again.**
 **Owner ask (verbatim intent):**
 
 > "I want the feedback to be responsive. It should show the current and past orientation of the board
@@ -195,6 +197,56 @@ be visible, not hidden.
 end + a dot for the ToF aperture), muted ink, wireframe-ish. In the hero (body-fixed) camera it is
 **stationary** — which is correct and, importantly, is what makes the shell readable. It is the
 anchor that tells you the shell is *yours*, not an abstract globe.
+
+> **Amended 2026-07-31 (owner): the two views are MERGED, and the device is the real one.**
+>
+> *"Can they be combined? The orientation from the bottom one, with coverage from the top one?"*
+> They can. There is now **one canvas** (`#magcal-hero`, unchanged 470 × 340) rendering **one pass**:
+> the **Steering framing** (world-fixed `steerCam`, `bodyGroup = T_WORLD_TO_CV·R`, ghost at `R·ΔR`,
+> wrist arrow) with the **hero's cell styling** (dashed hollow rings for missing, discs sized by
+> sample count, hue = |B| deviation). The faint "steer" cell wash is deleted — with no second view,
+> a coverage readout nobody can read is not a trade, it is a loss. `#magcal-steer` and
+> `#magcal-steer-note` are gone; `#magcal-guidance` / `#magcal-state-chips` / `#magcal-binning` sit
+> under the merged canvas.
+>
+> **This re-accepts a cost this spec had rejected**, and that rejection is not deleted: a body-fixed
+> shell seen from a room-fixed camera has its holes orbit at hand speed, so you can see *that* there
+> is a gap and never *where*. The mitigation is that the aiming instrument is no longer the shell —
+> it is the **ghost** and the **geodesic leader line**, both world-fixed and therefore steady under
+> exactly the motion that makes the shell swim. The shell reverts to being the progress readout. If
+> it proves unusable on a real sweep the fallback is the inverse merge (body-fixed camera with the
+> ghost drawn into it); same closure condition either way.
+>
+> **The body-fixed framing survives as the no-orientation fallback.** The old steering pass was gated
+> on `have_quat`; a merged view built only on the steering framing would render an **empty canvas**
+> on a ToF-only session. So when `have_quat` is false (or `t_world_to_cv` has not arrived) the pass
+> falls back to `bodyGroup = identity` + the first-person `heroCam`, which needs no orientation at
+> all — `cell_dirs` and `field_dir_body` are already body vectors — and `#magcal-hero-note` says why
+> the ghost is missing. `window.__magcal3d.framing` reports `"world"` or `"body"`.
+>
+> **The near/far translucency split becomes a per-frame quantity.** It was static *because* the
+> camera was fixed in body axes; with a room-fixed camera it goes stale immediately. It is recomputed
+> from the eye direction expressed in body coordinates (transpose of `bodyGroup`'s rotation — no new
+> convention is written client-side), throttled to 10 Hz and skipped below 1.5° of view-direction
+> change, and it rewrites the 4 × 92 instance matrices only when a cell actually changes side.
+> **Measured**, not assumed (2026-07-31, llvmpipe, `refreshMs`/`behindRecomputes` in
+> `window.__magcal3d`, `?magcalstatic=1` for the frozen baseline): **0.062 ms per recompute** under a
+> 90 °/s tumble, ≤ 10 Hz ⇒ **≤ 0.062 % of wall clock**; on a stationary rig it fires ~0 times/s and
+> the A/B fps difference is below this box's run-to-run noise.
+>
+> **The device model is the owner's actual instrument**, not a NUCLEO silhouette: a **5.5″ × 3″ ×
+> 2.5″ block**, dark grey for the half facing the user, white for the middle quarter, blue for the
+> quarter facing away, camera on the blue face. It lives in a new shared module
+> `static/devicemodel.js` and is drawn by **both** this view and the Sensors card's orientation gizmo
+> (previously an RGB axis triad), so the two cannot teach different shapes. Two consequences worth
+> keeping: the block is **8× deeper** than the old board, so its fill is ghosted to 0.30 in *both*
+> framings (the Steering pass's old solid 0.85 would blank the middle of the shell — where the
+> boresight, target ring and geodesic live); and `MOUNT_ROTATION`, a 180° turn about the boresight,
+> encodes that **body +X is the device's BOTTOM** — the old model called it "Up, USB down" and was
+> upside down. That constant is derived from the owner's own reading (held normally: World pitch 0°,
+> roll 180°, and `triad_roll_deg` is the roll of body +X about the boresight against true vertical)
+> and is pinned by `test_static_ui.py`, because a 180° error passes every symmetry check a box
+> silhouette can offer.
 
 ### 4.2 Trail / history — the two-tier rule
 

@@ -12,44 +12,61 @@
 // it cannot do is show the DEVICE, and the device is what carries the "oh, THAT
 // is what I have to do with my hands" moment. Hence two cameras on one scene.
 //
-// THE TWO FRAMINGS ARE ONE SCENE UNDER TWO CAMERAS
-// ------------------------------------------------
+// ONE SCENE, ONE PASS, TWO POSSIBLE CAMERAS  (merged 2026-07-31)
+// --------------------------------------------------------------
 // Everything lives in `bodyGroup`, in SFLP BODY axes (X = Up, Y = Right,
 // Z = Forward): the 92 coverage cells, the device model, the field arrow at
 // `field_dir_body`, gravity at `gravity_body`.
 //
-//   HERO (first-person camera):  bodyGroup.matrix = identity.
-//       The shell and the device are STATIONARY and the field marker moves.
-//       This is the map you can plan against — a hole is in the same screen
-//       place it was three seconds ago, which is the entire reason this is the
-//       hero. It also needs NO orientation data at all: `cell_dirs` and
-//       `field_dir_body` are already body vectors, so it renders correctly on a
-//       session with no stream 9.
+// Until 2026-07-31 this file rendered that one scene TWICE — a body-fixed
+// "hero" with the full cell styling, and a small world-fixed "steering" widget
+// with a ghost to fly the board into. The owner asked for one view: *"Can they
+// be combined? The orientation from the bottom one, with coverage from the top
+// one?"* They can, and the merge also halves the WebGL contexts, which is not
+// nothing on a software renderer.
 //
-//       The camera sits BEHIND the device on its boresight, looking where the
-//       ToF camera looks (owner, 2026-07-30) — the same framing as the live
-//       view's FPV mode, and for the same reason: the shell you are steering
-//       through is the sensor's own field of view, so "up-left on screen" has
-//       to mean "up-left of where I am pointing". Like FPV it is
-//       gravity-levelled: `camera.up` tracks −g (§ heroUp), so screen-down is
-//       room-down always and the shell counter-rolls when you roll the board.
-//       That is the ONLY motion the hero camera has — pitch and yaw move the
-//       camera with the body, so a hole still stays where it was.
+//   MERGED (world-fixed camera, the normal case):
+//       bodyGroup.matrix = T_WORLD_TO_CV · R, camera = `steerCam`.
+//       The device and its shell tumble in the operator's hand; the field
+//       arrow, the ghost and the target all stand still in the room — because
+//       `R · (Rᵀ·b_world) = b_world`, i.e. the Earth's field genuinely is fixed
+//       there. Cells keep the HERO styling (dashed hollow rings for missing,
+//       discs sized by sample count, hue = |B| deviation), not the old faint
+//       steering wash, because the shell is now the only coverage map on
+//       screen. The device fill stays ghosted at 0.30: the §7 block is 8×
+//       deeper than the old board silhouette and would otherwise blank the
+//       middle of the shell, exactly where the boresight, the target ring and
+//       the geodesic live.
 //
-//       Because the camera is pulled back along −boresight, the cells BEHIND it
-//       (dir·boresight < 0, the near cap) would otherwise cover the whole
-//       silhouette and hide the hemisphere you are aiming into. They are drawn
-//       translucent instead — see CELL_MESHES.
+//   FALLBACK (body-fixed first-person camera):  bodyGroup.matrix = identity,
+//       camera = `heroCam`. Used whenever there is no orientation —
+//       `have_quat` false, no `t_world_to_cv` yet, a ToF-only session. This is
+//       NOT decoration: `cell_dirs` and `field_dir_body` are already body
+//       vectors, so this framing renders a completely correct coverage map with
+//       zero IMU data, where the merged framing would render an empty canvas.
+//       The camera sits behind the device on its boresight looking where the
+//       ToF camera looks, gravity-levelled (`camera.up` tracks −g, § heroUp),
+//       the same rule the live view's FPV mode applies to the cloud.
 //
-//   STEERING (world-fixed camera):  bodyGroup.matrix = T_WORLD_TO_CV · R.
-//       Now the device and its shell tumble and the field arrow stands still —
-//       because `R · (Rᵀ·b_world) = b_world`, i.e. the Earth's field genuinely
-//       is fixed in the room. Its one job is the ghost mechanic: rotate the real
-//       board until the solid model lands inside the wireframe ghost.
+// THE COST WE RE-ACCEPTED, ON PURPOSE
+// -----------------------------------
+// This file used to record that a world-fixed hero had been REJECTED, because
+// a body-fixed shell seen from a room-fixed camera has its holes orbit at hand
+// speed: you can see *that* there is a gap and never *where*, nor whether it is
+// shrinking. That reasoning was not wrong and is not deleted — it is
+// reconsidered. The owner wants the targets to live in the room, and the
+// mitigation is that the aiming instrument is no longer the shell: it is the
+// **ghost** (fly the block into the wireframe) and the **geodesic leader line**
+// (follow the dashes), both of which are world-fixed and therefore steady under
+// exactly the motion that makes the shell swim. The shell reverts to being the
+// progress readout it always was. If this proves unusable on the rig the
+// fallback is the inverse merge — body-fixed camera with the ghost drawn into
+// it — same closure condition either way.
 //
-// A world-fixed HERO was rejected: a shell whose holes orbit at hand speed lets
-// you see *that* there is a gap and never *where*, nor whether it is shrinking.
-// A free-orbit hero camera was rejected for the same reason.
+// Consequence of a moving camera: the near/far cell split (which cells are
+// BEHIND the eye and therefore drawn translucent) is no longer static. It is
+// recomputed against the camera direction expressed in BODY coordinates, at
+// ~10 Hz — see `updateBehind`.
 //
 // FRAMES — WHAT THIS FILE IS ALLOWED TO COMPUTE
 // ---------------------------------------------
@@ -79,14 +96,18 @@
 //   getContext/three throws  -> 2D Lambert fallback (magcal.js, unmodified)
 //   webglcontextlost         -> same; no automatic restore attempt
 //   ?magcal2d=1              -> forced fallback, so both paths get screenshotted
-//   have_quat false          -> hero unaffected; Steering shows a placeholder
+//   ?magcalstatic=1          -> freeze the near/far split (the pre-merge
+//                               behaviour), so the per-frame recompute's cost
+//                               can be MEASURED rather than asserted
+//   have_quat false          -> body-fixed fallback framing + the note
 //
 // Public surface:
 //   chooseRenderer({force2d, webglOk}) -> 'webgl' | '2d'        (pure; testable)
 //   decodeMagpose(ArrayBuffer)         -> pose object | null    (pure)
-//   createMagcal3d({heroCanvas, steerCanvas, steerNote}) -> handle
+//   createMagcal3d({heroCanvas, note}) -> handle
 
 import * as THREE from 'three';
+import { createDeviceMesh, createDeviceGhost } from './devicemodel.js';
 
 const D = (m, l) => { try { window.__diag && window.__diag('magcal3d: ' + m, l); } catch (e) {} };
 
@@ -259,54 +280,14 @@ function labelSprite(text, colorCss) {
     return sp;
 }
 
-/** The device: a NUCLEO-ish board silhouette in body axes — long axis along
- *  body X (Up, board held vertically with USB down), width along Y (Right),
- *  thin along Z (Forward / boresight). Muted ink, wireframe-ish: it is the
- *  ANCHOR that tells you the shell is *yours*, not an abstract globe. */
-function deviceModel() {
-    const g = new THREE.Group();
-    const board = new THREE.BoxGeometry(0.62, 0.34, 0.035);
-    // The fill opacity is a per-pass value (`g.userData.fillMat`): seen from
-    // behind in the hero the board is face-on and would blank out the middle of
-    // the shell — exactly where the boresight, the target ring and the geodesic
-    // live — so the hero ghosts the fill and keeps the edges. The Steering
-    // widget needs the solid model, because its whole mechanic is landing a
-    // solid body inside a wireframe ghost.
-    const fillMat = new THREE.MeshBasicMaterial({
-        color: 0x2b313d, transparent: true, opacity: 0.85, depthWrite: false });
-    g.userData.fillMat = fillMat;
-    g.add(new THREE.Mesh(board, fillMat));
-    g.add(new THREE.LineSegments(new THREE.EdgesGeometry(board),
-        new THREE.LineBasicMaterial({ color: MUTED, transparent: true, opacity: 0.9 })));
-    // USB end (body -X, "down" when held vertically).
-    const usb = new THREE.BoxGeometry(0.07, 0.15, 0.055);
-    const nub = new THREE.Mesh(usb, new THREE.MeshBasicMaterial({ color: 0x3a4150 }));
-    nub.position.set(-0.345, 0, 0);
-    g.add(nub);
-    g.add(new THREE.LineSegments(new THREE.EdgesGeometry(usb),
-        new THREE.LineBasicMaterial({ color: MUTED, transparent: true, opacity: 0.5 })).translateX(-0.345));
-    // ToF aperture, on the +Z (Forward) face — the boresight the cloud comes out of.
-    const eye = new THREE.Mesh(new THREE.CircleGeometry(0.045, 16),
-        new THREE.MeshBasicMaterial({ color: 0x60a5fa, transparent: true, opacity: 0.85 }));
-    eye.position.set(0.17, 0, 0.019);
-    g.add(eye);
-    return g;
-}
-
-/** Wireframe-only clone of the device, for the Steering ghost. */
-function ghostModel() {
-    const g = new THREE.Group();
-    const board = new THREE.BoxGeometry(0.62, 0.34, 0.035);
-    g.add(new THREE.LineSegments(new THREE.EdgesGeometry(board),
-        new THREE.LineDashedMaterial({ color: INK, transparent: true, opacity: 0.55,
-                                       dashSize: 0.05, gapSize: 0.035 })));
-    const usb = new THREE.BoxGeometry(0.07, 0.15, 0.055);
-    g.add(new THREE.LineSegments(new THREE.EdgesGeometry(usb),
-        new THREE.LineDashedMaterial({ color: INK, transparent: true, opacity: 0.4,
-                                       dashSize: 0.05, gapSize: 0.035 })).translateX(-0.345));
-    g.traverse((o) => { if (o.computeLineDistances) o.computeLineDistances(); });
-    return g;
-}
+// The device model and its ghost now come from `devicemodel.js` — the real
+// instrument (a 5.5 x 3 x 2.5 inch block, grey/white/blue through the depth,
+// camera on the blue face), shared verbatim with the Sensors card's orientation
+// gizmo so the two views cannot drift into teaching different shapes. What used
+// to live here was a bare-NUCLEO board silhouette: right for the reference
+// firmware's dev board, wrong for the thing in the owner's hand, and 8x too
+// thin. `devicemodel.MOUNT_ROTATION` carries the "+X is the device's BOTTOM"
+// correction that the old model had backwards.
 
 function lineFrom(points, color, opacity, dashed) {
     const g = new THREE.BufferGeometry().setFromPoints(points);
@@ -363,18 +344,29 @@ function polyline(nPoints, color, opacity, dashed) {
 
 export function createMagcal3d(opts) {
     const heroCanvas = opts.heroCanvas;
-    const steerCanvas = opts.steerCanvas;
-    const steerNote = opts.steerNote || null;
+    // The "no orientation — connect the IMU" line. It used to belong to the
+    // Steering widget; the merged view still needs it, because the fallback
+    // framing is a real coverage map but it CANNOT show the ghost, and a
+    // missing ghost with no explanation reads as a broken feature.
+    const note = opts.note || null;
     const force2d = opts.force2d === true;
+    // Debug escape: freeze the near/far split at its body-fixed value, i.e. the
+    // pre-merge behaviour. Exists so the per-frame recompute below can be
+    // measured against a real baseline in the same build (docs/web-ui-testing.md).
+    const staticBehind = opts.staticBehind === true;
 
     const reduceMotion = !!(window.matchMedia
         && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
     const stats = { renderer: '2d', frames: 0, cells: 0, covered: 0, ghosted: 0,
-                    upDeg: 0, lastPoseMs: 0, poseHz: 0, reason: null };
+                    upDeg: 0, lastPoseMs: 0, poseHz: 0, reason: null,
+                    // Merged-view instrumentation: how often the near/far split
+                    // is recomputed and what one recompute+refresh costs, so
+                    // "throttled to 10 Hz is cheap" is a measurement.
+                    framing: 'body', behindRecomputes: 0, refreshMs: 0,
+                    staticBehind };
 
     let heroRenderer = null;
-    let steerRenderer = null;
     if (chooseRenderer({ force2d, webglOk: true }) === '2d') {
         stats.reason = 'forced by ?magcal2d=1';
         D('renderer=2d (' + stats.reason + ')');
@@ -389,14 +381,6 @@ export function createMagcal3d(opts) {
         D('renderer=2d (' + stats.reason + ')', 'error');
         return degraded(stats);
     }
-    try {
-        // The Steering widget is a bonus view; if a second context is refused we
-        // still have the hero, which is the one that answers the owner's ask.
-        steerRenderer = new THREE.WebGLRenderer({ canvas: steerCanvas, antialias: true, alpha: true });
-    } catch (e) {
-        steerRenderer = null;
-        D('steering widget disabled (second context refused): ' + (e && e.message), 'error');
-    }
     stats.renderer = 'webgl';
 
     // ---- scene ------------------------------------------------------------
@@ -409,7 +393,10 @@ export function createMagcal3d(opts) {
     ghostGroup.visible = false;
     scene.add(ghostGroup);
 
-    // Layers: 0 = shared, 1 = hero only (face labels), 2 = steering only (ghost).
+    // Layers: 0 = shared, 1 = face labels, 2 = the ghost + wrist arrow. Both
+    // cameras enable 1; only the world-fixed one enables 2, because a ghost
+    // drawn under the body-fixed fallback framing would sit exactly on top of
+    // the device and mean nothing (no orientation ⇒ no ΔR to fly toward).
     const setLayer = (obj, n) => obj.traverse((o) => o.layers.set(n));
 
     // ---- the shell: four meshes, because translucency is per-MATERIAL ------
@@ -417,30 +404,34 @@ export function createMagcal3d(opts) {
     // and `InstancedMesh`'s per-instance channel is colour, not alpha — so the
     // near/far split has to be a material split, i.e. a mesh split. Every cell
     // has an instance slot in all four; the three that don't apply are parked at
-    // scale 0. Cheap (4 draw calls, no per-frame work: the split is STATIC,
-    // because the hero camera is fixed in body axes and only rolls).
+    // scale 0. Cheap (4 draw calls). The split used to be STATIC because the
+    // only camera was fixed in body axes; the merged view's camera is fixed in
+    // the ROOM, so it is recomputed — see `updateBehind`, and note that the
+    // recompute is a rewrite of 4 x 92 instance matrices, not a rebuild.
     //
     // Translucency goes on the cells BEHIND the camera, not the far ones. The
-    // usual depth cue fades the far side, but here the camera looks down the
-    // boresight from behind, so the near cap is the rear of the shell and it
-    // covers the entire silhouette — fading the far side would hide precisely
-    // the hemisphere you are steering into. Ghosting the near cap instead lets
-    // you see the aim hemisphere through it, and a hole behind you still reads.
+    // usual depth cue fades the far side, but here the near cap covers the
+    // entire silhouette — fading the far side would hide precisely the
+    // hemisphere you are steering into. Ghosting the near cap instead lets you
+    // see the aim hemisphere through it, and a hole behind you still reads.
     const N = 92;
     const cellMat = (opacity) => new THREE.MeshBasicMaterial({
         transparent: true, opacity, side: THREE.DoubleSide, depthWrite: false });
     const discGeom = new THREE.CircleGeometry(1, 20);
     const ringGeom = dashedRingGeometry(0.62, 1.0, 4, 0.62, 3);
-    // hero / steer opacities: in Steering the shell is a faint backdrop and the
-    // ghost is the message, so everything drops to a wash.
+    // One styling, in both framings: the full coverage map. There used to be a
+    // second, faint "steering" wash for the small world-fixed widget, where the
+    // shell was a backdrop and the ghost carried the message. After the merge
+    // there is no other coverage map on screen, so the wash would simply be a
+    // coverage readout nobody can read (owner ask, 2026-07-31).
     const CELL_MESHES = [
-        { filled: true,  ghost: false, geom: discGeom, hero: 0.90, steer: 0.20 },
-        { filled: true,  ghost: true,  geom: discGeom, hero: 0.26, steer: 0.09 },
-        { filled: false, ghost: false, geom: ringGeom, hero: 0.95, steer: 0.16 },
-        { filled: false, ghost: true,  geom: ringGeom, hero: 0.30, steer: 0.07 },
+        { filled: true,  ghost: false, geom: discGeom, opacity: 0.90 },
+        { filled: true,  ghost: true,  geom: discGeom, opacity: 0.26 },
+        { filled: false, ghost: false, geom: ringGeom, opacity: 0.95 },
+        { filled: false, ghost: true,  geom: ringGeom, opacity: 0.30 },
     ];
     for (const c of CELL_MESHES) {
-        c.mat = cellMat(c.hero);
+        c.mat = cellMat(c.opacity);
         c.mesh = new THREE.InstancedMesh(c.geom, c.mat, N);
         c.mesh.frustumCulled = false;
         c.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -448,24 +439,25 @@ export function createMagcal3d(opts) {
         c.mesh.renderOrder = c.ghost ? 2 : 1;
         bodyGroup.add(c.mesh);
     }
-    function setCellPass(key) {
-        for (const c of CELL_MESHES) c.mat.opacity = c[key];
-    }
 
-    const device = deviceModel();
+    // The block, ghosted: 0.30 in BOTH framings now. The old steering pass drew
+    // it solid at 0.85 because its shell was a wash and the mechanic was landing
+    // a solid body inside a wireframe; with the full coverage map behind it, a
+    // block 8x deeper than the old board would blank the middle of the shell.
+    const device = createDeviceMesh(THREE, { fillOpacity: 0.30 });
     bodyGroup.add(device);
 
-    const ghost = ghostModel();
+    const ghost = createDeviceGhost(THREE, { color: INK });
     setLayer(ghost, 2);
     ghostGroup.add(ghost);
 
-    // Face labels: hero only. In the Steering view they'd tumble and be unreadable.
-    // Front/Back are skipped: the boresight axis projects to a single point in
-    // this camera, so both would land stacked on the device at screen centre,
-    // naming something the picture already says (you are looking out of Front).
-    // The four that ring the view are the informative ones — and because they
-    // roll with the gravity-levelled camera, "Top is over there now" is itself
-    // the roll readout.
+    // Face labels, on layer 1 so BOTH framings show them: they are sprites, so
+    // the text stays screen-aligned and readable however the body tumbles, and
+    // "Top is over there now" is exactly what the guidance sentence ("roll ≈70°,
+    // Top → Back") needs you to be able to see. Front/Back are still skipped:
+    // under the body-fixed fallback framing the boresight projects to a point
+    // and both would land stacked on the device at screen centre, naming
+    // something the picture already says.
     const labels = new THREE.Group();
     for (const [name, dir] of FACES) {
         if (Math.abs(dir[2]) > 0.9) continue;
@@ -540,30 +532,28 @@ export function createMagcal3d(opts) {
     targetGroup.visible = false;
     bodyGroup.add(targetGroup);
 
-    let wristArrow = null;    // steering-only curved arrow around the rotation axis
+    let wristArrow = null;    // curved arrow around the rotation axis (ghost layer)
 
     // ---- cameras ----------------------------------------------------------
-    // Hero: first-person. The camera stands off behind the device on the
+    // FALLBACK (body-fixed, first-person). Stands off behind the device on the
     // boresight (body −Z) and looks along it, so the shell is seen from where
-    // the ToF camera is. Position FIXED in body axes — the "the hole is where it
-    // was" property is the whole framing, and a free orbit destroys it. The only
-    // thing that moves is `up`, which tracks gravity so the view never rolls
-    // with the board (see updateHeroUp).
+    // the ToF camera is. Position FIXED in body axes; the only thing that moves
+    // is `up`, which tracks gravity so the view never rolls with the board (see
+    // updateHeroUp). Used when there is no orientation — the framing needs no
+    // quaternion at all, which is exactly why it survived the merge.
     const heroCam = new THREE.PerspectiveCamera(HERO_FOV, 1, 0.1, 30);
     heroCam.up.set(1, 0, 0);                       // body Up, until gravity says otherwise
     heroCam.position.set(0, 0, -HERO_DIST);
     heroCam.lookAt(0, 0, 0);
     heroCam.layers.enable(1);
-    // The boresight, as a view direction: origin − camera. Everything the
-    // near/far split needs, and the one place the framing's axis is named.
-    const VIEW_DIR = new THREE.Vector3(0, 0, 1);
 
-    // Steering: room camera, up = (0,-1,0) matching scene.js's Open3D CV world,
-    // so "up on screen" is up in the room.
+    // MERGED (world-fixed room camera), up = (0,-1,0) matching scene.js's
+    // Open3D CV world, so "up on screen" is up in the room.
     const steerCam = new THREE.PerspectiveCamera(42, 1, 0.1, 30);
     steerCam.up.set(0, -1, 0);
     steerCam.position.set(1.5, -1.15, -2.3).setLength(3.4);
     steerCam.lookAt(0, 0, 0);
+    steerCam.layers.enable(1);
     steerCam.layers.enable(2);
 
     // ---- state ------------------------------------------------------------
@@ -572,7 +562,7 @@ export function createMagcal3d(opts) {
     let cellDirs = null;         // [92][3], cached from the `open` report
     let counts = null;
     let devPcts = null;
-    let behind = null;           // static near/far split — the hero camera never moves
+    let behind = null;           // near/far split, recomputed by updateBehind
     let report = null;
     let haveQuat = false;
     let running = false;
@@ -626,12 +616,16 @@ export function createMagcal3d(opts) {
         if (Array.isArray(msg.cell_dirs)) {
             cellDirs = msg.cell_dirs;
             stats.cells = cellDirs.length;
-            // The hero camera is FIXED in body axes (it only rolls) and the
-            // shell does not rotate in it, so "which cells are behind the
-            // camera" is a static classification — computed once, not per frame.
-            behind = cellDirs.map(
-                (d) => (d[0] * VIEW_DIR.x + d[1] * VIEW_DIR.y + d[2] * VIEW_DIR.z) < 0);
-            stats.ghosted = behind.filter(Boolean).length;
+            // Allocate the near/far split ONLY when the lattice size changes
+            // (i.e. once). Re-seeding it on every report — this arrives at 5 Hz —
+            // both forced a full reclassification 5x/s regardless of the 10 Hz
+            // throttle AND left `refreshCells()` below drawing one frame with
+            // every cell marked "in front", a visible 5 Hz flicker of the near
+            // cap. `updateBehind` owns the contents from here on.
+            if (!behind || behind.length !== cellDirs.length) {
+                behind = new Array(cellDirs.length).fill(false);
+                behindDirty = true;
+            }
         }
         if (Array.isArray(msg.t_world_to_cv) && msg.t_world_to_cv.length === 9) {
             const t = msg.t_world_to_cv;
@@ -670,6 +664,77 @@ export function createMagcal3d(opts) {
         for (const c of CELL_MESHES) {
             c.mesh.instanceMatrix.needsUpdate = true;
             if (c.mesh.instanceColor) c.mesh.instanceColor.needsUpdate = true;
+        }
+    }
+
+    // ---- the near/far split, now a per-frame quantity -----------------------
+    // Which cells sit BETWEEN the eye and the origin: those are ghosted, so the
+    // near cap cannot hide the hemisphere being aimed into (see CELL_MESHES).
+    //
+    // Under the body-fixed fallback framing this is a CONSTANT — the camera
+    // stands on body −Z, so the answer is `dir·(0,0,1) < 0` forever, which is
+    // why it used to be computed once in `setReport`. The merged view's camera
+    // is fixed in the ROOM while the shell tumbles in the hand, so that cached
+    // answer goes stale within a frame or two of any motion and the wrong
+    // hemisphere gets ghosted.
+    //
+    // The recompute rotates the camera's view direction into BODY coordinates
+    // (the transpose of `bodyGroup`'s rotation, which is exactly
+    // T_WORLD_TO_CV·R — no new convention is written here), re-classifies 92
+    // dot products, and rewrites 4 x 92 instance matrices via refreshCells()
+    // *only if a cell actually changed side*. Two guards, both load-bearing:
+    // BEHIND_MIN_MS caps it at ~10 Hz, and BEHIND_MIN_COS skips it entirely
+    // while the view barely moves — without them a cell straddling the terminator
+    // flips at display rate and flickers. Cost is reported in
+    // `window.__magcal3d` (`behindRecomputes`, `refreshMs`); `?magcalstatic=1`
+    // freezes it at the pre-merge behaviour so the two can be compared.
+    const BEHIND_MIN_MS = 100;
+    const BEHIND_MIN_COS = Math.cos(1.5 * Math.PI / 180);
+    const _viewBody = new THREE.Vector3(0, 0, 1);
+    const _viewPrev = new THREE.Vector3(0, 0, 1);
+    const _m3 = new THREE.Matrix3();
+    let behindDirty = true;
+    let lastBehindMs = 0;
+
+    function updateBehind(now, worldFixed) {
+        if (!cellDirs || !behind) return;
+        if (staticBehind) {
+            if (!behindDirty) return;
+            worldFixed = false;
+        }
+        if (!behindDirty && now - lastBehindMs < BEHIND_MIN_MS) return;
+        if (worldFixed) {
+            _viewBody.copy(steerCam.position).negate().normalize();
+            _m3.setFromMatrix4(bodyGroup.matrix).transpose();
+            _viewBody.applyMatrix3(_m3);
+        } else {
+            _viewBody.set(0, 0, 1);
+        }
+        if (!behindDirty && _viewBody.dot(_viewPrev) > BEHIND_MIN_COS) {
+            lastBehindMs = now;
+            return;
+        }
+        lastBehindMs = now;
+        stats.behindRecomputes++;
+        let changed = behindDirty;
+        let ghosted = 0;
+        for (let i = 0; i < cellDirs.length; i++) {
+            const d = cellDirs[i] || [0, 0, 1];
+            const b = (d[0] * _viewBody.x + d[1] * _viewBody.y + d[2] * _viewBody.z) < 0;
+            if (b !== behind[i]) { behind[i] = b; changed = true; }
+            if (b) ghosted++;
+        }
+        stats.ghosted = ghosted;
+        _viewPrev.copy(_viewBody);
+        behindDirty = false;
+        if (changed) {
+            const t0 = performance.now();
+            refreshCells();
+            const dt = performance.now() - t0;
+            // EMA, so the number in __magcal3d is a steady-state cost rather
+            // than whatever the last call happened to hit.
+            stats.refreshMs = +(stats.refreshMs ? stats.refreshMs * 0.85 + dt * 0.15 : dt)
+                .toFixed(3);
         }
     }
 
@@ -851,7 +916,11 @@ export function createMagcal3d(opts) {
         heroCam.lookAt(0, 0, 0);
     }
 
-    function sizeTo(renderer, camera, canvas) {
+    // Sizes the one canvas and keeps BOTH cameras' aspect in step. Both,
+    // deliberately: the merged view swaps camera the instant orientation
+    // arrives or disappears, and a camera whose aspect was last set at a
+    // different canvas size renders a stretched shell on that first frame.
+    function sizeTo(renderer, canvas) {
         const w = canvas.clientWidth || canvas.width;
         const h = canvas.clientHeight || canvas.height;
         if (!w || !h) return false;
@@ -859,8 +928,10 @@ export function createMagcal3d(opts) {
             || canvas.height !== Math.round(h * devicePixelRatio)) {
             renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
             renderer.setSize(w, h, false);
-            camera.aspect = w / h;
-            camera.updateProjectionMatrix();
+            for (const cam of [heroCam, steerCam]) {
+                cam.aspect = w / h;
+                cam.updateProjectionMatrix();
+            }
         }
         return true;
     }
@@ -928,23 +999,19 @@ export function createMagcal3d(opts) {
             placeTangent(targetGroup.matrix, ga.target, SHELL_R * 1.008, pulse);
         }
 
-        // Pass 1 — HERO: the shell is body-fixed, so bodyGroup is identity; all
-        // the framing lives in the camera (position fixed on the boresight, up
-        // levelled by updateHeroUp above).
-        bodyGroup.matrix.copy(IDENT);
-        ghostGroup.visible = false;
-        setCellPass('hero');
-        device.userData.fillMat.opacity = 0.30;
-        if (sizeTo(heroRenderer, heroCam, heroCanvas)) {
-            bodyGroup.updateMatrixWorld(true);
-            heroRenderer.render(scene, heroCam);
-            stats.frames++;
-        }
+        // ---- ONE pass, one of two framings ---------------------------------
+        // World-fixed whenever there is orientation to be world-fixed WITH;
+        // body-fixed otherwise. The gate is the same one the old steering pass
+        // used, which is the point: everything it could not do without a
+        // quaternion (ghost, wrist arrow, room-stable field arrow) is exactly
+        // what the fallback drops, and the coverage map — the thing the modal
+        // exists for — survives either way.
+        const worldFixed = !!(tWorldToCv && haveQuat);
+        stats.framing = worldFixed ? 'world' : 'body';
 
-        // Pass 2 — STEERING: world-fixed, bodyGroup = T_WORLD_TO_CV · R. The
-        // device tumbles and the field arrow stands still, because
-        // R · (Rᵀ·b_world) = b_world.
-        if (steerRenderer && tWorldToCv && haveQuat) {
+        if (worldFixed) {
+            // bodyGroup = T_WORLD_TO_CV · R: the device tumbles and the field
+            // arrow stands still, because R · (Rᵀ·b_world) = b_world.
             _m4.makeRotationFromQuaternion(liveQ);
             bodyGroup.matrix.multiplyMatrices(tWorldToCv, _m4);
             // The ghost sits at R·ΔR — the minimal-effort attitude that puts the
@@ -959,19 +1026,26 @@ export function createMagcal3d(opts) {
             } else {
                 ghostGroup.visible = false;
             }
-            // The shell is a faint backdrop here; the ghost is the message.
-            setCellPass('steer');
-            device.userData.fillMat.opacity = 0.85;
-            if (sizeTo(steerRenderer, steerCam, steerCanvas)) {
-                bodyGroup.updateMatrixWorld(true);
-                ghostGroup.updateMatrixWorld(true);
-                steerRenderer.render(scene, steerCam);
-            }
-            if (steerNote) steerNote.classList.add('hidden');
-        } else if (steerNote) {
+            if (note) note.classList.add('hidden');
+        } else {
             // No orientation (ToF-only session, or before the first stream-9
-            // sample): the HERO is unaffected — the whole reason it is the hero.
-            steerNote.classList.remove('hidden');
+            // sample). `cell_dirs` and `field_dir_body` are body vectors, so the
+            // coverage map is fully correct here — only the ghost is missing,
+            // and the note says why.
+            bodyGroup.matrix.copy(IDENT);
+            ghostGroup.visible = false;
+            if (note) note.classList.remove('hidden');
+        }
+
+        // Must run AFTER bodyGroup.matrix is written for this frame and BEFORE
+        // the render: it reads that matrix to get the eye direction in body axes.
+        updateBehind(now, worldFixed);
+
+        if (sizeTo(heroRenderer, heroCanvas)) {
+            bodyGroup.updateMatrixWorld(true);
+            if (ghostGroup.visible) ghostGroup.updateMatrixWorld(true);
+            heroRenderer.render(scene, worldFixed ? steerCam : heroCam);
+            stats.frames++;
         }
 
         // 1 Hz diag line: a machine-checkable assertion that the WebGL path AND
@@ -980,13 +1054,14 @@ export function createMagcal3d(opts) {
             const dt = (now - (poseWindowStart || now)) / 1000;
             stats.poseHz = dt > 0 ? +(poseCount / dt).toFixed(1) : 0;
             // Screen-up as a body angle from +X (body Up): 0 = board upright,
-            // ±90 = held on its side. This is the camera's gravity levelling,
-            // reported so it can be asserted rather than eyeballed.
+            // ±90 = held on its side. This is the fallback camera's gravity
+            // levelling, reported so it can be asserted rather than eyeballed.
             stats.upDeg = +(Math.atan2(heroUp.y, heroUp.x) * 180 / Math.PI).toFixed(1);
             poseCount = 0; poseWindowStart = now; lastDiag = now;
-            D(`renderer=${stats.renderer} cells=${stats.cells} covered=${stats.covered} `
-              + `ghosted=${stats.ghosted} up_deg=${stats.upDeg} `
-              + `frames=${stats.frames} pose_hz=${stats.poseHz} have_quat=${haveQuat}`);
+            D(`renderer=${stats.renderer} framing=${stats.framing} cells=${stats.cells} `
+              + `covered=${stats.covered} ghosted=${stats.ghosted} up_deg=${stats.upDeg} `
+              + `frames=${stats.frames} pose_hz=${stats.poseHz} have_quat=${haveQuat} `
+              + `behind_recomputes=${stats.behindRecomputes} refresh_ms=${stats.refreshMs}`);
         }
     }
 
@@ -1002,7 +1077,6 @@ export function createMagcal3d(opts) {
         if (opts.onDegrade) opts.onDegrade(stats.reason);
     };
     heroCanvas.addEventListener('webglcontextlost', onLost, false);
-    if (steerCanvas) steerCanvas.addEventListener('webglcontextlost', onLost, false);
 
     function start() {
         if (running || lost) return;
@@ -1018,10 +1092,10 @@ export function createMagcal3d(opts) {
     function dispose() {
         stop();
         try { heroRenderer.dispose(); } catch (e) {}
-        try { steerRenderer && steerRenderer.dispose(); } catch (e) {}
     }
 
-    D('3D renderer ready (WebGL' + (steerRenderer ? ' ×2' : ' ×1, steering disabled') + ')');
+    D('3D renderer ready (WebGL ×1, merged view'
+      + (staticBehind ? ', ?magcalstatic=1: near/far split frozen' : '') + ')');
     const api = { ok: true, renderer: 'webgl', reason: null, setReport, setPose,
                   start, stop, dispose, stats: () => stats };
     window.__magcal3d = stats;

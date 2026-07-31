@@ -132,12 +132,51 @@ like the app ignoring your click (cost ~20 min on 2026-07-29: three "the mode
 select is broken" reproductions were all this). Wrap each step's body in an IIFE
 (`(()=>{ … })()`) or use distinct names.
 
-**The magnetometer-calibration modal has two renderers, and both must be shot.**
-Open it with `sensor-mag-cal`; drive it with `magcal-start` / `magcal-stop` /
-`magcal-clear`. The 3D "Shell & Steering" view (`magcal3d.js`) publishes a 1 Hz
-diag line and `window.__magcal3d = {renderer, frames, cells, covered, lastPoseMs,
-poseHz, reason}` — assert `renderer=="webgl"` and `poseHz≈30` rather than merely
-that a canvas exists. **`?magcal2d=1` forces the 2D Lambert fallback**, so one run
+**The magnetometer-calibration modal has one 3D canvas and a 2D fallback, and
+both must be shot.** (It had *two* WebGL canvases until 2026-07-31 — a body-fixed
+"hero" and a small world-fixed "steering" widget. They are merged: one
+`#magcal-hero` canvas, world-fixed framing with the full coverage styling, ghost
+included. There is no `#magcal-steer`.) Open it with `sensor-mag-cal`; drive it
+with `magcal-start` / `magcal-stop` / `magcal-clear`. `magcal3d.js` publishes a
+1 Hz diag line and `window.__magcal3d = {renderer, framing, frames, cells,
+covered, ghosted, lastPoseMs, poseHz, behindRecomputes, refreshMs, staticBehind,
+reason}` — assert `renderer=="webgl"` and `poseHz≈30` rather than merely that a
+canvas exists.
+
+Two fields are new and worth asserting:
+
+- **`framing`** is `"world"` (the merged view) or `"body"` (the no-orientation
+  fallback, camera parked on the boresight). Forcing `body` is the only way to
+  screenshot the degradation path on a rig that *has* an IMU: load a
+  stream-9-less capture, or in a step set the modal's renderer handle's pose
+  flags without `POSE_HAVE_QUAT` (bit 3). When it is `body`, `#magcal-hero-note`
+  must be visible and saying why.
+- **`behindRecomputes` / `refreshMs`** measure the per-frame near/far cell split
+  (the merged camera is room-fixed, so which cells are *behind the eye* changes
+  as the device turns; it used to be a constant). Attempted at most every 100 ms
+  and skipped entirely while the view direction has moved < 1.5°.
+  **`?magcalstatic=1` freezes it at the old body-fixed value**, which is how you
+  get a same-build baseline — compare `frames` over a fixed wall-clock window
+  with and without it.
+
+  Measured 2026-07-31 (llvmpipe, live rig, modal open, 30 s windows):
+
+  | arm | fps | recomputes/s | `refreshMs` |
+  |---|---|---|---|
+  | `?magcalstatic=1` (frozen) | 5.08 | 0 (1 total) | — |
+  | default (per-frame) | 5.87 | 0 (2 total) | — |
+
+  **A stationary rig does not exercise it at all** — that is what the 1.5° gate
+  is for, and it is why the fps difference here is only run-to-run noise on this
+  box (the "slower" arm measured faster). To get the cost under motion, build an
+  isolated instance on a throwaway canvas and pump synthetic poses; `createMagcal3d`
+  is exported and takes any canvas. At a **90 °/s tumble**: 2.5 recomputes/s
+  (bounded by the render rate, since `updateBehind` runs from `frame()`) at
+  **0.062 ms each** — 0.16 ms/s, and **0.062 % of wall clock even at the 10 Hz
+  ceiling**. Ignore any `refreshMs` read after only one or two calls: the first
+  call is cold and reads ~0.4 ms, 6× the warmed value.
+
+**`?magcal2d=1` forces the 2D Lambert fallback**, so one run
 covers both paths; `window.__magcal3d.renderer` reads `"2d"` and
 `#magcal-fallback-note` says why. Context loss is reachable from a step:
 `document.getElementById('magcal-hero').getContext('webgl2')

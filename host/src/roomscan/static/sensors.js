@@ -1,9 +1,13 @@
 // sensors.js — the left-rail Sensors readout (streams 9/10, Web Phase 2).
 //
 // Subscribes to "sensor" (JSON) and paints three 2D-canvas widgets + text:
-//   - orientation gizmo: orthographic projection of the server-computed display
-//     rotation `rot` (T_WORLD_TO_CV @ R @ T_CV_TO_BODY, already in the scene's
-//     Open3D-CV frame), so we never re-derive the load-bearing sign matrices.
+//   - orientation gizmo: the DEVICE ITSELF (devicemodel.js's shared block,
+//     drawn as an orthographic painter's-algorithm box on a 2D canvas), posed
+//     by the server-computed display rotation `rot` (T_WORLD_TO_CV @ R @
+//     T_CV_TO_BODY, already in the scene's Open3D-CV frame) so we never
+//     re-derive the load-bearing sign matrices. It was an RGB axis triad until
+//     2026-07-31, which answered "where is +Y" rather than "which way is the
+//     thing in my hand pointing".
 //   - tilt-compensated compass: needle at `heading` (0=up=N, clockwise), matching
 //     the desktop render_compass convention.
 //   - pressure / temperature sparklines: min/max-autoscaled polyline over the
@@ -60,6 +64,8 @@
 // Hub events:  subscribes "sensor", "state"; sends "set_orientation" (labels
 //   only), "zero_yaw", "clear_yaw_offset"
 
+import { drawDeviceBox2D } from './devicemodel.js';
+
 const D = (m, l) => { try { window.__diag && window.__diag('sensors.js: ' + m, l); } catch (e) {} };
 
 // fusion_key -> what to do about it (owner ask, 2026-07-31). Wording tracks the
@@ -79,8 +85,6 @@ const FUSION_HELP = {
 };
 
 // Match index.html's design tokens (canvas can't read CSS vars directly).
-const AXIS_COLORS = ['#ef4444', '#10b981', '#3b82f6'];   // X red, Y green, Z blue
-const AXIS_LABELS = ['X', 'Y', 'Z'];
 const GRID = 'rgba(255,255,255,0.10)';
 const INK = '#e2e8f0';
 const MUTED = '#94a3b8';
@@ -102,56 +106,17 @@ function fitCanvas(canvas, cssW, cssH) {
     return ctx;
 }
 
-// --- gizmo: project the rotated basis triad orthographically ---
+// --- gizmo: the DEVICE at its current attitude ---------------------------
+// Was an RGB axis triad, which showed the orientation of nothing in
+// particular: X/Y/Z are only meaningful to someone who already knows the
+// frame, and the operator's actual question is "which way is the thing in my
+// hand pointing". It now draws the real block (devicemodel.js -- the same
+// shape and the same colour bands the mag-cal modal draws in 3D, so the two
+// cannot teach different mental models). 2D canvas on purpose: this host runs
+// WebGL in software, and a third live GL context costs frame rate.
 function drawGizmo(canvas, rot) {
     const S = 96;
-    const ctx = fitCanvas(canvas, S, S);
-    const cx = S / 2, cy = S / 2, len = S * 0.36;
-
-    // faint origin ring
-    ctx.strokeStyle = GRID;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(cx, cy, len * 1.15, 0, Math.PI * 2);
-    ctx.stroke();
-
-    if (!Array.isArray(rot) || rot.length !== 9) {
-        ctx.fillStyle = MUTED;
-        ctx.font = '11px "JetBrains Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText('—', cx, cy + 4);
-        return;
-    }
-
-    // Column c basis vector = (rot[c], rot[3+c], rot[6+c]) in CV world (x=right,
-    // y=down, z=forward/into-screen). Screen x=+x, y=+y (canvas +y is down too).
-    // The scene camera looks along +Z, so +Z points away: draw far axes first
-    // and dim them for a cheap depth cue.
-    const axes = [0, 1, 2].map((c) => ({
-        c,
-        x: rot[c], y: rot[3 + c], z: rot[6 + c],
-    }));
-    axes.sort((a, b) => b.z - a.z);   // most-away (largest +z) first
-
-    for (const a of axes) {
-        const tipx = cx + a.x * len, tipy = cy + a.y * len;
-        const alpha = 0.45 + 0.55 * (1 - Math.min(1, Math.max(0, (a.z + 1) / 2)));
-        ctx.globalAlpha = alpha;
-        ctx.strokeStyle = AXIS_COLORS[a.c];
-        ctx.fillStyle = AXIS_COLORS[a.c];
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(cx, cy);
-        ctx.lineTo(tipx, tipy);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(tipx, tipy, 2.5, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.font = 'bold 10px "JetBrains Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(AXIS_LABELS[a.c], cx + a.x * len * 1.28, cy + a.y * len * 1.28 + 3);
-    }
-    ctx.globalAlpha = 1;
+    drawDeviceBox2D(fitCanvas(canvas, S, S), rot, S);
 }
 
 // --- compass: dial + needle (0=up=N, clockwise) ---

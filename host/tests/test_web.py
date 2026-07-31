@@ -1126,6 +1126,32 @@ def test_ui_from_config_rejects_bad_orientation_mode():
     assert ui.orientation_mode == "world"
 
 
+def test_ui_from_config_migrates_the_legacy_axis_labels():
+    """A stored copy of the OLD default is treated as un-customised.
+
+    `_persist_ui` writes every field on any UI change, so an install that never
+    touched its axis labels still has "Roll,Pitch,Yaw" on disk -- which would
+    shadow the new default forever. That is exactly backwards: those installs are
+    the ones showing "Pitch"/"Yaw" against World's boresight tilt and absolute
+    magnetic heading, i.e. the wrong names for the numbers beside them. This was
+    found on the owner's own config, where the relabelling was invisible after a
+    restart.
+    """
+    cfg = ViewerConfig(orientation_labels="Roll,Pitch,Yaw")
+    assert web.ui_from_config(cfg).orientation_labels == ("Roll", "Tilt", "Heading")
+
+
+def test_ui_from_config_keeps_genuinely_custom_axis_labels():
+    """The migration is exact-match only -- anything the user actually chose is
+    left alone, including a set that merely overlaps the old default."""
+    for stored, expected in [
+        ("Roll,Pitch,Twist", ("Roll", "Pitch", "Twist")),   # two of three match
+        ("Tilt,Pan,Twist", ("Tilt", "Pan", "Twist")),
+        ("Roll,Tilt,Heading", ("Roll", "Tilt", "Heading")),  # already migrated
+    ]:
+        assert web.ui_from_config(ViewerConfig(orientation_labels=stored)).orientation_labels == expected
+
+
 def test_apply_ui_to_config_orientation_round_trips():
     cfg = ViewerConfig()
     ui = web.UiState(orientation_mode="world", orientation_labels=("A", "B", "C"))

@@ -159,3 +159,128 @@ def test_every_card_id_has_a_squircle_icon_and_title():
         f"data-card-id values with no CARD_TITLES entry in layout.js (their "
         f"squircle button's title falls back to the raw id): {missing_titles}"
     )
+
+
+# ---------------------------------------------------------------------------
+# devicemodel.js -- the shared 3D device (owner ask, 2026-07-31)
+# ---------------------------------------------------------------------------
+# The block is drawn by two renderers that share nothing else: magcal3d.js
+# (WebGL, mag-cal modal) and sensors.js (2D canvas, orientation gizmo). These
+# checks pin the two constants that carry real physical meaning, because both
+# are the kind of thing that is invisibly wrong: a mount rotation that flips the
+# model upside down still renders a plausible box, and a frame permutation that
+# is silently transposed still renders a plausible box that mirrors.
+
+DEVICE_JS = STATIC / "devicemodel.js"
+
+
+def _js_number_array(js: str, name: str) -> list:
+    """Numbers of `export const <name> = [ ... ];` in devicemodel.js."""
+    m = re.search(r"export const " + re.escape(name) + r"\s*=\s*\[(.*?)\];", js, re.DOTALL)
+    assert m is not None, f"could not find `export const {name} = [...]` in devicemodel.js"
+    return [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", m.group(1))]
+
+
+def _js_dims(js: str) -> dict:
+    m = re.search(r"export const DEVICE_DIMS\s*=\s*\{(.*?)\};", js, re.DOTALL)
+    assert m is not None, "could not find `export const DEVICE_DIMS = {...}`"
+    return {k: float(v) for k, v in re.findall(r"([xyz])\s*:\s*(-?[\d.]+)", m.group(1))}
+
+
+def test_device_dims_carry_the_owners_5_5_by_3_by_2_5_block():
+    """The scanner is a 5.5" x 3" x 2.5" block, not the flat PCB silhouette the
+    mag-cal view used to draw. The ratios are what matter (the absolute scale is
+    magcal3d's shell units), and the DEPTH ratio especially: at 8x the old
+    board's thickness the model sits across the middle of the coverage shell,
+    which is the whole reason every caller ghosts its fill."""
+    d = _js_dims(DEVICE_JS.read_text(encoding="utf-8"))
+    assert d["y"] / d["x"] == pytest.approx(3.0 / 5.5, abs=1e-3)
+    assert d["z"] / d["x"] == pytest.approx(2.5 / 5.5, abs=1e-3)
+
+
+def test_device_bands_are_half_grey_quarter_white_quarter_blue():
+    """Through the depth, from the face toward the user to the camera face."""
+    js = DEVICE_JS.read_text(encoding="utf-8")
+    m = re.search(r"export const DEVICE_BANDS\s*=\s*\[(.*?)\];", js, re.DOTALL)
+    assert m is not None
+    fracs = [float(x) for x in re.findall(r"frac:\s*([\d.]+)", m.group(1))]
+    assert fracs == [0.50, 0.25, 0.25]
+    assert sum(fracs) == pytest.approx(1.0)
+    # Ordered -Z (user) -> +Z (boresight); the camera is on the last one.
+    names = re.findall(r"name:\s*'([a-z]+)'", m.group(1))
+    assert names[-1] == "camera"
+
+
+def test_mount_rotation_stands_the_device_upright_at_the_owners_attitude():
+    """MOUNT_ROTATION maps the DESIGN frame (+X = the device's own top) onto the
+    SFLP BODY frame, and it is a 180 deg turn about the boresight.
+
+    Held normally the instrument reads **World pitch 0 deg, roll 180 deg**, and
+    the owner confirms those readings are correct. World roll is
+    `sensors.triad_roll_deg`: the roll of body **+X** about the boresight against
+    true vertical -- so 180 deg means body +X points DOWN while the device is the
+    right way up. Body +X is therefore the device's bottom, and the old model
+    (which called +X "Up, USB down") drew it upside down.
+
+    This asserts the consequence rather than the matrix: at exactly that
+    attitude, the device's top must point at the ceiling and its camera face
+    must be horizontal. An identity MOUNT_ROTATION passes every "is it a box"
+    check and fails this one, which is the point -- a 180 deg error is invisible
+    to symmetry checks (the block's silhouette is symmetric about its centre).
+    """
+    import numpy as np
+
+    from roomscan import sensors
+
+    mount = np.array(_js_number_array(DEVICE_JS.read_text(encoding="utf-8"),
+                                      "MOUNT_ROTATION")).reshape(3, 3)
+
+    # Body -> SFLP world (X=North, Y=West, Z=Up) for "held normally":
+    # boresight (body +Z) aimed North and level; body +X pointing at the floor.
+    r = np.array([[0.0, 0.0, 1.0],
+                  [0.0, 1.0, 0.0],
+                  [-1.0, 0.0, 0.0]])
+    assert np.linalg.det(r) == pytest.approx(1.0)
+
+    # It really is the owner's reported attitude, by the server's own functions.
+    down_body = r.T @ np.array([0.0, 0.0, -1.0])
+    assert sensors.tilt_from_down_deg(down_body) == pytest.approx(0.0, abs=1e-9)
+    assert abs(sensors.triad_roll_deg(down_body)) == pytest.approx(180.0, abs=1e-9)
+
+    design_to_world = r @ mount
+    top = design_to_world @ np.array([1.0, 0.0, 0.0])       # the device's top
+    camera = design_to_world @ np.array([0.0, 0.0, 1.0])    # the blue/camera face
+    assert top == pytest.approx([0.0, 0.0, 1.0], abs=1e-9), (
+        "the device's top must point at the ceiling when it is held the right "
+        f"way up; MOUNT_ROTATION put it at {top}")
+    assert camera[2] == pytest.approx(0.0, abs=1e-9), (
+        "pitch 0 means the camera face is horizontal; got a Z component of "
+        f"{camera[2]}")
+    # ...and the rotation must be about the boresight, or the camera face moves.
+    assert mount[2, 2] == pytest.approx(1.0)
+
+
+def test_body_to_cv_is_the_transpose_of_the_servers_t_cv_to_body():
+    """`drawDeviceBox2D` is handed the `sensor` message's `rot`
+    (`T_WORLD_TO_CV @ R @ T_CV_TO_BODY`), which rotates CV-frame vectors, while
+    the block's geometry is body-framed. `BODY_TO_CV` is the one permutation the
+    client owns to bridge those. Pinning it here means a server-side convention
+    change fails a test rather than silently mirroring the gizmo -- and a
+    mirrored box is exactly the defect nobody spots, because a box looks like a
+    box either way."""
+    import numpy as np
+
+    from roomscan import sensors
+
+    body_to_cv = np.array(_js_number_array(DEVICE_JS.read_text(encoding="utf-8"),
+                                           "BODY_TO_CV")).reshape(3, 3)
+    assert body_to_cv == pytest.approx(sensors.T_CV_TO_BODY.T)
+
+
+def test_the_orientation_gizmo_draws_the_device_not_an_axis_triad():
+    """sensors.js must source its widget from the shared module, so the gizmo
+    and the mag-cal modal cannot drift into two different devices."""
+    js = (STATIC / "sensors.js").read_text(encoding="utf-8")
+    assert "from './devicemodel.js'" in js
+    assert "drawDeviceBox2D" in js
+    assert "AXIS_COLORS" not in js, "the RGB axis triad is still being drawn"

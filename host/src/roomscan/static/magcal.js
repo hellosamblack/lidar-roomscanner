@@ -25,7 +25,10 @@
 // ------------------------
 // Since 2026-07-29 this module owns the report / quality / actions DOM and
 // delegates *drawing* to whichever renderer is live:
-//   * `magcal3d.js` — the "Shell & Steering" WebGL view (the hero);
+//   * `magcal3d.js` — the merged "Shell & Steering" WebGL view (one canvas
+//     since 2026-07-31: coverage shell, device block and steering ghost in a
+//     single room-fixed framing, with a body-fixed fallback when there is no
+//     orientation);
 //   * the 2D Lambert disc pair below — the FALLBACK, kept alive and unmodified.
 // The fallback is not a degraded stub. It needs no orientation and no WebGL,
 // and it is the best view in the app for *counting* what is left. It takes over
@@ -430,8 +433,11 @@ export function createMagcal(hub, sceneApi) {
     const mapWrap = $('magcal-map-wrap');
     const heroWrap = $('magcal-hero-wrap');
     const heroCanvas = $('magcal-hero');
-    const steerCanvas = $('magcal-steer');
-    const steerNote = $('magcal-steer-note');
+    // The "no orientation" overlay on the merged canvas. It belonged to the
+    // Steering widget until the two views were merged (2026-07-31); the merged
+    // view still needs it, because the no-quaternion fallback framing draws a
+    // correct coverage map but cannot draw the ghost.
+    const heroNote = $('magcal-hero-note');
     const fallbackNote = $('magcal-fallback-note');
     const gaugeArc = $('magcal-gauge-arc');
     const gaugeTicks = $('magcal-gauge-ticks');
@@ -470,14 +476,19 @@ export function createMagcal(hub, sceneApi) {
     openBtn.title = 'Magnetometer calibration: sweep coverage + quality';
 
     // `?magcal2d=1` forces the fallback renderer, so BOTH paths get screenshotted
-    // in one headless run (docs/web-ui-testing.md).
-    const force2d = new URLSearchParams(window.location.search).get('magcal2d') === '1';
+    // in one headless run (docs/web-ui-testing.md). `?magcalstatic=1` freezes the
+    // merged view's near/far cell split at its pre-merge (body-fixed, computed
+    // once) behaviour -- a measurement escape hatch, not a feature: it is how the
+    // per-frame recompute's cost gets a baseline in the same build.
+    const _q = new URLSearchParams(window.location.search);
+    const force2d = _q.get('magcal2d') === '1';
+    const staticBehind = _q.get('magcalstatic') === '1';
 
     function ensureRenderer() {
         if (three) return;
         try {
             three = createMagcal3d({
-                heroCanvas, steerCanvas, steerNote, force2d,
+                heroCanvas, note: heroNote, force2d, staticBehind,
                 onDegrade: (why) => { showFallback(why); },
             });
         } catch (e) {
@@ -505,7 +516,7 @@ export function createMagcal(hub, sceneApi) {
         fallbackNote.textContent = force2d
             ? '3D disabled by ?magcal2d=1 — showing the flat coverage map.'
             : `3D unavailable (${why}) — showing the flat coverage map.`;
-        if (steerNote) steerNote.classList.remove('hidden');
+        if (heroNote) heroNote.classList.add('hidden');
         D('renderer=2d fallback: ' + why);
     }
 
