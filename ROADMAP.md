@@ -149,18 +149,83 @@ protocol (walking to park the device puts the operator in the FOV — owner, 202
 | # | Capture | Unblocks | Protocol | Acceptance gate | Status |
 |---|---|---|---|---|---|
 | **DC-A** | **Brisk-motion handheld scan** — one room, 60–90 s | Phase 6.D: BUG-036's escalating ICP retry has **never run in the field** (the run that exposed it was executing pre-fix code). Also probes the open "no relocalization" hole | Normal-pace sweep with 3–4 deliberate **fast** whips (~1.5 m/s ≈ 50 mm between frames, vs the 16.9 mm median that BUG-036 measured). Don't be gentle — the point is to trigger the retry | 0 CRC, stream 9 present. On replay: `tracking_stats` shows **escalations > 0**, `died == false`, no frozen-translation segment in the `.tum` | ✅ **PASS** (`DebugCapA.bin`, scored 2026-07-31) — escalations 7–47/run, 0/5 died, longest freeze 28 < 30. **First field exercise of BUG-036's retry, and it worked** |
-| **DC-B** | **Multi-room closed loop ×2** — 2–3 rooms or a corridor circuit, 3–5 min each, two takes of the *same* route | Phase 6.D items 3–4, the loop-closure go/no-go. The baseline is single-room only (~3% over 24 m) and the paired 95%-CI gate has only the two coffee-room circuits to score. Loop closure is supposed to earn its keep on **multi-room** trajectories — nothing in `captures/` tests that | Start parked on a marked pose, walk the route, return to the **same** marked pose. Revisit at least one area mid-route (that is what a pose-proximity edge needs). Two takes so the gate is paired | 0 lost frames, stream 9, byte-clean. ~135 MB per 5 min | ⬜ open |
+| **DC-B** | **Multi-room closed loop ×2** — 2–3 rooms or a corridor circuit, 3–5 min each, two takes of the *same* route | Phase 6.D items 3–4, the loop-closure go/no-go. The baseline is single-room only (~3% over 24 m) and the paired 95%-CI gate has only the two coffee-room circuits to score. Loop closure is supposed to earn its keep on **multi-room** trajectories — nothing in `captures/` tests that | Start parked on a marked pose, walk the route, return to the **same** marked pose. Revisit at least one area mid-route (that is what a pose-proximity edge needs). Two takes so the gate is paired | 0 lost frames, stream 9, byte-clean. ~135 MB per 5 min | ❌ **collected ×3, gate FAILS on "0 lost frames"** (`DebugCapB1/B2/B3`, 2026-07-31) — 2.29/4.28/9.35% transport loss, **BUG-049**. B1 usable as a provisional baseline (**2.71 ± 0.58 m over 75.3 m = 3.6%**); B3 is 9.6% on the *same route*. **Re-record after BUG-049** — see below |
 | **DC-C** | **Tracking-loss stress scan** — one room, ~90 s | Relocalization (Phase 6.D, explicitly open: the retry survives a bad *frame*, not a bad *second*). No capture contains a real tracking-kill event | Mid-scan, kill tracking deliberately 2–3×: palm over the sensor ~2 s, or point at a blank surface <20 cm away — then **return to already-mapped geometry** and continue | Byte-clean; the kill events identifiable on replay. This is a fixture, not a good scan — it should look bad | ✅ **PASS as a fixture** (`DebugCapC.bin`, 2026-07-31) — 0 CRC, 376–467 lost/run, freezes of 82–120 frames (2.7–4.0 s), 70–133 escalations. **Every run recovered** (0 died) because the protocol's "return to already-mapped geometry" is what relocalization would otherwise be for |
 | **DC-D** | **Flat-field pan** — 20 s over a uniform matte surface | Phase 2.5 follow-up: reflectance carries ~18% per-zone FPN and the correction is **built and shipped-disabled** waiting only on this (`docs/flatfield-calibration.md`) | Blank painted wall / foam board / grey card at ~0.5–1 m, roughly perpendicular, **slowly panning the whole time**. A static capture is invalid — it bakes scene texture into the "correction" | ≥100 panned frames; `build_flatfield` residual in the low tens of percent, gains comfortably inside [0.5, 1.6]. Gains near the [0.33, 3.0] clip bounds ⇒ recapture | ✅ **PASS** (`DebugCapD.bin`, 2026-07-31) — residual **7.3%**, gains 0.754–1.224 (mean 1.000, sd 7.1%), **all 2268 zones** inside [0.5, 1.6], none near the clip bounds. ~490 panned frames at 14.9 °/s. Flat-field is ready to enable |
-| **DC-E** | **Braced fixed-heading tilt sweep** — ~2 min | `docs/superpowers/plans/2026-07-29-orientation-resume.md` §4.6: BUG-030's closure proved the calibration's **magnitude**, not its **direction**. An ellipsoid fit is ambiguous up to a rotation (DT0103) — every sample on a perfect sphere while the field vector is systematically rotated. Bounded at ~2.5° by the near-spherical soft iron; measured at nothing | Hand-held, off the tripod. Pick **one fixed compass bearing** and keep pointing at it. Sweep tilt level → 45° → vertical, **holding each ~15 s**. Two cycles | `mag_check` tilt table flat (expected) **and** `absolute_heading` agreeing across every hold. Disagreement ⇒ implement DT0103's accelerometer-assisted fit | ⬜ open |
-| **DC-F** | **Controlled pan set** — 3 takes × ~60 s | The two claims currently inferred from stationary data plus arithmetic: applying the measured **+7.76 ms quat phase lead** (on the wire since BUG-031, nothing consumes it — now the largest motion-error term), and the `imufusion` A/B (built, gated off, no capture carries orientation ground truth). Also resume-doc §4.5 | Brace against a repeatable start (a corner, taped marks), pan to a repeatable end, hold. One take each at roughly **slow ~20 °/s / medium ~50 °/s / fast ~100 °/s**. 10 s stationary at both ends of every take | Endpoints repeatable enough that A→B is the same rotation across takes; 0 CRC; stream 11 present. The stationary bookends give the noise floor for free | ⬜ open |
+| **DC-E** | **Braced fixed-heading tilt sweep** — ~2 min | `docs/superpowers/plans/2026-07-29-orientation-resume.md` §4.6: BUG-030's closure proved the calibration's **magnitude**, not its **direction**. An ellipsoid fit is ambiguous up to a rotation (DT0103) — every sample on a perfect sphere while the field vector is systematically rotated. Bounded at ~2.5° by the near-spherical soft iron; measured at nothing | Hand-held, off the tripod. Pick **one fixed compass bearing** and keep pointing at it. Sweep tilt level → 45° → vertical, **holding each ~15 s**. Two cycles | `mag_check` tilt table flat (expected) **and** `absolute_heading` agreeing across every hold. Disagreement ⇒ implement DT0103's accelerometer-assisted fit | ⚠️ **collected to spec, gate FAILS on the tilt-ramp clause** (`DebugCapE.bin`, 2026-07-31) — 7 holds of 15–18 s at tilt 3.9/46.1/90.3/50.3/4.1/47.8/90.9°, exactly two cycles. Ramp **1.72×** (GOOD < 1.10). ⚠️ The heading clause is **partly artifact** — see BUG-048; re-score it after the singularity fix before sizing DT0103 |
+| **DC-F** | **Controlled pan set** — 3 takes × ~60 s | The two claims currently inferred from stationary data plus arithmetic: applying the measured **+7.76 ms quat phase lead** (on the wire since BUG-031, nothing consumes it — now the largest motion-error term), and the `imufusion` A/B (built, gated off, no capture carries orientation ground truth). Also resume-doc §4.5 | Brace against a repeatable start (a corner, taped marks), pan to a repeatable end, hold. One take each at roughly **slow ~20 °/s / medium ~50 °/s / fast ~100 °/s**. 10 s stationary at both ends of every take | Endpoints repeatable enough that A→B is the same rotation across takes; 0 CRC; stream 11 present. The stationary bookends give the noise floor for free | ⚠️ **gate PASSES, purpose NOT unblocked** (`DebugCapF.bin`, 2026-07-31) — collected above spec: **4** pans at 19/25/36/89 °/s with 5 bookend holds of ~11 s. Pans agree to **1.42°** of nominal 90°. But the bookends' own noise floor (0.3–1.7°) **exceeds** the predicted phase-lead effect (0.15–0.69°), so the rate-vs-error test is underpowered, not falsifying. Phase offset re-measured here as **+5.13 ms** (sign confirmed *lead*), vs the +7.76 ms on record |
 | **DC-G** | **Recorded magnetometer tumble** — 30–45 s | Magcal regression fixtures. The tumble that closed BUG-030 went straight through the modal, so **no capture contains one** — covered-shell tests still use a synthetic fixture (`tilt_sweep_20260729.bin` fills 2 of 92 cells, `web_20260729_061440.bin` fills 6) | Open the calibration modal, hit Record, free-tumble to good coverage, stop | ≥60 of 92 shell cells covered. Low priority — test data, not a decision | ⬜ open |
 | **DC-H** | **USB CDC connect transient** — 5 × 15 s | **BUG-005**: fix implemented 2026-07-30, **the code path has never executed**. `CAFE:4001` does not enumerate on the headless host (USB_USER is powered from the battery bridge) and `/dev/ttyACM*` return `root:root` mode 0 after every replug | Needs the board's USB_USER cable into a machine that can open the port (udev rule or run as root). Fresh connect, `host/tools/capture.py --seconds 15`, five times | `capture_analyze` reports **0** CRC failures in the connect region (today: exactly 1) and the first frame after connect is CALIB | ⬜ open |
 | **DC-I** | **Phase 7 seed set** | COLMAP pose priors + depth-regularized 3DGS | **Do not collect yet** — needs a rigid phone/webcam mount and a hand-eye extrinsic calibration, neither of which is designed. Listed so it is not a surprise when Phase 6 closes | — | ⬜ blocked on design |
+| **DC-J** | **Specular / mirror behaviour** — 42 s, room scan then dwell on a large mirror | Nothing in the repo analysed specular surfaces; "mirror" elsewhere means the **UI view mode**. Unplanned — the owner recorded it to see what would happen | Normal room scan, then point at a large mirror and dwell | *(added retroactively)* Does the map gain phantom geometry; does tracking survive | ✅ **characterized, no defect** (`DebugCapMirror.bin`, 2026-07-31) — see below |
 
-**Explicitly NOT owner-data-blocked** (do not add these to the queue): compression go/no-go and the
+### DC-B — the multi-room result, and why 6.D is now blocked on the transport (2026-07-31)
+
+Three takes of the same route, each ~3 min, scored with 10-run innocuous-perturbation ensembles
+(`slam_ensemble`, `--device CUDA:0`). **All three fail the "0 lost frames" gate** on transport loss
+(BUG-049), so these are provisional, not the baseline the phase wanted.
+
+| take | transport loss | horizontal closure | path | drift | tracking |
+|---|---|---|---|---|---|
+| `DebugCapB1` | 2.29% | **2.71 ± 0.58 m** | 75.32 ± 0.53 m | **3.6%** | 0/10 died, worst lost 15, no freeze |
+| `DebugCapB2` | 4.28% | *excluded* | — | — | **628-frame (21.2 s) mid-run freeze** |
+| `DebugCapB3` | 9.35% | **7.28 ± 0.71 m** | 75.60 ± 0.52 m | **9.6%** | 0/10 died, worst lost 92, 67-frame freeze |
+
+**1. The multi-room drift *rate* is not worse than single-room.** B1's 3.6% against the single-room
+baseline's ~3.1% (0.74 ± 0.19 m over 23.9 m) says frame-to-model drift scales with **path length**, and
+does not compound at room transitions. On this evidence the case for loop closure earning its
+complexity indoors gets **weaker**, not stronger — which is the opposite of what 6.D expected to find.
+
+**2. Transport loss, not the SLAM algorithm, dominates multi-room error.** B1 and B3 are the same route
+walked to within 0.4% of the same path length, and differ 4× in transport loss. Paired bootstrap over
+the matched perturbation set: **4.569 m mean difference, 95% CI [3.950, 5.168] m** — decisively
+non-zero. The mechanism is directly observed on B2, whose 628-frame tracking collapse begins **70 ms
+after** its 2.4 s transport outage ends (BUG-049).
+
+> **Therefore 6.D's loop-closure evaluation cannot proceed on this data.** Roughly 4.6 m of B3's 7.3 m
+> drift is caused by dropped packets. No pose-graph result measured against that is interpretable, and
+> the paired gate would be scoring the network. **Fix BUG-049, re-record DC-B, then evaluate.**
+
+**3. Vertical drift is the weak axis and wants its own look.** B1 ends **−1449 ± 826 mm** below its
+start on a single-floor route, with the barometer contributing only +109 mm — so this is ICP vertical
+drift. Scaling the single-room circuit's 125 ± 76 mm by path length predicts ~390 mm, so vertical
+appears to grow faster than linearly. The ±826 mm spread makes that ~1.8 sd, i.e. **suggestive, not
+established** — worth a targeted measurement rather than a conclusion.
+
+**4. `died` does not catch a mid-run freeze.** B2 reports `died == false` (its tail is healthy) while
+15.5% of its trajectory is a frozen dead-reckoned segment, and still produces a plausible-looking
+closure. `tracking_stats.died` is trailing-only by construction; **`longest_lost_run` is the field that
+catches this class**, and `slam_ensemble` now surfaces it as `worst_longest_lost_run` with a warning.
+
+### DC-J — what a mirror actually does to this sensor (2026-07-31)
+
+Measured against the capture's own room-only segments as baseline (the scan starts normal, which is
+what makes it useful). Mirror dwell isolated to **t = 39.6–56.3 s** by no-return-sentinel fraction.
+
+- **What comes back is multipath, not a virtual room.** Sentinel (12000 mm) fraction rises 0.07% →
+  **12.1%**, but the *non*-sentinel returns spread diffusely over 600–5800 mm with no sharp peak at
+  twice the mirror distance. The feared failure — a coherent phantom room integrated behind the wall —
+  **does not occur**.
+- **The map is not corrupted.** Block consumption *during* the dwell runs at **17.2 blocks/frame vs
+  28.9 pre-dwell**: the mirror contributes *less* geometry, not phantom geometry. Mesh bbox grew
+  proportionally with path length, with no blow-up to sentinel or 2×-distance scale.
+- **Tracking is essentially unaffected** — 4–12 lost frames of 1270 across a 5-run ensemble, longest
+  freeze 8, 0 died, 23 ICP escalations.
+- **A real specular glint exists but is tiny**: reflectance max 4543 during dwell vs 192 in the room
+  (24×), confined to **0.015%** of pixels. That is a plausible cheap specular *detector* if one is
+  ever wanted.
+- **Confidence does not flag it** — mirror returns are dampened monotonically with range rather than
+  marked, so there is no per-pixel validity signal. A concrete new data point for **BUG-007**.
+
+Conclusion: **no bug, no mitigation warranted.** TSDF/ICP already discard sentinel and multipath
+returns structurally. Recorded here so the question is not re-opened from first principles.
+
+**Explicitly NOT owner-data-blocked** (do not add these to the queue): ~~compression go/no-go and the
 pacer measurement (Phase 5.5 — the link measures zero loss over ~567k frames and loss must **not** be
-manufactured); Detailed-SLAM iteration calibration and the track-at-10 mm/reconstruct-at-5 mm
+manufactured)~~ **⚠️ that exclusion is WITHDRAWN as of 2026-07-31: the link no longer measures zero
+loss.** The three DC-B takes lost **2.29% / 4.28% / 9.35%** of RAW frames while byte-clean, in
+multi-second whole-group outages — see BUG-049. Loss no longer has to be manufactured; it is in the
+captures. The remaining exclusions stand: Detailed-SLAM iteration calibration and the track-at-10 mm/reconstruct-at-5 mm
 question (6.D item 2 — runs against `coffeeRoomCircuit*.bin`); Allan-variance characterisation
 (`captures/stationary_stream11_20260728_190311.bin`, 900 s, already recorded); SHT40 humidity
 (firmware work gated on a consumer existing). One non-data blocker: 6.D's end-to-end browser/server
@@ -988,8 +1053,19 @@ channel, barometer as soft 1-DoF Z constraint.
 > 2026-07-30**: the owner recorded two room circuits, `captures/coffeeRoomCircuitNoMnt.bin` closes at
 > ~~**0.150 m over 32.5 m (0.46%)**~~ **0.74 ± 0.19 m over 23.9 m (~3%)** with 0 lost frames — the
 > old figure was a lucky single run over a barometer-inflated path, corrected by BUG-037 — and
-> `captures/coffeeRoomCircuitMnt.bin` is the failure case — see the 6.D block below) and the on-rig flat-field capture
-> (Phase 2.5 follow-up, **DC-D**) gating reflectance-quality work.
+> `captures/coffeeRoomCircuitMnt.bin` is the failure case — see the 6.D block below) and ~~the on-rig
+> flat-field capture (Phase 2.5 follow-up, **DC-D**) gating reflectance-quality work~~ **DC-D landed
+> and PASSED 2026-07-31 (residual 7.3%, all 2268 zones inside [0.5, 1.6]) — the flat-field correction
+> is now unblocked and merely needs enabling**.
+>
+> **⚠️ 6.D is now blocked on the TRANSPORT, not on SLAM (2026-07-31).** The multi-room captures
+> (DC-B ×3) arrived and, unexpectedly, the loop-closure question cannot be scored on them: 2.29–9.35%
+> of frames were lost in multi-second whole-group outages (**BUG-049**), and a paired ensemble over two
+> takes of the *same route at the same path length* attributes **4.569 m [95% CI 3.950–5.168]** of
+> closure difference to that loss alone. The good news underneath it: the cleanest take closes at
+> **3.6% over 75.3 m**, versus ~3.1% single-room — so drift scales with path length and does **not**
+> compound across rooms, which weakens rather than strengthens the case for loop closure. Fix the
+> transport, re-record DC-B, then evaluate.
 
 > **Orientation accuracy for handheld use (2026-07-29)** — a full pass on the orientation path,
 > triggered by BUG-027's leftover "beat the fp16 floor" item and then **re-prioritised by the owner's
@@ -1230,7 +1306,22 @@ Three findings that change what 6.D should do next, in priority order:
    5.9°/5 min heading drift at high dynamics — ~1.2° over a 62 s circuit, ≈8 cm over the 3.7 m max
    excursion. Deliverable (2) is still worth shipping, but it cannot be what limits these runs.
 
-**⬜ Open — BUG-036's fix has never actually been exercised on a live handheld scan (2026-07-31).**
+**✅ CLOSED 2026-07-31 — BUG-036's fix has now been exercised in the field, and it held.** `DebugCapA.bin`
+(DC-A: 89 s brisk sweep, 24 whips above 100 °/s, 0.19% transport loss) scored over a 5-run ensemble:
+**ICP escalations 7–47 per run** (so the retry genuinely fired), **0/5 runs died**, longest frozen run
+**28 frames < 30**, closure 0.92 ± 0.55 m over 39.2 m of path. All three clauses of DC-A's gate pass.
+
+`DebugCapC.bin` (DC-C) then probed what the retry does *not* cover: deliberate 2 s tracking kills
+produced freezes of **82–120 frames (2.7–4.0 s)** and 376–467 lost frames per run — yet **every run
+recovered** (0 died, 0 trailing). It recovered because DC-C's protocol says to *return to
+already-mapped geometry*, which is precisely the job relocalization would do automatically. So the
+relocalization gap is real but is **operator-maskable**, and the case for building it rests on how
+often a scan cannot be walked back — see BUG-049, where a 2.4 s transport hole cost 21.2 s because the
+operator had no reason to know they needed to retrace.
+
+The original open item, retained for history:
+
+**~~⬜ Open — BUG-036's fix has never actually been exercised on a live handheld scan (2026-07-31).~~**
 The owner hit the classic failure that day: a SLAM run "started out great", degraded, then gave up.
 Post-mortem on the saved trajectory (`results/web_20260731-070730.tum`) showed translation frozen at
 **idx 333 / t = 11.89 s** while rotation kept tracking off the SFLP prior — the signature of

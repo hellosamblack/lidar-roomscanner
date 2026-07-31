@@ -55,6 +55,8 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-041 | fixed   | firmware/eth  | `ETH_SendFrame_Gather` burst all 11 fragments of a depth frame back-to-back into an 8-deep TX descriptor ring, and **abandoned the frame mid-burst** on any `udp_sendto`/`pbuf_alloc` failure — the already-sent fragments then being guaranteed waste. Replaced by a slot-FIFO pacer that meters fragments from `ETH_Process()` and retries rather than abandoning |
 | BUG-042 | fixed   | host/sources  | UDP reassembly required `frag_idx == expected` and appended, so a merely **reordered** datagram — which UDP explicitly permits — discarded the whole 14.8 KB frame exactly like a lost one, and counted nothing. Now reassembled into indexed slots, with counters separating reorder / loss / duplicate / invalid |
 | BUG-046 | open    | host/web      | Mag-cal coverage runs *backwards* on Fit — "92/92 cells" drops to 91/92, because fitting the candidate replaces the calibration the coverage cells are binned with, moving every sample's direction ~3° |
+| BUG-048 | open    | host/sensors  | `absolute_heading`/`quat_yaw_deg` disintegrate near ZYX gimbal lock — a **braced, stationary** device reports frame-to-frame yaw jumps up to 180°, and 22.7% of a tilt-sweep capture sits within 1° of lock. Corrupted the DC-E magnetometer-direction analysis into a false 20–30° "calibration error" |
+| BUG-049 | open    | host/transport | Multi-second **whole-group** frame loss on the multi-room captures — 2.29% / 4.28% / 9.35% of RAW frames lost while byte-clean and 0 CRC, in outages up to 215 frames (7.1 s). Cost DC-B take 2 a 628-frame (21.2 s) tracking collapse. Recurring 63-frame quantum in all three takes; not RF range (the bridge rides on the scanner, never roamed, signal > 80%) |
 | BUG-047 | fixed   | host/web      | `id="btn-restart"` named **two** buttons — the top bar's "Restart Server" and the playback "Restart". `getElementById` takes the first, so playback Restart was dead and its transport handler landed on Restart Server, which therefore fired a transport restart *and* `POST /api/restart` |
 
 ---
@@ -2062,3 +2064,119 @@ either. Proved by reintroducing the duplicate and confirming the test fails.
 module's button. The failure surfaces as a cross-feature side effect — a maintenance action firing an
 unrelated playback command — so it is worth an invariant over the whole document rather than a test
 per control.
+
+---
+
+## BUG-048 — Heading disintegrates near ZYX gimbal lock, and it faked a calibration fault
+
+**Status:** open · **Area:** host/sensors · **Found:** 2026-07-31, scoring DC-E (`captures/DebugCapE.bin`)
+
+`roomscan.sensors.absolute_heading` (sensors.py:452) strips yaw with
+`graft_yaw(quat, -quat_yaw_deg(quat))`, and `quat_yaw_deg` is a **ZYX Tait-Bryan yaw**, which
+gimbal-locks as `|quat_pitch_deg|` → 90°. Near lock, yaw and roll are degenerate — only their sum is
+determined — so both blow up.
+
+**Measured on a capture that is braced and stationary for most of its length**, frame-to-frame yaw
+change against proximity to lock:
+
+| \|ZYX pitch\| | frames | median \|Δyaw\| | p95 | max |
+|---|---|---|---|---|
+| 0–60° | 3187 | 0.000° | 0.36° | 2.70° |
+| 60–80° | 100 | 0.382° | 1.78° | 2.98° |
+| 80–85° | 74 | 0.840° | 3.31° | 9.39° |
+| 85–88° | 35 | 2.458° | **44.41°** | **175.31°** |
+| 88–89.5° | 611 | 0.756° | 6.84° | **179.60°** |
+| 89.5–90.1° | 452 | 2.362° | 8.35° | **150.65°** |
+
+A stationary device reporting 180° yaw flips is the decomposition failing, not the sensor.
+**1010 of 4459 frames (22.7%)** of this capture sit within 1° of lock.
+
+**What it cost.** The first DC-E analysis concluded the magnetometer calibration had a direction error
+of 44–59° and that ST DT0103's accelerometer-assisted fit was required. Two of the seven holds
+(tilt ≈ 90°, measured ZYX pitch **89.6°** and **89.1°**) contributed 20–30° of that spread and a
+within-hold circular std of **20.1°** on a *braced stationary* hold. Re-deriving heading with a
+singularity-free estimator — twist about world Z, `2·atan2(z, w)`, no Euler decomposition, whose own
+degenerate point is nowhere near this data (`min(w²+z²) = 0.42`) — collapses those two holds to
+**156.8° and 156.0° with std 0.7° and 1.0°**, in agreement with the mid-tilt holds. That part of the
+finding was an artifact of this bug.
+
+**What survives, and is a separate question.** Holds 1 and 5 (tilt ≈ 4°, non-singular, near-identical
+attitude) still disagree by **44.3°** after the fix, and the detrend-free `mag_check` tilt ramp is
+**1.72×** (GOOD < 1.10, MARGINAL < 1.25) — computed from |B| against tilt with no yaw math at all, so
+it is immune to this bug. There is a real magnetometer direction defect; its size is simply not yet
+known, because the tool used to size it was broken.
+
+**Scope — this is NOT a significant live-operation defect.** `absolute_heading` does feed live paths
+(`YawFusion.update` at sensors.py:615, and the UI compass at web.py:1226, whose anomaly gate is on |B|
+magnitude and cannot reject a geometrically-garbage heading). But normal scans do not visit the
+singular attitude: fraction of frames within 1° of lock is **0.0–0.2%** across `DebugCapA`,
+`DebugCapB1`, `DebugCapC`, `DebugCapF`, `DebugCapMirror`, `coffeeRoomCircuitNoMnt` and
+`roomSweepFull20260730` (median |pitch| 51–78°). Only DC-E, which deliberately sweeps tilt to both
+extremes, is heavily exposed. The urgent consequence is to **analysis**, not to live scanning.
+
+**Fix direction.** Replace the Euler yaw strip in `absolute_heading` with the swing-twist term about
+world Z. Note this is the **same defect class as BUG-039**, which replaced a body-Z yaw term with a
+world-Z swing-twist in `imufusion._correct_yaw` — a second instance in a different code path, so a
+sweep for other `quat_yaw_deg` consumers is warranted rather than a point fix.
+
+**Regression test to write.** A braced synthetic sweep through `|pitch| = 90°` must show bounded
+frame-to-frame heading change. Prove it by reintroducing the ZYX strip.
+
+---
+
+## BUG-049 — Multi-second whole-group frame loss on the multi-room captures
+
+**Status:** open · **Area:** host/transport · **Found:** 2026-07-31, scoring DC-B
+
+The three DC-B takes are **byte-perfect** — 0 CRC failures, 0 bytes skipped, `clean: true` — while
+missing large numbers of frames the device demonstrably sent:
+
+| take | duration | RAW loss | whole-group | fragment-only | worst outage |
+|---|---|---|---|---|---|
+| `DebugCapB1` | 163 s | **2.29%** (113/4933) | 72 | 46 | 63 frames = 2.1 s @ 37.3 s |
+| `DebugCapB2` | 165 s | **4.28%** (214/5004) | 139 | 86 | 73 = 2.4 s @ 5.8 s; 63 @ 136.3 s |
+| `DebugCapB3` | 181 s | **9.35%** (512/5474) | 456 | 69 | **215 = 7.1 s @ 66.2 s**; 153 = 5.1 s @ 162.6 s |
+| *`coffeeRoomCircuitNoMnt`* | 66 s | 0.15% | **0** | 4 | 1 frame |
+
+**The device emitted them.** Sequence numbers advance continuously at a steady **30.29 fps** (seq span
+÷ elapsed `t_us`) straight across the gaps, so these were lost between board and file. There are **zero
+EVENT frames** in any take — the firmware never noticed.
+
+**Two distinct mechanisms**, separated by `capture_analyze`'s new continuity census:
+1. **Whole-group outages** — the seq is absent from streams 9/10/11/13 *and* 7, i.e. the 20-byte
+   IMU_QUAT datagram vanished alongside the ~15 KB RAW one. Not bandwidth, not fragmentation.
+   CALIB spacing degrades to 64/128/256 where it should be uniformly 64.
+2. **RAW-only fragment loss** — 46/86/69 frames where only the ~11-fragment RAW datagram was lost.
+   This is the BUG-041/BUG-042 neighbourhood and is present at low rate on *every* capture.
+
+**Cost to SLAM, measured.** `DebugCapB2`'s 628-frame (21.2 s) tracking collapse begins at **t = 8.26 s**;
+its transport outage ran **5.81 → 8.19 s**. Tracking died within ~70 ms of the hole ending and stayed
+dead 21.2 s. This is the open "no relocalization" hole, quantified: SLAM is frame-to-model, so after a
+2.4 s gap the pose prior is stale and ICP cannot re-register. **A bad 2.4 seconds cost 21 seconds.**
+Timing matters more than length — `DebugCapB1`'s comparable 63-frame outage at t = 37.3 s cost it
+**zero** lost frames, because by then there was a mature model to re-register against.
+
+**What it is NOT.** Not RF range: the Wi-Fi bridge is permanently mounted on the scanner with a patch
+cable, so its link endpoints never separate; the owner confirms it never roamed and signal stayed
+above 80% (owner, 2026-07-31). Not block-grid saturation: re-running B2 at `block_count=500000`
+gives byte-identical results with `blocks_used` unchanged at 154469, so 160000 was never limiting
+(knob confirmed applied via the report's `block_count` field).
+
+**What discriminates the remaining candidates.** The loss correlates with **walking**, not duration —
+`DebugCapE` is 147 s, nearly as long as B1, recorded the same session, and has 3 whole-group losses.
+A **63-frame (2.08 s) outage recurs in all three takes**, which is a quantum, not the continuous
+distribution RF fading produces. Leading candidates: (a) Ethernet patch-cable link bounce — the one
+hop that physically flexes, and link-down plus auto-negotiation is ~1–3 s, matching the quantum;
+(b) background roaming scans on the bridge, which take the radio off-channel to *evaluate* candidates
+without ever losing signal or roaming; (c) a stall in the firmware's slot-FIFO TX pacer (BUG-041),
+which would block all streams together.
+
+**Next step (owner action).** Record ~3 minutes stationary, flexing the patch cable at the connectors
+partway through. If the outages follow the cable it is (a); if a still, untouched 3-minute capture
+still shows them it is (b) or (c). Do it with the Drops/Gaps HUD visible — BUG-040 fixed those rows,
+and BUG-042's counters separate reorder from loss, but none of that is stored in the capture file, so
+it has to be read live.
+
+**Instrument gap this exposed.** `capture_analyze` called all three takes `clean: true`, because it
+only ever checked CRC and resync. It now reports a `continuity` block; `clean` and
+`continuity.complete` are deliberately separate properties.
