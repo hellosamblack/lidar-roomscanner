@@ -120,6 +120,21 @@ def test_claimed_tools_actually_exist(tools):
             assert name in tools, f"{script} claims tool {name!r}, which is not registered"
 
 
+def test_every_tool_is_named_in_the_server_doc(tools):
+    """docs/mcp-server.md is the index a future session reads to find the surface.
+
+    `capture_skew` shipped registered-but-undocumented (2026-07-30) and was only
+    caught by a manual wrap-up grep: being registered makes a tool *callable*, being
+    listed makes it *findable*, and the registry guards above only enforced the first.
+    """
+    doc = (REPO / "docs" / "mcp-server.md").read_text()
+    missing = sorted(name for name in tools if f"`{name}(" not in doc)
+    assert not missing, (
+        f"tool(s) registered but not named in docs/mcp-server.md: {missing}. "
+        f"Add each to the tool table/list as `name(args)` -- registered means callable, "
+        f"documented means discoverable.")
+
+
 def test_exclusion_reasons_are_real_sentences():
     for script, reason in {**EXCLUDED, **CONSOLE_EXCLUDED}.items():
         assert len(reason) > 15, f"{script}: exclusion reason is too vague: {reason!r}"
