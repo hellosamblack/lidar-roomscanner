@@ -520,6 +520,14 @@ reflectance super-resolution / sensor-fusion-overlay work (both scoped, not yet 
 > `VL53L9_SYNC_AUTONOMOUS` (a bigger, unattempted change) to actually govern fps. `SET_EXPOSURE_MS` *does*
 > change fps measurably (5 ms → 28.6 fps, 15 ms → 25.6 fps).
 >
+> **Planned 2026-07-31 follow-up — high-rate/manual ranging:** The reviewed
+> [implementation plan](docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md)
+> turns that autonomous-sync requirement into a gated firmware/protocol/host/UI/MCP sequence. It is
+> **not implemented**: work begins by reconciling the source spec's inconsistent power/range anchors,
+> proving exposure granularity and fixed-map DSS-off transform compatibility, and recording the current
+> 30 Hz hardware baseline. The manual payload requires protocol v2; 90 Hz is accepted only after a
+> 60-second full-stream Ethernet soak with zero CRC, sequence, reassembly, or firmware-queue loss.
+>
 > **Device robustness** (Task 5): `rs_send_event()` emits EVENT frames
 > (`SENSOR_INIT_FAIL`/`TRIGGER_TIMEOUT`/`DMA_TIMEOUT`/`SENSOR_ERROR_STATUS`) on every fault path,
 > replacing reference-firmware bug #2's silent infinite spin — **bug #2 (above) is now fixed in our

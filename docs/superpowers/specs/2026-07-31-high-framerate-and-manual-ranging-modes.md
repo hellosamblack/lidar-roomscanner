@@ -4,6 +4,13 @@
 
 Specification for implementation. Builds upon Phase 3 runtime configuration (`docs/protocol.md`), Phase 4 sensor suite (`docs/iks4a1-stacking.md`), and Phase 5 Ethernet transport (`CLAUDE.md`).
 
+> **Planning review, 2026-07-31:** The preset power/range anchors do not reproduce the
+> equations below, the current driver exposes integer-millisecond—not 0.5 ms—exposure,
+> and the manual command payload does not fit protocol v1. Treat those values and wire
+> details as provisional until Task 1/2 of the reviewed
+> [implementation plan](../plans/2026-07-31-high-framerate-and-manual-ranging-modes.md)
+> reconciles them against the datasheet and hardware. The feature is not implemented.
+
 ---
 
 ## 1. Overview & Objectives
