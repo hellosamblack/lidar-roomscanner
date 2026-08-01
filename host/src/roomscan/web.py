@@ -289,10 +289,20 @@ _MAX_LABEL_LEN = 24
 # ZYX/ZXY/boresight are three genuinely different functions of the same
 # rotation, not sign-flipped copies of one formula.
 _YAW_GRAFT_SIGN = {"zyx": -1.0, "zxy": -1.0, "boresight": 1.0}
-# Precedent: `YawFusion.gimbal_margin_deg=15.0` gates the yaw-fusion filter
-# near its own gimbal lock; reused verbatim as the "near singularity" warning
-# threshold for every decomposition mode below.
+# The "near singularity" warning threshold for every decomposition mode below.
+# Inherited from `YawFusion.gimbal_margin_deg`, which is gone (BUG-051: yaw
+# fusion no longer has a singularity to gate on) -- this is a DISPLAY warning
+# about the selected decomposition's own conditioning and is unrelated to it.
 ORIENTATION_SINGULARITY_MARGIN_DEG = 15.0
+# World mode's roll reference: the device's structural TOP in body coordinates.
+# Body +X is the instrument's BOTTOM -- `static/devicemodel.js`'s MOUNT_ROTATION
+# is a 180 deg turn about the boresight for exactly this reason -- so referencing
+# `triad_roll_deg` to body +X (its default) made the normal upright grip read
+# ~+-180 deg, sitting on the wrap and reading like a fault (BUG-051). Referenced
+# to body -X instead, the normal grip reads ~0 deg and the wrap moves to
+# upside-down, where it belongs. `triad_roll_deg` itself is untouched: it is a
+# primitive, and its default stays body +X.
+_DEVICE_TOP_BODY = (-1.0, 0.0, 0.0)
 # Precedent: `YawFusion.anomaly_frac=0.3` gates its heading update on the
 # calibrated mag magnitude; reused verbatim for the World mode's validity
 # indicator (owner ask: "reuse that notion rather than inventing a new one").
@@ -827,7 +837,7 @@ def orientation_view(mode: str, quat, mag_ut_raw=None, heading_full: float | Non
             raw_down = tuple((r.T @ np.array([0.0, 0.0, -1.0])).tolist())
             gravity_source = "quat"
         tilt = tilt_from_down_deg(raw_down)
-        roll = triad_roll_deg(raw_down)
+        roll = triad_roll_deg(raw_down, up_ref_body=_DEVICE_TOP_BODY)
         heading = heading_full   # reuse the caller's absolute_heading(quat, calibrated_mag)
         mag_valid, mag_reason, mag_norm, mag_expected = _mag_validity(mag_ut_raw, mag_cal)
         motion_flag = _accel_motion_flag(imu_raw_batch)
@@ -1280,7 +1290,6 @@ _FUSION_LABELS = {
     "init": "Initializing",
     "active": "Active",
     "gated:no-cal": "No mag calibration",
-    "gated:gimbal": "Gimbal lock",
     "gated:motion": "Fast motion",
     "gated:anomaly": "Mag anomaly",
 }

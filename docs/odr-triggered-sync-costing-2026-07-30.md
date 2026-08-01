@@ -195,6 +195,11 @@ host fusion beat SFLP" is currently *no*.**
 > - **`YawFusion` already defended against the same degeneracy** with a `gimbal_margin_deg = 15°`
 >   gate — which would have gated the entire 86.2° stationary capture out. `imufusion` reused
 >   `quat_yaw_deg` without inheriting that gate. The new term needs none.
+>   *(Superseded 2026-07-31, BUG-051: that gate was not a defence, it was the bug. |ZYX pitch| ≈ 90°
+>   is the normal upright grip on this device — body X is Up — so the gate fired permanently in
+>   ordinary use, and `absolute_heading` carried an 18.4° systematic error at the operating pose
+>   regardless. Both now use the singularity-free `yaw_twist_deg`, and the gate is deleted. The
+>   sentence above stands only as the reasoning of the time.)*
 >
 > **The verdict of this note is unchanged.** Reason 1 above is spent; reasons 2 and 3 are untouched,
 > the filter is still gated off, and §2.2 / §5 still stand — no capture in this repo can adjudicate

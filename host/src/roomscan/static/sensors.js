@@ -73,8 +73,12 @@ const D = (m, l) => { try { window.__diag && window.__diag('sensors.js: ' + m, l
 
 // fusion_key -> what to do about it (owner ask, 2026-07-31). Wording tracks the
 // actual gates in sensors.py's YawFusion.update and their thresholds in
-// config.py: gimbal margin 15 deg, motion 40 deg/s, anomaly 30% of the
-// calibrated field. `active` isn't listed -- the caller hides the line then.
+// config.py: motion 40 deg/s, anomaly 30% of the calibrated field. `active`
+// isn't listed -- the caller hides the line then. There is deliberately no
+// `gated:gimbal` entry: that gate is gone (BUG-051), and its remedy text
+// ("tilt back toward horizontal") was doubly wrong -- it fired on the
+// structural up axis, not the boresight, so it read as a permanent fault
+// while the device was aimed level.
 // The tripod note on `gated:anomaly` is not incidental: BUG-034 (by-design)
 // measured the tripod alone adding 15-27 uT, which trips this gate on its own
 // regardless of calibration quality.
@@ -82,7 +86,6 @@ const FUSION_HELP = {
     init: 'Waiting for the first valid magnetometer sample — hold steady a moment.',
     off: 'Yaw fusion is disabled in config — set [viewer] yaw_fusion = true.',
     'gated:no-cal': 'No magnetometer calibration loaded — run Calibrate Mag.',
-    'gated:gimbal': 'Aimed within 15° of straight up/down, where yaw is undefined — tilt back toward horizontal.',
     'gated:motion': 'Turning faster than 40°/s — slow the sweep.',
     'gated:anomaly': 'Field strength is >30% off the calibrated value — move away from metal/magnets; take it off the tripod.',
 };

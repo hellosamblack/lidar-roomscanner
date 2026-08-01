@@ -55,10 +55,11 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-041 | fixed   | firmware/eth  | `ETH_SendFrame_Gather` burst all 11 fragments of a depth frame back-to-back into an 8-deep TX descriptor ring, and **abandoned the frame mid-burst** on any `udp_sendto`/`pbuf_alloc` failure — the already-sent fragments then being guaranteed waste. Replaced by a slot-FIFO pacer that meters fragments from `ETH_Process()` and retries rather than abandoning |
 | BUG-042 | fixed   | host/sources  | UDP reassembly required `frag_idx == expected` and appended, so a merely **reordered** datagram — which UDP explicitly permits — discarded the whole 14.8 KB frame exactly like a lost one, and counted nothing. Now reassembled into indexed slots, with counters separating reorder / loss / duplicate / invalid |
 | BUG-046 | open    | host/web      | Mag-cal coverage runs *backwards* on Fit — "92/92 cells" drops to 91/92, because fitting the candidate replaces the calibration the coverage cells are binned with, moving every sample's direction ~3° |
-| BUG-048 | open    | host/sensors  | `absolute_heading`/`quat_yaw_deg` disintegrate near ZYX gimbal lock — a **braced, stationary** device reports frame-to-frame yaw jumps up to 180°, and 22.7% of a tilt-sweep capture sits within 1° of lock. Corrupted the DC-E magnetometer-direction analysis into a false 20–30° "calibration error" |
+| BUG-048 | fixed (by BUG-051) | host/sensors  | `absolute_heading`/`quat_yaw_deg` disintegrate near ZYX gimbal lock — a **braced, stationary** device reports frame-to-frame yaw jumps up to 180°, and 22.7% of a tilt-sweep capture sits within 1° of lock. Corrupted the DC-E magnetometer-direction analysis into a false 20–30° "calibration error" |
 | BUG-049 | open    | host/transport | Multi-second **whole-group** frame loss on the multi-room captures — 2.29% / 4.28% / 9.35% of RAW frames lost while byte-clean and 0 CRC, in outages up to 215 frames (7.1 s). Cost DC-B take 2 a 628-frame (21.2 s) tracking collapse. Recurring 63-frame quantum in all three takes; not RF range (the bridge rides on the scanner, never roamed, signal > 80%) |
 | BUG-047 | fixed   | host/web      | `id="btn-restart"` named **two** buttons — the top bar's "Restart Server" and the playback "Restart". `getElementById` takes the first, so playback Restart was dead and its transport handler landed on Restart Server, which therefore fired a transport restart *and* `POST /api/restart` |
 | BUG-050 | fixed   | host/web      | Recording `elapsed_s` was `time.time() - time.monotonic()` -- two clocks with no shared origin -- so a 90-second take reported 1784067285.5 s. Every caller passed the wall clock; the start stamp was monotonic |
+| BUG-051 | fixed   | host/sensors  | The yaw-fusion gimbal gate fired **permanently in the normal upright grip** and its message named the wrong axis: ZYX pitch is the elevation of body **X = Up**, so upright *is* ZYX gimbal lock (measured 2.7° from it against a 15° threshold) while the boresight sat 2.1° off horizontal. Same root cause gave `absolute_heading` an **18.4° systematic error** at the operating pose (26.57° reported for a true 45°, exact only on the cardinal four), and put World's Roll readout on the ±180 wrap at 178.30°. Closes BUG-048 |
 
 ---
 
@@ -2070,7 +2071,10 @@ per control.
 
 ## BUG-048 — Heading disintegrates near ZYX gimbal lock, and it faked a calibration fault
 
-**Status:** open · **Area:** host/sensors · **Found:** 2026-07-31, scoring DC-E (`captures/DebugCapE.bin`)
+**Status:** fixed 2026-07-31 by **BUG-051**, which is the same defect met from the live rig instead of
+from a capture — see there for the shipped fix, and for the correction to this entry's "Scope"
+paragraph below (it understated the impact: the live path was the most affected, not the least).
+· **Area:** host/sensors · **Found:** 2026-07-31, scoring DC-E (`captures/DebugCapE.bin`)
 
 `roomscan.sensors.absolute_heading` (sensors.py:452) strips yaw with
 `graft_yaw(quat, -quat_yaw_deg(quat))`, and `quat_yaw_deg` is a **ZYX Tait-Bryan yaw**, which
@@ -2211,3 +2215,77 @@ confirming the failure.
 
 **Lesson.** A shape test cannot see a units or origin error. Where two clocks exist in one file,
 assert an interval against a *known* elapsed time, not the presence of a number.
+
+---
+
+## BUG-051 — The yaw-fusion gimbal gate fired permanently in the normal grip, on the wrong axis
+
+**Status:** fixed 2026-07-31 · **Area:** host/sensors · **Found by:** the owner, holding the
+instrument in its ordinary upright grip and reading *"Aimed within 15° of straight up/down, where yaw
+is undefined — tilt back toward horizontal"* while the boresight was 2.1° off horizontal. Their
+objection was exactly right: "yaw is just heading, why should it be undefined? If anything our roll is
+close to being undefined."
+
+One root cause, three symptoms: **yaw math computed in the ZYX Tait-Bryan frame on a device whose body
+X is Up.** ZYX's gimbal lock sits where body X goes vertical, so *"held upright"* **is** ZYX gimbal
+lock, structurally.
+
+**1 — the gate could never clear.** `YawFusion.update` froze the correction whenever
+`|quat_pitch_deg| > 90 - gimbal_margin_deg` (15°). Measured live at the owner's grip: body X at
+**−87.3°** elevation, **2.7°** from lock against a 15° threshold. The message was also wrong twice
+over — it fired on body X while its text described the **boresight**, which was 2.1° from horizontal,
+and World's own decomposition reported `singularity_margin_deg` **87.88**, `near_singularity: false`,
+at the same instant. The wording had been written against World's semantics; the gate was computed in
+ZYX.
+
+**2 — the heading itself was ill-conditioned, and biased.** `absolute_heading` stripped yaw with
+`graft_yaw(quat, -quat_yaw_deg(quat))` — identically `tilt_compensated_heading(quat) − ZYX_yaw`, a
+well-conditioned quantity minus an ill-conditioned one (verified: both give 284.6548° on the live
+quat). Against a synthetic known bearing at the operating pose the shipped formula reports **26.57°
+for a true 45°** — an **18.4° systematic error**, exact at 0/90/180/270°, which is why it survived
+review and every cardinal-angle eyeball check. Noise amplification at the same pose, per 0.1° of quat
+tilt:
+
+| 0.1° of tilt about | shipped `absolute_heading` | world-Z twist strip |
+|---|---|---|
+| body Y (Right) | **1.673°** | 0.304° |
+| body Z (boresight) | **1.551°** | 0.040° |
+| body X (Up) | 0.104° | 0.007° |
+
+**3 — World's Roll slot referenced the wrong end of the device.** `triad_roll_deg` defaults to rolling
+body **+X**, which on this instrument is the **bottom**. The normal grip read **178.30°**, so a few
+degrees of real roll swung the readout across the branch cut (+178 → −178) and read like a fault.
+
+**Fix.** New `sensors.yaw_twist_deg` — the swing–twist term about world Z, `2·atan2(z, w)` on the
+world-Z-relative quat, with no singularity at any attitude the device can reach. `absolute_heading`
+strips with it, and `YawFusion.update`'s yaw term uses **the same function**: the two must share one
+convention or `_delta` chases a moving difference of unlike quantities. `yaw_twist_deg` is
+additionally *exactly additive* under `graft_yaw`, so a converged `_delta` lands the fused quat's
+heading precisely on the mag heading rather than near it. The gimbal gate and `yaw_gimbal_margin_deg`
+are deleted from `sensors.py`, `config.py`, `panel.py`, `web.py` and `static/sensors.js`; a stale key
+left in an existing `roomscan.toml` is harmless (the loader ignores unknown keys), so there is no
+migration. World roll now passes `up_ref_body=_DEVICE_TOP_BODY` (body −X) and reads **−1.70°** in the
+grip; `triad_roll_deg` itself is untouched — it is a primitive and its default stays body +X.
+
+**Relationship to BUG-048 — and a correction to it.** Same defect, same function, found by analysis on
+`DebugCapE` instead of by holding the thing; its stated fix direction (replace the Euler yaw strip
+with the world-Z swing–twist) is what shipped here, so it closes with this change. But its **scope
+paragraph was wrong**: it concluded "NOT a significant live-operation defect" from the fraction of
+frames within 1° of lock (0.0–0.2% on normal captures). Proximity in *frames* is the wrong measure —
+the error is a smooth 18° bias well before lock, and the live rig in the owner's ordinary grip sits at
+ZYX pitch 87.3°. The live path was the *most* affected, not the least.
+
+**Regression tests.** `test_normal_upright_grip_is_not_gated`,
+`test_absolute_heading_recovers_true_bearing_at_the_operating_pose` (off-axis bearings are
+load-bearing — the ZYX strip is exact on the cardinal four),
+`test_yaw_twist_is_the_negated_graft_yaw_error_from_identity`,
+`test_yaw_twist_is_exactly_additive_under_graft_yaw`, and
+`test_orientation_view_world_roll_is_near_zero_in_the_normal_grip`. All proved by reintroducing each
+defect and confirming the failure (`bearing 30.0: heading off by 60.00 deg`; `World roll 178.30 deg`).
+Note every pre-existing `YawFusion` test used `LEVEL` (identity) — the one attitude the bug could not
+reach, which is how a permanently-tripping gate passed a suite for weeks.
+
+**Lesson.** Third instance of the class after **BUG-039** (body-Z yaw term) and **BUG-048**: an Euler
+decomposition used as a *quantity* rather than a display. Any `quat_yaw_deg` consumer in a live path
+is suspect. And a test suite that exercises only the identity attitude cannot see a bug whose whole
+domain is the pose the device is actually held in.

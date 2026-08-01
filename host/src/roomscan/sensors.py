@@ -436,6 +436,32 @@ def _unit_quat(quat) -> tuple[float, float, float, float]:
     return (w / n, x / n, y / n, z / n)
 
 
+def yaw_twist_deg(quat) -> float:
+    """How far `quat` is rotated about **world +Z**, in degrees [-180, 180) --
+    the swing-twist twist, and the singularity-free replacement for
+    `quat_yaw_deg` wherever "the heading part of this attitude" is meant
+    (BUG-051).
+
+    Identical to ``-graft_yaw_error_deg((1,0,0,0), quat)`` (pinned by a test);
+    written out because it is the primitive and that function is the loop form.
+
+    Two properties `quat_yaw_deg` lacks, both of which the callers need:
+
+    * **No singularity.** ZYX yaw is ill-conditioned as its pitch approaches
+      +-90 deg, and this device's SFLP body frame has **X = Up**, so ZYX pitch
+      is the elevation of the *structural up axis* -- held upright, the normal
+      grip, it sits ~87 deg and ZYX yaw is nearly degenerate. That is the whole
+      operating envelope, not an edge case.
+    * **Exactly additive under `graft_yaw`.** ``yaw_twist_deg(graft_yaw(q, d))
+      == wrap180(yaw_twist_deg(q) + d)`` for every `q`, `d`, because pre-
+      multiplying by ``qz(d)`` maps ``atan2(z, w) -> atan2(z, w) + d/2``. ZYX
+      yaw is only approximately additive, and least so exactly where this
+      device lives.
+    """
+    w, _, _, z = _unit_quat(quat)
+    return wrap180(math.degrees(2.0 * math.atan2(z, w)))
+
+
 def tilt_compensated_heading(
     quat: tuple[float, float, float, float],
     mag_ut: tuple[float, float, float],
@@ -456,8 +482,23 @@ def absolute_heading(quat, mag_ut) -> float:
 
     This is the yaw reference the fusion steers toward. Passing the full quat to
     `tilt_compensated_heading` instead would rotate the mag by the drifting yaw
-    too, re-injecting exactly the drift the fusion exists to remove."""
-    tilt_only = graft_yaw(quat, -quat_yaw_deg(quat))
+    too, re-injecting exactly the drift the fusion exists to remove.
+
+    Yaw is stripped with `yaw_twist_deg`, **not** `quat_yaw_deg` (BUG-051).
+    Because `graft_yaw` only rotates about world Z, this whole function reduces
+    to ``tilt_compensated_heading(quat, mag) - <the stripped yaw>`` -- a
+    well-conditioned quantity minus the stripped one -- so the strip's
+    conditioning *is* the result's conditioning. With ZYX yaw, at the attitude
+    this device is actually held (ZYX pitch ~87 deg, see `yaw_twist_deg`), that
+    cost a measured **18.4 deg** of systematic heading error at a true bearing
+    of 45 deg, plus ~1.6 deg of swing per 0.1 deg of quat tilt noise. It read
+    exact at bearings of 0/90/180/270 deg, which is why it survived. The twist
+    strip recovers the true bearing exactly at every attitude tested.
+
+    Drift-freedom is preserved and is in fact now exact: a pure world-Z drift
+    of `d` raises both `tilt_compensated_heading` and `yaw_twist_deg` by exactly
+    `d`, so it cancels."""
+    tilt_only = graft_yaw(quat, -yaw_twist_deg(quat))
     return tilt_compensated_heading(tilt_only, mag_ut)
 
 
@@ -581,16 +622,24 @@ AXIS_CONVENTION.setflags(write=False)   # module constant — guard against in-p
 class YawFusion:
     """Stateful yaw-only complementary filter: grafts a gated, low-passed
     tilt-compensated magnetometer heading onto the SFLP quaternion. Tilt is
-    taken from SFLP unchanged; only heading is corrected."""
+    taken from SFLP unchanged; only heading is corrected.
+
+    There is no gimbal gate (removed, BUG-051). There used to be one -- freeze
+    within `gimbal_margin_deg` of |ZYX pitch| = 90 -- and it was not defending
+    the *filter*, it was defending this class's own use of `quat_yaw_deg`. On a
+    device whose body X is Up, ZYX pitch is the elevation of the structural up
+    axis, so held upright (the normal grip, measured 87.3 deg) the gate tripped
+    permanently and yaw fusion could never run: the UI reported "Gimbal lock"
+    while the boresight sat 2.1 deg off horizontal. Both the yaw term here and
+    `absolute_heading` now use `yaw_twist_deg`, which has no singularity at any
+    attitude, so there is nothing left to gate on."""
 
     def __init__(self, tau_s: float = 20.0, calibration: MagCalibration | None = None,
-                 anomaly_frac: float = 0.3, motion_rate_dps: float = 40.0,
-                 gimbal_margin_deg: float = 15.0):
+                 anomaly_frac: float = 0.3, motion_rate_dps: float = 40.0):
         self.tau_s = float(tau_s)
         self.cal = calibration
         self.anomaly_frac = float(anomaly_frac)
         self.motion_rate_dps = float(motion_rate_dps)
-        self.gimbal_margin_deg = float(gimbal_margin_deg)
         self._delta = 0.0
         self._have_delta = False
         self._last_quat: tuple[float, float, float, float] | None = None
@@ -612,11 +661,6 @@ class YawFusion:
         dt = (t_us - prev_t) / 1e6
         if dt <= 0:
             dt = 1e-3
-        # gate: gimbal lock
-        if abs(quat_pitch_deg(quat)) > 90.0 - self.gimbal_margin_deg:
-            self.status = "gated:gimbal"
-            self._last_t = t_us
-            return
         # gate: fast motion (SFLP quat angular rate as accel-free motion proxy)
         dot = sum(a * b for a, b in zip(prev_quat, quat))
         ang = 2.0 * math.acos(max(0.0, min(1.0, abs(dot))))   # rad between orientations
@@ -632,7 +676,12 @@ class YawFusion:
             self._last_t = t_us
             return
         heading = absolute_heading(quat, tuple(cal_mag))
-        yaw = quat_yaw_deg(quat)
+        # Must be the SAME yaw convention `absolute_heading` strips with, or
+        # `_delta` chases a moving difference of two unlike quantities
+        # (BUG-051). `yaw_twist_deg` is additionally EXACTLY additive under the
+        # `graft_yaw` that `fused_quat` applies, so a converged `_delta` lands
+        # the fused quat's heading precisely on `heading` rather than near it.
+        yaw = yaw_twist_deg(quat)
         if not self._have_delta:
             self._delta = wrap180(heading - yaw)   # snap on first valid sample
             self._have_delta = True

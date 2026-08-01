@@ -112,7 +112,6 @@ class ViewerConfig:
     mag_cal_path: str = "mag_cal.json"      # hard/soft-iron calibration JSON
     yaw_anomaly_frac: float = 0.3           # |mag| deviation from field to reject
     yaw_motion_rate_dps: float = 40.0       # quat angular rate above which to freeze
-    yaw_gimbal_margin_deg: float = 15.0     # freeze within this of |pitch|=90
     orientation_mode: str = "world"         # selected orientation decomposition (owner ask,
                                             # 2026-07-28): "zyx" | "zxy" | "boresight" | "world".
                                             # Defaulted to "world" 2026-07-31 -- the Sensors card's

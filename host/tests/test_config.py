@@ -9,7 +9,10 @@ def test_yaw_fusion_config_defaults():
     assert c.mag_cal_path == "mag_cal.json"
     assert c.yaw_anomaly_frac == 0.3
     assert c.yaw_motion_rate_dps == 40.0
-    assert c.yaw_gimbal_margin_deg == 15.0
+    # `yaw_gimbal_margin_deg` is deliberately gone (BUG-051): yaw fusion has no
+    # singularity left to gate on. A stale copy in an existing roomscan.toml is
+    # harmless -- the loader ignores unknown keys -- so there is no migration.
+    assert not hasattr(c, "yaw_gimbal_margin_deg")
 
 
 def test_yaw_fusion_config_roundtrip(tmp_path):

@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 
 from roomscan.magcal import MagCalibration
-from roomscan.sensors import YawFusion, quat_yaw_deg, quat_pitch_deg, wrap180
+from roomscan.sensors import (YawFusion, absolute_heading, graft_yaw, graft_yaw_error_deg,
+                              quat_mul, quat_pitch_deg, quat_to_matrix, quat_yaw_deg,
+                              tilt_from_down_deg, wrap180, yaw_twist_deg)
 
 IDENT_CAL = MagCalibration(offset=(0.0, 0.0, 0.0),
                            matrix=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
@@ -112,17 +114,78 @@ def test_gate_motion_holds_delta():
     assert f._delta == pytest.approx(held)   # delta held, not pulled toward 90
 
 
-def test_gate_gimbal_holds_delta():
-    f = YawFusion(tau_s=1.0, calibration=IDENT_CAL, gimbal_margin_deg=15.0)
-    f.update(LEVEL, _mag_for_heading(25.0), 10_000)
-    f.update(LEVEL, _mag_for_heading(25.0), 20_000)     # snap: delta -> 25
-    held = f._delta
-    assert held == pytest.approx(25.0, abs=1.0)
-    a = math.radians(85.0) / 2   # pitch 85 deg -> within 15 of 90
-    steep = (math.cos(a), 0.0, math.sin(a), 0.0)
-    f.update(steep, _mag_for_heading(90.0), 30_000)
-    assert f.status == "gated:gimbal"
-    assert f._delta == pytest.approx(held)   # delta held despite a valid-looking mag
+def test_normal_upright_grip_is_not_gated():
+    """The pose the instrument is actually held in must let fusion RUN (BUG-051).
+
+    The old gimbal gate froze within 15 deg of |ZYX pitch| = 90. This device's
+    SFLP body frame has X = Up, so ZYX pitch is the elevation of the structural
+    up axis: held upright it is ~87 deg and the gate tripped forever, reporting
+    "Gimbal lock" while the boresight sat ~2 deg off horizontal. Reintroducing
+    the gate fails this test, which is the point -- every other test in this
+    file uses LEVEL (identity), the one attitude the bug could not reach.
+    """
+    # The owner's live quat, read off /ws in the normal handheld grip.
+    grip = (0.604421, 0.35965, 0.593567, -0.391159)
+    assert abs(quat_pitch_deg(grip)) > 75.0          # the old gate's trip region
+    assert abs(tilt_from_down_deg(                    # ...yet aimed nearly level
+        tuple(quat_to_matrix(*grip).T @ np.array([0.0, 0.0, -1.0])))) < 15.0
+
+    f = YawFusion(tau_s=1.0, calibration=IDENT_CAL)
+    f.update(grip, _mag_for_heading(25.0), 10_000)
+    f.update(grip, _mag_for_heading(25.0), 20_000)
+    assert f.status == "active"
+
+
+def test_absolute_heading_recovers_true_bearing_at_the_operating_pose():
+    """`absolute_heading` must return the boresight's true compass bearing at
+    the attitude the device is held in, not just at bearings of 0/90/180/270.
+
+    This is the test the ZYX yaw-strip failed (BUG-051): it was exact on the
+    axis-aligned bearings -- which is why it survived review and a 180/90 deg
+    eyeball check -- and reported 26.57 deg for a true 45 deg bearing in the
+    normal grip, an 18.4 deg systematic error. Off-axis bearings are load-
+    bearing here; do not "simplify" this to the cardinal four.
+    """
+    dip, field = 66.0, 50.0
+    b_world = np.array([field * math.cos(math.radians(dip)), 0.0,
+                        -field * math.sin(math.radians(dip))])
+    # Normal grip: boresight (body +Z) level and North, body +X pointing DOWN.
+    base = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]])
+    w = math.sqrt(1.0 + base.trace()) / 2.0
+    qbase = (w, (base[2, 1] - base[1, 2]) / (4 * w),
+             (base[0, 2] - base[2, 0]) / (4 * w), (base[1, 0] - base[0, 1]) / (4 * w))
+
+    ref = None
+    for bearing in (0.0, 30.0, 45.0, 90.0, 137.0, 180.0, 270.0, 315.0):
+        a = math.radians(-bearing) / 2.0
+        q = quat_mul((math.cos(a), 0.0, 0.0, math.sin(a)), qbase)
+        r = quat_to_matrix(*q)
+        true = math.degrees(math.atan2(-r[1, 2], r[0, 2])) % 360.0   # world Y = West
+        assert true == pytest.approx(bearing, abs=1e-6)
+        got = absolute_heading(q, tuple(r.T @ b_world))
+        if ref is None:
+            ref = wrap180(got - bearing)      # one fixed convention offset
+        assert wrap180(got - bearing - ref) == pytest.approx(0.0, abs=1e-6), (
+            f"bearing {bearing}: heading off by "
+            f"{wrap180(got - bearing - ref):.2f} deg")
+
+
+def test_yaw_twist_is_the_negated_graft_yaw_error_from_identity():
+    """`yaw_twist_deg` and `graft_yaw_error_deg` are the same swing-twist twist
+    about world Z -- primitive and loop form. Pinned so they cannot drift."""
+    for q in (LEVEL, (0.604421, 0.35965, 0.593567, -0.391159),
+              (0.5, -0.5, 0.5, 0.5), (0.1, 0.2, -0.3, 0.9)):
+        assert wrap180(yaw_twist_deg(q)
+                       + graft_yaw_error_deg((1.0, 0.0, 0.0, 0.0), q)) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_yaw_twist_is_exactly_additive_under_graft_yaw():
+    """The property `quat_yaw_deg` lacks, and the reason a converged `_delta`
+    lands the fused quat's heading exactly on the mag heading."""
+    q = (0.604421, 0.35965, 0.593567, -0.391159)
+    for d in (-170.0, -33.0, 5.0, 91.0, 179.0):
+        assert wrap180(yaw_twist_deg(graft_yaw(q, d))
+                       - wrap180(yaw_twist_deg(q) + d)) == pytest.approx(0.0, abs=1e-9)
 
 
 def test_no_calibration_returns_raw():

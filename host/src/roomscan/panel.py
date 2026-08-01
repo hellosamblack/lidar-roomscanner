@@ -444,7 +444,6 @@ class ControlPanel:
                 calibration=self._mag_cal,
                 anomaly_frac=float(getattr(args, "yaw_anomaly_frac", 0.3) or 0.3),
                 motion_rate_dps=float(getattr(args, "yaw_motion_rate_dps", 40.0) or 40.0),
-                gimbal_margin_deg=float(getattr(args, "yaw_gimbal_margin_deg", 15.0) or 15.0),
             )
         self.sensor_state = SensorState(fusion=fusion)
         # seed with "off" so the disabled case never publishes a status line;
@@ -3340,7 +3339,7 @@ _PANEL_FIELDS = ("point_size", "ir_colormap", "ir_freeze_range", "panel_width",
                  "surface_enabled", "surface_mode", "surface_threshold_pct",
                  "imu_gizmo", "sensors_panel", "gizmo_scale", "metrics_overlay",
                  "yaw_fusion", "yaw_fusion_tau", "mag_cal_path",
-                 "yaw_anomaly_frac", "yaw_motion_rate_dps", "yaw_gimbal_margin_deg",
+                 "yaw_anomaly_frac", "yaw_motion_rate_dps",
                  "mode", "camera", "ir_overlay", "ir_opacity")
 
 

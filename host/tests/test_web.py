@@ -1024,6 +1024,25 @@ def test_orientation_view_world_mode_falls_back_to_quat_gravity_without_imu_raw(
     assert v["reason"] == "no magnetometer calibration"
 
 
+def test_orientation_view_world_roll_is_near_zero_in_the_normal_grip():
+    """World's Roll slot must read ~0 deg when the instrument is held normally,
+    not sit on the +-180 wrap (BUG-051).
+
+    Body +X is the instrument's BOTTOM (`web._DEVICE_TOP_BODY`, and
+    `devicemodel.js`'s MOUNT_ROTATION for the same reason), so referencing
+    `triad_roll_deg` to its default body +X put the operating pose at ~178 deg:
+    a few degrees of real roll swung the readout across the branch cut, +178 to
+    -178, and read like a fault. The quat below is the owner's, read off /ws in
+    the normal handheld grip. Reintroducing the default reference fails this.
+    """
+    grip = (0.604421, 0.35965, 0.593567, -0.391159)
+    v = web.orientation_view("world", grip)
+    assert abs(v["roll_deg"]) < 15.0, (
+        f"World roll {v['roll_deg']:.2f} deg -- upright grip should be near 0, "
+        "not near the +-180 wrap")
+    assert v["pitch_deg"] == pytest.approx(2.1, abs=0.5)   # tilt: aimed level
+
+
 def test_orientation_view_world_mode_prefers_imu_raw_gravity():
     from roomscan.protocol import ImuRawBatch
     batch = ImuRawBatch(

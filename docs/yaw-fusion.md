@@ -9,7 +9,14 @@ the future ICP rotation prior a drift-bounded orientation.
 
 It is a **gentle drift bound, not a hard heading source** — indoor magnetic yaw is worse than
 point-cloud ICP yaw (rebar/wiring distortion), so the correction is slow (default τ ≈ 20 s) and freezes
-on magnetic anomalies, fast motion, and gimbal-lock (pointing at ceiling/floor).
+on magnetic anomalies and fast motion.
+
+There is deliberately **no gimbal gate** (BUG-051, 2026-07-31). One existed, freezing the correction
+within 15° of |ZYX pitch| = 90°. It defended a singularity the filter no longer has — both
+`absolute_heading` and the fusion's own yaw term now use `yaw_twist_deg` (swing–twist about world Z),
+which is well-conditioned at every attitude the device can reach — and because the SFLP body frame has
+**X = Up**, |ZYX pitch| ≈ 90° *is* the normal upright handheld grip, so the gate fired permanently
+in ordinary use.
 
 Design + rationale: `docs/superpowers/specs/2026-07-10-lsm6dsv16x-mag-yaw-correction-design.md`.
 
@@ -65,9 +72,11 @@ never crashes uncalibrated). Config keys (in `roomscan.toml` `[viewer]`):
 | `mag_cal_path` | `mag_cal.json` | calibration file to load |
 | `yaw_anomaly_frac` | `0.3` | reject mag when \|mag\| deviates this fraction from the fitted field |
 | `yaw_motion_rate_dps` | `40.0` | freeze correction above this SFLP angular rate |
-| `yaw_gimbal_margin_deg` | `15.0` | freeze within this many degrees of \|pitch\| = 90 |
 
-The panel logs `yaw-fusion -> active | gated:anomaly | gated:motion | gated:gimbal | gated:no-cal` on each
+(`yaw_gimbal_margin_deg` was removed by BUG-051 — see above. A stale copy left in an existing
+`roomscan.toml` is harmless: the loader ignores unknown keys, so there is no migration.)
+
+The panel logs `yaw-fusion -> active | gated:anomaly | gated:motion | gated:no-cal` on each
 state change.
 
 ## 3. On-target axis-convention check (one-time)
