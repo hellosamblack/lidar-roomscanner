@@ -161,6 +161,15 @@ def test_every_card_id_has_a_squircle_icon_and_title():
     )
 
 
+def test_view_modes_include_preview_and_build_uses_a_confirmation_modal():
+    """The thumbnail is a real display mode, and Detailed build cannot start
+    invisibly from the capture card."""
+    html = _index()
+    assert 'data-display="preview"' in html
+    for element_id in ("build-modal", "build-intro", "build-facts", "build-confirm"):
+        assert f'id="{element_id}"' in html
+
+
 # ---------------------------------------------------------------------------
 # devicemodel.js -- the shared 3D device (owner ask, 2026-07-31)
 # ---------------------------------------------------------------------------

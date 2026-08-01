@@ -376,10 +376,11 @@ async def rig_playback(action: str, value: str | float | None = None,
 @mcp.tool()
 async def rig_view(source: str = "", display: str = "", regenerate: bool = False,
                    timeout: float = 15.0) -> dict:
-    """Select Live/View and Point cloud/SLAM/Detailed, verifying server state.
+    """Select Live/View and Point cloud/Preview/SLAM/Detailed, verifying server state.
 
     ``source`` is live|view; View reuses the selected capture. ``display`` is
-    point_cloud|slam|detailed. Set ``regenerate=True`` to start an explicit
+    point_cloud|preview|slam|detailed. Preview requires the selected View
+    capture. Set ``regenerate=True`` to start an explicit
     Detailed sidecar rebuild for the selected View capture. The returned state,
     not the requested value, is the result.
     """

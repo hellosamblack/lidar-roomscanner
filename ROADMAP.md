@@ -921,12 +921,18 @@ Owner-driven round of UI fixes after living with the Live/View consolidation. Si
   1200 frames), and direction must not live in the sign of `autoRotateSpeed`, which the `state` echo
   overwrites on every unrelated setting change (measured: the return leg vanished entirely).
 - **Live is one Record button; View is a real capture browser** — thumbnails, metadata, rename,
-  multi-select delete, preview. Thumbnails are a top-down sketch from ~40 sampled frames rotated by
+  multi-select delete, and a first-class **Preview** display mode. The Build action now opens a
+  confirmation dialog with capture/frame/compute details and the active Detailed estimate (honestly
+  marked uncalibrated until CUDA timing is measured); it then loads the capture, starts the build,
+  and enters Detailed. Playback starts at **1×** by default. Thumbnails are a top-down sketch from
+  ~40 sampled frames rotated by
   stream 9; **it is not a map** (no translation estimate, so every frame shares one origin) and the
   tooltip says so. 51 ms/file across the real 1.49 GiB library, reading 0.161% of a 408 MB capture.
   Served over `GET /thumb/{name}` rather than a `/ws` tag so `<img loading="lazy">` gives paced
   fetching and caching for free. "Area covered" is a floor-projected footprint, not mesh surface
-  area, which would score a corridor above a large room.
+  area, which would score a corridor above a large room. **Turbo/Gray now applies equally to Point
+  cloud, SLAM, and Detailed**; the latter two re-map their presentation mesh only, never the
+  reconstruction or sidecar.
 
 **Bugs found and fixed here:** **BUG-047** (`id="btn-restart"` named two buttons — playback Restart
 was dead *and* "Restart Server" fired a transport restart first) and **BUG-050** (recording

@@ -153,11 +153,11 @@ RESULTS_DIR = "results"            # where Save writes the full-res map + trajec
 _TRAJ_TAIL_MAX = 256               # trajectory positions shipped in each `slam` message
 _VALID_MODES = ("realtime", "slam")  # legacy inbound compatibility
 _VALID_SOURCES = ("live", "view")
-_VALID_DISPLAYS = ("point_cloud", "slam", "detailed")
+_VALID_DISPLAYS = ("point_cloud", "preview", "slam", "detailed")
 _VALID_WALL_MODES = ("solid", "split")
 # The playback speed segmented control maps ×0.5/×1/×2/Max onto these fps; a
-# capture's own cadence is ~28 Hz, so ×1 (30 fps) plays it near-native and Max
-# (0 -> interval 0) drains as fast as it decodes.
+# capture's own cadence is ~28 Hz, so ×1 (30 fps) plays it near-native and is
+# the default. Max (0 -> interval 0) drains as fast as it decodes.
 _SPEED_BASE_FPS = 30.0
 
 _VALID_COLOR_MODES = ("depth", "reflectance", "confidence")
@@ -335,7 +335,7 @@ class UiState:
     # arms the latest-wins live runner.
     mode: str = "realtime"
     source: str = "live"              # "live" | "view" (not persisted)
-    display: str = "point_cloud"      # "point_cloud" | "slam" | "detailed"
+    display: str = "point_cloud"      # "point_cloud" | "preview" | "slam" | "detailed"
     selected_capture: str | None = None
     slam_trajectory: bool = True
     slam_walls: str = "split"          # "solid" | "split" -> MeshPrep wall_mode
@@ -1904,6 +1904,10 @@ def list_captures(captures_dir, results_dir=RESULTS_DIR,
     d = Path(captures_dir)
     if not d.is_dir():
         return []
+    # The estimate is attached to the library item so the confirmation dialog
+    # can state it before starting a potentially long offline job.
+    preset = DetailedSlamPreset.load()
+    cuda = preferred_device().startswith("CUDA")
     items = []
     for p in sorted(d.glob("*.bin")):
         try:
@@ -1920,7 +1924,9 @@ def list_captures(captures_dir, results_dir=RESULTS_DIR,
             has_thumb = False
         items.append({"name": p.name, "bytes": st.st_size, "mtime": round(st.st_mtime, 1),
                       **info, "has_thumb": has_thumb,
-                      "slam": _sidecar_summary(p, results_dir)})
+                      "slam": _sidecar_summary(p, results_dir),
+                      "detailed_estimate": estimate_seconds(
+                          info["frames"], preset, cuda=cuda)})
     items.sort(key=lambda x: x["mtime"], reverse=True)
     return items
 
@@ -2376,7 +2382,7 @@ class SessionController:
     def __init__(self, *, live_source, live_label, stage, stats, slot, fault, bus,
                  client, recorder, pacer, sensor_state, metrics,
                  captures_dir=CAPTURES_DIR, results_dir=RESULTS_DIR,
-                 initial_replay_path=None, initial_speed_fps=0.0):
+                 initial_replay_path=None, initial_speed_fps=_SPEED_BASE_FPS):
         self._live_underlying = live_source
         self._live_proxy = _NoCloseSource(live_source) if live_source is not None else None
         self.live_label = live_label
@@ -2414,12 +2420,14 @@ class SessionController:
             self.mode = "replay"
             self.replay_path = str(initial_replay_path)
             self.index = build_capture_index(self.replay_path)
-            self.speed_fps = float(initial_speed_fps or 0.0)
+            self.speed_fps = float(initial_speed_fps)
         else:
             self.mode = "live"
             self.replay_path = None
             self.index = None
-            self.speed_fps = 0.0
+            # Preserve the default 1× selection for the first later View swap;
+            # live streaming itself always uses a zero-interval pacer.
+            self.speed_fps = float(initial_speed_fps)
 
     # ---- lifecycle ----
 
@@ -3277,7 +3285,7 @@ async def _handle_delete_captures(state, ctrl, msg: dict) -> dict:
         await asyncio.to_thread(ctrl.switch_to_live)
         await _reset_slam(state)
         ui.source, ui.selected_capture = "live", None
-        if ui.display == "detailed":
+        if ui.display in ("preview", "detailed"):
             ui.display = "point_cloud"
         ui.mode = "realtime" if ui.display == "point_cloud" else "slam"
         state.bus.publish("switched to live: the capture being played was deleted")
@@ -3943,7 +3951,7 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         await asyncio.to_thread(ctrl.switch_to_replay, path)
         await _reset_slam(state)          # fresh map for the new source
         ui.source, ui.selected_capture = "view", path.name
-        if ui.display == "detailed":
+        if ui.display in ("preview", "detailed"):
             ui.display = "point_cloud"
         ui.mode = "realtime"
         await _broadcast_session(state)
@@ -4145,7 +4153,11 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         if display not in _VALID_DISPLAYS:
             log.warning("invalid set_display: %r", display)
             return
-        if display != "point_cloud":
+        if display == "preview":
+            if ui.source != "view" or not ui.selected_capture:
+                state.bus.publish("Preview -> load a capture in View first")
+                return
+        elif display != "point_cloud":
             if ctrl is not None and ctrl.mode == "replay" and not ctrl.index.get("has_stream_9"):
                 state.bus.publish("SLAM -> unavailable: this legacy capture has no stream 9 orientation")
                 return
@@ -4168,7 +4180,7 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         # recording for is actually armed.
         if display == "slam" and ui.source == "live":
             await _start_slam_auto_record(state, ctrl)
-        else:
+        elif ui.source == "live":
             await _stop_slam_auto_record(state, ctrl)
         await _broadcast_state(state)
 
@@ -4505,7 +4517,11 @@ def main(argv=None) -> int:
         )
     sensor_state = SensorState(fusion=fusion)
 
-    initial_speed_fps = float(args.replay_fps) if (args.replay and args.replay_fps and args.replay_fps > 0) else 0.0
+    # Keep the selected speed on the controller even while live. A later View
+    # swap reuses it, so seeding live with Max here would make ordinary playback
+    # start at Max despite the replay-launch path defaulting to 1×.
+    initial_speed_fps = (float(args.replay_fps) if (args.replay and args.replay_fps and args.replay_fps > 0)
+                         else _SPEED_BASE_FPS)
     pacer = _Pacer(interval=speed_to_interval(initial_speed_fps) if args.replay else 0.0)
     recorder = Recorder()
 

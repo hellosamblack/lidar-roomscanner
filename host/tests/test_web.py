@@ -1871,7 +1871,7 @@ def test_build_session_message_shape():
 # ---- SessionController ----
 
 def _make_controller(tmp_path, *, live_source=None, live_label="test",
-                     replay_path=None, captures_dir=None, speed_fps=0.0):
+                     replay_path=None, captures_dir=None, speed_fps=web._SPEED_BASE_FPS):
     stage = TransformStage(outputs=("depth", "reflectance", "confidence"))
     import queue
     slot = queue.Queue(maxsize=1)
@@ -3106,6 +3106,39 @@ def test_set_display_refuses_slam_on_a_legacy_capture():
     asyncio.run(web._handle_inbound(state, {"type": "set_display", "display": "slam"}))
     assert ui.display == "point_cloud"
     assert any("stream 9" in line for line in published), published
+
+
+def test_preview_is_a_view_only_display_for_the_loaded_capture():
+    """Preview is a first-class display, but it cannot show a live source or
+    an arbitrary path supplied by a websocket peer."""
+    import asyncio
+    ui = web.UiState(source="view", selected_capture="take.bin")
+    state, _ = _inbound_state(ui, _FakeCtrl())
+    asyncio.run(web._handle_inbound(state, {"type": "set_display", "display": "preview"}))
+    assert ui.display == "preview" and ui.mode == "realtime"
+
+    ui = web.UiState(source="live")
+    state, published = _inbound_state(ui, _FakeCtrl(mode="live"))
+    asyncio.run(web._handle_inbound(state, {"type": "set_display", "display": "preview"}))
+    assert ui.display == "point_cloud"
+    assert any("load a capture" in line for line in published), published
+
+
+def test_replay_controller_defaults_to_one_times_speed(tmp_path):
+    cap = tmp_path / "take.bin"
+    _make_depth_capture_flat(cap, n_frames=3, base=1000.0)
+    ctrl, _ = _make_controller(tmp_path, replay_path=str(cap))
+    try:
+        assert ctrl.speed_fps == web._SPEED_BASE_FPS
+        assert ctrl.pacer.interval == pytest.approx(1.0 / web._SPEED_BASE_FPS)
+    finally:
+        ctrl.close()
+
+    live, _ = _make_controller(tmp_path)
+    try:
+        assert live.speed_fps == web._SPEED_BASE_FPS
+    finally:
+        live.close()
 
 
 def test_rail_cards_data_attributes_and_default_collapsed_states():

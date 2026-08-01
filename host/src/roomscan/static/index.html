@@ -149,7 +149,7 @@
             border-left: none; border-right: none; border-top: none;
         }
         .app-title { font-size: 1.05rem; font-weight: 600; letter-spacing: -0.02em; }
-        /* Source (Live/View) + display (Point cloud/SLAM/Detailed), side by side.
+        /* Source (Live/View) + display (Point cloud/Preview/SLAM/Detailed), side by side.
            `flex: 1` alone was written for ONE switch; with two children it stretched
            each to the full 1175 px bar and stacked them into two banners. The slot
            still takes the free space (so the admin buttons stay right-aligned) but
@@ -768,6 +768,13 @@
             width: 100%; aspect-ratio: 1 / 1; object-fit: contain; border-radius: 6px;
             background: rgba(0, 0, 0, 0.35);
         }
+        #capture-preview-view {
+            position: fixed; inset: var(--topbar-h) 0 var(--console-h) 0; z-index: 2;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            gap: 10px; pointer-events: none; background: rgba(10, 10, 15, 0.96);
+        }
+        #capture-preview-view img { max-width: min(72vw, 760px); max-height: 68vh; object-fit: contain; }
+        #capture-preview-caption { font: 0.8rem 'JetBrains Mono', monospace; color: var(--text-muted); }
         .preview-facts { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
         .preview-facts dt { font-size: 0.66rem; color: var(--text-muted); }
         .preview-facts dd {
@@ -961,6 +968,10 @@
 </head>
 <body>
     <div id="canvas-container"></div>
+    <div id="capture-preview-view" class="hidden" aria-live="polite">
+        <img id="capture-preview-image" alt="Selected capture thumbnail">
+        <div id="capture-preview-caption"></div>
+    </div>
 
     <!-- Top bar (§8.1): title · reserved mode-switch slot · connection status -->
     <div id="topbar" class="card">
@@ -972,6 +983,7 @@
             </div>
             <div class="segmented segmented--sm" id="seg-display">
                 <button data-display="point_cloud" class="active" title="Show the raw deprojected point cloud">Point cloud</button>
+                <button data-display="preview" title="Show the selected capture's thumbnail preview">Preview</button>
                 <button data-display="slam" title="Build an ephemeral realtime SLAM preview">SLAM</button>
                 <button data-display="detailed" title="Build or view the saved detailed reconstruction">Detailed</button>
             </div>
@@ -1632,6 +1644,24 @@ cover the whole sphere from this viewpoint, and a gap behind you still has to be
                 <div class="btn-row">
                     <button id="btn-delete-cancel" title="Keep these captures (Esc)">Cancel</button>
                     <button id="btn-delete-confirm" title="Permanently delete the captures listed above">Delete</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="build-modal" class="modal-backdrop hidden">
+        <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="build-title">
+            <div class="modal__header">
+                <h2 class="modal__title" id="build-title">Build Detailed Reconstruction</h2>
+                <button id="build-close" class="modal__close" title="Cancel (Esc)">&times;</button>
+            </div>
+            <div class="modal__body">
+                <p class="modal__intro" id="build-intro"></p>
+                <dl class="preview-facts" id="build-facts"></dl>
+                <p class="modal__intro" id="build-note"></p>
+                <div class="btn-row">
+                    <button id="build-cancel" title="Keep this capture unchanged (Esc)">Cancel</button>
+                    <button class="primary" id="build-confirm" title="Start the offline Detailed reconstruction">Build</button>
                 </div>
             </div>
         </div>

@@ -55,8 +55,10 @@ export function createSlam(hub, sceneApi) {
     let seeThrough = 0;
 
     let state = { source: 'live', display: 'point_cloud', slam_available: true,
-        slam_trajectory: true, slam_walls: 'split', slam_follow: true };
+        slam_trajectory: true, slam_walls: 'split', slam_follow: true,
+        view_colormap: 'turbo', selected_capture: null };
     let lastVerts = 0;
+    let lastMeshes = null;
 
     // --- MESH binary ingest ----------------------------------------------
     // Layout (docs/web-protocol.md): 9×u32 header then, per submesh, f32 pos,
@@ -78,11 +80,40 @@ export function createSlam(hub, sceneApi) {
         const fPos = take(Float32Array, 3 * nfp);
         const fIdx = take(Uint32Array, 2 * nfl);
 
-        applyMesh(nonWallMesh, xrayNonWall, nwPos, nwCol, nwIdx);
-        applyMesh(wallMesh, xrayWall, wPos, wCol, wIdx);
+        lastMeshes = { nwPos, nwCol, nwIdx, wPos, wCol, wIdx };
+        renderMeshes();
         applyLines(floorLines, fPos, fIdx);
         if (!window.__gotMesh) { window.__gotMesh = true; D('first mesh: ' + nnwv + ' non-wall verts'); }
     });
+
+    function renderMeshes() {
+        if (!lastMeshes) return;
+        const m = lastMeshes;
+        applyMesh(nonWallMesh, xrayNonWall, m.nwPos, palette(m.nwCol), m.nwIdx);
+        applyMesh(wallMesh, xrayWall, m.wPos, palette(m.wCol), m.wIdx);
+    }
+
+    // Mesh packets carry a shaded scalar encoded as RGB. Re-map that scalar in
+    // the browser so the View card's Turbo/Gray choice applies equally to live
+    // SLAM and the offline Detailed mesh, without changing reconstruction data.
+    function palette(colors) {
+        const out = new Float32Array(colors.length);
+        for (let i = 0; i < colors.length; i += 3) {
+            const t = Math.max(0, Math.min(1, 0.2126 * colors[i] + 0.7152 * colors[i + 1] + 0.0722 * colors[i + 2]));
+            if (state.view_colormap === 'gray') out[i] = out[i + 1] = out[i + 2] = t;
+            else {
+                // Google's Turbo polynomial, evaluated client-side on the same
+                // normalised scalar the Gray path exposes.
+                const r = 0.13572138 + t * (4.61539260 + t * (-42.66032258 + t * (132.13108234 + t * (-152.94239396 + t * 59.28637943))));
+                const g = 0.09140261 + t * (2.19418839 + t * (4.84296658 + t * (-14.18503333 + t * (4.27729857 + t * 2.82956604))));
+                const b = 0.10667330 + t * (12.64194608 + t * (-60.58204836 + t * (110.36276771 + t * (-89.90310912 + t * 27.34824973))));
+                out[i] = Math.max(0, Math.min(1, r));
+                out[i + 1] = Math.max(0, Math.min(1, g));
+                out[i + 2] = Math.max(0, Math.min(1, b));
+            }
+        }
+        return out;
+    }
 
     // `twin` is the see-through draw of the same map: it shares the geometry
     // object (one set of GPU buffers, disposed once here), differing only in
@@ -191,15 +222,19 @@ export function createSlam(hub, sceneApi) {
 
     // --- server `state` echo drives mode + toggles + visibility ----------
     hub.on('state', (msg) => {
+        const paletteChanged = state.view_colormap !== (msg.view_colormap || 'turbo');
         state = {
             source: msg.source || 'live',
             display: msg.display || (msg.mode === 'slam' ? 'slam' : 'point_cloud'),
+            selected_capture: msg.selected_capture || null,
             slam_available: msg.slam_available !== false,
             detailed: msg.detailed || null,
             slam_trajectory: msg.slam_trajectory !== false,
             slam_walls: msg.slam_walls || 'split',
             slam_follow: msg.slam_follow !== false,
+            view_colormap: msg.view_colormap || 'turbo',
         };
+        if (paletteChanged) renderMeshes();
         if (msg.see_through !== undefined) {
             seeThrough = Math.min(1, Math.max(0, Number(msg.see_through) || 0));
             xrayNonWallMat.opacity = xrayWallMat.opacity = seeThrough;
@@ -210,7 +245,7 @@ export function createSlam(hub, sceneApi) {
     function applyState() {
         const slamOn = state.display === 'slam' || state.display === 'detailed';
         group.visible = slamOn;
-        sceneApi.setPointsVisible(!slamOn);
+        sceneApi.setPointsVisible(!slamOn && state.display !== 'preview');
         sceneApi.setFollow(slamOn && state.slam_follow);
         trajLine.visible = state.slam_trajectory;
         head.visible = slamOn;
@@ -222,8 +257,10 @@ export function createSlam(hub, sceneApi) {
         setActive($('seg-source'), 'source', state.source);
         setActive($('seg-display'), 'display', state.display);
         for (const b of $('seg-display')?.querySelectorAll('button[data-display]') || []) {
-            b.disabled = (b.dataset.display === 'detailed' && state.source !== 'view') ||
-                (b.dataset.display !== 'point_cloud' && !state.slam_available);
+            b.disabled = (b.dataset.display === 'preview' &&
+                (state.source !== 'view' || !state.selected_capture)) ||
+                (b.dataset.display === 'detailed' && state.source !== 'view') ||
+                ((b.dataset.display === 'slam' || b.dataset.display === 'detailed') && !state.slam_available);
         }
         $('slam-group')?.classList.toggle('hidden', !slamOn);
         $('slam-hud')?.classList.toggle('hidden', !slamOn);

@@ -47,6 +47,16 @@ export function createBrowser(hub, capture) {
     const btnLoad = $('btn-preview-load');
     const btnRename = $('btn-preview-rename');
     const btnBuild = $('btn-preview-build');
+    const previewView = $('capture-preview-view');
+    const previewViewImage = $('capture-preview-image');
+    const previewViewCaption = $('capture-preview-caption');
+    const buildModal = $('build-modal');
+    const buildIntro = $('build-intro');
+    const buildFacts = $('build-facts');
+    const buildNote = $('build-note');
+    const btnBuildConfirm = $('build-confirm');
+    const btnBuildCancel = $('build-cancel');
+    const btnBuildClose = $('build-close');
 
     const delModal = $('delete-modal');
     const delIntro = $('delete-intro');
@@ -59,6 +69,7 @@ export function createBrowser(hub, capture) {
     let captures = [];                 // latest server `captures` array
     let prefs = { sort: 'recent', view: 'grid', thumbs: true };
     let source = 'live';
+    let display = 'point_cloud';
     let playing = null;                // session.playback.capture_name
     let selected = new Set();          // ticked names — CLIENT-LOCAL
     let previewed = null;              // previewed name — CLIENT-LOCAL
@@ -67,6 +78,7 @@ export function createBrowser(hub, capture) {
     // would otherwise wipe the only report of a refusal off the screen a frame
     // after it appeared. Cleared by the next thing the user does.
     let deleteNote = null;
+    let buildPending = null;             // { name, force }; waits for load echo
 
     // ---- formatting -------------------------------------------------------
     const fmtBytes = (n) => !n ? '0 B' : n < 1024 ? n + ' B'
@@ -166,7 +178,10 @@ export function createBrowser(hub, capture) {
     function renderPreview() {
         const c = captures.find((x) => x.name === previewed) || null;
         previewCard?.classList.toggle('hidden', source !== 'view' || !c);
-        if (!c) return;
+        if (!c) {
+            previewView?.classList.add('hidden');
+            return;
+        }
         if (previewThumb) {
             previewThumb.src = thumbUrl(c);
             previewThumb.title = THUMB_NOTE;
@@ -192,6 +207,13 @@ export function createBrowser(hub, capture) {
         if (btnBuild) {
             const s = c.slam;
             btnBuild.textContent = s ? (s.current ? '⚙ Rebuild' : '⚙ Rebuild (stale)') : '⚙ Build';
+        }
+        const showInViewport = source === 'view' && display === 'preview';
+        previewView?.classList.toggle('hidden', !showInViewport);
+        if (showInViewport) {
+            if (previewViewImage) previewViewImage.src = thumbUrl(c);
+            if (previewViewCaption) previewViewCaption.textContent =
+                `${c.name} · ${fmtTime(c.duration_s)} · ${c.frames || 0} frames`;
         }
     }
 
@@ -244,15 +266,52 @@ export function createBrowser(hub, capture) {
             capture.openRename(previewed, { fromBrowser: true });
         }
     });
-    btnBuild?.addEventListener('click', () => {
-        if (!previewed) return;
-        const c = captures.find((x) => x.name === previewed);
-        const stale = !!(c && c.slam && !c.slam.current);
-        // `generate_detailed`/`regenerate_detailed` act on the LOADED capture,
-        // so load it first if it isn't the one playing.
-        if (previewed !== playing) hub.send({ type: 'load_capture', name: previewed });
-        hub.send({ type: stale ? 'regenerate_detailed' : 'generate_detailed' });
+    btnBuild?.addEventListener('click', openBuildModal);
+    btnBuildCancel?.addEventListener('click', closeBuildModal);
+    btnBuildClose?.addEventListener('click', closeBuildModal);
+    buildModal?.addEventListener('click', (e) => { if (e.target === buildModal) closeBuildModal(); });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && buildModal && !buildModal.classList.contains('hidden')) closeBuildModal();
     });
+    btnBuildConfirm?.addEventListener('click', () => {
+        if (!buildPending) return;
+        const pending = buildPending;
+        closeBuildModal(false);
+        if (pending.name === playing) startBuild(pending);
+        else hub.send({ type: 'load_capture', name: pending.name });
+    });
+
+    function openBuildModal() {
+        const c = captures.find((x) => x.name === previewed);
+        if (!c) return;
+        const force = !!(c.slam && c.slam.exists);
+        const est = c.detailed_estimate || {};
+        buildPending = { name: c.name, force };
+        if (buildIntro) buildIntro.textContent =
+            `${force ? 'Rebuild' : 'Build'} the offline Detailed reconstruction for ${c.name}.`;
+        if (buildFacts) {
+            const time = est.calibrated ? `~${fmtTime(est.seconds)} (${est.seconds.toFixed(1)} s)` : 'Not benchmarked yet';
+            buildFacts.innerHTML = `<dt>Frames</dt><dd>${c.frames || 0}</dd>` +
+                `<dt>Estimated time</dt><dd>${time}</dd>` +
+                `<dt>Compute</dt><dd>${est.cpu_warning ? 'CPU (slower)' : 'CUDA'}</dd>`;
+        }
+        if (buildNote) buildNote.textContent = est.calibrated
+            ? 'The build runs offline and never changes the capture.'
+            : `The active preset has no timing calibration. ${est.note || 'The first build establishes a baseline.'} The build runs offline and never changes the capture.`;
+        if (btnBuildConfirm) btnBuildConfirm.textContent = force ? 'Rebuild' : 'Build';
+        buildModal?.classList.remove('hidden');
+    }
+
+    function closeBuildModal(clear = true) {
+        buildModal?.classList.add('hidden');
+        if (clear) buildPending = null;
+    }
+
+    function startBuild(pending) {
+        buildPending = null;
+        hub.send({ type: pending.force ? 'regenerate_detailed' : 'generate_detailed' });
+        hub.send({ type: 'set_display', display: 'detailed' });
+    }
 
     // ---- delete: confirm modal --------------------------------------------
     btnDelete?.addEventListener('click', openDeleteModal);
@@ -310,14 +369,16 @@ export function createBrowser(hub, capture) {
         playing = next;
         if (!previewed && playing) previewed = playing;
         render();
+        if (buildPending && playing === buildPending.name) startBuild(buildPending);
     });
 
     hub.on('state', (msg) => {
         source = msg.source || 'live';
+        display = msg.display || 'point_cloud';
         if (msg.browser_sort) prefs.sort = msg.browser_sort;
         if (msg.browser_view) prefs.view = msg.browser_view;
         if (typeof msg.browser_thumbs === 'boolean') prefs.thumbs = msg.browser_thumbs;
-        if (msg.selected_capture && !previewed) previewed = msg.selected_capture;
+        if (msg.selected_capture) previewed = msg.selected_capture;
         browserCard?.classList.toggle('hidden', source !== 'view');
         render();
     });
