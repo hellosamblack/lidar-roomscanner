@@ -128,11 +128,8 @@ export function createControls(hub) {
         setActive(segColor, 'mode', msg.color_mode);
         // View: view mode, colormap, point size, render mode, surface
         setActive(segViewMode, 'viewmode', msg.view_mode);
-        // The view mode only governs the real-time cloud — SLAM mode replaces it
-        // with the reconstructed mesh and drives its own follow camera.
-        if (segViewMode && msg.mode !== undefined) {
-            for (const b of segViewMode.querySelectorAll('button')) b.disabled = (msg.mode === 'slam');
-        }
+        // World / FPV / Mirror is shared by Point cloud, Preview, SLAM and
+        // Detailed; never disable it merely because the display changed.
         // Camera framing for whichever mode is selected.
         const cam = msg.view_cam && msg.view_cam[msg.view_mode];
         if (cam) {
@@ -156,7 +153,7 @@ export function createControls(hub) {
         }
         // Orbiting only means something in World — a locked view has nothing to
         // circle, so grey the controls out rather than let them look armed.
-        const worldOnly = msg.view_mode === 'world' && msg.mode !== 'slam';
+        const worldOnly = msg.view_mode === 'world';
         if (chkOrbit) chkOrbit.disabled = !worldOnly;
         if (slOrbitSpeed) slOrbitSpeed.disabled = !worldOnly;
         if (segOrbitMode) for (const b of segOrbitMode.querySelectorAll('button')) b.disabled = !worldOnly;

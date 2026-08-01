@@ -70,6 +70,7 @@ export function createBrowser(hub, capture) {
     let prefs = { sort: 'recent', view: 'grid', thumbs: true };
     let source = 'live';
     let display = 'point_cloud';
+    let viewMode = 'world';
     let playing = null;                // session.playback.capture_name
     let selected = new Set();          // ticked names — CLIENT-LOCAL
     let previewed = null;              // previewed name — CLIENT-LOCAL
@@ -212,6 +213,11 @@ export function createBrowser(hub, capture) {
         previewView?.classList.toggle('hidden', !showInViewport);
         if (showInViewport) {
             if (previewViewImage) previewViewImage.src = thumbUrl(c);
+            // Preview is a saved 2D thumbnail, so World and FPV have the same
+            // pixels. Mirror remains meaningful: it is the same left-right
+            // camera flip used by the 3D map view, scoped to the image only.
+            if (previewViewImage) previewViewImage.style.transform =
+                viewMode === 'mirror' ? 'scaleX(-1)' : '';
             if (previewViewCaption) previewViewCaption.textContent =
                 `${c.name} · ${fmtTime(c.duration_s)} · ${c.frames || 0} frames`;
         }
@@ -375,6 +381,7 @@ export function createBrowser(hub, capture) {
     hub.on('state', (msg) => {
         source = msg.source || 'live';
         display = msg.display || 'point_cloud';
+        viewMode = msg.view_mode || 'world';
         if (msg.browser_sort) prefs.sort = msg.browser_sort;
         if (msg.browser_view) prefs.view = msg.browser_view;
         if (typeof msg.browser_thumbs === 'boolean') prefs.thumbs = msg.browser_thumbs;

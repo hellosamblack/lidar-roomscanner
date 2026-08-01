@@ -7,20 +7,19 @@
 // (browser paint rate) and publishes it on the hub (~1/s) — this is distinct
 // from the device fps the server reports.
 //
-// VIEW MODE (`state.view_mode`, owner ask 2026-07-29). "world" is the orbit
-// view; "fpv"/"mirror" lock the camera to the sensor's viewpoint. The frame
-// change happens SERVER-side (web.py `view_rotation` ships the cloud already in
-// the boresight view frame — still gravity-levelled, X-negated for mirror), so
-// all this module does is park the camera at the origin, take OrbitControls
-// fully out (no orbit, no pan, no zoom — it is a locked view) and hide the world
-// grid. A fixed pose cannot lag the geometry the way a client-rotated camera
-// would, and the level horizon comes from the server, not from `camera.up`.
+// VIEW MODE (`state.view_mode`, owner ask, expanded 2026-08-01). "world" is the
+// orbit view; "fpv"/"mirror" lock the camera to the scanner's viewpoint. Live
+// clouds arrive in the chosen frame from web.py (so their display quaternion
+// cannot lag the points); SLAM and Detailed maps stay in their world frame and
+// instead use the current scanner pose to place this camera. Thus one control
+// means the same thing in every 3D display.
 //
 // Public surface:
 //   makeXrayMaterial(THREE, material) -> the see-through twin of a material
 //   createScene(hub) -> { resetCamera, THREE, scene, camera,
 //                         setPointsVisible(bool), setFollow(bool),
-//                         setFollowTarget(eye, center, up),
+//                         setFollowTarget(eye, center, up), setSlamPose(pose),
+//                         setViewportMirror(bool),
 //                         setRenderActive(bool) }
 // slam.js (web Phase 4) uses the returned handle to add its mesh/trajectory
 // group to the same scene and to drive the follow camera (which must coordinate
@@ -327,6 +326,32 @@ export function createScene(hub) {
 
     const savedPos = new THREE.Vector3();   // the orbit pose to return to
     const savedTarget = new THREE.Vector3();
+    let latestSlamPose = null;              // row-major world<-CV sensor pose
+
+    // SLAM/Detailed maps are already in the fixed world frame. For their
+    // first-person views, move the camera with the scanner instead of rotating
+    // the map into a transient local frame. This keeps the accumulated map and
+    // trajectory coherent, while preserving the exact same framing controls
+    // used by the live point cloud.
+    function applySlamPose() {
+        if (!latestSlamPose || viewMode === 'world') return;
+        const p = latestSlamPose;
+        const sensor = new THREE.Vector3(p[3], p[7], p[11]);
+        const forward = new THREE.Vector3(p[2], p[6], p[10]).normalize();
+        if (!Number.isFinite(forward.lengthSq()) || forward.lengthSq() < 1e-8) return;
+        const c = viewCam[viewMode] || DEFAULT_VIEW_CAM.fpv;
+        const target = sensor.clone().addScaledVector(forward, CAM_LOOK_AHEAD_M);
+        const offset = forward.clone().multiplyScalar(-(CAM_LOOK_AHEAD_M + c.distance_m));
+        offset.addScaledVector(CAM_UP, c.height_m);
+        offset.applyAxisAngle(CAM_UP, c.rotation_deg * Math.PI / 180);
+        setFollowTarget(target.clone().add(offset), target, CAM_UP);
+    }
+
+    function setSlamPose(pose) {
+        if (!Array.isArray(pose) || pose.length !== 16 || !pose.every(Number.isFinite)) return;
+        latestSlamPose = pose.slice();
+        applySlamPose();
+    }
 
     // Park the camera on a mode's computed pose. In world this also becomes the
     // new "return to" pose, so a framing change acts like a Reset Camera; in
@@ -373,6 +398,9 @@ export function createScene(hub) {
             controls.enableRotate = controls.enablePan = controls.enableZoom = false;
             controls.enabled = false;
             gridHelper.visible = false;
+            // A SLAM pose can already be known when the user switches from
+            // World to FPV/Mirror; do not wait for the next worker update.
+            applySlamPose();
         }
         // World only — a locked view has nothing to orbit around. (The FPV
         // branch also skips controls.update(), so it could not advance anyway;
@@ -535,7 +563,10 @@ export function createScene(hub) {
         // A framing edit with no mode change still has to be applied — that is
         // the slider being dragged. (When the mode also changed, applyViewMode
         // already placed the camera.)
-        if (framingMoved && !modeMoved) applyPose(viewMode);
+        if (framingMoved && !modeMoved) {
+            if (latestSlamPose && viewMode !== 'world') applySlamPose();
+            else applyPose(viewMode);
+        }
         if (msg.orbit_speed_deg_s !== undefined) {
             controls.autoRotateSpeed = msg.orbit_speed_deg_s * AUTOROTATE_PER_DEG_S;
         }
@@ -631,6 +662,14 @@ export function createScene(hub) {
     // getAzimuthalAngle() from the console to verify the oscillate wave) --
     // nothing external should mutate it; the state echo above is the only
     // supported way to drive it.
+    // Live point clouds are mirrored by their server-side frame transform.
+    // Maps are world-fixed, so mirror their *viewport* instead. Keeping this
+    // scoped to the canvas avoids touching any chrome or pointer mapping.
+    function setViewportMirror(on) {
+        renderer.domElement.style.transform = on ? 'scaleX(-1)' : '';
+        renderer.domElement.style.transformOrigin = 'center';
+    }
+
     return { resetCamera, THREE, scene, camera, controls, setPointsVisible, setFollow,
-             setFollowTarget, setRenderActive };
+             setFollowTarget, setSlamPose, setViewportMirror, setRenderActive };
 }

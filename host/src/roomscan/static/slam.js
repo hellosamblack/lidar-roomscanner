@@ -6,7 +6,8 @@
 // SwiftShader box. It owns a THREE.Group added to that scene: two vertex-colored
 // meshes (non-wall + wall — colors are pre-shaded server-side by MeshPrep, so an
 // unlit MeshBasicMaterial shows them as-is), a floor grid, a trajectory ribbon,
-// and a head marker at the current pose.
+// and the same scanner model used by the Sensors orientation gizmo at the
+// current pose.
 //
 // All mode/toggle/enabled state is driven FROM the server's `state` echo
 // (one-way flow, §5) so multiple tabs stay in sync. DOM events become
@@ -16,6 +17,7 @@
 //              sends set_mode / slam_opt / save.
 
 import { makeXrayMaterial } from './scene.js';
+import { BODY_TO_CV, createDeviceMesh } from './devicemodel.js';
 
 export function createSlam(hub, sceneApi) {
     const D = (m, l) => { try { window.__diag && window.__diag('slam.js: ' + m, l); } catch (e) {} };
@@ -36,10 +38,20 @@ export function createSlam(hub, sceneApi) {
         new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x2a3550 }));
     const trajLine = new THREE.Line(
         new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x35d07f }));
-    const head = new THREE.Mesh(
-        new THREE.SphereGeometry(0.03, 12, 12),
-        new THREE.MeshBasicMaterial({ color: 0x7fffd4 }));
-    group.add(nonWallMesh, wallMesh, floorLines, trajLine, head);
+    // `createDeviceMesh` is body-framed; SLAM poses are world<-CV-camera.
+    // Keep that one declared bridge (BODY_TO_CV) here, rather than inventing a
+    // second scanner silhouette or silently assuming the two frames agree.
+    const scanner = new THREE.Group();
+    scanner.name = 'scanner-model';
+    scanner.matrixAutoUpdate = false;
+    let scannerHasPose = false;
+    scanner.add(createDeviceMesh(THREE, { fillOpacity: 0.92, edgeOpacity: 0.95 }));
+    const bodyToCv = new THREE.Matrix4().set(
+        BODY_TO_CV[0], BODY_TO_CV[1], BODY_TO_CV[2], 0,
+        BODY_TO_CV[3], BODY_TO_CV[4], BODY_TO_CV[5], 0,
+        BODY_TO_CV[6], BODY_TO_CV[7], BODY_TO_CV[8], 0,
+        0, 0, 0, 1);
+    group.add(nonWallMesh, wallMesh, floorLines, trajLine, scanner);
 
     // See-through twins (owner ask, 2026-07-31). Same geometry, inverted depth
     // test: the parts of the map hidden behind a nearer wall are blended back
@@ -56,7 +68,7 @@ export function createSlam(hub, sceneApi) {
 
     let state = { source: 'live', display: 'point_cloud', slam_available: true,
         slam_trajectory: true, slam_walls: 'split', slam_follow: true,
-        view_colormap: 'turbo', selected_capture: null };
+        view_colormap: 'turbo', selected_capture: null, view_mode: 'world' };
     let lastVerts = 0;
     let lastMeshes = null;
     // Server-owned job state. Keeping it here (rather than deriving a timer on
@@ -167,12 +179,21 @@ export function createSlam(hub, sceneApi) {
         }
         trajLine.geometry = ng;
 
-        // Head marker at the current pose translation (row-major col 3).
+        // Scanner model at the current SLAM pose (row-major world<-CV camera).
         const p = msg.pose;
-        if (Array.isArray(p) && p.length === 16) head.position.set(p[3], p[7], p[11]);
+        if (Array.isArray(p) && p.length === 16) {
+            const pose = new THREE.Matrix4().set(
+                p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
+                p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+            scanner.matrix.copy(pose).multiply(bodyToCv);
+            scanner.matrixWorldNeedsUpdate = true;
+            scannerHasPose = true;
+            scanner.visible = true;
+            sceneApi.setSlamPose(p);
+        }
 
         // Follow camera (server-computed eye/center/up).
-        if (state.display === 'slam' && state.slam_follow && msg.follow) {
+        if (state.display === 'slam' && state.slam_follow && state.view_mode === 'world' && msg.follow) {
             sceneApi.setFollowTarget(msg.follow.eye, msg.follow.center, msg.follow.up);
         }
 
@@ -242,6 +263,7 @@ export function createSlam(hub, sceneApi) {
             slam_walls: msg.slam_walls || 'split',
             slam_follow: msg.slam_follow !== false,
             view_colormap: msg.view_colormap || 'turbo',
+            view_mode: msg.view_mode || 'world',
         };
         if (paletteChanged) renderMeshes();
         if (msg.see_through !== undefined) {
@@ -255,9 +277,15 @@ export function createSlam(hub, sceneApi) {
         const slamOn = state.display === 'slam' || state.display === 'detailed';
         group.visible = slamOn;
         sceneApi.setPointsVisible(!slamOn && state.display !== 'preview');
-        sceneApi.setFollow(slamOn && state.slam_follow);
+        // FPV/Mirror are explicitly scanner-relative cameras, so they always
+        // follow their pose. World retains the optional follow toggle for a
+        // moving map overview.
+        sceneApi.setFollow(slamOn && (state.slam_follow || state.view_mode !== 'world'));
         trajLine.visible = state.slam_trajectory;
-        head.visible = slamOn;
+        scanner.visible = slamOn && scannerHasPose;
+        // Point clouds are mirrored server-side. SLAM/Detailed maps stay in a
+        // stable world frame, so the mirror view flips only their canvas.
+        sceneApi.setViewportMirror(slamOn && state.view_mode === 'mirror');
         // Off at 0 so the renderer skips the pass entirely (the default costs
         // nothing); `group.visible` already handles the realtime case.
         xrayNonWall.visible = xrayWall.visible = seeThrough > 0;
@@ -283,7 +311,14 @@ export function createSlam(hub, sceneApi) {
 
         // Toggles reflect server truth.
         const t = $('chk-slam-traj'); if (t) t.checked = state.slam_trajectory;
-        const f = $('chk-slam-follow'); if (f) f.checked = state.slam_follow;
+        const f = $('chk-slam-follow');
+        if (f) {
+            f.checked = state.slam_follow;
+            f.disabled = state.view_mode !== 'world';
+            if (f.parentElement) f.parentElement.title = state.view_mode === 'world'
+                ? 'Camera automatically follows the device position'
+                : 'FPV and Mirror always follow the scanner; switch to World to control this';
+        }
         setActive($('seg-walls'), 'walls', state.slam_walls);
         updateSaveEnabled();
     }
@@ -344,6 +379,9 @@ export function createSlam(hub, sceneApi) {
     });
     $('btn-save')?.addEventListener('click', () => hub.send({ type: 'save' }));
 
+    // Metrics already arrive at a modest, real-time cadence for the HUD.  The
+    // Detailed overlay mirrors the host-wide values here because offline mesh
+    // extraction can be the most resource-intensive stage of a build.
     hub.on('metrics', (msg) => {
         detailedResources = msg.resources || null;
         renderDetailedBuildStatus();
@@ -355,12 +393,27 @@ export function createSlam(hub, sceneApi) {
         const processed = msg.processed || 0;
         const el = $('slam-frames');
         if (el && total) el.textContent = `${processed} / ${total}${done ? ' done' : ''}`;
+        // A cached sidecar is ready to view, not an active build. It should not
+        // resurrect an old completion banner just because the user revisits it.
         if (msg.phase === 'cached') {
             detailedBuild = null;
         } else if (msg.started || total || msg.reason || msg.phase === 'loading_cached') {
             detailedBuild = { ...(detailedBuild || {}), ...msg };
         }
         renderDetailedBuildStatus();
+        // Detailed reconstruction owns an offline trajectory. Its latest pose
+        // gives FPV/Mirror the same scanner-relative camera and model as SLAM.
+        if (Array.isArray(msg.pose) && msg.pose.length === 16) {
+            const p = msg.pose;
+            const pose = new THREE.Matrix4().set(
+                p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
+                p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+            scanner.matrix.copy(pose).multiply(bodyToCv);
+            scanner.matrixWorldNeedsUpdate = true;
+            scannerHasPose = true;
+            scanner.visible = true;
+            sceneApi.setSlamPose(p);
+        }
     });
 
     function fmtTime(seconds) {
@@ -377,6 +430,7 @@ export function createSlam(hub, sceneApi) {
             (b.started || b.total || b.reason || b.phase === 'loading_cached') && b.phase !== 'cached';
         panel.classList.toggle('hidden', !visible);
         if (!visible) return;
+
         const total = Number(b.total) || 0;
         const processed = Math.max(0, Math.min(total, Number(b.processed) || 0));
         const fraction = total ? Math.max(0, Math.min(1,
@@ -395,12 +449,16 @@ export function createSlam(hub, sceneApi) {
             : processed ? 'Building detailed reconstruction' : 'Preparing detailed reconstruction';
         if (progress) progress.textContent = total ? `${processed} / ${total} · ${pct}%`
             : (b.reason || 'Preparing');
-        if (bar) { bar.style.width = pct + '%'; bar.setAttribute('aria-valuenow', String(pct)); }
+        if (bar) {
+            bar.style.width = pct + '%';
+            bar.setAttribute('aria-valuenow', String(pct));
+        }
         renderDetailedResourceBars(detailedResources);
         const elapsed = fmtTime(Number(b.elapsed_s));
         const eta = fmtTime(Number(b.eta_s));
         if (timing) timing.textContent = b.phase === 'failed' ? 'Loading failed'
-            : done ? `Completed in ${elapsed || '—'}`
+            : done
+            ? `Completed in ${elapsed || '—'}`
             : `Elapsed ${elapsed || '0:00'} · ${eta ? 'ETA ' + eta : 'calculating ETA'}`;
         if (detail) {
             if (b.phase === 'failed') detail.textContent = b.reason || 'The saved reconstruction could not be loaded.';
@@ -420,7 +478,9 @@ export function createSlam(hub, sceneApi) {
             if (label) label.textContent = value;
             if (!fill) return;
             if (!Number.isFinite(fraction)) {
-                fill.style.width = '0%'; fill.classList.remove('is-warn', 'is-crit'); return;
+                fill.style.width = '0%';
+                fill.classList.remove('is-warn', 'is-crit');
+                return;
             }
             const clamped = Math.max(0, Math.min(1, fraction));
             fill.style.width = (clamped * 100).toFixed(0) + '%';
@@ -433,10 +493,12 @@ export function createSlam(hub, sceneApi) {
         }
         const known = (value) => value !== null && value !== undefined && Number.isFinite(Number(value));
         const percent = (value) => known(value) ? Math.round(Number(value)) + '%' : 'n/a';
-        const ratio = (used, total) => known(used) && Number(used) >= 0 && known(total) && Number(total) > 0
-            ? Number(used) / Number(total) : null;
-        set('gpu', known(resources.gpu_util) ? Number(resources.gpu_util) / 100 : null, percent(resources.gpu_util));
-        set('cpu', known(resources.sys_cpu_percent) ? Number(resources.sys_cpu_percent) / 100 : null, percent(resources.sys_cpu_percent));
+        const ratio = (used, total) => known(used) && Number(used) >= 0 &&
+            known(total) && Number(total) > 0 ? Number(used) / Number(total) : null;
+        set('gpu', known(resources.gpu_util) ? Number(resources.gpu_util) / 100 : null,
+            percent(resources.gpu_util));
+        set('cpu', known(resources.sys_cpu_percent) ? Number(resources.sys_cpu_percent) / 100 : null,
+            percent(resources.sys_cpu_percent));
         const ram = ratio(resources.ram_used, resources.ram_total);
         set('ram', ram, ram === null ? 'n/a' : Math.round(ram * 100) + '%');
         const vram = ratio(resources.device_vram_used, resources.device_vram_total);

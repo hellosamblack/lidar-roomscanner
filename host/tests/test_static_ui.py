@@ -312,3 +312,22 @@ def test_the_orientation_gizmo_draws_the_device_not_an_axis_triad():
     assert "from './devicemodel.js'" in js
     assert "drawDeviceBox2D" in js
     assert "AXIS_COLORS" not in js, "the RGB axis triad is still being drawn"
+
+
+def test_camera_views_cover_every_display_and_slam_uses_the_shared_scanner_model():
+    """World / FPV / Mirror must not turn off when SLAM is selected.
+
+    The live cloud has a server-side frame transform, whereas maps are
+    world-fixed: their first-person/mirror behaviour belongs in the shared scene
+    camera.  The pose marker is the same physical scanner model as Sensors, not
+    another anonymous green sphere.
+    """
+    controls = (STATIC / "controls.js").read_text(encoding="utf-8")
+    scene = (STATIC / "scene.js").read_text(encoding="utf-8")
+    slam = (STATIC / "slam.js").read_text(encoding="utf-8")
+    browser = (STATIC / "browser.js").read_text(encoding="utf-8")
+    assert "b.disabled = (msg.mode === 'slam')" not in controls
+    assert "setSlamPose" in scene and "setViewportMirror" in scene
+    assert "from './devicemodel.js'" in slam and "createDeviceMesh" in slam
+    assert "SphereGeometry(0.03" not in slam
+    assert "viewMode === 'mirror' ? 'scaleX(-1)'" in browser
