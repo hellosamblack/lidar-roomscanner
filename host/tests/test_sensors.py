@@ -478,3 +478,68 @@ def test_triad_roll_zero_when_up_ref_points_true_up():
     up_ref = (0.0, -1.0, 0.0)       # points exactly at true "up" (-down)
     roll = triad_roll_deg(down, axis_body=axis, up_ref_body=up_ref)
     assert roll == pytest.approx(0.0, abs=1e-6)
+
+
+# --- BUG-039 / BUG-048 / BUG-051: no ZYX yaw as a quantity in a live path -----
+
+# `quat_yaw_deg` is a ZYX Tait-Bryan yaw, and this device's SFLP body frame has
+# X = Up -- so its gimbal lock sits at the NORMAL UPRIGHT GRIP, not at some
+# exotic attitude. Using it as a *quantity* (a heading, a heading error, a yaw to
+# strip or to zero against) has now shipped as a bug four times:
+#
+#   BUG-039  imufusion._correct_yaw nulled it            -> graft_yaw_error_deg
+#   BUG-048  absolute_heading stripped it                -> (same defect as 051)
+#   BUG-051  absolute_heading + YawFusion's yaw term     -> yaw_twist_deg
+#
+# It remains legitimate as a *display decomposition* -- "what is the ZYX yaw of
+# this attitude" is a fair question to render, and its own ill-conditioning is
+# information the UI reports (that is what `near_singularity` is for).
+#
+# This test pins the callers so a fifth instance cannot land quietly. If it
+# fails on a NEW call site, the question to answer is: am I rendering the ZYX
+# decomposition, or am I computing with a heading? If the latter, use
+# `yaw_twist_deg` (swing-twist about world Z) or `graft_yaw_error_deg`.
+_ZYX_YAW_DISPLAY_CALLERS = {
+    # (module, enclosing function) -> why it is allowed
+    ("web.py", "orientation_view"): "renders the 'zyx' decomposition mode itself",
+    ("web.py", "update"): "JitterTracker: reports the displayed decomposition's own frame-to-frame change",
+    ("web.py", "build_sensor_message"): "orientation_raw.yaw_deg -- the raw ZYX readout in the diagnostics drawer",
+    # panel.py is deprecated legacy (see CLAUDE.md). This one is a display
+    # baseline for its "reset orientation" button, not a live estimator, but it
+    # is the same class and should move to `yaw_twist_deg` if panel.py is ever
+    # revived rather than deleted.
+    ("panel.py", "_on_reset_orientation"): "deprecated panel's zero-yaw display baseline",
+}
+
+
+def test_no_new_zyx_yaw_consumers():
+    import ast
+    import pathlib
+
+    pkg = pathlib.Path(__file__).resolve().parents[1] / "src" / "roomscan"
+    found = {}
+    for path in sorted(pkg.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        # map every node to its nearest enclosing function
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(fn):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "quat_yaw_deg"):
+                    found.setdefault((path.name, fn.name), []).append(node.lineno)
+
+    unexpected = {k: v for k, v in found.items() if k not in _ZYX_YAW_DISPLAY_CALLERS}
+    assert not unexpected, (
+        "New `quat_yaw_deg` call site(s): "
+        + ", ".join(f"{m}::{f} (line {ls[0]})" for (m, f), ls in sorted(unexpected.items()))
+        + ". ZYX yaw gimbal-locks at this device's NORMAL GRIP (body X = Up) -- it has "
+          "shipped as a bug three times (BUG-039/048/051). If you are rendering the ZYX "
+          "decomposition, add it to _ZYX_YAW_DISPLAY_CALLERS with a reason. If you are "
+          "computing a heading or a heading error, use `yaw_twist_deg` or "
+          "`graft_yaw_error_deg` instead.")
+
+    # And the allow-list must not rot: every entry still has to be a real call site.
+    stale = set(_ZYX_YAW_DISPLAY_CALLERS) - set(found)
+    assert not stale, f"_ZYX_YAW_DISPLAY_CALLERS entries no longer call it: {sorted(stale)}"
