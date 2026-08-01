@@ -863,6 +863,74 @@ Host-side only — no wire-protocol, firmware, or `/ws`-message change. Owner de
   message from it. No frontend change — the existing `state` echo already drives the UI, so persisted values reach
   the browser through the unchanged connect handshake.
 
+#### Web Phase 6 — UI corrections pass  ← **✅ Complete (2026-07-31)**
+
+Owner-driven round of UI fixes after living with the Live/View consolidation. Six commits
+(`df28686`, `2399afa`, `61b96ac`, `66ea675`, `2dbcbcb`, `7d5ffe6`), **1327 passed / 1 skipped**.
+
+- **Explain the instrument.** Drops/Gaps/FPS/Bandwidth and every per-stream row now carry
+  tooltips (keyed on `stream_id`, not `label` — `metrics.py` maps two ids onto "ToF"). The Fusion
+  row names a remedy for each `fusion_key`, not just the fault. `body { user-select: none }` was
+  making every diagnostic uncopyable; `#diag-log`, the event log, the quat and the jitter table opt
+  back in.
+- **Declutter.** The right-rail IR group duplicated controls the IR card already had inline — gone;
+  its × now collapses into the squircle rail rather than hiding with no way back. The orientation
+  decomposition picker is gone and the card is pinned to **World**, which also fixed the axis
+  labels: World's slots are triad roll, boresight tilt from horizontal, and absolute magnetic
+  heading, so "Pitch"/"Yaw" named the wrong quantities. A one-time migration adopts the new labels
+  for configs still carrying the old default (`_persist_ui` writes every field on any change, so the
+  stale default would otherwise shadow the new one forever).
+- **The squircle rail** is now a map of every panel — permanent buttons, bright when open and dim
+  when collapsed, with matching icons injected into each card title from the same `CARD_ICONS` table.
+- **A real device model.** `devicemodel.js` is the single source for the owner's 5.5 × 3 × 2.5 in
+  block (dark grey / white / blue through the depth, camera on the blue face), shared by the mag-cal
+  3D view and a new 2D painter for the Sensors gizmo (2D canvas, not a third WebGL context — this
+  host is llvmpipe). `MOUNT_ROTATION` is a 180° turn about the boresight, derived from World roll
+  being `triad_roll_deg` of body +X and corroborated by the live rig reading Roll 179.66°.
+- **Mag-cal is one view, not two** — the world-fixed steering framing carrying the hero's cell
+  styling. This *re-accepts* a tradeoff `magcal3d.js` had explicitly rejected (a body-fixed shell
+  under a room camera has its holes orbit at hand speed); the mitigation is that the ghost and the
+  leader line become the aiming instrument. `heroCam` is kept as the no-quaternion fallback, or a
+  ToF-only session renders an empty canvas. The behind-camera split is now per-pose: 0.062 ms per
+  recompute under a synthetic 90 °/s tumble.
+- **Elevation replaces pressure** — feet, with hPa beside it and a Δ datum button (persisted).
+  Sea-level reference from Open-Meteo, the app's **first outbound third-party request**: stdlib
+  `urllib` in a thread, one GET per 30 min, cached, with a visible `msl_source` so a fallback is
+  reported rather than hidden. EMA'd at 6 s because the barometer is 267 mm RMS per frame (BUG-037);
+  the sparkline is left unsmoothed on purpose.
+- **Resource headroom during Live SLAM.** `build_metrics_message` had hardcoded `resources: None`.
+  Now wired, plus system-wide RAM/CPU (psutil) and **device-wide** VRAM via the ctypes NVML in
+  `slam.gpumem` — `pynvml` is not installed, so every per-process GPU field would have been null.
+  The VRAM figure deliberately exceeds `nvidia-smi memory.used` (370 vs 18 MiB) because NVML counts
+  driver-reserved memory, which for a headroom gauge is spoken for. Also surfaces the **TSDF block
+  gauge** — the ceiling that silently killed 18% of a real sweep (BUG-035) — sampled at the metrics
+  rate, since `block_usage()` is a device sync on CUDA.
+- **Auto-record on entering Live SLAM**, because a live scan is unrepeatable (the same reasoning
+  that kept its one-shot Save, BUG-043). A manually started take is tracked separately and never
+  stopped by a display switch.
+- **Oscillate orbit** — a triangle wave sweeping ±N about the start azimuth. Two traps: the azimuth
+  wraps at ±π (unwrapped per-frame steps, or any amplitude ≥ 180° latches — measured 0 reversals in
+  1200 frames), and direction must not live in the sign of `autoRotateSpeed`, which the `state` echo
+  overwrites on every unrelated setting change (measured: the return leg vanished entirely).
+- **Live is one Record button; View is a real capture browser** — thumbnails, metadata, rename,
+  multi-select delete, preview. Thumbnails are a top-down sketch from ~40 sampled frames rotated by
+  stream 9; **it is not a map** (no translation estimate, so every frame shares one origin) and the
+  tooltip says so. 51 ms/file across the real 1.49 GiB library, reading 0.161% of a 408 MB capture.
+  Served over `GET /thumb/{name}` rather than a `/ws` tag so `<img loading="lazy">` gives paced
+  fetching and caching for free. "Area covered" is a floor-projected footprint, not mesh surface
+  area, which would score a corridor above a large room.
+
+**Bugs found and fixed here:** **BUG-047** (`id="btn-restart"` named two buttons — playback Restart
+was dead *and* "Restart Server" fired a transport restart first) and **BUG-050** (recording
+`elapsed_s` was `time.time() - time.monotonic()`; a 90 s take reported 1.78e9 s, and it survived
+because the tests asserted the value was a *float*).
+
+**Open, non-blocking:** the narrow-viewport overlap probes (1280×800 / 1100×560 / 820×700) were not
+run — `ui_screenshot`'s width/height did not resize the viewport, so only 1600×1000 is measured
+(0 overlaps with browser + preview + Playback open). `MOUNT_ROTATION` and the merged mag-cal view
+both want an owner-in-hand confirmation. On-demand **Detailed** builds did not complete during
+verification (7+ min on a 759-frame capture) — pre-existing, worth its own look.
+
 ### Phase 4 — Integrate X-NUCLEO-IKS4A1  ← **✅ Complete** *(swapped with Ethernet 2026-07-09, owner decision — sensors next)*
 
 > **Status 2026-07-10:** verified on hardware — the full stack (ToF depth + SFLP orientation +

@@ -100,6 +100,27 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
   describing what it does. Use short, plain-language phrases — one sentence max, no jargon. When adding
   a new button to `index.html`, add a `title` in the same commit. For `<label class="toggle">` elements,
   put the `title` on the `<label>`, not the inner `<input>`.
+  **This is now enforced** by `host/tests/test_static_ui.py` — it was review-only for months and had
+  drifted past nine controls. That module holds the other whole-file markup invariants too: no
+  duplicate `id=` (BUG-047 — one id named two buttons, so "Restart Server" also fired a playback
+  transport restart), every `data-card-id` present in `CARD_ICONS`/`CARD_TITLES` (a card without an
+  icon entry gets no squircle and is unreachable once collapsed), and `user-select: text` on the
+  read-only sinks that `body { user-select: none }` would otherwise make uncopyable.
+  *If a rule here could be checked by a grep, write the grep as a test in the same session.*
+- **Read-only telemetry needs tooltips too.** The rule above says "interactive", so the HUD counters
+  (Drops/Gaps/stream rows) had none — and those are exactly the numbers whose meaning is not
+  guessable. Key any per-stream help map on `stream_id`, **not** `label`: `metrics.py` maps two
+  different ids onto `"ToF"`, so a label-keyed map cannot tell a replay from a live capture.
+- **Client-owned animation state must not live in a field the `state` handler assigns.** `state` is
+  re-broadcast on *every* unrelated setting change, so a value stored in (say) the sign of
+  `controls.autoRotateSpeed` is silently reset whenever someone clicks an unrelated control. Give it
+  its own variable and re-assert it each frame; the server owns magnitude, the client owns
+  direction/phase.
+- **Changing a `ViewerConfig` default needs a migration.** `web._persist_ui` writes the whole
+  `[viewer]` table on any single UI change, so an install that never touched a field still has the
+  *then*-current default on disk, and `ui_from_config` reads it back in preference to the new code
+  default — the change is invisible to every existing install. Migrate the exact old default only,
+  and leave any other stored value alone as a real customization.
 
 ## Verification discipline
 
@@ -133,6 +154,21 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
   *did* apply left the test still passing, correctly revealing the fix had **no** coverage at all
   (`DetailedSlamPreset.fingerprint`). So assert the edit applied (`assert s.count(old) == 1`)
   separately from the pytest result — only then does green-after-restore mean anything.
+- **A shape test cannot see a units, origin, or clock error.** BUG-050 (`elapsed_s` computed as
+  `time.time() - time.monotonic()`, reporting 1.78e9 s for a 90-second take) survived two existing
+  tests because both asserted the key was present and was a float — and a wrong-by-a-billion float
+  is one. When the value is a *quantity*, assert it against a **known** magnitude (advance the clock
+  by 90 s, assert ~90), not against its type. Any subtraction across `time.time()` and
+  `time.monotonic()` in the same file is a bug until proven otherwise.
+- **Verify against the shipped function, not a retyped copy.** A JS check that re-types the
+  algorithm into a scratch file tests the copy, and the copy drifts. Extract the real function out of
+  the source at run time (`readFileSync` + a match + `new Function`) and drive it against a stub —
+  that is what caught the oscillate orbit's `state`-echo interaction, which the retyped version could
+  not see because the bug was in the interaction, not the arithmetic.
+- **A stationary rig measures nothing.** An A/B whose code path is gated on motion (the mag-cal
+  behind-camera recompute fires only past a 1.5° step) reports identical numbers in both arms on a
+  parked device, and the "slower" arm can measure faster on noise alone. Drive the input the feature
+  actually responds to — a synthetic tumble is fine — or say plainly that the measurement is absent.
 - **Verify a backup before the step that needs it, and never at a guessable path.** Restoring a file
   from `/tmp/<name>.bak` overwrote uncommitted work with *another session's* leftover copy: the
   backup `cp` had silently failed (the Bash cwd had drifted, so the repo-relative path missed) while
