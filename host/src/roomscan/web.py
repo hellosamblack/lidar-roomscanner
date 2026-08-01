@@ -2228,6 +2228,28 @@ class SlamRunner:
             self._teardown_locked()
 
 
+def _last_tum_pose(path: Path) -> np.ndarray | None:
+    """Read the final world<-camera pose from a Detailed sidecar trajectory.
+
+    A cached Detailed mesh has no worker to report progress from, but its `.tum`
+    sidecar is written atomically with the mesh.  Reusing that final scanner
+    pose keeps FPV/Mirror meaningful when reopening a completed build.
+    """
+    try:
+        with Path(path).open("r", encoding="utf-8") as f:
+            lines = [line for line in f if line.strip()]
+        fields = [float(v) for v in lines[-1].split()]
+    except (OSError, IndexError, ValueError):
+        return None
+    if len(fields) != 8 or not all(math.isfinite(v) for v in fields):
+        return None
+    _ts, tx, ty, tz, qx, qy, qz, qw = fields
+    pose = np.eye(4, dtype=np.float64)
+    pose[:3, :3] = quat_to_matrix(qw, qx, qy, qz)
+    pose[:3, 3] = (tx, ty, tz)
+    return pose
+
+
 class DetailedRunner:
     """Server-owned offline reconstruction job for one immutable capture.
 
@@ -2244,14 +2266,21 @@ class DetailedRunner:
         self._meshprep = None
         self._capture = None
         self._cached_mesh = None
+        self._cached_pose = None
+        self._loading_capture = None
+        self._loading_started_at = None
+        self._load_error = None
         self._last_mesh = object()
         self._mesh_seq = 0
         self._committed = False
+        self._started_at = None
         self.preset = DetailedSlamPreset.load()
 
     def start(self, capture, *, force: bool = False) -> dict:
         capture = Path(capture)
         with self._lock:
+            if self._loading_capture is not None:
+                return {"started": False, "reason": "a saved Detailed mesh is still loading"}
             if self._worker is not None:
                 latest = self._worker.latest()
                 if latest is None or not latest.done:
@@ -2272,58 +2301,151 @@ class DetailedRunner:
             prep.start()
             self._worker, self._meshprep, self._capture = worker, prep, capture
             self._cached_mesh = None
+            self._cached_pose = None
+            self._loading_capture = None
+            self._loading_started_at = None
+            self._load_error = None
             self._last_mesh, self._mesh_seq, self._committed = object(), 0, False
+            self._started_at = time.monotonic()
         self._bus.publish(f"[detailed] started {capture.name} ({self.preset.fingerprint()})")
-        return {"started": True, "estimate": estimate_seconds(
-            len(worker.timestamps), self.preset, cuda=preferred_device().startswith("CUDA"))}
+        return {"started": True, "capture": capture.name, "phase": "frames",
+                "processed": 0, "total": len(worker.timestamps), "fraction": 0.0,
+                "done": False, "elapsed_s": 0.0, "eta_s": None,
+                "mesh_every": self.preset.mesh_every,
+                "estimate": estimate_seconds(
+                    len(worker.timestamps), self.preset,
+                    cuda=preferred_device().startswith("CUDA"))}
 
-    def load_cached(self, capture) -> bool:
-        """Load a saved Detailed mesh for immediate View rendering."""
+    def begin_load_cached(self, capture) -> bool:
+        """Start loading a saved Detailed mesh without blocking the UI loop."""
         capture = Path(capture)
         paths = sidecar_paths(capture, self.results_dir)
         if not paths["ply"].is_file():
             return False
-        import open3d as o3d
         with self._lock:
-            if self._worker is not None:
+            if self._worker is not None or self._loading_capture is not None:
                 return False
+            old_prep = self._meshprep
+            self._meshprep = None
+            self._capture = capture
+            self._cached_mesh = None
+            self._cached_pose = None
+            self._last_mesh, self._mesh_seq = object(), 0
+            self._started_at = None
+            self._loading_capture = capture
+            self._loading_started_at = time.monotonic()
+            self._load_error = None
+        if old_prep is not None:
+            old_prep.stop()
+        threading.Thread(target=self._load_cached_worker, args=(capture, paths), daemon=True).start()
+        return True
+
+    # Kept as a compatibility spelling for callers outside the websocket
+    # handler.  Loading is deliberately asynchronous now.
+    load_cached = begin_load_cached
+
+    def _load_cached_worker(self, capture: Path, paths: dict) -> None:
+        """Read a sidecar and prepare it off the websocket/event-loop path."""
+        prep = None
+        try:
+            import open3d as o3d
             mesh = o3d.t.io.read_triangle_mesh(str(paths["ply"]))
+            pose = _last_tum_pose(paths["tum"])
             prep = MeshPrep(vertex_budget=150000, fps_budget_ms=8.0)
             prep.start()
-            self._meshprep, self._capture, self._cached_mesh = prep, capture, mesh
-            self._last_mesh, self._mesh_seq = object(), 0
-        return True
+        except Exception as exc:
+            with self._lock:
+                if self._loading_capture == capture:
+                    self._loading_capture = None
+                    self._loading_started_at = None
+                    self._load_error = f"could not load saved mesh: {exc}"
+            self._bus.publish(f"[detailed] failed to load {capture.name}: {exc}")
+            return
+        with self._lock:
+            if self._loading_capture != capture:
+                stale = True
+            else:
+                stale = False
+                self._meshprep, self._cached_mesh = prep, mesh
+                self._cached_pose = pose
+                self._loading_capture = None
+                self._loading_started_at = None
+                self._load_error = None
+        if stale:
+            prep.stop()
 
     def status(self) -> dict | None:
         with self._lock:
-            worker, capture = self._worker, self._capture
+            worker, capture, started_at = self._worker, self._capture, self._started_at
+            loading_capture, loading_started_at, load_error = (
+                self._loading_capture, self._loading_started_at, self._load_error)
+        if loading_capture is not None:
+            elapsed_s = max(0.0, time.monotonic() - loading_started_at) if loading_started_at else 0.0
+            return {"type": "detailed", "capture": loading_capture.name,
+                    "phase": "loading_cached", "processed": 0, "total": 0,
+                    "fraction": 0.0, "done": False, "stats": None,
+                    "elapsed_s": round(elapsed_s, 1), "eta_s": None,
+                    "mesh_every": self.preset.mesh_every}
+        if load_error is not None and capture is not None:
+            return {"type": "detailed", "capture": capture.name, "phase": "failed",
+                    "processed": 0, "total": 0, "fraction": 0.0, "done": True,
+                    "stats": None, "elapsed_s": 0.0, "eta_s": None,
+                    "mesh_every": self.preset.mesh_every, "reason": load_error}
         if worker is None or capture is None:
             return None
         progress = worker.latest()
+        total = len(worker.timestamps)
+        elapsed_s = max(0.0, time.monotonic() - started_at) if started_at is not None else 0.0
         if progress is None:
-            return {"capture": capture.name, "phase": "frames", "processed": 0,
-                    "total": len(worker.timestamps), "done": False}
-        return {"capture": capture.name, "phase": "offline_only" if progress.done else "frames",
-                "processed": round(progress.fraction * len(worker.timestamps)),
-                "total": len(worker.timestamps), "done": progress.done, "stats": progress.stats}
+            return {"type": "detailed", "capture": capture.name, "phase": "frames", "processed": 0,
+                    "total": total, "fraction": 0.0, "done": False, "stats": None,
+                    "elapsed_s": round(elapsed_s, 1), "eta_s": None,
+                    "mesh_every": self.preset.mesh_every}
+        pose = None
+        trajectory = getattr(progress, "trajectory", ())
+        if trajectory:
+            latest_pose = np.asarray(trajectory[-1], dtype=np.float64)
+            if latest_pose.shape == (4, 4) and np.all(np.isfinite(latest_pose)):
+                pose = [round(float(v), 5) for v in latest_pose.reshape(-1)]
+        processed = round(progress.fraction * total)
+        eta_s = None
+        if processed > 0 and not progress.done:
+            eta_s = elapsed_s * max(0, total - processed) / processed
+        status = {"type": "detailed", "capture": capture.name,
+                  "phase": getattr(progress, "phase", "offline_only" if progress.done else "frames"),
+                  "processed": processed, "total": total, "fraction": round(progress.fraction, 6),
+                  "done": progress.done, "stats": progress.stats,
+                  "elapsed_s": round(elapsed_s, 1),
+                  "eta_s": 0.0 if progress.done else (round(eta_s, 1) if eta_s is not None else None),
+                  "mesh_every": self.preset.mesh_every}
+        if pose is not None:
+            status["pose"] = pose
+        return status
 
     def poll(self, wall_mode: str) -> tuple[dict | None, bytes | None]:
         with self._lock:
-            worker, prep, capture = self._worker, self._meshprep, self._capture
+            worker, prep, capture, cached_pose, cached_mesh, loading_capture = (
+                self._worker, self._meshprep, self._capture, self._cached_pose,
+                self._cached_mesh, self._loading_capture)
+        if loading_capture is not None:
+            return self.status(), None
         if prep is None or capture is None:
-            return None, None
-        if worker is None and self._cached_mesh is not None:
-            if self._cached_mesh is not self._last_mesh:
+            return self.status(), None
+        if worker is None and cached_mesh is not None:
+            if cached_mesh is not self._last_mesh:
                 self._mesh_seq += 1
-                prep.submit(self._cached_mesh, mesh_seq=self._mesh_seq, glow_origin=None, wall_mode=wall_mode)
-                self._last_mesh = self._cached_mesh
+                prep.submit(cached_mesh, mesh_seq=self._mesh_seq, glow_origin=None, wall_mode=wall_mode)
+                self._last_mesh = cached_mesh
             packet = prep.latest()
-            return ({"type": "detailed", "capture": capture.name, "phase": "cached", "done": True,
-                     "mesh_seq": self._mesh_seq}, pack_mesh(packet) if packet is not None else None)
+            state = {"type": "detailed", "capture": capture.name, "phase": "cached", "done": True,
+                     "mesh_seq": self._mesh_seq}
+            if cached_pose is not None:
+                state["pose"] = [round(float(v), 5) for v in cached_pose.reshape(-1)]
+            return state, pack_mesh(packet) if packet is not None else None
         progress = worker.latest()
         if progress is None:
             return self.status(), None
-        if progress.mesh is not self._last_mesh:
+        if progress.mesh is not None and progress.mesh is not self._last_mesh:
             self._mesh_seq += 1
             prep.submit(progress.mesh, mesh_seq=self._mesh_seq, glow_origin=None, wall_mode=wall_mode)
             self._last_mesh = progress.mesh
@@ -2363,6 +2485,11 @@ class DetailedRunner:
             worker, prep = self._worker, self._meshprep
             self._worker = self._meshprep = None
             self._cached_mesh = None
+            self._cached_pose = None
+            self._loading_capture = None
+            self._loading_started_at = None
+            self._load_error = None
+            self._started_at = None
         for obj in (worker, prep):
             if obj is not None:
                 try:
@@ -3668,17 +3795,6 @@ async def _broadcaster() -> None:
                 if smsg is not None:
                     await _broadcast_text(clients, json.dumps(smsg))
 
-            # Detailed uses an offline worker, but publishes its progressive
-            # mesh through the same MESH channel. It deliberately does not
-            # consume the replay reader's latest frame here.
-            detailed = getattr(state, "detailed_runner", None)
-            if ui.display == "detailed" and detailed is not None:
-                dmsg, mesh_bytes = detailed.poll(ui.slam_walls)
-                if mesh_bytes is not None:
-                    await _broadcast_bytes(clients, mesh_bytes)
-                if dmsg is not None:
-                    await _broadcast_text(clients, json.dumps(dmsg))
-
             # IR_IMAGE on its own slower cadence.
             if now - last_ir >= IR_INTERVAL:
                 last_ir = now
@@ -3703,6 +3819,18 @@ async def _broadcaster() -> None:
                 else:
                     _log_debounced(state, bus, "ir-miss",
                                    "reflectance unavailable this frame, holding IR pane")
+
+        # Detailed uses an offline worker, but publishes its progressive mesh
+        # through the same MESH channel.  It deliberately does not consume the
+        # replay reader's latest frame, and must keep reporting while replay is
+        # paused (Detailed has no valid playback transport).
+        detailed = getattr(state, "detailed_runner", None)
+        if ui.display == "detailed" and detailed is not None:
+            dmsg, mesh_bytes = detailed.poll(ui.slam_walls)
+            if mesh_bytes is not None:
+                await _broadcast_bytes(clients, mesh_bytes)
+            if dmsg is not None:
+                await _broadcast_text(clients, json.dumps(dmsg))
 
         # Sensor (streams 9/10) on its own cadence; silent until 9/10 arrives.
         if now - last_sensor >= SENSOR_INTERVAL:
@@ -4170,9 +4298,13 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         if slam is not None:
             await asyncio.to_thread(slam.set_active, display == "slam")
         if display == "detailed" and ctrl is not None and ctrl.replay_path:
+            # Detailed owns its own immutable offline reader.  Keeping the
+            # replay pacer moving here makes the playback card look active even
+            # though replay frames cannot affect the Detailed map.
+            ctrl.pause()
             runner = getattr(state, "detailed_runner", None)
             if runner is not None:
-                await asyncio.to_thread(runner.load_cached, ctrl.replay_path)
+                runner.begin_load_cached(ctrl.replay_path)
         # Auto-record the scan (owner ask, 2026-07-31): entering Live SLAM
         # starts a take, leaving it stops one -- but only the take Live SLAM
         # itself started (see SessionController._auto_recording). Deliberately
@@ -4183,6 +4315,12 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         elif ui.source == "live":
             await _stop_slam_auto_record(state, ctrl)
         await _broadcast_state(state)
+        if display == "detailed":
+            runner = getattr(state, "detailed_runner", None)
+            if runner is not None:
+                status = runner.status()
+                if status is not None:
+                    await _broadcast_text(state.clients, json.dumps(status))
 
     elif mtype in ("generate_detailed", "regenerate_detailed") and ctrl is not None:
         if ctrl.mode != "replay" or not ctrl.replay_path or not ctrl.index.get("has_stream_9"):
@@ -4513,7 +4651,6 @@ def main(argv=None) -> int:
             calibration=mag_cal,
             anomaly_frac=float(getattr(args, "yaw_anomaly_frac", 0.3) or 0.3),
             motion_rate_dps=float(getattr(args, "yaw_motion_rate_dps", 40.0) or 40.0),
-            gimbal_margin_deg=float(getattr(args, "yaw_gimbal_margin_deg", 15.0) or 15.0),
         )
     sensor_state = SensorState(fusion=fusion)
 

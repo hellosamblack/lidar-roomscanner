@@ -3024,9 +3024,13 @@ class _FakeCtrl:
         self.index = {"n_frames": 3, "seqs": [1, 2, 3], "has_stream_9": has_stream_9}
         self.captures_dir = captures_dir
         self.switched_to = None
+        self.paused = False
 
     def switch_to_live(self):
         self.mode, self.replay_path, self.switched_to = "live", None, "live"
+
+    def pause(self):
+        self.paused = True
 
 
 def _inbound_state(ui, ctrl):
@@ -3065,6 +3069,96 @@ def test_state_echo_keeps_capability_context_on_an_unrelated_control():
     echoes = [m for m in sent if m.get("type") == "state"]
     assert echoes, "set_color must echo state"
     assert echoes[-1]["slam_available"] is False
+
+
+def test_detailed_runner_status_reports_real_elapsed_time_and_eta(tmp_path, monkeypatch):
+    """Detailed progress is server-owned so every tab gets the same ETA.
+
+    The estimate attached to a capture is only a planning hint.  Once a build
+    starts, elapsed time and ETA must come from the current worker progress,
+    including the first batch before a mesh can be shown.
+    """
+    import types
+
+    class _Worker:
+        timestamps = [0.0, 1.0, 2.0, 3.0]
+
+        @staticmethod
+        def latest():
+            return types.SimpleNamespace(fraction=0.25, done=False, stats=None)
+
+    runner = web.DetailedRunner(bus=LogBus(), results_dir=tmp_path / "results")
+    runner._worker = _Worker()
+    runner._capture = tmp_path / "take.bin"
+    runner._started_at = 100.0
+    monkeypatch.setattr(web.time, "monotonic", lambda: 110.0)
+
+    status = runner.status()
+    assert status == {
+        "type": "detailed", "capture": "take.bin", "phase": "frames", "processed": 1, "total": 4,
+        "fraction": 0.25, "done": False, "stats": None, "elapsed_s": 10.0,
+        "eta_s": 30.0, "mesh_every": runner.preset.mesh_every,
+    }
+
+    runner._worker.latest = lambda: None
+    initial = runner.status()
+    assert initial["type"] == "detailed"
+    assert (initial["processed"], initial["fraction"], initial["eta_s"]) == (0, 0.0, None)
+
+
+def test_detailed_runner_reports_cached_mesh_loading_without_blocking(tmp_path, monkeypatch):
+    """The websocket can acknowledge a large PLY load before Open3D finishes it."""
+    runner = web.DetailedRunner(bus=LogBus(), results_dir=tmp_path / "results")
+    capture = tmp_path / "take.bin"
+    runner._capture = capture
+    runner._loading_capture = capture
+    runner._loading_started_at = 100.0
+    monkeypatch.setattr(web.time, "monotonic", lambda: 107.5)
+
+    assert runner.status() == {
+        "type": "detailed", "capture": "take.bin", "phase": "loading_cached",
+        "processed": 0, "total": 0, "fraction": 0.0, "done": False,
+        "stats": None, "elapsed_s": 7.5, "eta_s": None,
+        "mesh_every": runner.preset.mesh_every,
+    }
+
+
+def test_detailed_runner_status_exposes_the_latest_scanner_pose(tmp_path):
+    """Detailed maps stay world-fixed; FPV/Mirror therefore need the worker's
+    latest world<-camera pose rather than a made-up transform in the browser."""
+    import types
+
+    pose = np.eye(4, dtype=np.float64)
+    pose[:3, 3] = (1.25, -0.5, 2.75)
+
+    class _Worker:
+        timestamps = [0.0]
+
+        @staticmethod
+        def latest():
+            return types.SimpleNamespace(
+                fraction=1.0, done=True, stats=None, trajectory=[pose])
+
+    runner = web.DetailedRunner(bus=LogBus(), results_dir=tmp_path / "results")
+    runner._worker = _Worker()
+    runner._capture = tmp_path / "take.bin"
+    status = runner.status()
+    assert status["pose"] == pytest.approx(pose.reshape(-1).tolist())
+
+
+def test_last_tum_pose_recovers_the_cached_detailed_camera_pose(tmp_path):
+    """A finished Detailed build has no worker, so its FPV/Mirror camera must
+    recover the final scanner pose from the sidecar that was saved with it."""
+    pose = np.eye(4, dtype=np.float64)
+    pose[:3, 3] = (1.25, -0.5, 2.75)
+    a = math.radians(30.0)
+    pose[:3, :3] = np.array([[math.cos(a), -math.sin(a), 0.0],
+                             [math.sin(a), math.cos(a), 0.0],
+                             [0.0, 0.0, 1.0]])
+    tum = tmp_path / "take.tum"
+    from roomscan.slam.metrics import write_tum
+    write_tum(tum, [1.0], [pose])
+    assert web._last_tum_pose(tum) == pytest.approx(pose, abs=1e-5)
 
 
 def test_save_is_live_slam_only():
@@ -3122,6 +3216,34 @@ def test_preview_is_a_view_only_display_for_the_loaded_capture():
     asyncio.run(web._handle_inbound(state, {"type": "set_display", "display": "preview"}))
     assert ui.display == "point_cloud"
     assert any("load a capture" in line for line in published), published
+
+
+def test_detailed_display_pauses_replay_and_starts_cached_load_immediately():
+    """Detailed has its own offline worker; replay must not run underneath it."""
+    import asyncio
+
+    class _Runner:
+        def __init__(self):
+            self.loaded = None
+
+        def begin_load_cached(self, capture):
+            self.loaded = capture
+            return True
+
+        def status(self):
+            return {"type": "detailed", "phase": "loading_cached", "capture": "take.bin",
+                    "processed": 0, "total": 0, "fraction": 0.0, "done": False}
+
+    ctrl = _FakeCtrl()
+    ui = web.UiState(source="view", display="point_cloud", selected_capture="take.bin")
+    state, _ = _inbound_state(ui, ctrl)
+    runner = _Runner()
+    state.detailed_runner = runner
+    asyncio.run(web._handle_inbound(state, {"type": "set_display", "display": "detailed"}))
+
+    assert ui.display == "detailed"
+    assert ctrl.paused is True
+    assert runner.loaded == "take.bin"
 
 
 def test_replay_controller_defaults_to_one_times_speed(tmp_path):

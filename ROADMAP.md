@@ -1439,6 +1439,10 @@ closure numbers have no ground truth and must not be quoted as drift.)
 **Live/View Detailed-SLAM follow-ups (recorded 2026-07-31).** The Live/View playback foundation is
 landed: server-authoritative `source`/`display` state, TIM2-based replay timing, stream-9 capability
 gating, capture-keyed Detailed sidecars, progressive `MESH` updates, and the pure paired-gate helper.
+Detailed now reports preview-mesh extraction separately from frame processing, shows asynchronous
+saved-sidecar loading immediately, pauses invalid replay during Detailed, and displays live
+GPU/CPU/RAM/VRAM utilization beneath its progress bar. This fixes the visible-feedback path; it does not
+replace the end-to-end verification below.
 The following work is deliberately still open; do not describe the fallback preset as a validated
 loop-closure implementation.
 

@@ -170,6 +170,25 @@ def test_view_modes_include_preview_and_build_uses_a_confirmation_modal():
         assert f'id="{element_id}"' in html
 
 
+def test_detailed_build_has_an_always_visible_progress_status():
+    """An offline build must never look like a dead click.
+
+    The SLAM HUD is intentionally collapsed by default, so its frame counter is
+    not an adequate progress affordance.  The viewport overlay is the durable
+    status surface: it stays visible while the progressive mesh refines below.
+    """
+    html = _index()
+    for element_id in (
+        "detailed-build-status", "detailed-build-title", "detailed-build-progress",
+        "detailed-build-bar", "detailed-build-time", "detailed-build-detail",
+        "detailed-resource-gpu", "detailed-resource-cpu", "detailed-resource-ram",
+        "detailed-resource-vram",
+    ):
+        assert f'id="{element_id}"' in html
+    assert 'role="progressbar"' in html
+    assert 'detailed-build__resources' in html
+
+
 # ---------------------------------------------------------------------------
 # devicemodel.js -- the shared 3D device (owner ask, 2026-07-31)
 # ---------------------------------------------------------------------------

@@ -59,6 +59,11 @@ export function createSlam(hub, sceneApi) {
         view_colormap: 'turbo', selected_capture: null };
     let lastVerts = 0;
     let lastMeshes = null;
+    // Server-owned job state. Keeping it here (rather than deriving a timer on
+    // each tab) makes a reconnect or a second browser show the same elapsed
+    // time and ETA as the tab that started the build.
+    let detailedBuild = null;
+    let detailedResources = null;
 
     // --- MESH binary ingest ----------------------------------------------
     // Layout (docs/web-protocol.md): 9×u32 header then, per submesh, f32 pos,
@@ -83,6 +88,10 @@ export function createSlam(hub, sceneApi) {
         lastMeshes = { nwPos, nwCol, nwIdx, wPos, wCol, wIdx };
         renderMeshes();
         applyLines(floorLines, fPos, fIdx);
+        if (state.display === 'detailed' && detailedBuild && !detailedBuild.done) {
+            detailedBuild.meshShown = true;
+            renderDetailedBuildStatus();
+        }
         if (!window.__gotMesh) { window.__gotMesh = true; D('first mesh: ' + nnwv + ' non-wall verts'); }
     });
 
@@ -270,6 +279,7 @@ export function createSlam(hub, sceneApi) {
         // reconstructions are repeatable, so they don't get the card.
         $('resources-card')?.classList.toggle('hidden',
             !(state.source === 'live' && state.display === 'slam'));
+        renderDetailedBuildStatus();
 
         // Toggles reflect server truth.
         const t = $('chk-slam-traj'); if (t) t.checked = state.slam_trajectory;
@@ -334,13 +344,104 @@ export function createSlam(hub, sceneApi) {
     });
     $('btn-save')?.addEventListener('click', () => hub.send({ type: 'save' }));
 
+    hub.on('metrics', (msg) => {
+        detailedResources = msg.resources || null;
+        renderDetailedBuildStatus();
+    });
+
     hub.on('detailed', (msg) => {
         const done = !!msg.done;
         const total = msg.total || 0;
         const processed = msg.processed || 0;
         const el = $('slam-frames');
         if (el && total) el.textContent = `${processed} / ${total}${done ? ' done' : ''}`;
+        if (msg.phase === 'cached') {
+            detailedBuild = null;
+        } else if (msg.started || total || msg.reason || msg.phase === 'loading_cached') {
+            detailedBuild = { ...(detailedBuild || {}), ...msg };
+        }
+        renderDetailedBuildStatus();
     });
+
+    function fmtTime(seconds) {
+        if (!Number.isFinite(seconds) || seconds < 0) return null;
+        const s = Math.round(seconds);
+        return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    }
+
+    function renderDetailedBuildStatus() {
+        const panel = $('detailed-build-status');
+        if (!panel) return;
+        const b = detailedBuild;
+        const visible = state.display === 'detailed' && b &&
+            (b.started || b.total || b.reason || b.phase === 'loading_cached') && b.phase !== 'cached';
+        panel.classList.toggle('hidden', !visible);
+        if (!visible) return;
+        const total = Number(b.total) || 0;
+        const processed = Math.max(0, Math.min(total, Number(b.processed) || 0));
+        const fraction = total ? Math.max(0, Math.min(1,
+            Number.isFinite(Number(b.fraction)) ? Number(b.fraction) : processed / total)) : 0;
+        const pct = Math.round(fraction * 100);
+        const done = !!b.done;
+        const title = $('detailed-build-title');
+        const progress = $('detailed-build-progress');
+        const bar = $('detailed-build-bar');
+        const timing = $('detailed-build-time');
+        const detail = $('detailed-build-detail');
+        if (title) title.textContent = b.phase === 'failed' ? 'Detailed reconstruction could not load'
+            : done ? 'Detailed reconstruction saved'
+            : b.phase === 'loading_cached' ? 'Loading saved detailed reconstruction'
+            : b.phase === 'extracting_mesh' ? 'Extracting preview mesh'
+            : processed ? 'Building detailed reconstruction' : 'Preparing detailed reconstruction';
+        if (progress) progress.textContent = total ? `${processed} / ${total} · ${pct}%`
+            : (b.reason || 'Preparing');
+        if (bar) { bar.style.width = pct + '%'; bar.setAttribute('aria-valuenow', String(pct)); }
+        renderDetailedResourceBars(detailedResources);
+        const elapsed = fmtTime(Number(b.elapsed_s));
+        const eta = fmtTime(Number(b.eta_s));
+        if (timing) timing.textContent = b.phase === 'failed' ? 'Loading failed'
+            : done ? `Completed in ${elapsed || '—'}`
+            : `Elapsed ${elapsed || '0:00'} · ${eta ? 'ETA ' + eta : 'calculating ETA'}`;
+        if (detail) {
+            if (b.phase === 'failed') detail.textContent = b.reason || 'The saved reconstruction could not be loaded.';
+            else if (done) detail.textContent = 'Saved reconstruction is ready to inspect or download.';
+            else if (b.phase === 'loading_cached') detail.textContent = 'Reading the saved mesh and preparing it for the viewport.';
+            else if (b.phase === 'extracting_mesh') detail.textContent = `Extracting a preview mesh at frame ${processed || '—'}; frame progress pauses briefly during this GPU step.`;
+            else if (b.meshShown) detail.textContent = 'Rendering the latest reconstructed mesh below.';
+            else if (b.mesh_every) detail.textContent = `Preparing the first mesh (updates every ${b.mesh_every} frames).`;
+            else detail.textContent = 'The mesh will appear here as it is reconstructed.';
+        }
+    }
+
+    function renderDetailedResourceBars(resources) {
+        const set = (name, fraction, value) => {
+            const fill = $('detailed-resource-' + name);
+            const label = $('detailed-resource-' + name + '-value');
+            if (label) label.textContent = value;
+            if (!fill) return;
+            if (!Number.isFinite(fraction)) {
+                fill.style.width = '0%'; fill.classList.remove('is-warn', 'is-crit'); return;
+            }
+            const clamped = Math.max(0, Math.min(1, fraction));
+            fill.style.width = (clamped * 100).toFixed(0) + '%';
+            fill.classList.toggle('is-warn', clamped >= 0.80 && clamped < 0.90);
+            fill.classList.toggle('is-crit', clamped >= 0.90);
+        };
+        if (!resources) {
+            for (const name of ['gpu', 'cpu', 'ram', 'vram']) set(name, null, 'n/a');
+            return;
+        }
+        const known = (value) => value !== null && value !== undefined && Number.isFinite(Number(value));
+        const percent = (value) => known(value) ? Math.round(Number(value)) + '%' : 'n/a';
+        const ratio = (used, total) => known(used) && Number(used) >= 0 && known(total) && Number(total) > 0
+            ? Number(used) / Number(total) : null;
+        set('gpu', known(resources.gpu_util) ? Number(resources.gpu_util) / 100 : null, percent(resources.gpu_util));
+        set('cpu', known(resources.sys_cpu_percent) ? Number(resources.sys_cpu_percent) / 100 : null, percent(resources.sys_cpu_percent));
+        const ram = ratio(resources.ram_used, resources.ram_total);
+        set('ram', ram, ram === null ? 'n/a' : Math.round(ram * 100) + '%');
+        const vram = ratio(resources.device_vram_used, resources.device_vram_total);
+        set('vram', vram, vram === null ? 'n/a' : Math.round(vram * 100) + '%');
+    }
 
     // --- helpers ----------------------------------------------------------
     function setActive(seg, attr, value) {

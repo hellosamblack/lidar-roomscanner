@@ -155,6 +155,24 @@ def test_non_terminal_publishes_have_no_stats():
             assert p.stats is None
 
 
+def test_mesh_extraction_phase_is_published_before_the_expensive_mesh_snapshot():
+    """A slow ``Mapper.mesh`` must never look like a frozen frame counter."""
+    import types
+
+    w = PostProcessWorker(_wall_sequence(3), W, H)
+    old_mesh = object()
+    w._latest = Progress(1 / 3, old_mesh, ["old pose"], False)
+    mapper = types.SimpleNamespace(trajectory=["latest pose"])
+
+    w._publish_extracting_mesh(mapper, 2, 3)
+    latest = w.latest()
+    assert latest is not None
+    assert latest.phase == "extracting_mesh"
+    assert latest.fraction == pytest.approx(2 / 3)
+    assert latest.mesh is old_mesh
+    assert latest.trajectory == ["latest pose"]
+
+
 def test_improving_preview_vertex_count_non_decreasing():
     """The concrete, testable meaning of "the preview visibly sharpens": each
     later publish's mesh has >= vertices than an earlier one. A fresh/

@@ -107,6 +107,10 @@ class Progress:
     trajectory: list
     done: bool
     stats: dict | None = None
+    # Extracting a tensor mesh is a heavyweight GPU synchronization.  Publish
+    # that distinct phase before asking Open3D for the mesh so clients don't
+    # mistake a stationary frame count for a stalled reconstruction.
+    phase: str = "frames"
 
 
 class PostProcessWorker:
@@ -143,7 +147,7 @@ class PostProcessWorker:
             p = self._latest
             if p is None:
                 return None
-            return Progress(p.fraction, p.mesh, list(p.trajectory), p.done, p.stats)
+            return Progress(p.fraction, p.mesh, list(p.trajectory), p.done, p.stats, p.phase)
 
     @property
     def timestamps(self) -> list[float]:
@@ -178,9 +182,37 @@ class PostProcessWorker:
             trajectory=list(mapper.trajectory),
             done=done,
             stats=stats,
+            phase="offline_only" if done else "frames",
         )
         with self._lock:
             self._latest = progress
+
+    def _publish_extracting_mesh(self, mapper: Mapper, frames_done: int, total: int) -> None:
+        """Expose mesh extraction before the potentially long ``mapper.mesh``.
+
+        Detailed maps can take substantial time to turn their TSDF into a
+        tensor mesh.  That work is intentionally still on this worker thread,
+        but its *phase* is available to the web UI immediately.  Reuse the
+        prior mesh, if any, so presentation can continue while the next one is
+        being extracted.
+        """
+        with self._lock:
+            previous_mesh = self._latest.mesh if self._latest is not None else None
+        # A number of consumers use fraction==1 as the terminal signal.  The
+        # final mesh extraction is still real work, so keep it infinitesimally
+        # below 1 until `_publish(..., done=True)` has completed.
+        fraction = frames_done / total if total else 1.0
+        if total and frames_done >= total:
+            fraction = (total - 0.001) / total
+        with self._lock:
+            self._latest = Progress(
+                fraction=fraction,
+                mesh=previous_mesh,
+                trajectory=list(mapper.trajectory),
+                done=False,
+                stats=None,
+                phase="extracting_mesh",
+            )
 
     def _publish_construction_failure(self) -> None:
         """Terminal, zero-progress publish for a failure so total there's no
@@ -227,6 +259,7 @@ class PostProcessWorker:
                 continue
             is_last = i == total
             if is_last or i % self._mesh_every == 0:
+                self._publish_extracting_mesh(mapper, i, total)
                 self._publish(mapper, i, total, done=is_last)
                 published_final = published_final or is_last
         if not published_final:
@@ -234,6 +267,7 @@ class PostProcessWorker:
             # loop above never hit its is_last publish -- still publish a
             # terminal result so a caller's latest() is never left stuck
             # mid-progress (or None) with the thread already dead.
+            self._publish_extracting_mesh(mapper, total, total)
             self._publish(mapper, total, total, done=True)
 
     def start(self) -> None:
