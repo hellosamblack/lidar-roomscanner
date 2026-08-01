@@ -1138,7 +1138,8 @@ channel, barometer as soft 1-DoF Z constraint.
 > `captures/coffeeRoomCircuitMnt.bin` is the failure case — see the 6.D block below) and ~~the on-rig
 > flat-field capture (Phase 2.5 follow-up, **DC-D**) gating reflectance-quality work~~ **DC-D landed
 > and PASSED 2026-07-31 (residual 7.3%, all 2268 zones inside [0.5, 1.6]) — the flat-field correction
-> is now unblocked and merely needs enabling**.
+> is now unblocked and merely needs enabling**. Newly **proposed**: sub-phase **6.H** — an audible
+> coverage cue (buzzer clicking on new TSDF blocks), owner idea 2026-07-31, block at the end of this phase.
 >
 > **⚠️ 6.D is now blocked on the TRANSPORT, not on SLAM (2026-07-31).** The multi-room captures
 > (DC-B ×3) arrived and, unexpectedly, the loop-closure question cannot be scored on them: 2.29–9.35%
@@ -1651,6 +1652,82 @@ baro-Z-is-Open3D-−Y mapping are all specified there.
   SLAM's clock domain (PTP-united with device timestamps). Needs: rigid mount + hand-eye/extrinsic
   calibration to the ToF (same calibration Phase 7 already requires for the phone camera — do it once,
   share it).
+
+#### Sub-phase 6.H — Audible coverage feedback ("geiger counter" buzzer)  ← **proposed (owner, 2026-07-31)**
+
+> **Owner's framing:** *"add a buzzer to the board that clicks when a new voxel has been received. If we
+> keep sweeping over the same area and aren't getting any new information then the clicks will slow/stop,
+> and a fresh area will be many rapid clicks."*
+
+The problem it solves is real and currently unsolved: **the operator cannot see the map while scanning.**
+The rig is handheld and untethered (battery + FileHub Wi-Fi bridge, Phase 5 / `hse-is-stlink-mco`), so
+during a sweep the only coverage feedback lives on a screen the operator is not looking at. Every
+map-completeness defect so far was found *after* the fact — BUG-035 silently dropped 18% of a sweep,
+BUG-049's transport outages lost 2.3–9.4% of the multi-room takes. Audio is the right modality here
+precisely because it needs no eyes and no hands.
+
+**The signal does not exist on the board.** The MCU ships raw `3DMD`; nothing on it knows what is new —
+novelty is a property of the *host's* TSDF. So this is a **host→device** feature that happens to end in a
+transducer, not a firmware feature.
+
+**Novelty signal — candidates, in preference order.**
+
+1. **New-TSDF-block delta (recommended).** `TsdfMap.block_usage()` (`slam/tsdf.py:196`) returns the
+   hashmap's live `size()`; `Mapper._sample_block_usage()` already polls it every
+   `_BLOCK_USAGE_INTERVAL_S = 0.25 s`. The first derivative of that count *is* "map gained" — it is
+   exactly the quantity the owner described, and it is already on the wire for the Web Phase 6 block
+   gauge. Two constraints inherited, not negotiable: the read is a **CUDA device sync** (`mapper.py:42`),
+   so it must **not** be moved to per-frame to get a finer click rate; and a block is 16³ voxels, so the
+   granularity is decimetre-scale chunks, not points — coarse, but "did I gain map" is a coarse question.
+2. **Newly-integrated voxel count** — finer and closer to the literal ask, but Open3D exposes no cheap
+   primitive for it; it would cost a per-frame whole-grid comparison, which is what 6.G/BUG-032 spent a
+   sub-phase removing. Reject unless (1) proves too chunky.
+3. **ICP fitness / unmatched fraction** — free (already computed in `slam/odometry.py`), but it conflates
+   "new area" with "**tracking is failing**", which would make the rig sing loudest exactly when the scan
+   is dying. Reject as the primary signal; keep as a **mute condition** — clicks should stop, not
+   accelerate, while `Mapper.lost_flags` is set.
+
+**Delivery — rate-driven, not per-event.**
+
+- ❌ *One COMMAND per click.* Up to ~30 datagrams/s host→device, on a link that has already demonstrated
+  multi-second whole-group outages (BUG-049). Network jitter would smear the rhythm, which is the entire
+  signal. Reject.
+- ✅ *Send a rate.* Host sends a **click rate** at the existing metrics cadence (~4 Hz); firmware runs a
+  local timer emitting clicks at that rate until a fresh update arrives. ~4 datagrams/s, jitter-immune
+  (the rhythm is generated locally off TIM2), and it **fails safe** — a watchdog decays the rate to
+  silence if no update lands within ~1 s, so a dropped link goes quiet rather than clicking forever.
+  Consider Poisson rather than uniform spacing: an actual geiger counter's irregularity is what makes
+  rate legible by ear.
+
+**Protocol.** Additive `RS_CMD_SET_BUZZ` = **cmd 8** (`rs_protocol.h` registry currently ends at 7 /
+`SET_STANDBY`); `param` u32 carries rate in centi-Hz plus a mode/mute field; ACK echoes the applied rate.
+Run the **`protocol-change` skill** — `docs/protocol.md` command-registry row + rev entry, `rs_protocol.h`,
+the host command enum, golden vectors, all in lockstep.
+
+**Hardware — the one genuinely open question.** A piezo needs a free PWM-capable pin, and the
+H563 + IKS4A1 + 53L9A1 stack consumes much of the Zio header. **Check the netlist via the
+`stack-electrical` skill before committing to a pin** (`hardware-diagnosis-discipline`) — this is also the
+one part of the loop Claude cannot do: soldering/mounting the transducer is an owner action. A self-driving
+buzzer needs only a GPIO level; a bare magnetic transducer needs a gated ~2–4 kHz TIM PWM burst (~5–10 ms
+per click). Current draw is ~10–30 mA peak — negligible against the untethered USB_USER supply, but keep it
+off the sensor rails.
+
+**De-risk first, in the browser.** Build the whole novelty→rate path host-side and drive **Web Audio in the
+web UI** before any hardware or protocol change. Zero cost, and it answers the question that actually
+decides the feature: *does the block delta feel right?* If it doesn't, the buzzer inherits the wrongness.
+
+**Known failure mode, and a bonus.** Under pose drift the map allocates **new** blocks for an
+already-scanned wall — so a fully-covered room would keep clicking, which is the exact opposite of the
+intended meaning, and couples this feature to **6.D**. Inverted, that is a free diagnostic: sustained
+clicking while the operator is *stationary* means the pose is drifting, audible in real time. Worth
+surfacing deliberately rather than treating as a bug.
+
+**Scope note.** Live SLAM only. In Live point-cloud display there is no TSDF and therefore no novelty
+signal — the buzzer must be **silent and say why**, never synthesise a rate from frame arrival (that would
+click at a constant 30 Hz and mean nothing).
+
+**Latency budget:** 0.25 s block sampling + ~4 Hz update + link RTT. Adequate for a coverage cue; do not
+extend this path to anything needing tighter timing.
 
 ### Phase 7 — Offline post-processing
 
