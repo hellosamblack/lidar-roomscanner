@@ -45,6 +45,13 @@ claude mcp add --transport http roomscan http://127.0.0.1:8765/mcp -s project
 
 Both transports serve the same tool definitions.
 
+⚠ **A running server pins the code from when it started.** Add or change a tool and the connected
+server keeps serving the old one — `capture_analyze` went on returning results with no `continuity`
+block for the rest of the session that added it (2026-07-31). There is no reload. In the session that
+writes a tool, drive it through its `host/tools/` CLI from Bash, and tell subagents to do the same;
+the MCP surface catches up on the next server start. Same failure shape as a stale `roomscan-web`
+(ROADMAP 6.D's "SLAM gave up", which was a process running week-old code).
+
 ## Tools
 
 **rig_\*** — control a running `roomscan-web` over `/ws` (`docs/web-protocol.md`).

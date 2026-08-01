@@ -91,3 +91,7 @@ results/
 # capture's own (stem, size, mtime_ns), same class of artifact as results/.
 thumbs/
 logs/
+
+# roomscan-slam CLI default outputs (regenerable; keep them out of blanket adds)
+slam_map.ply
+slam_traj.tum
