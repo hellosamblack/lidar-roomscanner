@@ -154,6 +154,39 @@ export function createSlam(hub, sceneApi) {
         set('slam-frames', m.frames_integrated ?? 0);
         set('slam-verts', (m.mesh_verts ?? 0).toLocaleString());
         set('slam-ms', (m.slam_ms ?? 0).toFixed(1) + ' ms');
+        updateBlockGauge(m);
+    }
+
+    // TSDF block-grid headroom (BUG-035). The mapper samples this at ~4 Hz
+    // (block_usage() is a device sync on CUDA), so it arrives null on most
+    // `slam` messages early in a scan — null renders as unknown, never as 0
+    // blocks, which would read as "loads of headroom" at exactly the wrong
+    // moment. `capacity` is the hash grid's LIVE capacity (Open3D rehashes to
+    // grow); `configured` is the [slam] block_count the operator can raise,
+    // and is what the warning threshold is really about.
+    function updateBlockGauge(m) {
+        const val = $('res-blocks-val');
+        const fill = $('res-blocks-fill');
+        if (!val && !fill) return;
+        const used = m.blocks_used, cap = m.blocks_capacity, cfg = m.blocks_configured;
+        if (used === null || used === undefined || !cap) {
+            if (val) val.textContent = 'n/a';
+            if (fill) {
+                fill.style.width = '0%';
+                fill.classList.remove('is-warn', 'is-crit');
+            }
+            return;
+        }
+        const frac = used / cap;
+        if (val) {
+            val.textContent = used.toLocaleString() + ' / ' + cap.toLocaleString()
+                + (cfg && cfg !== cap ? ' (cfg ' + cfg.toLocaleString() + ')' : '');
+        }
+        if (fill) {
+            fill.style.width = (Math.max(0, Math.min(1, frac)) * 100).toFixed(0) + '%';
+            fill.classList.toggle('is-warn', frac >= 0.80 && frac < 0.90);
+            fill.classList.toggle('is-crit', frac >= 0.90);
+        }
     }
 
     // --- server `state` echo drives mode + toggles + visibility ----------
@@ -194,6 +227,12 @@ export function createSlam(hub, sceneApi) {
         }
         $('slam-group')?.classList.toggle('hidden', !slamOn);
         $('slam-hud')?.classList.toggle('hidden', !slamOn);
+        // Resource headroom is a LIVE SLAM concern (owner ask, 2026-07-31):
+        // that is the only mode that can exhaust VRAM or the TSDF block grid
+        // while you are standing there holding the scanner. Replay/Detailed
+        // reconstructions are repeatable, so they don't get the card.
+        $('resources-card')?.classList.toggle('hidden',
+            !(state.source === 'live' && state.display === 'slam'));
 
         // Toggles reflect server truth.
         const t = $('chk-slam-traj'); if (t) t.checked = state.slam_trajectory;

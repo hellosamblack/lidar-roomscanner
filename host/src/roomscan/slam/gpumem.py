@@ -56,6 +56,22 @@ class Nvml:
             return None
         return mem
 
+    def name(self) -> str | None:
+        """Device name (e.g. "NVIDIA RTX 2000 Ada Generation"), or None.
+
+        Added for the Live SLAM resource card: without it the card can say a
+        GPU exists but not WHICH card's ceiling you are approaching, and the
+        per-process `pynvml` probe that used to supply the name is "n/a" here
+        (pynvml lives in the optional `monitor` extra and is not installed).
+        """
+        if not self.ok:
+            return None
+        buf = ctypes.create_string_buffer(96)      # NVML_DEVICE_NAME_V2_BUFFER_SIZE
+        if self._lib.nvmlDeviceGetName(self._handle, buf, ctypes.c_uint(96)) != 0:
+            return None
+        text = buf.value.decode("ascii", "replace").strip()
+        return text or None
+
     def used_bytes(self) -> int:
         mem = self._mem()
         return int(mem.used) if mem is not None else 0

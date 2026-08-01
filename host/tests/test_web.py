@@ -2077,6 +2077,32 @@ def test_controller_session_message_live_vs_replay(tmp_path):
     assert m2["source_label"] == "Serial CDC · COM7"
 
 
+def test_recording_elapsed_is_measured_on_the_clock_that_started_it(tmp_path, monkeypatch):
+    """BUG-048: `elapsed_s` was `time.time() - time.monotonic()`, i.e. the epoch.
+
+    Every caller passed `time.time()` as `now`, but `_record_started` is a
+    `time.monotonic()` stamp. The two clocks share no origin, so a 90-second take
+    reported elapsed_s = 1784067285.5 -- and the UI happily rendered it, because
+    nothing asserted the magnitude. The bug is invisible to a shape test (the key
+    is present and is a float) which is exactly why it survived.
+    """
+    class FakeLive:
+        def read(self): return b""
+        def write(self, d): pass
+        def close(self): pass
+
+    ctrl, _ = _make_controller(tmp_path, live_source=FakeLive(), live_label="x")
+    ctrl.start_record()
+    try:
+        # Advance the monotonic clock by a known amount; leave wall clock alone.
+        base = time.monotonic()
+        monkeypatch.setattr(web.time, "monotonic", lambda: base + 90.0)
+        elapsed = ctrl.session_message(None, time.time())["recording"]["elapsed_s"]
+    finally:
+        ctrl.stop_record()
+    assert 89.0 <= elapsed <= 91.0, f"elapsed_s was {elapsed!r}, expected ~90 s"
+
+
 def test_controller_transport_speed_and_loop(tmp_path):
     cap = tmp_path / "a.bin"
     _make_depth_capture_flat(cap, n_frames=5, base=1000.0)
@@ -3092,6 +3118,7 @@ def test_rail_cards_data_attributes_and_default_collapsed_states():
         "telemetry": False,  # Expanded
         "sensors": True,     # Collapsed
         "slam-hud": True,    # Collapsed
+        "resources": False,  # Expanded (only rendered at all in Live SLAM)
         "ir-view": True,     # Collapsed
         "diag": True,        # Collapsed
         "device": True,      # Collapsed
@@ -3152,3 +3179,634 @@ def test_squircles_and_overflow_prevention():
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# 15. Elevation readout (owner ask, 2026-07-31) — feet, hPa, and a Δ datum
+# ---------------------------------------------------------------------------
+#
+# The Sensors card used to print raw pascals, which is not a number anyone
+# reads. It now prints barometric height above sea level in feet, low-passed
+# because BUG-037 measured ~267 mm RMS of white noise per barometer sample
+# (~1.2 ft), with the absolute pressure beside it and the sea-level reference
+# it is measured against under Diagnostics.
+
+def _env_ss(pressure_pa=101000.0, temp_c=22.0, n=1):
+    """A SensorState with a quat + n ENV samples at `pressure_pa`."""
+    ss = SensorState()
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", 1.0, 0.0, 0.0, 0.0)))
+    for i in range(n):
+        ss.feed(_sframe(StreamId.ENV,
+                        struct.pack("<5f", pressure_pa, 1.0, 2.0, 3.0, temp_c),
+                        t_us=1000 + i * 3_000_000))
+    return ss
+
+
+def test_build_sensor_message_reports_elevation_in_feet():
+    """The altitude is `slam.frames.baro_height_m` — the SAME formula SLAM
+    uses — converted to feet, never a second barometric formula."""
+    from roomscan.slam.frames import baro_height_m
+    ss = _env_ss(pressure_pa=98000.0)
+    msg = web.build_sensor_message(ss, None, msl_pa=101300.0, msl_source="api", msl_age_s=12.0)
+    expect_ft = baro_height_m(98000.0, 101300.0) * web.FT_PER_M
+    assert msg["elevation_ft"] == pytest.approx(expect_ft, abs=0.15)
+    assert msg["pressure_hpa"] == pytest.approx(980.0, abs=0.01)
+    assert msg["msl_pa"] == pytest.approx(101300.0)
+    assert msg["msl_source"] == "api"
+    assert msg["msl_age_s"] == pytest.approx(12.0)
+    # The raw pascals stay on the wire: the Diagnostics drawer still shows them
+    # and nothing that already consumed them has to change.
+    assert msg["pressure_pa"] == pytest.approx(98000.0, abs=0.5)
+    json.dumps(msg)
+
+
+def test_build_sensor_message_defaults_to_the_fallback_reference():
+    """No `msl_pa` argument at all (the default, and what a test or an offline
+    box gets) must still produce a number — against 101325 Pa — and SAY that is
+    what happened."""
+    msg = web.build_sensor_message(_env_ss(pressure_pa=101325.0), None)
+    assert msg["msl_pa"] == pytest.approx(101325.0)
+    assert msg["msl_source"] == "fallback"
+    assert msg["msl_age_s"] is None
+    assert msg["elevation_ft"] == pytest.approx(0.0, abs=0.05)
+
+
+def test_build_sensor_message_elevation_null_without_env():
+    """A ToF-only (or quat-only) session has no pressure — every elevation
+    field must be null rather than an altitude computed from a zero."""
+    ss = SensorState()
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", 1.0, 0.0, 0.0, 0.0)))
+    msg = web.build_sensor_message(ss, None)
+    assert msg["elevation_ft"] is None
+    assert msg["pressure_hpa"] is None
+    assert msg["elevation_hist"] == []
+
+
+def test_build_sensor_message_elevation_datum_defaults_to_none():
+    """The `None` default of a NEW parameter, asserted explicitly.
+
+    engineering-practices.md:81-86: this function has silently shadowed a new
+    argument with a local of the same name before (the BUG-026 follow-up), and
+    it was only a test asserting the None default that caught it. So: pass
+    nothing, expect null.
+    """
+    msg = web.build_sensor_message(_env_ss(), None)
+    assert msg["elevation_datum_ft"] is None
+
+
+def test_build_sensor_message_echoes_the_elevation_datum():
+    msg = web.build_sensor_message(_env_ss(), None, elevation_datum_ft=912.34)
+    assert msg["elevation_datum_ft"] == pytest.approx(912.3)
+
+
+def test_build_sensor_message_elevation_hist_matches_the_pressure_hist():
+    """The sparkline and the readout must be the same quantity: elevation_hist
+    is the SAME decimated samples the pressure sparkline draws, converted."""
+    from roomscan.slam.frames import baro_height_m
+    ss = _env_ss(pressure_pa=101000.0, n=3)
+    msg = web.build_sensor_message(ss, None, msl_pa=101325.0)
+    assert len(msg["elevation_hist"]) == len(msg["pressure_hist"]) == 3
+    for pa, ft in zip(msg["pressure_hist"], msg["elevation_hist"]):
+        assert ft == pytest.approx(baro_height_m(pa, 101325.0) * web.FT_PER_M, abs=0.15)
+
+
+def test_build_sensor_message_low_passes_the_elevation():
+    """A raw readout would flicker over a foot several times a second
+    (BUG-037: ~267 mm RMS per sample). One big pressure step must move the
+    displayed elevation only a fraction of the way on the first update."""
+    clock = {"t": 0.0}
+    sm = web.ElevationSmoother(tau_s=6.0, clock=lambda: clock["t"])
+    ss = _env_ss(pressure_pa=101325.0)
+    first = web.build_sensor_message(ss, None, msl_pa=101325.0, altitude_smoother=sm)
+    assert first["elevation_ft"] == pytest.approx(0.0, abs=0.05)   # first sample adopted outright
+
+    step_ss = _env_ss(pressure_pa=98000.0)                          # ~+930 ft step
+    target = web.build_sensor_message(step_ss, None, msl_pa=101325.0)["elevation_ft"]
+    clock["t"] = 1.0                                                # one second later
+    smoothed = web.build_sensor_message(step_ss, None, msl_pa=101325.0,
+                                        altitude_smoother=sm)["elevation_ft"]
+    # 1 - exp(-1/6) = 15.35% of the way there.
+    assert smoothed == pytest.approx(target * 0.1535, rel=0.02)
+    assert smoothed < target * 0.25
+
+    # ...and it converges: 60 s (10 tau) gets essentially all the way.
+    for i in range(2, 62):
+        clock["t"] = float(i)
+        smoothed = web.build_sensor_message(step_ss, None, msl_pa=101325.0,
+                                            altitude_smoother=sm)["elevation_ft"]
+    assert smoothed == pytest.approx(target, rel=0.001)
+
+
+def test_elevation_smoother_is_time_based_not_per_sample():
+    """The `sensor` message rides an elapsed-time gate, and a stalled stream
+    (paused replay, idled device) must not stretch the effective time
+    constant. Same elapsed time => same response, whatever the sample count."""
+    def run(n_steps):
+        clock = {"t": 0.0}
+        sm = web.ElevationSmoother(tau_s=6.0, clock=lambda: clock["t"])
+        sm.update(0.0)
+        for i in range(1, n_steps + 1):
+            clock["t"] = 6.0 * i / n_steps
+            sm.update(100.0)
+        return sm.value_m
+
+    assert run(1) == pytest.approx(run(90), rel=0.02)
+    assert run(90) == pytest.approx(100.0 * (1 - math.exp(-1.0)), rel=0.02)
+
+
+def test_elevation_smoother_ignores_none_and_reports_feet():
+    sm = web.ElevationSmoother(tau_s=6.0)
+    assert sm.value_m is None and sm.value_ft is None
+    assert sm.update(None) is None
+    sm.update(100.0)
+    assert sm.value_ft == pytest.approx(100.0 * web.FT_PER_M)
+    sm.reset()
+    assert sm.value_m is None
+
+
+# --- set_elevation_datum inbound -------------------------------------------
+
+def _elev_state(ui=None, *, smoothed_ft=None, config=None):
+    import types
+    published = []
+    bus = types.SimpleNamespace(publish=published.append)
+    smoother = web.ElevationSmoother()
+    if smoothed_ft is not None:
+        smoother.update(smoothed_ft / web.FT_PER_M)
+    return types.SimpleNamespace(
+        config=config, ui_state=ui if ui is not None else web.UiState(),
+        clients=set(), controller=None, bus=bus, slam_runner=None,
+        detailed_runner=None, elevation_smoother=smoother), published
+
+
+def test_set_elevation_datum_captures_the_smoothed_elevation():
+    """Happy path: `on: true` stores the CURRENT SMOOTHED elevation.
+
+    Smoothed, not raw, on purpose — a datum taken from one barometer sample
+    would bake ~1.2 ft of noise in as a constant offset for the whole session,
+    which is exactly the mistake BUG-037 found in the SLAM height datum.
+    """
+    state, _ = _elev_state(smoothed_ft=935.2)
+    asyncio.run(web._handle_inbound(state, {"type": "set_elevation_datum", "on": True}))
+    assert state.ui_state.elevation_datum_ft == pytest.approx(935.2, abs=0.1)
+
+    asyncio.run(web._handle_inbound(state, {"type": "set_elevation_datum", "on": False}))
+    assert state.ui_state.elevation_datum_ft is None
+
+
+@pytest.mark.parametrize("bad", [None, "true", 1, 0, [], {}, "on"])
+def test_set_elevation_datum_rejects_a_non_bool(bad):
+    """Reject/no-op half. A truthy-looking string must not set a datum, and a
+    falsy-looking one must not clear an existing one."""
+    ui = web.UiState(elevation_datum_ft=100.0)
+    state, _ = _elev_state(ui, smoothed_ft=935.2)
+    msg = {"type": "set_elevation_datum"} if bad is None else {"type": "set_elevation_datum", "on": bad}
+    asyncio.run(web._handle_inbound(state, msg))
+    assert ui.elevation_datum_ft == 100.0      # untouched
+
+
+def test_set_elevation_datum_without_a_reading_says_so_and_does_nothing():
+    """No barometer yet (ToF-only session): refuse with a bus line rather than
+    capturing a datum of 0 ft, which would silently offset every later
+    reading by the true elevation."""
+    state, published = _elev_state()            # smoother never fed
+    asyncio.run(web._handle_inbound(state, {"type": "set_elevation_datum", "on": True}))
+    assert state.ui_state.elevation_datum_ft is None
+    assert any("no barometer" in line for line in published), published
+
+
+def test_set_elevation_datum_echoes_state():
+    """The Δ button takes its pressed state from the echo, never from the
+    click — so the echo has to carry the datum."""
+    state, _ = _elev_state(smoothed_ft=935.2)
+    sent = []
+
+    async def drive():
+        async def capture_text(clients, text):
+            sent.append(json.loads(text))
+        orig, web._broadcast_text = web._broadcast_text, capture_text
+        try:
+            await web._handle_inbound(state, {"type": "set_elevation_datum", "on": True})
+        finally:
+            web._broadcast_text = orig
+
+    asyncio.run(drive())
+    echoes = [m for m in sent if m.get("type") == "state"]
+    assert echoes and echoes[-1]["elevation_datum_ft"] == pytest.approx(935.2, abs=0.1)
+
+
+def test_set_elevation_datum_persists(tmp_path):
+    import types
+    import roomscan.config as config_mod
+    p = tmp_path / "roomscan.toml"
+    state, _ = _elev_state(smoothed_ft=935.2, config=ViewerConfig())
+    orig = config_mod.config_path
+    config_mod.config_path = lambda: p
+    try:
+        asyncio.run(web._handle_inbound(state, {"type": "set_elevation_datum", "on": True}))
+        assert p.exists()
+        assert ViewerConfig.load(p).elevation_datum_ft == pytest.approx(935.2, abs=0.1)
+        # ...and survives a "restart": a fresh UiState seeded from that file.
+        assert web.ui_from_config(ViewerConfig.load(p)).elevation_datum_ft == \
+            pytest.approx(935.2, abs=0.1)
+
+        asyncio.run(web._handle_inbound(state, {"type": "set_elevation_datum", "on": False}))
+        assert ViewerConfig.load(p).elevation_datum_ft is None
+        assert web.ui_from_config(ViewerConfig.load(p)).elevation_datum_ft is None
+    finally:
+        config_mod.config_path = orig
+
+
+def test_elevation_datum_round_trips_through_the_flat_toml_writer(tmp_path):
+    """`None` goes through the TOML writer as `""` (there is no null), and
+    `ViewerConfig.load` has to turn it back into None — otherwise an unset
+    datum loads as the STRING "" and every consumer has to defend against it."""
+    p = tmp_path / "roomscan.toml"
+    ViewerConfig(elevation_datum_ft=None).save(p)
+    assert 'elevation_datum_ft = ""' in p.read_text()
+    assert ViewerConfig.load(p).elevation_datum_ft is None
+
+    ViewerConfig(elevation_datum_ft=812.5).save(p)
+    assert ViewerConfig.load(p).elevation_datum_ft == pytest.approx(812.5)
+
+
+@pytest.mark.parametrize("stored", ["", "nonsense", float("nan"), float("inf")])
+def test_ui_from_config_rejects_a_corrupt_elevation_datum(stored):
+    cfg = ViewerConfig()
+    cfg.elevation_datum_ft = stored
+    assert web.ui_from_config(cfg).elevation_datum_ft is None
+
+
+def test_apply_ui_to_config_round_trips_the_elevation_datum():
+    cfg = ViewerConfig()
+    web.apply_ui_to_config(web.UiState(elevation_datum_ft=421.5), cfg)
+    assert cfg.elevation_datum_ft == pytest.approx(421.5)
+    assert web.ui_from_config(cfg).elevation_datum_ft == pytest.approx(421.5)
+
+
+# ---------------------------------------------------------------------------
+# 16. Live SLAM resource monitor (owner ask, 2026-07-31)
+# ---------------------------------------------------------------------------
+
+def _resource_snapshot(**kw):
+    from roomscan.metrics import ResourceSnapshot
+    base = dict(proc_cpu_percent=42.0, n_cores=8, proc_rss=512 * 1024 * 1024,
+                ram_total=32 * 1024**3, gpu_util=None, proc_vram=None,
+                vram_total=None, gpu_name=None, gpu_source="n/a",
+                sys_cpu_percent=17.5, ram_used=9 * 1024**3,
+                device_vram_used=1725 * 1024**2, device_vram_total=8188 * 1024**2,
+                device_vram_source="nvml")
+    base.update(kw)
+    return ResourceSnapshot(**base)
+
+
+def test_build_metrics_message_serialises_resources():
+    """`resources` was hardcoded null ("Phase 1, no ResourceSampler wired")
+    since Phase 1. It now carries both scopes: this process AND the box."""
+    snap = MetricsSnapshot(render_fps=28.0, streams=[], link_bytes_per_s=0.0,
+                           resources=_resource_snapshot())
+    msg = web.build_metrics_message(snap)
+    r = msg["resources"]
+    assert r is not None
+    assert r["proc_cpu_percent"] == pytest.approx(42.0)
+    assert r["sys_cpu_percent"] == pytest.approx(17.5)
+    assert r["ram_used"] == 9 * 1024**3 and r["ram_total"] == 32 * 1024**3
+    assert r["device_vram_used"] == 1725 * 1024**2
+    assert r["device_vram_total"] == 8188 * 1024**2
+    assert r["device_vram_source"] == "nvml"
+    json.dumps(msg)
+
+
+def test_build_metrics_message_resources_null_without_a_sampler():
+    """No sampler (every existing test, and any state built by hand) must keep
+    reading exactly as before."""
+    snap = MetricsSnapshot(render_fps=28.0, streams=[], link_bytes_per_s=0.0, resources=None)
+    assert web.build_metrics_message(snap)["resources"] is None
+
+
+def test_resources_degrade_to_null_on_a_gpu_less_box():
+    """Every GPU/system field must be None-able, not zero. A 0 where a
+    measurement should be reads as "plenty of headroom" — the exact trap the
+    verify-the-knob lesson is about."""
+    snap = MetricsSnapshot(render_fps=0.0, streams=[], link_bytes_per_s=0.0,
+                           resources=_resource_snapshot(
+                               sys_cpu_percent=None, ram_used=None,
+                               device_vram_used=None, device_vram_total=None,
+                               device_vram_source="n/a"))
+    r = web.build_metrics_message(snap)["resources"]
+    assert r["sys_cpu_percent"] is None and r["ram_used"] is None
+    assert r["device_vram_used"] is None and r["device_vram_total"] is None
+    assert r["device_vram_source"] == "n/a"
+    assert r["proc_cpu_percent"] == pytest.approx(42.0)     # per-process still real
+    json.dumps(r)
+
+
+def test_probe_device_vram_never_raises():
+    """It is a ctypes NVML call behind a bare `Nvml()`; on a box with no
+    driver library it must report absence, not throw."""
+    from roomscan.metrics import probe_device_vram
+    used, total, name, src = probe_device_vram()
+    assert src in ("nvml", "n/a")
+    if src == "n/a":
+        assert used is None and total is None and name is None
+    else:
+        assert used >= 0 and total > 0 and used <= total
+        assert name is None or isinstance(name, str)
+
+
+def test_resource_sampler_uses_injected_probes():
+    """Both probes are injectable so this runs identically on a GPU-less box."""
+    from roomscan.metrics import ResourceSampler
+    s = ResourceSampler(interval=0.02,
+                        gpu_probe=lambda: (11.0, 123, 456, "FakeGPU", "test"),
+                        vram_probe=lambda: (700, 8000, "TestGPU 9000", "test-nvml"))
+    s.start()
+    try:
+        deadline = time.time() + 3.0
+        while s.latest() is None and time.time() < deadline:
+            time.sleep(0.02)
+        snap = s.latest()
+    finally:
+        s.stop()
+    assert snap is not None, "sampler published no snapshot"
+    assert snap.device_vram_used == 700 and snap.device_vram_total == 8000
+    assert snap.device_vram_source == "test-nvml"
+    # The per-process probe supplied a name here, so it wins; the ctypes
+    # device-wide name is the fallback for a box with no pynvml (i.e. this one).
+    assert snap.gpu_name == "FakeGPU"
+    assert snap.sys_cpu_percent is not None and 0.0 <= snap.sys_cpu_percent <= 100.0
+    assert 0 < snap.ram_used <= snap.ram_total
+    assert snap.gpu_source == "test"
+
+
+# --- the TSDF block gauge (BUG-035) ----------------------------------------
+
+def test_build_slam_message_carries_the_block_gauge():
+    step = _FrameStep(pose=np.eye(4), fitness=0.9, rmse=0.01, tracking_lost=False,
+                      slam_ms=7.0, blocks_used=38912, blocks_capacity=40000,
+                      blocks_configured=160000)
+    msg = web.build_slam_message(step, [np.eye(4)], frames_integrated=1, mesh_seq=1,
+                                 source_vertex_count=10)
+    assert msg["blocks_used"] == 38912
+    assert msg["blocks_capacity"] == 40000
+    assert msg["blocks_configured"] == 160000
+    json.dumps(msg)
+
+
+def test_build_slam_message_block_gauge_null_before_the_first_sample():
+    """`block_usage()` is a device sync on CUDA, so the mapper samples it at
+    ~4 Hz, not per frame — and a worker predating the gauge omits it entirely.
+    Both must be null (unknown), never 0 (an empty map)."""
+    step = _FrameStep(pose=np.eye(4), fitness=0.9, rmse=0.01, tracking_lost=False, slam_ms=7.0)
+    msg = web.build_slam_message(step, [np.eye(4)], frames_integrated=1, mesh_seq=1,
+                                 source_vertex_count=10)
+    assert msg["blocks_used"] is None
+    assert msg["blocks_capacity"] is None
+    assert msg["blocks_configured"] is None
+
+
+def test_frame_step_block_fields_are_backwards_compatible():
+    """New FrameStep fields must have defaults — remote.py and ~20 tests build
+    one positionally/with keywords and none of them know about the gauge."""
+    step = _FrameStep(pose=np.eye(4), fitness=0.0, rmse=0.0, tracking_lost=True, slam_ms=1.0)
+    assert step.blocks_used is None and step.blocks_capacity is None
+    assert step.blocks_configured is None
+
+
+# ---------------------------------------------------------------------------
+# 17. Auto-record on entering Live SLAM (owner ask, 2026-07-31)
+# ---------------------------------------------------------------------------
+#
+# A live scan is unrepeatable — the same reason BUG-043 kept Live SLAM's
+# one-shot Save. The invariant that needs protecting is that a MANUALLY started
+# recording is never ended by a display switch.
+
+class _RecCtrl(_FakeCtrl):
+    """_FakeCtrl plus the recording surface the auto-record path drives."""
+
+    def __init__(self, *, mode="live", has_live=True, **kw):
+        super().__init__(mode=mode, **kw)
+        self.has_live = has_live
+        self.recording = False
+        self.starts = 0
+        self.stops = 0
+        self._auto_recording = False
+        self.session_calls = 0
+
+    # Mirrors SessionController's real logic, which is itself tested separately
+    # against a real Recorder below.
+    def start_record(self):
+        if self.mode != "live":
+            return
+        self.recording = True
+        self.starts += 1
+        self._auto_recording = False
+
+    def stop_record(self):
+        if not self.recording:
+            return
+        self.recording = False
+        self.stops += 1
+        self._auto_recording = False
+
+    def start_auto_record(self):
+        if self.mode != "live" or not self.has_live or self.recording:
+            return False
+        self.start_record()
+        self._auto_recording = True
+        return True
+
+    def stop_auto_record(self):
+        if not self._auto_recording:
+            return False
+        self.stop_record()
+        return True
+
+    def session_message(self, pos, now):
+        self.session_calls += 1
+        return {"type": "session", "recording": {"active": self.recording}}
+
+
+def _autorec_state(ui, ctrl, *, slam_auto_record=True):
+    import types
+    published = []
+    bus = types.SimpleNamespace(publish=published.append)
+    cfg = ViewerConfig(slam_auto_record=slam_auto_record)
+    return types.SimpleNamespace(config=cfg, ui_state=ui, clients=set(),
+                                 controller=ctrl, bus=bus, slam_runner=None,
+                                 detailed_runner=None), published
+
+
+def _run_inbound(state, msg):
+    """Drive one inbound message with the broadcast fan-out stubbed out."""
+    async def drive():
+        async def noop_text(clients, text):
+            pass
+
+        async def noop_caps(state_, ctrl_):
+            pass
+
+        orig_t, orig_c = web._broadcast_text, web._broadcast_captures
+        web._broadcast_text, web._broadcast_captures = noop_text, noop_caps
+        try:
+            await web._handle_inbound(state, msg)
+        finally:
+            web._broadcast_text, web._broadcast_captures = orig_t, orig_c
+
+    asyncio.run(drive())
+
+
+def test_entering_live_slam_starts_a_recording():
+    ui = web.UiState(source="live", display="point_cloud")
+    ctrl = _RecCtrl(mode="live")
+    state, published = _autorec_state(ui, ctrl)
+    _run_inbound(state, {"type": "set_display", "display": "slam"})
+    assert ctrl.recording is True and ctrl.starts == 1
+    assert ctrl._auto_recording is True
+    assert any("auto-recording" in line for line in published), published
+
+
+def test_leaving_live_slam_stops_the_auto_recording():
+    ui = web.UiState(source="live", display="point_cloud")
+    ctrl = _RecCtrl(mode="live")
+    state, _ = _autorec_state(ui, ctrl)
+    _run_inbound(state, {"type": "set_display", "display": "slam"})
+    _run_inbound(state, {"type": "set_display", "display": "point_cloud"})
+    assert ctrl.recording is False and ctrl.stops == 1
+    assert ctrl._auto_recording is False
+
+
+def test_go_live_stops_the_auto_recording():
+    ui = web.UiState(source="live", display="slam")
+    ctrl = _RecCtrl(mode="live")
+    state, _ = _autorec_state(ui, ctrl)
+    _run_inbound(state, {"type": "set_display", "display": "slam"})
+    _run_inbound(state, {"type": "go_live"})
+    assert ctrl.recording is False and ctrl.stops == 1
+
+
+def test_a_manual_recording_is_never_stopped_by_a_display_switch():
+    """The whole reason `_auto_recording` exists. The operator pressed Record;
+    entering and leaving SLAM must not touch their take."""
+    ui = web.UiState(source="live", display="point_cloud")
+    ctrl = _RecCtrl(mode="live")
+    state, _ = _autorec_state(ui, ctrl)
+    _run_inbound(state, {"type": "record", "on": True})     # manual
+    assert ctrl.recording is True and ctrl._auto_recording is False
+
+    _run_inbound(state, {"type": "set_display", "display": "slam"})
+    assert ctrl.recording is True and ctrl.starts == 1      # not restarted
+    assert ctrl._auto_recording is False                    # still MANUALLY owned
+
+    _run_inbound(state, {"type": "set_display", "display": "point_cloud"})
+    assert ctrl.recording is True and ctrl.stops == 0       # and NOT stopped
+
+
+def test_view_source_slam_does_not_auto_record():
+    """Replay SLAM is repeatable; there is nothing to preserve, and the
+    controller would refuse anyway."""
+    ui = web.UiState(source="view", display="point_cloud", selected_capture="take.bin")
+    ctrl = _RecCtrl(mode="replay")
+    state, _ = _autorec_state(ui, ctrl)
+    _run_inbound(state, {"type": "set_display", "display": "slam"})
+    assert ctrl.recording is False and ctrl.starts == 0
+
+
+def test_auto_record_is_a_no_op_without_a_live_source():
+    """A `--replay`-launched process has has_live False. That must be a no-op,
+    not an error, and must not block SLAM from arming."""
+    ui = web.UiState(source="live", display="point_cloud")
+    ctrl = _RecCtrl(mode="live", has_live=False)
+    state, published = _autorec_state(ui, ctrl)
+    _run_inbound(state, {"type": "set_display", "display": "slam"})
+    assert ui.display == "slam"                              # SLAM still armed
+    assert ctrl.recording is False and ctrl.starts == 0
+    assert not any("auto-recording" in line for line in published), published
+
+
+def test_auto_record_can_be_disabled_by_config():
+    ui = web.UiState(source="live", display="point_cloud")
+    ctrl = _RecCtrl(mode="live")
+    state, _ = _autorec_state(ui, ctrl, slam_auto_record=False)
+    _run_inbound(state, {"type": "set_display", "display": "slam"})
+    assert ui.display == "slam"
+    assert ctrl.recording is False and ctrl.starts == 0
+
+
+def test_set_mode_alias_also_auto_records():
+    """`set_mode` is still how the rig_* MCP tools enter SLAM, and a scan
+    started that way is just as unrepeatable."""
+    ui = web.UiState(source="live", display="point_cloud")
+    ctrl = _RecCtrl(mode="live")
+    state, _ = _autorec_state(ui, ctrl)
+    _run_inbound(state, {"type": "set_mode", "mode": "slam"})
+    assert ctrl.recording is True and ctrl._auto_recording is True
+    _run_inbound(state, {"type": "set_mode", "mode": "realtime"})
+    assert ctrl.recording is False
+
+
+def test_controller_auto_record_flags_on_the_real_controller(tmp_path):
+    """The real SessionController's ownership flag, not the fake's."""
+    class FakeLive:
+        def read(self):
+            time.sleep(0.02)
+            return b""
+
+        def write(self, d):
+            pass
+
+        def close(self):
+            pass
+
+    outdir = tmp_path / "caps"
+    ctrl, _ = _make_controller(tmp_path, live_source=FakeLive(), captures_dir=outdir)
+    try:
+        assert ctrl.start_auto_record() is True
+        assert ctrl.recorder.active and ctrl._auto_recording is True
+        # A second call while one is running must not start another.
+        assert ctrl.start_auto_record() is False
+        assert ctrl.stop_auto_record() is True
+        assert not ctrl.recorder.active and ctrl._auto_recording is False
+        assert ctrl.stop_auto_record() is False           # nothing to stop
+
+        # A MANUAL take is not auto-owned, so stop_auto_record leaves it alone.
+        ctrl.start_record()
+        assert ctrl.recorder.active and ctrl._auto_recording is False
+        assert ctrl.stop_auto_record() is False
+        assert ctrl.recorder.active
+        ctrl.stop_record()
+    finally:
+        ctrl.close()
+
+
+def test_controller_auto_record_refused_in_replay(tmp_path):
+    cap = tmp_path / "a.bin"
+    _make_depth_capture_flat(cap, n_frames=5, base=1000.0)
+    ctrl, _ = _make_controller(tmp_path, replay_path=str(cap))
+    try:
+        assert ctrl.start_auto_record() is False
+        assert not ctrl.recorder.active
+    finally:
+        ctrl.close()
+
+
+def test_device_vram_name_is_the_fallback_when_pynvml_is_absent():
+    """`pynvml` is not installed here, so the per-process probe returns
+    `gpu_name=None` and `gpu_source="n/a"`. Without the ctypes fallback the
+    Resources card could say a GPU exists but never WHICH card's ceiling you
+    are approaching, and `gpu_name` would be a permanently-null wire field."""
+    from roomscan.metrics import ResourceSampler
+    s = ResourceSampler(interval=0.02,
+                        gpu_probe=lambda: (None, None, None, None, "n/a"),
+                        vram_probe=lambda: (700, 8000, "TestGPU 9000", "test-nvml"))
+    s.start()
+    try:
+        deadline = time.time() + 3.0
+        while s.latest() is None and time.time() < deadline:
+            time.sleep(0.02)
+        snap = s.latest()
+    finally:
+        s.stop()
+    assert snap is not None
+    assert snap.gpu_source == "n/a"
+    assert snap.gpu_name == "TestGPU 9000"

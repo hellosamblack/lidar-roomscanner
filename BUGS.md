@@ -58,6 +58,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-048 | open    | host/sensors  | `absolute_heading`/`quat_yaw_deg` disintegrate near ZYX gimbal lock — a **braced, stationary** device reports frame-to-frame yaw jumps up to 180°, and 22.7% of a tilt-sweep capture sits within 1° of lock. Corrupted the DC-E magnetometer-direction analysis into a false 20–30° "calibration error" |
 | BUG-049 | open    | host/transport | Multi-second **whole-group** frame loss on the multi-room captures — 2.29% / 4.28% / 9.35% of RAW frames lost while byte-clean and 0 CRC, in outages up to 215 frames (7.1 s). Cost DC-B take 2 a 628-frame (21.2 s) tracking collapse. Recurring 63-frame quantum in all three takes; not RF range (the bridge rides on the scanner, never roamed, signal > 80%) |
 | BUG-047 | fixed   | host/web      | `id="btn-restart"` named **two** buttons — the top bar's "Restart Server" and the playback "Restart". `getElementById` takes the first, so playback Restart was dead and its transport handler landed on Restart Server, which therefore fired a transport restart *and* `POST /api/restart` |
+| BUG-048 | fixed   | host/web      | Recording `elapsed_s` was `time.time() - time.monotonic()` -- two clocks with no shared origin -- so a 90-second take reported 1784067285.5 s. Every caller passed the wall clock; the start stamp was monotonic |
 
 ---
 
@@ -2180,3 +2181,33 @@ it has to be read live.
 **Instrument gap this exposed.** `capture_analyze` called all three takes `clean: true`, because it
 only ever checked CRC and resync. It now reports a `continuity` block; `clean` and
 `continuity.complete` are deliberately separate properties.
+
+## BUG-048 — Recording elapsed time was the Unix epoch
+
+**Status:** fixed 2026-07-31 · **Area:** host/web · **Found by:** an agent adding the Live-SLAM
+auto-record feature, which read `session.recording.elapsed_s` back to check its own work.
+
+`SessionController.session_message(position, now)` computed
+`rec_elapsed = now - self._record_started`. All three call sites pass `time.time()`; but
+`start_record` stamps `self._record_started = time.monotonic()`. The two clocks share no origin, so
+the subtraction returns roughly the Unix epoch: a live 90-second take reported
+`elapsed_s: 1784067285.5`.
+
+**Why it survived.** `test_build_session_message_shape` and
+`test_controller_session_message_live_vs_replay` both assert the *shape* — the key exists and is a
+float — and a wrong-by-a-billion float is still a float. Nothing asserted the magnitude, and nothing
+compared it against a known elapsed interval. The web UI rendered it through `fmtTime()`, which
+divides into minutes and seconds without complaint, so it displayed as an absurd but well-formatted
+duration in a status line nobody was reading closely.
+
+**Fix.** `session_message` now reads `time.monotonic()` itself for the recording clock. The `now`
+parameter is kept for the callers' convenience but is deliberately unused for this, with a comment
+saying why — passing a wall-clock `now` is the trap, and the next caller will pass one too.
+
+**Regression test.** `test_recording_elapsed_is_measured_on_the_clock_that_started_it` starts a real
+recording, advances `time.monotonic` by a known 90 s via monkeypatch while leaving the wall clock
+alone, and asserts the reported elapsed is ~90. Proved by reintroducing the subtraction and
+confirming the failure.
+
+**Lesson.** A shape test cannot see a units or origin error. Where two clocks exist in one file,
+assert an interval against a *known* elapsed time, not the presence of a number.

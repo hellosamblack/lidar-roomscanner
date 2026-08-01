@@ -138,7 +138,13 @@ class RemoteSlamWorker:
                         "bandwidth win (tools/slam-container/build.ps1).")
             step = FrameStep(pose=np.asarray(res["pose"], np.float64),
                              fitness=res["fitness"], rmse=res["rmse"],
-                             tracking_lost=res["tracking_lost"], slam_ms=res["slam_ms"])
+                             tracking_lost=res["tracking_lost"], slam_ms=res["slam_ms"],
+                             # Optional: a container built before the block
+                             # gauge (BUG-035) simply omits them -> None, which
+                             # the UI renders as "unknown", not as 0 blocks.
+                             blocks_used=res.get("blocks_used"),
+                             blocks_capacity=res.get("blocks_capacity"),
+                             blocks_configured=res.get("blocks_configured"))
             self._tracking_lost_count = res["tracking_lost_count"]
             self._trajectory.append(np.asarray(res["pose"], np.float64))
             with self._out_lock:

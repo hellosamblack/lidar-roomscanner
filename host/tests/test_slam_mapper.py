@@ -395,3 +395,64 @@ def test_baro_longer_tau_rejects_more_noise():
     _, s_short = _drive_baro(short, noisy)
     _, s_long = _drive_baro(long_, noisy)
     assert s_long.std() < s_short.std() / 10.0
+
+
+# --- TSDF block-grid gauge (BUG-035, owner ask 2026-07-31) -----------------
+#
+# BUG-035 is the ceiling that silently killed 18% of a real sweep: map growth
+# stalls near capacity and frame-to-model tracking collapses ~30 frames later
+# with no error at all. The number has to be visible while the scan runs.
+
+def test_frame_step_reports_the_block_gauge():
+    m = Mapper(W, H, voxel_size=0.02, block_count=12345)
+    step = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert step.blocks_used is not None and step.blocks_used > 0
+    assert step.blocks_capacity is not None and step.blocks_capacity >= step.blocks_used
+    assert step.blocks_configured == 12345
+
+
+def test_block_usage_is_sampled_at_the_metrics_rate_not_per_frame():
+    """`TsdfMap.block_usage()` reads the hashmap size, which is a DEVICE SYNC
+    on CUDA. Calling it per frame would put a pipeline stall in the hot path
+    for a number nobody reads faster than 4 Hz. Drive the mapper on a frozen
+    clock and count the calls: many frames, one sample.
+    """
+    from roomscan.slam import mapper as mapper_mod
+
+    clock = {"t": 0.0}
+    m = Mapper(W, H, voxel_size=0.02, clock=lambda: clock["t"])
+    calls = []
+    real = m._tsdf.block_usage
+
+    def counting():
+        calls.append(clock["t"])
+        return real()
+
+    m._tsdf.block_usage = counting
+
+    for _ in range(8):
+        m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert len(calls) == 1, f"sampled {len(calls)} times on a frozen clock"
+
+    # Past the interval it samples again -- exactly once more.
+    clock["t"] = mapper_mod._BLOCK_USAGE_INTERVAL_S + 0.001
+    for _ in range(5):
+        m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert len(calls) == 2
+
+
+def test_block_gauge_keeps_the_last_reading_when_the_probe_fails():
+    """A gauge must never be able to kill a scan, and a failed read must not
+    report a fake 0 blocks (which would read as an empty map)."""
+    clock = {"t": 0.0}
+    m = Mapper(W, H, voxel_size=0.02, clock=lambda: clock["t"])
+    good = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert good.blocks_used > 0
+
+    def boom():
+        raise RuntimeError("device sync failed")
+
+    m._tsdf.block_usage = boom
+    clock["t"] = 10.0
+    step = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert step.blocks_used == good.blocks_used     # last reading, not 0 and not a crash

@@ -59,7 +59,7 @@ from .magsweep import (
     motion_state,
     view_calibration,
 )
-from .metrics import MetricsRegistry, MetricsSnapshot
+from .metrics import MetricsRegistry, MetricsSnapshot, ResourceSampler
 from .flatfield import FlatField
 from .pipeline import TransformStage
 from .reader import _Pacer, _run_reader, follow_camera_target
@@ -104,8 +104,10 @@ from .slam.detailed import (build_manifest, estimate_seconds, sidecar_paths,
                             sidecar_status, write_manifest_atomic)
 from .slam.meshprep import MeshPrep
 from .slam.metrics import write_tum
+from .slam.frames import baro_height_m
 from .slam.showcase import PostProcessWorker
 from .viewer import Stats, resolve_args
+from .weather import FALLBACK_MSL_PA, MslPressure
 
 log = logging.getLogger("roomscan.web")
 
@@ -383,6 +385,12 @@ class UiState:
     # Presentation-only, same guarantee as `orientation_mode` above: never
     # touches `fused_quat()`/`display_rotation`/the point-cloud rotation/SLAM.
     yaw_offset_deg: float = 0.0
+    # Elevation datum (owner ask, 2026-07-31): the Delta button captures the
+    # current smoothed elevation here, and the Sensors card switches from an
+    # absolute reading ("935 ft") to a signed change since that datum
+    # ("+12 ft"). None = absolute. Persisted, so the datum survives a restart;
+    # presentation-only, like the yaw offset above.
+    elevation_datum_ft: float | None = None
 
 
 # --- pure helpers (no socket, no async) -------------------------------------
@@ -648,6 +656,69 @@ class OrientationSmoother:
         self._held = quat_slerp(self._held, quat,
                                 self._alpha(quat_angle_deg(self._held, quat)))
         return self._held
+
+
+#: Metres -> feet. The elevation readout is in feet (owner ask, 2026-07-31).
+FT_PER_M = 3.280839895013123
+
+#: EMA time constant for the elevation readout, seconds.
+#:
+#: BUG-037 measured the frame-rate barometer at ~3.1 Pa RMS of sample-to-sample
+#: noise, which is **~267 mm RMS of apparent altitude** (~380 mm frame to
+#: frame, ~1.2 ft). A raw readout would flicker over a foot several times a
+#: second and read as broken. 6 s is long enough to sit still to ~0.1 ft
+#: (267 mm / sqrt(6 s * 15 Hz) ~ 28 mm) and short enough that walking up a
+#: flight of stairs settles before you reach the top. Stated in the row's
+#: tooltip, because a filtered readout that does not say it is filtered is a
+#: lie about the instrument's response time.
+ELEVATION_TAU_S = 6.0
+
+
+class ElevationSmoother:
+    """Time-constant EMA over barometric altitude (metres), for display only.
+
+    Deliberately time-based rather than a fixed per-sample alpha: the `sensor`
+    message is emitted on an elapsed-time gate, not per frame, and a stalled
+    stream (replay paused, device idled) must not make the filter's effective
+    time constant balloon. `alpha = 1 - exp(-dt/tau)` gives the same 6 s
+    response whatever the sample spacing.
+
+    Never feeds SLAM -- the mapper does its own, differently-shaped barometric
+    handling (`Mapper._apply_baro_z`, a bounded complementary correction), and
+    the two must not be confused for each other.
+    """
+
+    def __init__(self, tau_s: float = ELEVATION_TAU_S, clock=time.monotonic):
+        self.tau_s = max(1e-3, float(tau_s))
+        self._clock = clock
+        self._value_m: float | None = None
+        self._t_prev: float | None = None
+
+    @property
+    def value_m(self) -> float | None:
+        return self._value_m
+
+    @property
+    def value_ft(self) -> float | None:
+        return None if self._value_m is None else self._value_m * FT_PER_M
+
+    def update(self, altitude_m) -> float | None:
+        """Feed the newest raw altitude (m); return the smoothed one."""
+        if altitude_m is None:
+            return self._value_m
+        altitude_m = float(altitude_m)
+        now = self._clock()
+        if self._value_m is None or self._t_prev is None:
+            self._value_m, self._t_prev = altitude_m, now
+            return self._value_m
+        dt = max(0.0, now - self._t_prev)
+        self._t_prev = now
+        alpha = 1.0 - math.exp(-dt / self.tau_s) if dt > 0.0 else 0.0
+        self._value_m += alpha * (altitude_m - self._value_m)
+        return self._value_m
+
+    def reset(self) -> None:
+        self._value_m = self._t_prev = None
 
 
 def _sanitize_axis_labels(labels) -> tuple[str, str, str]:
@@ -1082,7 +1153,18 @@ def build_slam_message(step, trajectory, *, frames_integrated: int, mesh_seq: in
         "frames_integrated": int(frames_integrated),
         "mesh_seq": int(mesh_seq),
         "mesh_verts": int(source_vertex_count),
+        # TSDF block-grid occupancy (BUG-035), sampled at ~4 Hz inside the
+        # mapper -- `block_usage()` is a device sync on CUDA. Null before the
+        # first sample, or from a worker that predates the gauge; the client
+        # renders that as unknown rather than as an empty map.
+        "blocks_used": _opt_int(getattr(step, "blocks_used", None)),
+        "blocks_capacity": _opt_int(getattr(step, "blocks_capacity", None)),
+        "blocks_configured": _opt_int(getattr(step, "blocks_configured", None)),
     }
+
+
+def _opt_int(v) -> int | None:
+    return None if v is None else int(v)
 
 
 def sanitize_result_name(name, results_dir) -> Path | None:
@@ -1119,10 +1201,48 @@ def build_saved_message(results_dir) -> dict:
     return {"type": "saved", "items": list_results(results_dir)}
 
 
+def resources_to_dict(res) -> dict | None:
+    """ResourceSnapshot -> the `metrics.resources` JSON object, or None.
+
+    Raw numbers only (bytes, percent); the frontend formats them, same rule as
+    the rest of the `metrics` message. Both scopes ride together because the
+    owner's question -- "am I approaching a RAM/VRAM/GPU/CPU limit?" -- needs
+    the ceiling, which is a property of the box, not of this process. Every
+    field except the two the sampler always has (`proc_*`) can be null: no
+    GPU, no NVML, or a psutil error all report absence rather than a zero that
+    reads as a measurement (the trap in the verify-the-knob memory).
+    """
+    if res is None:
+        return None
+    return {
+        "proc_cpu_percent": round(float(res.proc_cpu_percent), 1),
+        "n_cores": int(res.n_cores),
+        "proc_rss": int(res.proc_rss),
+        "ram_total": int(res.ram_total),
+        "ram_used": None if res.ram_used is None else int(res.ram_used),
+        "sys_cpu_percent": (None if res.sys_cpu_percent is None
+                            else round(float(res.sys_cpu_percent), 1)),
+        "gpu_util": None if res.gpu_util is None else round(float(res.gpu_util), 1),
+        "proc_vram": None if res.proc_vram is None else int(res.proc_vram),
+        "vram_total": None if res.vram_total is None else int(res.vram_total),
+        "gpu_name": res.gpu_name,
+        "gpu_source": res.gpu_source,
+        "device_vram_used": (None if res.device_vram_used is None
+                             else int(res.device_vram_used)),
+        "device_vram_total": (None if res.device_vram_total is None
+                              else int(res.device_vram_total)),
+        "device_vram_source": getattr(res, "device_vram_source", "n/a"),
+    }
+
+
 def build_metrics_message(snapshot: MetricsSnapshot) -> dict:
-    """MetricsSnapshot -> `metrics` JSON dict (§6.2). `resources` is null in
-    Phase 1 (no ResourceSampler wired); numeric fields go raw over the wire,
-    the frontend formats. device_hz/jitter_ms may be None -> JSON null."""
+    """MetricsSnapshot -> `metrics` JSON dict (§6.2). Numeric fields go raw over
+    the wire, the frontend formats. device_hz/jitter_ms may be None -> JSON null.
+
+    `resources` is null until a `ResourceSampler` has published its first sample
+    (it is constructed and started in `main()`, and passed to the
+    `MetricsRegistry`, whose `snapshot()` folds it in); it stays null forever on
+    a state built without one, e.g. in tests."""
     return {
         "type": "metrics",
         "render_fps": float(snapshot.render_fps),
@@ -1138,7 +1258,7 @@ def build_metrics_message(snapshot: MetricsSnapshot) -> dict:
             for s in snapshot.streams
         ],
         "link_bytes_per_s": float(snapshot.link_bytes_per_s),
-        "resources": None,
+        "resources": resources_to_dict(snapshot.resources),
         "drops": snapshot.drops,
         "gaps": snapshot.gaps,
     }
@@ -1160,7 +1280,12 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
                           orientation_mode: str = "zyx",
                           axis_labels=DEFAULT_AXIS_LABELS,
                           yaw_offset_deg: float = 0.0,
-                          ir_display_quat=None) -> dict | None:
+                          ir_display_quat=None,
+                          msl_pa: float | None = None,
+                          msl_source: str = "fallback",
+                          msl_age_s: float | None = None,
+                          elevation_datum_ft: float | None = None,
+                          altitude_smoother: "ElevationSmoother | None" = None) -> dict | None:
     """SensorState -> `sensor` JSON dict (streams 9/10), or None when there is no
     sensor data at all (so the broadcaster stays silent on a ToF-only session).
 
@@ -1206,6 +1331,21 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
     just documents that explicitly. A constant offset cancels exactly in any
     frame-to-frame diff, so `jitter`'s roll/pitch/yaw magnitudes are
     unaffected by it (see `test_yaw_offset_does_not_change_jitter_magnitude`).
+
+    `elevation_ft` / `pressure_hpa` / `msl_*` (owner ask, 2026-07-31) turn the
+    raw Pascals into the number a person actually reads: elevation above sea
+    level, in feet. The altitude is `slam.frames.baro_height_m` -- the SAME
+    barometric formula SLAM uses, never a second one -- evaluated against
+    `msl_pa`, the current sea-level reference `weather.py` fetches. Whether
+    that reference is real is REPORTED (`msl_source`), not hidden: with no
+    internet it is 101325 Pa and the absolute elevation can be a couple of
+    hundred feet off, while the *change* since a datum stays correct either
+    way (a constant reference cancels in a difference). `altitude_smoother`
+    low-passes the readout -- BUG-037 measured ~267 mm RMS of white noise per
+    barometer sample (~1.2 ft), so the raw number is unreadable; pass None and
+    you get the raw instantaneous altitude. `elevation_hist` is derived from
+    the same decimated pressure history the sparkline already draws, so the
+    trace and the readout are the same quantity in the same units.
     """
     quat = sensor_state.fused_quat()
     env = sensor_state.latest_env()
@@ -1264,6 +1404,24 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
                   if jitter is not None
                   else _jitter_stats([]) | {"window_s": SENSOR_JITTER_WINDOW_S})
 
+    # --- elevation (owner ask, 2026-07-31) ---------------------------------
+    # One barometric formula in the whole project: slam.frames.baro_height_m.
+    # `msl_ref` is the sea-level reference; falling back to the ICAO standard
+    # atmosphere is a real answer (the Delta datum still works against it), it
+    # just gets reported as such via `msl_source`.
+    msl_ref = float(msl_pa) if msl_pa else FALLBACK_MSL_PA
+    pressure_pa = float(env.pressure_pa) if env is not None else None
+    altitude_raw_m = baro_height_m(pressure_pa, msl_ref) if pressure_pa else None
+    altitude_m = (altitude_smoother.update(altitude_raw_m)
+                  if altitude_smoother is not None else altitude_raw_m)
+    elevation_ft = None if altitude_m is None else round(altitude_m * FT_PER_M, 1)
+    # Same decimated samples the pressure sparkline uses, converted so the
+    # trace and the readout are in one unit. Unsmoothed on purpose: the
+    # sparkline's job is to show the noise band and the trend, and it is
+    # min/max autoscaled anyway.
+    elevation_hist = [round(baro_height_m(float(p), msl_ref) * FT_PER_M, 1)
+                      for p in press_spark.tolist() if p]
+
     raw_status = sensor_state.fusion_status()
     return {
         "type": "sensor",
@@ -1278,6 +1436,19 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
         "has_mag_cal": mag_cal is not None,
         "pressure_hist": [round(float(v), 1) for v in press_spark.tolist()],
         "temp_hist": [round(float(v), 2) for v in temp_spark.tolist()],
+        # Elevation readout. `pressure_pa`/`pressure_hist` above are KEPT (the
+        # diagnostics drawer still shows the raw Pascals, and nothing that
+        # already consumes them has to change).
+        "elevation_ft": elevation_ft,
+        "elevation_datum_ft": (None if elevation_datum_ft is None
+                               else round(float(elevation_datum_ft), 1)),
+        "elevation_hist": elevation_hist,
+        "pressure_hpa": None if pressure_pa is None else round(pressure_pa / 100.0, 2),
+        "msl_pa": round(msl_ref, 1),
+        "msl_source": msl_source,
+        "msl_age_s": None if msl_age_s is None else round(float(msl_age_s), 1),
+        "elevation_tau_s": round(float(altitude_smoother.tau_s
+                                       if altitude_smoother is not None else 0.0), 1),
         "orientation_raw": orientation_raw,
         "orientation_view": orientation_view_out,
         "jitter": jitter_out,
@@ -1347,7 +1518,8 @@ def _state_message(ui: UiState, controller=None, detailed=None) -> dict:
             "idle_enabled": ui.idle_enabled, "idle_level": ui.idle_level,
             "orientation_mode": ui.orientation_mode,
             "orientation_labels": list(ui.orientation_labels),
-            "yaw_offset_deg": ui.yaw_offset_deg}
+            "yaw_offset_deg": ui.yaw_offset_deg,
+            "elevation_datum_ft": ui.elevation_datum_ft}
 
 
 # --- settings persistence (Web Phase 5) -------------------------------------
@@ -1445,6 +1617,17 @@ def ui_from_config(cfg: ViewerConfig) -> UiState:
         ui.yaw_offset_deg = float(cfg.yaw_offset_deg)
     except (TypeError, ValueError):
         pass   # keep the UiState default (0.0) on a corrupt config value
+    # Elevation datum: None (absolute reading) is the normal state, and the
+    # flat-TOML writer round-trips it through "" -- so anything that isn't a
+    # finite number is treated as "no datum" rather than propagated.
+    ui.elevation_datum_ft = None
+    if cfg.elevation_datum_ft is not None:
+        try:
+            datum = float(cfg.elevation_datum_ft)
+        except (TypeError, ValueError):
+            datum = None
+        if datum is not None and math.isfinite(datum):
+            ui.elevation_datum_ft = datum
     return ui
 
 
@@ -1479,6 +1662,8 @@ def apply_ui_to_config(ui: UiState, cfg: ViewerConfig) -> None:
     cfg.orientation_mode = ui.orientation_mode
     cfg.orientation_labels = ",".join(ui.orientation_labels)
     cfg.yaw_offset_deg = float(ui.yaw_offset_deg)
+    cfg.elevation_datum_ft = (None if ui.elevation_datum_ft is None
+                              else float(ui.elevation_datum_ft))
 
 
 def _persist_ui(state) -> None:
@@ -2084,6 +2269,11 @@ class SessionController:
         self._thread: threading.Thread | None = None
         self._record_started = 0.0
         self._last_recorded_name = None
+        # Whether the CURRENT take was started automatically on entering Live
+        # SLAM (owner ask, 2026-07-31). It exists so leaving Live SLAM stops
+        # only what Live SLAM started: a recording the operator pressed Record
+        # for is theirs, and a display switch must never end it.
+        self._auto_recording = False
         self._seek_prefix = b""
         self._seek_offset = 0
         self.loop = False
@@ -2161,6 +2351,7 @@ class SessionController:
             self._stop_reader()
             if self.recorder.active:
                 self.recorder.stop()                      # never record a replay
+            self._auto_recording = False
             # Drop any stream-11 batch from whatever source was active before
             # (owner ask, 2026-07-28 "World" orientation mode) -- a capture
             # with no stream 11 must fall back to the quat-derived gravity
@@ -2260,6 +2451,7 @@ class SessionController:
         self.recorder.start(path)
         self._record_started = time.monotonic()
         self._last_recorded_name = None    # clear the previous take's "just finished" name
+        self._auto_recording = False       # manual unless start_auto_record says otherwise
         self.bus.publish(f"recording -> {path}")
 
     def stop_record(self) -> None:
@@ -2267,8 +2459,40 @@ class SessionController:
             return
         path = self.recorder.path
         self.recorder.stop()
+        self._auto_recording = False
         self._last_recorded_name = os.path.basename(path) if path else None
         self.bus.publish(f"recording stopped -> {path}")
+
+    # ---- auto-record (Live SLAM, owner ask 2026-07-31) ----------------------
+    #
+    # A live scan is unrepeatable -- the same reason BUG-043 kept Live SLAM's
+    # one-shot Save. Recording it makes it replayable and
+    # Detailed-reconstructable afterwards, so entering Live SLAM starts a take
+    # and leaving it stops one. Both are no-ops (never errors) when there is no
+    # live source or a take is already running for another reason.
+
+    def start_auto_record(self) -> bool:
+        """Start a take on behalf of Live SLAM. Returns True only if THIS call
+        started it. A no-op in replay, with no live device, or while any
+        recording is already running -- including a manual one, which must keep
+        its manual ownership."""
+        if self.mode != "live" or not self.has_live or self.recorder.active:
+            return False
+        self.start_record()
+        if not self.recorder.active:
+            return False               # start_record refused (e.g. unwritable dir)
+        self._auto_recording = True
+        return True
+
+    def stop_auto_record(self) -> bool:
+        """Stop the take only if it was auto-started. Returns True if it did."""
+        if not self._auto_recording:
+            return False
+        if not self.recorder.active:
+            self._auto_recording = False
+            return False
+        self.stop_record()              # clears _auto_recording
+        return True
 
     def rename_last_recording(self, new_name: str) -> str | None:
         """Rename the just-finished recording (the Web UI's post-stop naming
@@ -2303,13 +2527,19 @@ class SessionController:
 
     # ---- session snapshot ----
 
-    def session_message(self, position, now) -> dict:
+    def session_message(self, position, now=None) -> dict:
+        """`now` is accepted for callers' convenience and DELIBERATELY unused for
+        the recording clock -- see BUG-048. Every caller passed `time.time()`,
+        but `_record_started` is a `time.monotonic()` stamp, so subtracting them
+        yielded the Unix epoch (a 90 s take reported elapsed_s = 1784067285.5).
+        The two clocks share no origin; read the recording elapsed off the same
+        clock that started it."""
         rec_active = self.recorder.active
         rec_path = self.recorder.path
         rec_bytes = 0
         rec_elapsed = 0.0
         if rec_active:
-            rec_elapsed = max(0.0, now - self._record_started)
+            rec_elapsed = max(0.0, time.monotonic() - self._record_started)
             try:
                 rec_bytes = os.path.getsize(rec_path) if rec_path else 0
             except OSError:
@@ -2901,6 +3131,20 @@ async def _broadcaster() -> None:
     jitter = getattr(state, "orientation_jitter", None)
     if jitter is None:
         jitter = state.orientation_jitter = OrientationJitter()
+    # Elevation readout (owner ask, 2026-07-31): the EMA that makes a ~1.2 ft
+    # noise band readable, and the cached sea-level reference it is measured
+    # against. Same lazy-create pattern as the two above, so a hand-built
+    # state (tests) doesn't have to know about either.
+    elevation = getattr(state, "elevation_smoother", None)
+    if elevation is None:
+        elevation = state.elevation_smoother = ElevationSmoother()
+    msl = getattr(state, "msl_pressure", None)
+    if msl is None:
+        cfg = getattr(state, "config", None)
+        msl = state.msl_pressure = MslPressure(
+            getattr(cfg, "latitude", 45.014060) if cfg else 45.014060,
+            getattr(cfg, "longitude", -93.245526) if cfg else -93.245526,
+            refresh_s=float(getattr(cfg, "msl_refresh_s", 1800.0) or 1800.0) if cfg else 1800.0)
     last_ir = 0.0
     last_metrics = 0.0
     last_sensor = 0.0
@@ -3044,11 +3288,21 @@ async def _broadcaster() -> None:
         # Sensor (streams 9/10) on its own cadence; silent until 9/10 arrives.
         if now - last_sensor >= SENSOR_INTERVAL:
             last_sensor = now
+            # One outbound HTTP GET per 30 min, fire-and-forget off the loop
+            # (weather.py). A box with no uplink just keeps reporting
+            # msl_source="fallback"; nothing here can raise or block.
+            msl.maybe_refresh()
+            snap = msl.snapshot()
             smsg = build_sensor_message(state.sensor_state, state.mag_cal, jitter,
                                          orientation_mode=state.ui_state.orientation_mode,
                                          axis_labels=state.ui_state.orientation_labels,
                                          yaw_offset_deg=state.ui_state.yaw_offset_deg,
-                                         ir_display_quat=smoother.held)
+                                         ir_display_quat=smoother.held,
+                                         msl_pa=snap["msl_pa"],
+                                         msl_source=snap["msl_source"],
+                                         msl_age_s=snap["msl_age_s"],
+                                         elevation_datum_ft=state.ui_state.elevation_datum_ft,
+                                         altitude_smoother=elevation)
             if smsg is not None:
                 await _broadcast_text(clients, json.dumps(smsg))
 
@@ -3149,6 +3403,41 @@ async def websocket_endpoint(websocket: WebSocket):
         await _viewer_left(state)   # arm the debounced sensor idle if that was the last tab
 
 
+async def _start_slam_auto_record(state, ctrl) -> bool:
+    """Start Live SLAM's automatic recording, if it is enabled and possible.
+
+    A no-op -- never an error -- when there is no controller, no live device,
+    a take is already running, or `[viewer] slam_auto_record` is off. Publishes
+    a bus line and re-broadcasts `session` only when it actually started one,
+    so the UI's Record indicator and the log agree with reality.
+    """
+    if ctrl is None:
+        return False
+    cfg = getattr(state, "config", None)
+    if not bool(getattr(cfg, "slam_auto_record", True)):
+        return False
+    if not await asyncio.to_thread(ctrl.start_auto_record):
+        return False
+    state.bus.publish("Live SLAM -> auto-recording this scan (a live scan is unrepeatable)")
+    await _broadcast_session(state)
+    await _broadcast_captures(state, ctrl)
+    return True
+
+
+async def _stop_slam_auto_record(state, ctrl) -> bool:
+    """Stop Live SLAM's automatic recording if one is running. A manually
+    started take is untouched. The client's existing falling-edge latch then
+    pops the rename modal -- the intended ending, no new client code."""
+    if ctrl is None:
+        return False
+    if not await asyncio.to_thread(ctrl.stop_auto_record):
+        return False
+    state.bus.publish("Live SLAM ended -> recording stopped")
+    await _broadcast_session(state)
+    await _broadcast_captures(state, ctrl)
+    return True
+
+
 async def _handle_inbound(state, msg: dict, ws=None) -> None:
     """Route one decoded inbound JSON message by `type` (§5.4).
 
@@ -3197,6 +3486,9 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         if path is None:
             log.warning("load_capture: unknown/invalid name %r", msg.get("name"))
             return
+        # Leaving live ends Live SLAM's auto-take (before switch_to_replay
+        # closes the recorder itself, which would strand the file unnamed).
+        await _stop_slam_auto_record(state, ctrl)
         await asyncio.to_thread(ctrl.switch_to_replay, path)
         await _reset_slam(state)          # fresh map for the new source
         ui.source, ui.selected_capture = "view", path.name
@@ -3207,6 +3499,11 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         await _broadcast_state(state)
 
     elif mtype == "go_live" and ctrl is not None:
+        # Stop Live SLAM's auto-take BEFORE the swap: switch_to_live tears the
+        # reader down, and a recording closed by that path would never reach
+        # `stop_record` -- so the file would be orphaned with no `last_name`
+        # and no rename modal.
+        await _stop_slam_auto_record(state, ctrl)
         await asyncio.to_thread(ctrl.switch_to_live)
         await _reset_slam(state)
         ui.source, ui.selected_capture = "live", None
@@ -3362,6 +3659,10 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         if source not in _VALID_SOURCES:
             log.warning("invalid set_source: %r", source)
             return
+        # Leaving Live SLAM by switching source ends its auto-take, and must do
+        # so before switch_to_replay stops the recorder behind our back (which
+        # would strand the file without a `last_name` for the rename modal).
+        await _stop_slam_auto_record(state, ctrl)
         if source == "live":
             await asyncio.to_thread(ctrl.switch_to_live)
             ui.source, ui.selected_capture = "live", None
@@ -3399,6 +3700,15 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             runner = getattr(state, "detailed_runner", None)
             if runner is not None:
                 await asyncio.to_thread(runner.load_cached, ctrl.replay_path)
+        # Auto-record the scan (owner ask, 2026-07-31): entering Live SLAM
+        # starts a take, leaving it stops one -- but only the take Live SLAM
+        # itself started (see SessionController._auto_recording). Deliberately
+        # after set_active, so a scan is only recorded once the pipeline it is
+        # recording for is actually armed.
+        if display == "slam" and ui.source == "live":
+            await _start_slam_auto_record(state, ctrl)
+        else:
+            await _stop_slam_auto_record(state, ctrl)
         await _broadcast_state(state)
 
     elif mtype in ("generate_detailed", "regenerate_detailed") and ctrl is not None:
@@ -3427,6 +3737,13 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             # Arming is a cheap flag; disarming stops+joins the worker threads,
             # so do it off the event loop.
             await asyncio.to_thread(slam.set_active, mode == "slam")
+        # Same auto-record rule as `set_display` -- this alias is still how the
+        # rig_* MCP tools enter SLAM, and a scan started that way is just as
+        # unrepeatable.
+        if mode == "slam" and ui.source == "live":
+            await _start_slam_auto_record(state, ctrl)
+        else:
+            await _stop_slam_auto_record(state, ctrl)
         await _broadcast_state(state)
 
     elif mtype == "slam_opt":
@@ -3506,6 +3823,32 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
     elif mtype == "clear_yaw_offset":
         # Explicit reset back to the raw (un-offset) SFLP yaw.
         ui.yaw_offset_deg = 0.0
+        _persist_ui(state)
+        await _broadcast_state(state)
+
+    elif mtype == "set_elevation_datum":
+        # Delta button (owner ask, 2026-07-31): capture the CURRENT smoothed
+        # elevation as a datum, so the Sensors card reads change-since instead
+        # of an absolute height. Same shape as zero_yaw/clear_yaw_offset above
+        # -- presentation-only, persisted, echoed back as the single source of
+        # the button's pressed state (one-way flow; the client never toggles
+        # itself). Deliberately captures the SMOOTHED value, not the raw one:
+        # a datum taken from a single sample would bake in ~1.2 ft of
+        # barometer noise as a constant offset for the whole session -- the
+        # exact mistake BUG-037 found in the SLAM height datum.
+        on = msg.get("on")
+        if not isinstance(on, bool):
+            log.warning("invalid set_elevation_datum: %r (expected a bool `on`)", on)
+            return
+        if on:
+            smoother = getattr(state, "elevation_smoother", None)
+            current_ft = smoother.value_ft if smoother is not None else None
+            if current_ft is None:
+                state.bus.publish("elevation datum -> no barometer reading yet")
+                return
+            ui.elevation_datum_ft = round(float(current_ft), 1)
+        else:
+            ui.elevation_datum_ft = None
         _persist_ui(state)
         await _broadcast_state(state)
 
@@ -3665,7 +4008,13 @@ def main(argv=None) -> int:
     client = CommandClient(live_source.write) if isinstance(live_source, (SerialSource, UdpSource)) else None
     stats = Stats()
     bus = LogBus()
-    metrics = MetricsRegistry(window_s=2.0)
+    # Resource monitor (owner ask, 2026-07-31). The sampler has existed since
+    # Phase 1 but was never constructed, so `metrics.resources` was hardcoded
+    # null. It is a daemon thread doing one psutil + one NVML read every 0.7 s;
+    # on a GPU-less box the NVML half reports "n/a" and everything still works.
+    resource_sampler = ResourceSampler()
+    resource_sampler.start()
+    metrics = MetricsRegistry(window_s=2.0, sampler=resource_sampler)
     dispatcher = CommandDispatcher(client, on_message=bus.publish)
 
     # Always compute all three planes: marginal cost per plane is ~zero and it
@@ -3719,6 +4068,7 @@ def main(argv=None) -> int:
     app.state.slot = slot
     app.state.bus = bus
     app.state.metrics = metrics
+    app.state.resource_sampler = resource_sampler
     app.state.dispatcher = dispatcher
     app.state.fault = fault
     app.state.fault_reported = False
@@ -3749,6 +4099,14 @@ def main(argv=None) -> int:
     app.state.deproj = None
     app.state.orientation_smoother = OrientationSmoother()
     app.state.orientation_jitter = OrientationJitter()
+    # Elevation readout (owner ask, 2026-07-31): the display EMA and the cached
+    # sea-level reference. Built here so `set_elevation_datum` can read the
+    # current smoothed value even before the first broadcaster tick.
+    app.state.elevation_smoother = ElevationSmoother()
+    app.state.msl_pressure = MslPressure(
+        float(getattr(config, "latitude", 45.014060)),
+        float(getattr(config, "longitude", -93.245526)),
+        refresh_s=float(getattr(config, "msl_refresh_s", 1800.0) or 1800.0))
     app.state.clients = set()
     app.state.command_labels = set()
     app.state.debounce = {}

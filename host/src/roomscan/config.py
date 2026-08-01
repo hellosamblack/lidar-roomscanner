@@ -127,6 +127,20 @@ class ViewerConfig:
                                             # support, see the module docstring). In World mode
                                             # these are NOT Roll/Pitch/Yaw -- see
                                             # web.py's DEFAULT_AXIS_LABELS.
+    # Elevation readout (owner ask, 2026-07-31). The Sensors card reports
+    # barometric elevation in FEET against a sea-level reference fetched for
+    # this location (see weather.py) -- absolute pressure alone is unreadable.
+    # `elevation_datum_ft` is the Delta button's captured datum: None = show
+    # absolute elevation, a number = show change since that elevation.
+    latitude: float = 45.014060             # rig location, for the sea-level pressure lookup
+    longitude: float = -93.245526
+    msl_refresh_s: float = 1800.0           # how often to re-fetch the sea-level reference
+    elevation_datum_ft: Optional[float] = None
+    slam_auto_record: bool = True           # start recording automatically when Live SLAM is
+                                            # entered: a live scan is unrepeatable (the same
+                                            # reasoning that kept Live SLAM's one-shot Save,
+                                            # BUG-043), and a recording makes it replayable and
+                                            # Detailed-reconstructable afterwards
     yaw_offset_deg: float = 0.0             # "Zero yaw here" (owner ask, 2026-07-29): a
                                             # user-set world-Z graft applied to the relative
                                             # yaw-like slot of zyx/zxy/boresight ONLY -- World
@@ -154,7 +168,11 @@ class ViewerConfig:
             return cls()
         known = {f.name for f in fields(cls)}
         kwargs = {k: v for k, v in viewer.items() if k in known}
-        for _optkey in ("port", "flatfield_path"):
+        # TOML has no null; `_toml_value` writes None as "" and these read it
+        # back. `elevation_datum_ft` is a FLOAT here, not a string -- without
+        # this line an unset datum would load as the string "" and every
+        # consumer would have to defend against it.
+        for _optkey in ("port", "flatfield_path", "elevation_datum_ft"):
             if kwargs.get(_optkey) == "":
                 kwargs[_optkey] = None  # TOML has no null; empty string round-trips "unset"
         try:

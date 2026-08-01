@@ -10,8 +10,11 @@
 //     thing in my hand pointing".
 //   - tilt-compensated compass: needle at `heading` (0=up=N, clockwise), matching
 //     the desktop render_compass convention.
-//   - pressure / temperature sparklines: min/max-autoscaled polyline over the
-//     history arrays + a live value readout.
+//   - elevation / temperature sparklines: min/max-autoscaled polyline over the
+//     history arrays + a live value readout. Elevation is FEET above sea level
+//     (owner ask, 2026-07-31) with the bare hPa beside it and a Δ button that
+//     switches to change-since-datum; the raw Pascals and the sea-level
+//     reference the height is measured against moved to Diagnostics.
 //
 // Card structure (decluttered 2026-07-29; pinned to World-only 2026-07-31):
 // the always-visible tiers are the two widgets above, the World orientation
@@ -203,6 +206,16 @@ function fmtJitterNum(stat, key) {
     return (v === null || v === undefined) ? '—' : v.toFixed(3);
 }
 
+// Seconds since the sea-level reference was fetched -> "never" / "42 s" /
+// "17 min" / "3.1 h". Never a bare number: "1800" beside "Ref age" is
+// ambiguous between seconds and minutes exactly where it matters.
+function fmtAge(s) {
+    if (s === null || s === undefined) return 'never';
+    if (s < 90) return Math.round(s) + ' s';
+    if (s < 5400) return Math.round(s / 60) + ' min';
+    return (s / 3600).toFixed(1) + ' h';
+}
+
 // fusion_key ("off" / "init" / "active" / "gated:...") -> the .sensor-state
 // class that colours the readout: green fusing, amber gated, muted off.
 function fusionClass(key) {
@@ -219,8 +232,14 @@ export function createSensors(hub) {
     const headingEl = $('sensor-heading');
     const fusionEl = $('sensor-fusion');
     const fusionHelpEl = $('sensor-fusion-help');
-    const pressSpark = $('sensor-press-spark');
-    const pressVal = $('sensor-press-val');
+    const elevSpark = $('sensor-elev-spark');
+    const elevVal = $('sensor-elev-val');
+    const elevDeltaBtn = $('sensor-elev-delta');
+    const pressHpa = $('sensor-press-hpa');
+    const pressVal = $('sensor-press-val');       // Diagnostics: raw pascals
+    const mslPaEl = $('sensor-msl-pa');
+    const mslSourceEl = $('sensor-msl-source');
+    const mslAgeEl = $('sensor-msl-age');
     const tempSpark = $('sensor-temp-spark');
     const tempVal = $('sensor-temp-val');
     const resetBtn = $('sensor-reset-heading');
@@ -252,7 +271,7 @@ export function createSensors(hub) {
     // prime placeholders
     drawGizmo(gizmo, null);
     drawCompass(compass, null);
-    drawSparkline(pressSpark, null);
+    drawSparkline(elevSpark, null);
     drawSparkline(tempSpark, null);
 
     if (resetBtn) {
@@ -295,6 +314,19 @@ export function createSensors(hub) {
         });
     }
 
+    // --- Δ elevation datum (owner ask, 2026-07-31) -----------------------
+    // One-way flow, same as everything else here: the click only SENDS. The
+    // button's pressed state is set from the `state` echo below, so a datum
+    // captured in one tab lights the button in every tab -- and a rejected
+    // press (no barometer reading yet) leaves it visibly un-pressed rather
+    // than lying about the mode.
+    let hasElevDatum = false;
+    if (elevDeltaBtn) {
+        elevDeltaBtn.addEventListener('click', () => {
+            hub.send({ type: 'set_elevation_datum', on: !hasElevDatum });
+        });
+    }
+
     hub.on('state', (msg) => {
         if (Array.isArray(msg.orientation_labels)) {
             msg.orientation_labels.forEach((lbl, i) => {
@@ -329,6 +361,19 @@ export function createSensors(hub) {
         if (clearYawBtn) {
             clearYawBtn.disabled = isWorld || !hasOffset;
         }
+
+        // Δ datum: server truth, never local click state.
+        const datum = msg.elevation_datum_ft;
+        hasElevDatum = typeof datum === 'number';
+        if (elevDeltaBtn) {
+            elevDeltaBtn.classList.toggle('is-on', hasElevDatum);
+            elevDeltaBtn.title = hasElevDatum
+                ? `Δ on — showing change since ${datum.toFixed(1)} ft. Press to go back to absolute height.`
+                : 'Δ — capture this elevation as a datum and show change since it. Press again to go back to absolute height.';
+        }
+        if (elevVal) elevVal.title = hasElevDatum
+            ? `Change since the datum at ${datum.toFixed(1)} ft above sea level.`
+            : '';
     });
 
     hub.on('sensor', (msg) => {
@@ -360,12 +405,42 @@ export function createSensors(hub) {
                 fusionHelpEl.classList.toggle('hidden', !help);
                 fusionHelpEl.title = fusionTitle;
             }
-            if (pressVal) pressVal.textContent =
-                (msg.pressure_pa === null || msg.pressure_pa === undefined) ? '—' : Math.round(msg.pressure_pa) + ' Pa';
+            // Elevation (owner ask, 2026-07-31): feet, with the bare hPa
+            // beside it. With a datum set the readout becomes a SIGNED change
+            // since that datum -- the subtraction happens here so the server
+            // keeps sending one unambiguous absolute number.
+            const elevFt = msg.elevation_ft;
+            const datumFt = msg.elevation_datum_ft;
+            if (elevVal) {
+                if (elevFt === null || elevFt === undefined) {
+                    elevVal.textContent = '—';
+                } else if (typeof datumFt === 'number') {
+                    const d = elevFt - datumFt;
+                    elevVal.textContent = (d >= 0 ? '+' : '−') + Math.abs(d).toFixed(1) + ' ft';
+                } else {
+                    elevVal.textContent = Math.round(elevFt) + ' ft';
+                }
+            }
+            if (pressHpa) pressHpa.textContent =
+                (msg.pressure_hpa === null || msg.pressure_hpa === undefined) ? '—' : msg.pressure_hpa.toFixed(1);
             if (tempVal) tempVal.textContent =
                 (msg.temp_c === null || msg.temp_c === undefined) ? '—' : msg.temp_c.toFixed(1) + ' °C';
-            drawSparkline(pressSpark, msg.pressure_hist);
+            drawSparkline(elevSpark, msg.elevation_hist);
             drawSparkline(tempSpark, msg.temp_hist);
+
+            // Diagnostics drawer: the raw inputs behind the row above.
+            if (pressVal) pressVal.textContent =
+                (msg.pressure_pa === null || msg.pressure_pa === undefined) ? '—' : Math.round(msg.pressure_pa) + ' Pa';
+            if (mslPaEl) mslPaEl.textContent =
+                (msg.msl_pa === null || msg.msl_pa === undefined) ? '—' : Math.round(msg.msl_pa) + ' Pa';
+            if (mslSourceEl) {
+                mslSourceEl.textContent = msg.msl_source || '—';
+                // `fallback` is not a failure to hide -- it is the difference
+                // between "935 ft" and "935 ft ± a couple of hundred".
+                mslSourceEl.className = (msg.msl_source === 'api')
+                    ? 'hud-val' : 'hud-val sensor-state is-gated';
+            }
+            if (mslAgeEl) mslAgeEl.textContent = fmtAge(msg.msl_age_s);
             if (resetBtn) resetBtn.disabled = (msg.fusion_key === 'off');
 
             // Raw orientation (full precision, pre-smoothing) + jitter.

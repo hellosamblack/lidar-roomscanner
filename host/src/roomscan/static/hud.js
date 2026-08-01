@@ -12,6 +12,17 @@
 
 const LINK_BAR_MAX = 2 * 1024 * 1024;   // client-side visual cap: 2 MB/s (§7.4)
 
+// Headroom colouring for the Resources card (owner ask, 2026-07-31).
+//
+// These are HEADROOM thresholds, not measurements of any particular workload:
+// the point is "how close to the ceiling", and the ceiling is the same
+// whatever the scan. 90% is where TsdfMap._check_saturation already warns
+// (BUG-035 — the run that failed sat at ~97% of its configured block count),
+// so the red step is pinned to that existing, measured threshold rather than
+// invented; amber is one step earlier so it is a warning and not an epitaph.
+const RES_WARN = 0.80;
+const RES_CRIT = 0.90;
+
 // Per-stream tooltips. Keyed on `stream_id`, NOT on `label`: metrics.py maps two
 // different ids (DEPTH_ZF32=0 replay, RAW_3DMD=7 live) onto the same "ToF" label,
 // so a label-keyed map could not tell a replay apart from a live capture. Ids are
@@ -41,6 +52,30 @@ function fmtRate(n) {
         x /= 1024;
     }
     return `${x.toFixed(1)} GB/s`;
+}
+
+function fmtBytes(n) {
+    if (n === null || n === undefined) return '?';
+    let x = Number(n);
+    for (const unit of ['B', 'KB', 'MB', 'GB', 'TB']) {
+        if (x < 1024 || unit === 'TB') return `${x.toFixed(1)} ${unit}`;
+        x /= 1024;
+    }
+    return `${x.toFixed(1)} TB`;
+}
+
+// One headroom bar: text "used / total" plus a fill coloured by fraction.
+// `frac === null` means UNKNOWN (no NVML, no SLAM running, no sample yet) --
+// rendered as an empty bar and an explicit "n/a", never as 0%, which would
+// read as a measurement of plenty of headroom.
+function setBar(valEl, fillEl, text, frac) {
+    if (valEl) valEl.textContent = text;
+    if (!fillEl) return;
+    const f = (frac === null || frac === undefined || !isFinite(frac))
+        ? null : Math.max(0, Math.min(1, frac));
+    fillEl.style.width = (f === null ? 0 : f * 100).toFixed(0) + '%';
+    fillEl.classList.toggle('is-warn', f !== null && f >= RES_WARN && f < RES_CRIT);
+    fillEl.classList.toggle('is-crit', f !== null && f >= RES_CRIT);
 }
 
 export function createHud(hub) {
@@ -91,7 +126,52 @@ export function createHud(hub) {
             const pct = Math.max(0, Math.min(1, bps / LINK_BAR_MAX)) * 100;
             linkFillEl.style.width = pct.toFixed(0) + '%';
         }
+
+        renderResources(msg.resources || null);
     });
+
+    // --- Resources card (owner ask, 2026-07-31) ---------------------------
+    // CPU/RAM/VRAM are system/device-wide: the question is headroom, and the
+    // ceiling is shared with every other process on the box. The per-process
+    // numbers ride along in brackets so it is still possible to tell "the box
+    // is busy" from "we are busy". Anything the server could not measure
+    // arrives as null and renders "n/a" — see setBar.
+    function renderResources(r) {
+        const note = document.getElementById('res-note');
+        if (!r) {
+            setBar(document.getElementById('res-cpu-val'), document.getElementById('res-cpu-fill'), 'n/a', null);
+            setBar(document.getElementById('res-ram-val'), document.getElementById('res-ram-fill'), 'n/a', null);
+            setBar(document.getElementById('res-vram-val'), document.getElementById('res-vram-fill'), 'n/a', null);
+            if (note) note.textContent = 'waiting for the first resource sample…';
+            return;
+        }
+        const sysCpu = r.sys_cpu_percent;
+        const procCpu = r.proc_cpu_percent;
+        setBar(document.getElementById('res-cpu-val'), document.getElementById('res-cpu-fill'),
+            (sysCpu === null || sysCpu === undefined ? 'n/a' : sysCpu.toFixed(0) + '%')
+            + (procCpu === null || procCpu === undefined ? '' : ` (us ${procCpu.toFixed(0)}%)`),
+            (sysCpu === null || sysCpu === undefined) ? null : sysCpu / 100);
+
+        const ramUsed = r.ram_used, ramTotal = r.ram_total;
+        setBar(document.getElementById('res-ram-val'), document.getElementById('res-ram-fill'),
+            (ramUsed === null || ramUsed === undefined)
+                ? 'n/a'
+                : `${fmtBytes(ramUsed)} / ${fmtBytes(ramTotal)} (us ${fmtBytes(r.proc_rss)})`,
+            (ramUsed && ramTotal) ? ramUsed / ramTotal : null);
+
+        const vUsed = r.device_vram_used, vTotal = r.device_vram_total;
+        setBar(document.getElementById('res-vram-val'), document.getElementById('res-vram-fill'),
+            (vUsed === null || vUsed === undefined)
+                ? 'n/a (no NVIDIA driver)'
+                : `${fmtBytes(vUsed)} / ${fmtBytes(vTotal)}`,
+            (vUsed && vTotal) ? vUsed / vTotal : null);
+
+        if (note) {
+            note.textContent = r.gpu_name ? String(r.gpu_name)
+                : (r.device_vram_source === 'nvml' ? 'GPU present' : 'no GPU detected');
+        }
+    }
+    renderResources(null);
 
     hub.on('conn', (msg) => {
         const open = msg && msg.state === 'open';

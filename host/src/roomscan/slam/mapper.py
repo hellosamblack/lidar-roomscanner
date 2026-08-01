@@ -37,6 +37,15 @@ _DEFAULT_MIN_CONFIDENCE = 20.0  # tuned against captures/phase6_motion_ref.bin, 
 _BARO_REF_FRAMES = 90
 
 
+#: How often the TSDF hashmap's occupancy is sampled, in seconds.
+#:
+#: `TsdfMap.block_usage()` reads the hashmap's size, which is a DEVICE SYNC on
+#: CUDA -- doing it per frame would put a pipeline stall in the hot path for a
+#: number nobody reads faster than the 4 Hz metrics cadence. 0.25 s matches
+#: that cadence; between samples `FrameStep` carries the last reading.
+_BLOCK_USAGE_INTERVAL_S = 0.25
+
+
 @dataclass
 class FrameStep:
     pose: np.ndarray
@@ -44,6 +53,18 @@ class FrameStep:
     rmse: float
     tracking_lost: bool
     slam_ms: float
+    # TSDF block-grid occupancy (BUG-035). New fields WITH DEFAULTS so every
+    # existing constructor (remote.py, tests) is unaffected. This is the
+    # ceiling that silently killed 18% of a real sweep: map growth stalls and
+    # frame-to-model tracking collapses ~30 frames later with no error at all,
+    # so it has to be visible while the scan is running, not after it dies.
+    # `blocks_capacity` is the hashmap's LIVE capacity (Open3D rehashes to
+    # grow); `blocks_configured` is the `block_count` it was built with, which
+    # is the number the operator can actually raise. None until the first
+    # sample (see `_BLOCK_USAGE_INTERVAL_S`).
+    blocks_used: int | None = None
+    blocks_capacity: int | None = None
+    blocks_configured: int | None = None
 
 
 class Mapper:
@@ -113,6 +134,12 @@ class Mapper:
         # along world-up. Reported (not just applied) so a run can say how much
         # of its height came from the barometer rather than from ICP.
         self.baro_correction_m = 0.0
+        # TSDF occupancy, sampled at `_BLOCK_USAGE_INTERVAL_S` (a device sync
+        # on CUDA -- see that constant). Reported on every FrameStep so the
+        # live UI can show headroom against BUG-035's ceiling.
+        self._block_usage_at: float | None = None
+        self._blocks_used: int | None = None
+        self._blocks_capacity: int | None = None
         self.trajectory: list[np.ndarray] = []
         self.tracking_lost_count = 0
         # Per-frame lost flag. Kept because the COUNT alone hides the failure
@@ -320,9 +347,28 @@ class Mapper:
 
         self.trajectory.append(report_pose.copy())
         self.lost_flags.append(bool(lost))
+        self._sample_block_usage()
         slam_ms = (self._clock() - t0) * 1000.0
         return FrameStep(pose=report_pose, fitness=fitness, rmse=rmse,
-                         tracking_lost=lost, slam_ms=slam_ms)
+                         tracking_lost=lost, slam_ms=slam_ms,
+                         blocks_used=self._blocks_used,
+                         blocks_capacity=self._blocks_capacity,
+                         blocks_configured=self._tsdf.block_count or None)
+
+    def _sample_block_usage(self) -> None:
+        """Refresh the cached TSDF occupancy, at most every
+        `_BLOCK_USAGE_INTERVAL_S`. Deliberately NOT per frame: the hashmap size
+        read behind `block_usage()` is a device sync on CUDA. Failures are
+        swallowed -- a gauge must never be able to kill a scan."""
+        now = self._clock()
+        if (self._block_usage_at is not None
+                and (now - self._block_usage_at) < _BLOCK_USAGE_INTERVAL_S):
+            return
+        self._block_usage_at = now
+        try:
+            self._blocks_used, self._blocks_capacity = self._tsdf.block_usage()
+        except Exception:
+            pass          # keep the previous reading rather than reporting a fake 0
 
     def mesh(self):
         return self._tsdf.mesh()

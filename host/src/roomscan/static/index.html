@@ -252,6 +252,11 @@
         .hud-stream__jit { color: var(--text-muted); min-width: 44px; text-align: right; }
         .hud-bar { height: 6px; border-radius: 3px; background: rgba(255,255,255,0.08); overflow: hidden; margin: 2px 0; }
         .hud-bar__fill { height: 100%; width: 0%; background: var(--accent); transition: width 0.3s ease; }
+        /* Headroom bars (Resources card). The two step colours are set from
+           MEASURED thresholds in hud.js, not decoration — see RES_WARN/RES_CRIT
+           there for why 80/90%. */
+        .hud-bar__fill.is-warn { background: var(--warning); }
+        .hud-bar__fill.is-crit { background: var(--danger); }
 
         /* ---- Sensors card (Phase 2; decluttered 2026-07-29) ----------------
          *
@@ -284,6 +289,14 @@
         .sensor-btn { pointer-events: auto !important; padding: 5px 3px; font-size: 0.68rem; white-space: nowrap; }
         .sensor-btn:disabled { opacity: 0.35; cursor: not-allowed; }
         .sensor-btn--secondary { border-style: dashed; }
+        /* Elevation row: value · bare hPa · Δ datum toggle, right-aligned as a
+           single unit so the row still reads label-left / value-right. */
+        .sensor-elev { display: inline-flex; align-items: center; gap: 6px; }
+        .sensor-elev__hpa { font-weight: 400; font-size: 0.72rem; color: var(--text-muted); }
+        .sensor-btn--delta { padding: 1px 6px; font-size: 0.72rem; line-height: 1.2; }
+        /* Pressed state comes from the server's `state` echo, never from the
+           click — one-way flow, same as every other control here. */
+        .sensor-btn--delta.is-on { color: var(--accent); border-color: var(--accent); }
         /* Fusion state reads as status, not trivia: green when actually fusing,
            amber while gated (the common "No mag calibration" case), muted off. */
         .sensor-state { font-size: 0.72rem; font-weight: 700; text-align: right; }
@@ -974,8 +987,25 @@
                 </div>
 
                 <div class="hud-section-label">Environment</div>
-                <div class="hud-row"><span>Pressure</span><span class="hud-val" id="sensor-press-val">—</span></div>
-                <canvas id="sensor-press-spark" class="sensor-spark" width="1" height="1"></canvas>
+                <!-- Elevation, not Pascals (owner ask, 2026-07-31). The number
+                     is barometric height above sea level in feet, low-passed
+                     with a 6 s EMA because a raw barometer sample carries
+                     ~1.2 ft of noise (BUG-037) and would read as broken. The
+                     absolute pressure rides beside it as a bare hPa figure;
+                     the sea-level reference it is measured against, and
+                     whether that reference is real, live in Diagnostics. -->
+                <div class="hud-row" id="sensor-elev-row"
+                     title="Barometric height above sea level, smoothed with a 6-second filter (a single barometer sample is worth about 1.2 ft of noise). Absolute height depends on the sea-level reference — see Diagnostics; the Δ reading does not.">
+                    <span>Elevation</span>
+                    <span class="hud-val sensor-elev">
+                        <span id="sensor-elev-val">—</span>
+                        <span class="sensor-elev__hpa" id="sensor-press-hpa">—</span>
+                        <button id="sensor-elev-delta" class="sensor-btn sensor-btn--delta" type="button"
+                                title="Δ — capture this elevation as a datum and show change since it. Press again to go back to absolute height.">Δ</button>
+                    </span>
+                </div>
+                <canvas id="sensor-elev-spark" class="sensor-spark" width="1" height="1"
+                        title="Recent elevation, in feet, autoscaled. Unsmoothed — the band you see is the barometer's own noise."></canvas>
                 <div class="hud-row"><span>Temp</span><span class="hud-val" id="sensor-temp-val">—</span></div>
                 <canvas id="sensor-temp-spark" class="sensor-spark" width="1" height="1"></canvas>
 
@@ -1024,6 +1054,21 @@
                             <div class="sensor-block-val" id="sensor-quat">—</div>
                         </div>
 
+                        <!-- What the Elevation row above is actually made of
+                             (owner ask, 2026-07-31). Kept out of the card body
+                             so it stays as decluttered as BUG-033 left it, but
+                             kept SOMEWHERE, because an elevation is only as
+                             good as its sea-level reference: with no internet
+                             the reference is the 101325 Pa standard atmosphere
+                             and the absolute height can be a couple of hundred
+                             feet off. The Δ reading is unaffected either way —
+                             a constant reference cancels in a difference. -->
+                        <div class="hud-section-label" title="The raw inputs behind the Elevation row above.">Elevation source</div>
+                        <div class="hud-row" title="Absolute barometric pressure straight off the sensor, in pascals — unsmoothed."><span>Pressure</span><span class="hud-val" id="sensor-press-val">—</span></div>
+                        <div class="hud-row" title="The sea-level reference pressure the elevation is measured against."><span>Sea-level ref</span><span class="hud-val" id="sensor-msl-pa">—</span></div>
+                        <div class="hud-row" title="Where that reference came from: `api` = fetched for this location, `stale` = fetched but no longer fresh, `fallback` = no internet, using the 101325 Pa standard atmosphere (absolute height may be off by a few hundred feet; the Δ reading is not)."><span>Ref source</span><span class="hud-val" id="sensor-msl-source">—</span></div>
+                        <div class="hud-row" title="How long ago the sea-level reference was fetched. It is refreshed every 30 minutes."><span>Ref age</span><span class="hud-val" id="sensor-msl-age">—</span></div>
+
                         <div class="hud-section-label" title="Frame-to-frame change of the raw (unsmoothed) signal, deg/frame. Roll/Pitch/Yaw follow the Mode above; Heading and Orientation are convention-independent and read the same in every mode.">Jitter (deg/frame)</div>
                         <div class="jitter-table">
                             <span></span><span class="jitter-table__head">p95</span><span class="jitter-table__head">mean</span>
@@ -1048,6 +1093,29 @@
                 <div class="hud-row"><span>Frames</span><span class="hud-val" id="slam-frames">0</span></div>
                 <div class="hud-row"><span>Vertices</span><span class="hud-val" id="slam-verts">0</span></div>
                 <div class="hud-row"><span>SLAM</span><span class="hud-val" id="slam-ms">—</span></div>
+            </div>
+        </div>
+
+        <!-- Resource headroom during a Live SLAM scan (owner ask, 2026-07-31):
+             "am I approaching a RAM/VRAM/GPU/CPU limit?". Shown only in Live
+             SLAM (slam.js toggles it), because that is the only mode that can
+             hit one. CPU/RAM/VRAM are SYSTEM-wide, not this process's share —
+             the ceiling belongs to the box. TSDF blocks is the fourth bar for
+             a specific reason: BUG-035 is the ceiling that silently killed 18%
+             of a real sweep, with no error at all until tracking collapsed
+             ~30 frames after the map stopped growing. -->
+        <div id="resources-card" class="card hud-card control-group hidden" data-card-id="resources">
+            <button class="control-group__header" type="button"><span>Resources</span><span class="chevron">&#9662;</span></button>
+            <div class="card-body control-group__body">
+                <div class="hud-row" title="Whole-box CPU load across all cores, and this server's own share of it in brackets (100% there is one full core)."><span>CPU</span><span class="hud-val" id="res-cpu-val">—</span></div>
+                <div class="hud-bar"><div class="hud-bar__fill" id="res-cpu-fill"></div></div>
+                <div class="hud-row" title="System memory in use, out of total. Cache and buffers count as free — this is what a new allocation could actually get. This server's own resident size is in brackets."><span>RAM</span><span class="hud-val" id="res-ram-val">—</span></div>
+                <div class="hud-bar"><div class="hud-bar__fill" id="res-ram-fill"></div></div>
+                <div class="hud-row" title="GPU memory in use on the whole card, out of total. This is the number BUG-032 (a mesh-extraction leak that grew 10 MiB per frame) and BUG-035 were about. Shows n/a on a box with no NVIDIA driver."><span>VRAM</span><span class="hud-val" id="res-vram-val">—</span></div>
+                <div class="hud-bar"><div class="hud-bar__fill" id="res-vram-fill"></div></div>
+                <div class="hud-row" title="Voxel blocks in the SLAM map, out of the hash grid's current capacity. Running near capacity is exactly where map growth stalled and tracking silently collapsed on a real sweep (BUG-035) — raise [slam] block_count, or coarsen [slam] voxel_size, for a scan that large. Only updates during SLAM."><span>TSDF blocks</span><span class="hud-val" id="res-blocks-val">—</span></div>
+                <div class="hud-bar"><div class="hud-bar__fill" id="res-blocks-fill"></div></div>
+                <div class="hud-note" id="res-note"></div>
             </div>
         </div>
 

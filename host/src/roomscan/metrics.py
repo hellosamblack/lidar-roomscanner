@@ -129,11 +129,25 @@ class StreamRate:
 
 @dataclass(frozen=True)
 class ResourceSnapshot:
-    """Resource usage of THIS process (not the whole system), so the HUD shows
-    what our app consumes. ``proc_cpu_percent`` is summed across cores
-    (100% == one full core); divide by 100 for core-equivalents. ``proc_vram``
-    is None where the platform can't attribute GPU memory per process (Windows
-    WDDM), in which case the HUD omits the VRAM bar."""
+    """Resource usage of this process AND of the box it runs on.
+
+    The per-process fields came first (``proc_*``): what our app consumes.
+    ``proc_cpu_percent`` is summed across cores (100% == one full core); divide
+    by 100 for core-equivalents. ``proc_vram`` is None where the platform can't
+    attribute GPU memory per process (Windows WDDM) or where ``pynvml`` isn't
+    installed -- which is the normal case here, since it lives in the optional
+    ``monitor`` extra.
+
+    The system/device-wide fields (``sys_cpu_percent``, ``ram_used``,
+    ``device_vram_*``) were added 2026-07-31 for the Live SLAM resource
+    monitor, because the owner's question is "am I about to hit a limit?" and a
+    per-process number cannot answer it: the limit is shared with every other
+    process on the box, and the VRAM ceiling in particular is the one BUG-032
+    (mesh-extraction leak) and BUG-035 (TSDF block capacity) were about. VRAM
+    comes from ``slam.gpumem.Nvml`` -- ctypes NVML, no dependency -- so it works
+    in a venv with no ``pynvml``; every one of them degrades to None rather than
+    raising on a box with no GPU.
+    """
     proc_cpu_percent: float
     n_cores: int
     proc_rss: int                   # our process resident set size (bytes)
@@ -143,6 +157,12 @@ class ResourceSnapshot:
     vram_total: int | None
     gpu_name: str | None
     gpu_source: str                 # "pynvml" | "n/a" | test tag
+    # System/device-wide (all None-able: no psutil sample yet, or no GPU).
+    sys_cpu_percent: float | None = None    # whole-box CPU %, 0..100 across all cores
+    ram_used: int | None = None             # system RAM in use (total - available)
+    device_vram_used: int | None = None     # DEVICE-wide VRAM in use (all processes)
+    device_vram_total: int | None = None
+    device_vram_source: str = "n/a"         # "nvml" | "n/a" | test tag
 
 
 @dataclass(frozen=True)
@@ -299,20 +319,70 @@ def probe_gpu_process(pid: int, probes=None):
     return None, None, None, None, "n/a"
 
 
-class ResourceSampler:
-    """Background daemon sampling THIS process's CPU/RAM (psutil) + per-process
-    GPU (NVML) at ``interval`` seconds, publishing the latest ResourceSnapshot
-    for lockless reads. Off the render loop so a slow probe never stalls it.
+def probe_device_vram():
+    """DEVICE-wide VRAM ``(used, total, name, source)`` -- bytes, bytes, str,
+    str -- or ``(None, None, None, "n/a")``.
 
-    ``gpu_probe`` is injectable (defaults to the NVML per-process probe) so tests
-    need no GPU; ``pid`` defaults to the current process.
+    Uses ``roomscan.slam.gpumem.Nvml``: a ctypes binding to libnvidia-ml, so it
+    needs no ``pynvml`` (which is not installed here -- it is in the optional
+    ``monitor`` extra, which is why ``probe_gpu_process`` reports "n/a" and
+    every per-process GPU field is null on this box). Device-wide rather than
+    per-process is also the RIGHT number for the headroom question: the card is
+    shared, and what kills a scan is the device running out, not our share of
+    it (BUG-032, BUG-035).
+
+    Never raises: no driver library, no GPU, or an NVML error all give "n/a".
+
+    **It will not match `nvidia-smi --query-gpu=memory.used` — that is expected.**
+    Measured on this box 2026-07-31: NVML said 370.94 MiB while `nvidia-smi`
+    said 18 MiB used and 354 MiB *reserved*, i.e. 18 + 354 = 372 ~ 371. The v1
+    `nvmlDeviceGetMemoryInfo` counts the driver's reserved allocation and
+    `memory.used` does not. Totals agree exactly (8188 MiB). Including reserved
+    is the right choice for a headroom gauge: reserved memory is not available
+    to a new allocation either.
+    """
+    try:
+        from .slam.gpumem import Nvml
+    except Exception:
+        return None, None, None, "n/a"
+    try:
+        nvml = Nvml()
+    except Exception:
+        return None, None, None, "n/a"
+    try:
+        if not nvml.ok:
+            return None, None, None, "n/a"
+        used, total = nvml.used_bytes(), nvml.total_bytes()
+        if total <= 0:
+            return None, None, None, "n/a"
+        return int(used), int(total), nvml.name(), "nvml"
+    except Exception:
+        return None, None, None, "n/a"
+    finally:
+        try:
+            nvml.close()
+        except Exception:
+            pass
+
+
+class ResourceSampler:
+    """Background daemon sampling CPU/RAM/GPU at ``interval`` seconds, publishing
+    the latest ResourceSnapshot for lockless reads. Off the render loop so a slow
+    probe never stalls it.
+
+    Samples both scopes: this process (``proc_*``, psutil + per-process NVML) and
+    the whole box (``sys_cpu_percent`` / ``ram_used`` / ``device_vram_*``). Both
+    probes are injectable (``gpu_probe``, ``vram_probe``) so tests need no GPU;
+    ``pid`` defaults to the current process.
     """
 
-    def __init__(self, interval: float = 0.7, gpu_probe=None, pid: int | None = None):
+    def __init__(self, interval: float = 0.7, gpu_probe=None, pid: int | None = None,
+                 vram_probe=None):
         import os
         self.interval = interval
         self._pid = pid if pid is not None else os.getpid()
         self._gpu_probe = gpu_probe if gpu_probe is not None else (lambda: probe_gpu_process(self._pid))
+        self._vram_probe = vram_probe if vram_probe is not None else probe_device_vram
         self._latest: ResourceSnapshot | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -341,6 +411,7 @@ class ResourceSampler:
         import psutil
         proc = psutil.Process(self._pid)
         proc.cpu_percent(None)              # prime (first call is a 0.0 baseline)
+        psutil.cpu_percent(None)            # ditto for the system-wide meter
         n_cores = psutil.cpu_count() or 1
         while not self._stop.wait(self.interval):
             try:
@@ -348,8 +419,18 @@ class ResourceSampler:
                 rss = int(proc.memory_info().rss)
             except psutil.Error:
                 continue                    # process vanished mid-sample; try again
-            ram_total = int(psutil.virtual_memory().total)
+            vm = psutil.virtual_memory()
+            ram_total = int(vm.total)
+            # `available` (not `total - used`) is what a new allocation can
+            # actually get: cache/buffers are reclaimable, so `used` alone
+            # would report a Linux box as near-full at idle.
+            ram_used = max(0, ram_total - int(getattr(vm, "available", 0)))
+            try:
+                sys_cpu = float(psutil.cpu_percent(None))
+            except psutil.Error:
+                sys_cpu = None
             gpu_util, proc_vram, vram_total, gpu_name, src = self._gpu_probe()
+            dev_used, dev_total, dev_name, dev_src = self._vram_probe()
             self._latest = ResourceSnapshot(
                 proc_cpu_percent=float(cpu),
                 n_cores=int(n_cores),
@@ -358,6 +439,14 @@ class ResourceSampler:
                 gpu_util=gpu_util,
                 proc_vram=proc_vram,
                 vram_total=vram_total,
-                gpu_name=gpu_name,
+                # Prefer the per-process probe's name (it knows which device
+                # our pid is on); fall back to the ctypes device-wide one,
+                # which is the only source present without pynvml.
+                gpu_name=gpu_name or dev_name,
                 gpu_source=src,
+                sys_cpu_percent=sys_cpu,
+                ram_used=ram_used,
+                device_vram_used=dev_used,
+                device_vram_total=dev_total,
+                device_vram_source=dev_src,
             )
