@@ -58,7 +58,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-048 | open    | host/sensors  | `absolute_heading`/`quat_yaw_deg` disintegrate near ZYX gimbal lock — a **braced, stationary** device reports frame-to-frame yaw jumps up to 180°, and 22.7% of a tilt-sweep capture sits within 1° of lock. Corrupted the DC-E magnetometer-direction analysis into a false 20–30° "calibration error" |
 | BUG-049 | open    | host/transport | Multi-second **whole-group** frame loss on the multi-room captures — 2.29% / 4.28% / 9.35% of RAW frames lost while byte-clean and 0 CRC, in outages up to 215 frames (7.1 s). Cost DC-B take 2 a 628-frame (21.2 s) tracking collapse. Recurring 63-frame quantum in all three takes; not RF range (the bridge rides on the scanner, never roamed, signal > 80%) |
 | BUG-047 | fixed   | host/web      | `id="btn-restart"` named **two** buttons — the top bar's "Restart Server" and the playback "Restart". `getElementById` takes the first, so playback Restart was dead and its transport handler landed on Restart Server, which therefore fired a transport restart *and* `POST /api/restart` |
-| BUG-048 | fixed   | host/web      | Recording `elapsed_s` was `time.time() - time.monotonic()` -- two clocks with no shared origin -- so a 90-second take reported 1784067285.5 s. Every caller passed the wall clock; the start stamp was monotonic |
+| BUG-050 | fixed   | host/web      | Recording `elapsed_s` was `time.time() - time.monotonic()` -- two clocks with no shared origin -- so a 90-second take reported 1784067285.5 s. Every caller passed the wall clock; the start stamp was monotonic |
 
 ---
 
@@ -2182,7 +2182,7 @@ it has to be read live.
 only ever checked CRC and resync. It now reports a `continuity` block; `clean` and
 `continuity.complete` are deliberately separate properties.
 
-## BUG-048 — Recording elapsed time was the Unix epoch
+## BUG-050 — Recording elapsed time was the Unix epoch
 
 **Status:** fixed 2026-07-31 · **Area:** host/web · **Found by:** an agent adding the Live-SLAM
 auto-record feature, which read `session.recording.elapsed_s` back to check its own work.

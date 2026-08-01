@@ -136,6 +136,15 @@ class ViewerConfig:
     longitude: float = -93.245526
     msl_refresh_s: float = 1800.0           # how often to re-fetch the sea-level reference
     elevation_datum_ft: Optional[float] = None
+    # View-page capture browser (§12, owner ask 2026-07-31). Presentation-only
+    # prefs, persisted like the display toggles so the library comes back the
+    # way you left it. Sorting is applied CLIENT-side off the already-broadcast
+    # `captures` array, so changing it costs no rescan; `web_browser_thumbs =
+    # false` renders tiles with no <img> at all, so a slow box never pays for
+    # thumbnails it will not look at.
+    web_browser_sort: str = "recent"        # "recent" | "name" | "size" | "duration"
+    web_browser_view: str = "grid"          # "grid" | "list"
+    web_browser_thumbs: bool = True
     slam_auto_record: bool = True           # start recording automatically when Live SLAM is
                                             # entered: a live scan is unrepeatable (the same
                                             # reasoning that kept Live SLAM's one-shot Save,

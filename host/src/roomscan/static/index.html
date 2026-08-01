@@ -48,6 +48,13 @@
             // Resource-load errors (failed module/script/img) arrive as an
             // event on the element with no .message; note the target's src.
             if (!e.message && e.target && (e.target.src || e.target.href)) {
+                // A capture thumbnail that 404s is an EXPECTED, handled outcome,
+                // not a page fault: /thumb never 500s, and a .bin the renderer
+                // can't read (a firmware image parked in captures/, a truncated
+                // take) simply has no tile — browser.js collapses the <img>.
+                // Logging one 'error' per such file would push the Diagnostics
+                // panel open on every visit to the View page.
+                if (e.target.classList && e.target.classList.contains('cap-tile__thumb')) return;
                 m = 'resource failed to load: ' + (e.target.src || e.target.href);
             }
             window.__diag('window.error: ' + m + where, 'error');
@@ -706,6 +713,75 @@
         .cap-status.rec { color: var(--danger); }
         .cap-list { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow-y: auto; }
 
+        /* ---- View-page capture browser (§12) ----
+           `.control-group card`, NOT `.hud-card`: `.dock > .hud-card { pointer-
+           events: none }` (the read-only-telemetry rule above) would make every
+           tile unclickable. This is the one left-dock card that is interactive. */
+        #browser-card { width: 420px; }
+        .browser-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+        .browser-toolbar .segmented { flex: 0 0 auto; }
+        /* grid-auto-rows: max-content is load-bearing — without it the default
+           `auto` rows are stretched to divide the container's max-height between
+           however many captures exist, so a 37-file library renders 37 squashed
+           30 px slivers instead of a scrollable grid of square tiles. */
+        .browser-grid {
+            display: grid; grid-template-columns: repeat(3, 1fr);
+            grid-auto-rows: max-content; align-content: start; gap: 8px;
+            max-height: 42vh; overflow-y: auto; overflow-x: hidden;
+        }
+        .browser-grid.is-list { grid-template-columns: 1fr; gap: 4px; }
+        /* A capture the renderer can't read (a firmware image that happens to
+           live in captures/, a truncated take) 404s its thumb. Collapse the
+           <img> to the placeholder instead of leaving a broken-image glyph. */
+        .cap-tile__thumb.is-missing { display: none; }
+        .cap-tile {
+            position: relative; display: flex; flex-direction: column; gap: 3px;
+            padding: 5px; border: 1px solid var(--panel-border); border-radius: 8px;
+            background: rgba(255, 255, 255, 0.02); cursor: pointer; overflow: hidden;
+            transition: border-color 0.15s ease, background 0.15s ease;
+        }
+        .cap-tile:hover { border-color: var(--accent); background: rgba(255, 255, 255, 0.05); }
+        .cap-tile.is-selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+        .cap-tile.is-playing { border-color: var(--ok, #4ade80); }
+        .cap-tile__thumb {
+            width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 4px;
+            background: rgba(0, 0, 0, 0.35); display: block;
+        }
+        .browser-grid.is-list .cap-tile { flex-direction: row; align-items: center; gap: 8px; }
+        .browser-grid.is-list .cap-tile__thumb { width: 44px; height: 44px; aspect-ratio: auto; flex: 0 0 auto; }
+        .cap-tile__name {
+            font-size: 0.68rem; color: var(--text-main); overflow: hidden;
+            text-overflow: ellipsis; white-space: nowrap;
+        }
+        .cap-tile__meta {
+            font-family: 'JetBrains Mono', monospace; font-size: 0.6rem; color: var(--text-muted);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .cap-tile__check { position: absolute; top: 6px; left: 6px; margin: 0; z-index: 2; cursor: pointer; }
+        .browser-grid.is-list .cap-tile__check { position: static; }
+        .cap-tile__badge {
+            position: absolute; top: 5px; right: 5px; padding: 1px 4px; border-radius: 4px;
+            font-size: 0.55rem; letter-spacing: 0.04em; text-transform: uppercase;
+            background: rgba(0, 0, 0, 0.6); color: var(--text-muted);
+        }
+        #preview-card .preview-thumb {
+            width: 100%; aspect-ratio: 1 / 1; object-fit: contain; border-radius: 6px;
+            background: rgba(0, 0, 0, 0.35);
+        }
+        .preview-facts { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+        .preview-facts dt { font-size: 0.66rem; color: var(--text-muted); }
+        .preview-facts dd {
+            margin: 0; font-family: 'JetBrains Mono', monospace; font-size: 0.68rem;
+            color: var(--text-main); text-align: right;
+        }
+        #delete-modal .modal { width: min(520px, 96vw); }
+        .delete-list {
+            margin: 0; padding: 8px 10px; max-height: 200px; overflow: auto;
+            font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; line-height: 1.5;
+            background: rgba(0, 0, 0, 0.3); border-radius: 6px; list-style: none;
+        }
+        #btn-delete-confirm { background: var(--danger); border-color: var(--danger); color: white; }
+
         /* ---- record-name modal (post-recording naming prompt) ---- */
         #record-name-modal .modal { width: min(440px, 96vw); }
 
@@ -1136,6 +1212,51 @@
             </div>
         </div>
 
+        <!-- Capture browser (§12, owner ask 2026-07-31). The View page's real
+             file library: thumbnails, metadata, rename, multi-select delete,
+             preview. Replaces the cramped `#cap-list` that used to live inside
+             the right rail's Capture card. Shown only when state.source ===
+             "view"; every tile's data comes from the server's `captures` echo. -->
+        <div id="browser-card" class="control-group card hidden" data-card-id="browser">
+            <button class="control-group__header"><span>Captures</span><span class="chevron">&#9662;</span></button>
+            <div class="control-group__body">
+                <div class="browser-toolbar">
+                    <div class="segmented segmented--sm" id="seg-browser-sort">
+                        <button data-sort="recent" title="Newest capture first">Recent</button>
+                        <button data-sort="name" title="Sort by file name (A to Z)">Name</button>
+                        <button data-sort="size" title="Largest capture first">Size</button>
+                        <button data-sort="duration" title="Longest capture first">Length</button>
+                    </div>
+                    <div class="segmented segmented--sm" id="seg-browser-view">
+                        <button data-view="grid" title="Show captures as a thumbnail grid">Grid</button>
+                        <button data-view="list" title="Show captures as a compact list">List</button>
+                    </div>
+                    <label class="toggle toggle--sm" title="Render thumbnails. Turn off on a slow machine — each tile is generated on demand from ~40 sampled frames"><input type="checkbox" id="chk-browser-thumbs" checked><span>Thumbnails</span></label>
+                    <button id="btn-browser-refresh" title="Re-scan the captures directory on the server">&#8635; Refresh</button>
+                    <button id="btn-browser-delete" disabled title="Delete the ticked captures. This is the only destructive action in the app and always asks first">&#128465; Delete</button>
+                </div>
+                <div class="browser-grid" id="cap-grid"></div>
+                <div class="cap-status" id="browser-status"></div>
+            </div>
+        </div>
+
+        <!-- Preview (§12): the one selected capture, big. Its thumbnail is the
+             SAME /thumb/<name> the tile uses, so opening a preview costs no
+             extra generation. -->
+        <div id="preview-card" class="control-group card hidden" data-card-id="preview">
+            <button class="control-group__header"><span>Preview</span><span class="chevron">&#9662;</span></button>
+            <div class="control-group__body">
+                <img id="preview-thumb" class="preview-thumb" alt="" src="">
+                <div class="cap-status" id="preview-name">&mdash;</div>
+                <dl class="preview-facts" id="preview-facts"></dl>
+                <button class="primary" id="btn-preview-load" title="Load this capture into the 3D view and start playback">&#9654; Load into view</button>
+                <div class="btn-row">
+                    <button id="btn-preview-rename" title="Rename this capture; its reconstruction and thumbnail follow it">&#9998; Rename</button>
+                    <button id="btn-preview-build" title="Build (or rebuild) the offline Detailed reconstruction for this capture">&#9881; Build</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Diagnostic feed (populated by window.__diag). Collapsed by default;
              opens itself on the first error so a failure stays traceable without
              devtools. #diag-log is the text sink the inline head script writes. -->
@@ -1264,20 +1385,32 @@
              × button now collapses it into the squircle rail, which is also how
              it comes back -- so the "Show IR card" checkbox is not needed either. -->
 
-        <!-- Capture & Playback (Web Phase 3): record live, browse + load captures,
-             transport controls in replay. Active/disabled state is driven from the
-             server's session/captures echo (one-way flow), never local clicks. -->
-        <div class="control-group card collapsed" data-card-id="capture">
-            <button class="control-group__header"><span>Capture &amp; Playback</span><span class="chevron">&#9662;</span></button>
+        <!-- Record (§11, owner ask 2026-07-31). Was "Capture & Playback", which
+             did three jobs: record, browse, and drive playback transport. The
+             browsing moved to the View page's file browser (browser.js) and the
+             transport to its own "Playback" card below, leaving this one control
+             that only means anything on the Live page. Shown only when
+             state.source === "live"; active state comes from the server's
+             `session` echo (one-way flow), never from the local click. -->
+        <div class="control-group card" id="capture-card" data-card-id="capture">
+            <button class="control-group__header"><span>Record</span><span class="chevron">&#9662;</span></button>
             <div class="control-group__body">
                 <button id="btn-record" title="Start or stop recording the live stream to a capture file">&#9679; Record</button>
                 <div class="cap-status" id="record-status"></div>
+            </div>
+        </div>
 
-                <div class="field-label">Source</div>
-                <div class="cap-list" id="cap-list"></div>
-                <button id="btn-refresh-caps" title="Reload the capture library from the server">&#8635; Refresh list</button>
-
-                <div class="transport hidden" id="transport">
+        <!-- Playback (§11). Transport is *replay* state, exactly as Record is
+             *live* state; one card that was half-hidden in each mode is now two
+             cards that are simply shown or hidden. Markup moved verbatim from
+             the old Capture card -- including `btn-transport-restart`, whose id
+             was `btn-restart` until BUG-047 (it collided with the top bar's
+             Restart Server, so this button was dead and its handler fired the
+             server restart instead). Shown only when session.playback.is_replay. -->
+        <div class="control-group card hidden" id="transport-card" data-card-id="transport">
+            <button class="control-group__header"><span>Playback</span><span class="chevron">&#9662;</span></button>
+            <div class="control-group__body">
+                <div class="transport" id="transport">
                     <button class="primary" id="btn-golive" title="Stop playback and return to the live device stream">&#9679; Go Live</button>
                     <div class="btn-row">
                         <button id="btn-playpause" title="Pause or resume capture playback">Pause</button>
@@ -1291,7 +1424,7 @@
                         <button data-fps="0" title="Play as fast as possible (no delay)">Max</button>
                     </div>
                     <label class="toggle toggle--sm" title="Automatically restart playback when the capture ends"><input type="checkbox" id="chk-loop"><span>Loop at end</span></label>
-                    <input type="range" id="seek" min="0" max="1000" value="0">
+                    <input type="range" id="seek" min="0" max="1000" value="0" title="Scrub to a position in the capture">
                     <div class="cap-status" id="pos-status">&mdash;</div>
                 </div>
             </div>
@@ -1477,6 +1610,28 @@ cover the whole sphere from this viewpoint, and a gap behind you still has to be
                 <div class="btn-row">
                     <button id="record-name-skip" title="Keep the automatic timestamp name. The recording is already saved either way.">Skip</button>
                     <button id="record-name-save" class="primary" title="Rename the recording to the name above">Save</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Delete confirm (§12). Deleting captures is the ONLY destructive action
+         in the app, so the confirm is not optional: it names the exact files and
+         the total bytes, and the result reported afterwards is what was actually
+         deleted, not what was requested. -->
+    <div id="delete-modal" class="modal-backdrop hidden">
+        <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="delete-title">
+            <div class="modal__header">
+                <h2 class="modal__title" id="delete-title">Delete captures?</h2>
+                <button id="delete-close" class="modal__close" title="Cancel (Esc)">&times;</button>
+            </div>
+            <div class="modal__body">
+                <p class="modal__intro" id="delete-intro">This cannot be undone.</p>
+                <ul class="delete-list" id="delete-list"></ul>
+                <label class="toggle" title="Also remove each capture's reconstruction (results/&lt;name&gt;.ply/.tum/.slam.json) and its cached thumbnail. They are derived from a file that will no longer exist."><input type="checkbox" id="chk-delete-sidecars" checked><span>Also delete reconstructions and thumbnails</span></label>
+                <div class="btn-row">
+                    <button id="btn-delete-cancel" title="Keep these captures (Esc)">Cancel</button>
+                    <button id="btn-delete-confirm" title="Permanently delete the captures listed above">Delete</button>
                 </div>
             </div>
         </div>

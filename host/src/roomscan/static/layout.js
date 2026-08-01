@@ -53,6 +53,9 @@
         'device': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M9,4V6H11V4H9M13,4V6H15V4H13M9,18V20H11V18H9M13,18V20H15V18H13M4,9H6V11H4V9M4,13H6V15H4V13M18,9H20V11H18V9M18,13H20V15H18V13Z"/></svg>',
         'view': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22C13.1,22 14,21.1 14,20C14,19.5 13.8,19.05 13.47,18.7C13.12,18.33 12.92,17.84 12.92,17.3C12.92,16.2 13.82,15.3 14.92,15.3H16C19.31,15.3 22,12.61 22,9.3C22,5.27 17.52,2 12,2M6.5,11.5A1.5,1.5 0 0,1 5,10A1.5,1.5 0 0,1 6.5,8.5A1.5,1.5 0 0,1 8,10A1.5,1.5 0 0,1 6.5,11.5M9.5,7.5A1.5,1.5 0 0,1 8,6A1.5,1.5 0 0,1 9.5,4.5A1.5,1.5 0 0,1 11,6A1.5,1.5 0 0,1 9.5,7.5M14.5,7.5A1.5,1.5 0 0,1 13,6A1.5,1.5 0 0,1 14.5,4.5A1.5,1.5 0 0,1 16,6A1.5,1.5 0 0,1 14.5,7.5M17.5,11.5A1.5,1.5 0 0,1 16,10A1.5,1.5 0 0,1 17.5,8.5A1.5,1.5 0 0,1 19,10A1.5,1.5 0 0,1 17.5,11.5Z"/></svg>',
         'capture': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M18,4L20,8H17L15,4H13L15,8H12L10,4H8L10,8H7L5,4H4A2,2 0 0,0 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V4H18M10,10L16,13L10,16V10Z"/></svg>',
+        'transport': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M8,5.14V19.14L19,12.14L8,5.14Z"/></svg>',
+        'browser': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M3,3H11V11H3V3M13,3H21V11H13V3M3,13H11V21H3V13M13,13H21V21H13V13Z"/></svg>',
+        'preview': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M4,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4M4,6V18H20V6H4M6,8H18V10H6V8M6,12H14V14H6V12Z"/></svg>',
         'slam-ctrl': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12,2L4.5,20.29L5.21,21L12,18L18.79,21L19.5,20.29L12,2Z"/></svg>',
         'resources': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M4,2H20A2,2 0 0,1 22,4V20A2,2 0 0,1 20,22H4A2,2 0 0,1 2,20V4A2,2 0 0,1 4,2M6,6V18H8V6H6M10,10V18H12V10H10M14,8V18H16V8H14M18,13V18H20V13H18Z"/></svg>',
         'log': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M19,3H5C3.89,3 3,3.89 3,5V19C3,20.1 3.89,21 5,21H19C20.1,21 21,20.1 21,19V5C21,3.89 20.1,3 19,3M7,7H17V9H7V7M7,11H17V13H7V11M7,15H14V17H7V15Z"/></svg>'
@@ -66,7 +69,10 @@
         'diag': 'Diagnostics',
         'device': 'Device',
         'view': 'View',
-        'capture': 'Capture & Playback',
+        'capture': 'Record',
+        'transport': 'Playback',
+        'browser': 'Captures',
+        'preview': 'Preview',
         'slam-ctrl': 'SLAM',
         'resources': 'Resources',
         'log': 'Event Log'

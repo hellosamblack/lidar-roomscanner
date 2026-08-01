@@ -39,7 +39,7 @@ from pathlib import Path
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .colors import gray, turbo
@@ -81,6 +81,7 @@ from .sensors import (
     YawFusion,
     absolute_heading,
     boresight_view_deg,
+    display_rotation,
     graft_yaw,
     gravity_body_from_imu_raw,
     ir_gravity_residual_deg,
@@ -97,11 +98,14 @@ from .sensors import (
     triad_roll_deg,
     wrap180,
 )
+from . import thumbs as thumbs_mod
 from .motion import coherence
 from .sources import FileSource, Recorder, SerialSource, UdpSource, get_best_source
 from .slam.config import DetailedSlamPreset, preferred_device
 from .slam.detailed import (build_manifest, estimate_seconds, sidecar_paths,
                             sidecar_status, write_manifest_atomic)
+from .slam.detailed import delete_sidecar as detailed_delete_sidecar
+from .slam.detailed import rename_sidecar as detailed_rename_sidecar
 from .slam.meshprep import MeshPrep
 from .slam.metrics import write_tum
 from .slam.frames import baro_height_m
@@ -161,6 +165,15 @@ _VALID_IR_COLORMAPS = ("gray", "turbo")
 _VALID_VIEW_COLORMAPS = ("turbo", "gray")
 _VALID_SURFACE_MODES = ("grid", "spatial")
 _VALID_IDLE_LEVELS = ("soft", "hard")
+# View-page capture browser (§12). Sorting is applied CLIENT-side off the
+# already-broadcast `captures` array -- the server persists the choice, it does
+# not re-scan for it.
+_VALID_BROWSER_SORTS = ("recent", "name", "size", "duration")
+_VALID_BROWSER_VIEWS = ("grid", "list")
+# One inbound `delete_captures` can never nominate more files than the library
+# could plausibly hold; a WS peer is untrusted and this is the only destructive
+# handler in the app.
+_MAX_DELETE_BATCH = 200
 # Real-time view modes (owner ask, 2026-07-29). Which frame the live cloud is
 # shipped in -- see `view_rotation`. Real-time only; SLAM has its own camera.
 _VALID_VIEW_MODES = ("world", "fpv", "mirror")
@@ -371,6 +384,11 @@ class UiState:
     orbit_amplitude_deg: float = 45.0
     idle_enabled: bool = True
     idle_level: str = "soft"           # "soft" | "hard"
+    # View-page capture browser (§12). Presentation-only and persisted; see the
+    # `[viewer] web_browser_*` comment in config.py for why sort is client-side.
+    browser_sort: str = "recent"       # "recent" | "name" | "size" | "duration"
+    browser_view: str = "grid"         # "grid" | "list"
+    browser_thumbs: bool = True
     # Orientation decomposition (owner ask, 2026-07-28): which VIEW of the
     # orientation quaternion the Sensors panel reports, plus user-renamable
     # axis labels applied positionally (slot 1/2/3) whichever mode is active.
@@ -448,17 +466,10 @@ def _apply_colormap(vn: np.ndarray, colormap: str) -> np.ndarray:
     return gray(vn) if colormap == "gray" else turbo(vn)
 
 
-def display_rotation(quat) -> np.ndarray | None:
-    """Body -> Open3D-CV-world rotation used to gravity-align the live display,
-    or None when there is no orientation yet (ToF-only session).
-
-    This is the one composed mapping from `docs/coordinate-frames.md`
-    (`T_WORLD_TO_CV @ R @ T_CV_TO_BODY`) — the same matrix the desktop panel
-    applied to its orbit-mode cloud (`panel.py:1337`) and the same one shipped to
-    the client as the gizmo's `rot`. Never re-derive it locally."""
-    if quat is None:
-        return None
-    return T_WORLD_TO_CV @ quat_to_matrix(*quat) @ T_CV_TO_BODY
+# `display_rotation` now lives in `sensors.py` (beside T_WORLD_TO_CV /
+# T_CV_TO_BODY, the two matrices it composes) and is re-exported here: the
+# thumbnail renderer needs it and must not import `web`. See the import block
+# at the top of this file; the name is unchanged for every existing caller.
 
 
 # A horizontal (left-right) flip of the live cloud. The ToF/CV frame is
@@ -1516,6 +1527,8 @@ def _state_message(ui: UiState, controller=None, detailed=None) -> dict:
             "slam_trajectory": ui.slam_trajectory,
             "slam_walls": ui.slam_walls, "slam_follow": ui.slam_follow,
             "idle_enabled": ui.idle_enabled, "idle_level": ui.idle_level,
+            "browser_sort": ui.browser_sort, "browser_view": ui.browser_view,
+            "browser_thumbs": ui.browser_thumbs,
             "orientation_mode": ui.orientation_mode,
             "orientation_labels": list(ui.orientation_labels),
             "yaw_offset_deg": ui.yaw_offset_deg,
@@ -1610,6 +1623,11 @@ def ui_from_config(cfg: ViewerConfig) -> UiState:
     # default migrates; any other stored value is a real customization and is
     # left alone, and retyping "Roll/Pitch/Yaw" by hand re-migrates only on the
     # next boot, which is a fair price for not stranding the wrong labels.
+    if cfg.web_browser_sort in _VALID_BROWSER_SORTS:
+        ui.browser_sort = cfg.web_browser_sort
+    if cfg.web_browser_view in _VALID_BROWSER_VIEWS:
+        ui.browser_view = cfg.web_browser_view
+    ui.browser_thumbs = bool(cfg.web_browser_thumbs)
     stored_labels = _sanitize_axis_labels(cfg.orientation_labels.split(","))
     ui.orientation_labels = (DEFAULT_AXIS_LABELS if stored_labels == _LEGACY_AXIS_LABELS
                              else stored_labels)
@@ -1659,6 +1677,9 @@ def apply_ui_to_config(ui: UiState, cfg: ViewerConfig) -> None:
     cfg.slam_follow = bool(ui.slam_follow)
     cfg.sensor_idle_enabled = bool(ui.idle_enabled)
     cfg.sensor_idle_level = ui.idle_level
+    cfg.web_browser_sort = ui.browser_sort
+    cfg.web_browser_view = ui.browser_view
+    cfg.web_browser_thumbs = bool(ui.browser_thumbs)
     cfg.orientation_mode = ui.orientation_mode
     cfg.orientation_labels = ",".join(ui.orientation_labels)
     cfg.yaw_offset_deg = float(ui.yaw_offset_deg)
@@ -1776,8 +1797,110 @@ def _capture_info(path) -> dict:
     return dict(out)
 
 
-def list_captures(captures_dir) -> list[dict]:
-    """View-library entries including SLAM capability and real duration."""
+_SIDECAR_SUMMARY_CACHE: dict[tuple[str, int, int], dict] = {}
+
+
+def _sidecar_summary(capture, results_dir) -> dict | None:
+    """Reconstruction summary for the browser tile, or None if there is none.
+
+    ``{exists, current, frames, path_m, gap_m, area_m2}``. Distance travelled and
+    area covered only exist where a reconstruction does -- they are outputs of
+    the SLAM run, not of the capture -- so a capture with no sidecar renders an
+    em dash rather than a zero.
+
+    Cached on the MANIFEST's own `(path, size, mtime_ns)`, not the capture's: the
+    sidecar changes independently (a rebuild rewrites it while the capture is
+    byte-identical), so keying on the capture would serve a stale summary
+    forever. `area_m2` is absent from every manifest written before 2026-07-31
+    and reads as None -- deliberately not backfilled, since recomputing it means
+    re-running the reconstruction.
+    """
+    mpath = sidecar_paths(capture, results_dir)["manifest"]
+    try:
+        st = mpath.stat()
+    except OSError:
+        return None
+    key = (str(mpath), st.st_size, st.st_mtime_ns)
+    cached = _SIDECAR_SUMMARY_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
+    try:
+        status = sidecar_status(capture, results_dir)
+    except OSError:
+        return None
+    if not status.get("exists"):
+        return None
+    stats = (status.get("manifest") or {}).get("stats") or {}
+    out = {"exists": True, "current": bool(status.get("current")),
+           "frames": stats.get("frames"), "path_m": stats.get("path_m"),
+           "gap_m": stats.get("gap_m"), "area_m2": stats.get("area_m2")}
+    _SIDECAR_SUMMARY_CACHE[key] = out
+    return dict(out)
+
+
+def _forget_capture_caches(path) -> None:
+    """Drop every cache entry keyed on `path` (both the capture info scan and the
+    sidecar summary), after a rename or a delete.
+
+    Both caches are unbounded and keyed on `(path, size, mtime_ns)`, so without
+    this a long-lived server accumulates one dead entry per renamed/deleted file
+    forever -- and a rename back to an old name would serve the pre-rename scan.
+    """
+    p = str(Path(path))
+    stem = Path(path).stem
+    for key in [k for k in _CAPTURE_INFO_CACHE if k[0] == p]:
+        _CAPTURE_INFO_CACHE.pop(key, None)
+    for key in [k for k in _SIDECAR_SUMMARY_CACHE
+                if Path(k[0]).name == f"{stem}.slam.json"]:
+        _SIDECAR_SUMMARY_CACHE.pop(key, None)
+
+
+def _move_sidecars_and_thumbs(old_path, new_path, results_dir) -> None:
+    """Carry a renamed capture's derived artifacts with it.
+
+    The reconstruction sidecar MUST follow (and its manifest be patched) or
+    `sidecar_status` reports `stale` and the UI offers a pointless rebuild --
+    see `detailed.rename_sidecar`. The thumbnail follows too: its cache key is
+    `<stem>__<size>_<mtime_ns>`, and a POSIX rename leaves mtime untouched, so
+    only the stem changes. Best-effort; a failure here costs a regenerated tile.
+    """
+    try:
+        detailed_rename_sidecar(old_path, new_path, results_dir)
+    except Exception:                                # never break a rename
+        log.warning("sidecar rename failed for %s", Path(old_path).name, exc_info=True)
+    old_stem, new_stem = Path(old_path).stem, Path(new_path).stem
+    try:
+        for t in Path(thumbs_mod.THUMBS_DIR).glob(f"{old_stem}__*.png"):
+            os.replace(t, t.with_name(new_stem + t.name[len(old_stem):]))
+    except OSError:
+        pass
+    _forget_capture_caches(new_path)
+
+
+def _remove_thumbs(capture) -> None:
+    """Delete every cached tile for a capture (any size / any mtime generation).
+    An orphaned thumbnail is unreachable anyway -- `/thumb/<name>` 404s once the
+    capture is gone -- so it would just occupy disk forever."""
+    try:
+        for t in Path(thumbs_mod.THUMBS_DIR).glob(f"{Path(capture).stem}__*.png"):
+            t.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def list_captures(captures_dir, results_dir=RESULTS_DIR,
+                  thumbs_dir=thumbs_mod.THUMBS_DIR) -> list[dict]:
+    """View-library entries including SLAM capability and real duration.
+
+    `results_dir`/`thumbs_dir` are KEYWORD-defaulted so every existing caller and
+    test keeps working unchanged; the browser (§12) is the only thing that reads
+    the two fields they add:
+
+      * `has_thumb` -- whether a cached tile already exists on disk. The client
+        requests `/thumb/<name>` either way (the route generates on demand); this
+        only lets it know which tiles will be instant.
+      * `slam` -- `_sidecar_summary`, or None.
+    """
     d = Path(captures_dir)
     if not d.is_dir():
         return []
@@ -1791,7 +1914,13 @@ def list_captures(captures_dir) -> list[dict]:
             info = _capture_info(p)
         except (OSError, ProtocolError):
             info = {"frames": 0, "has_stream_9": False, "duration_s": 0.0, "timestamped": False}
-        items.append({"name": p.name, "bytes": st.st_size, "mtime": round(st.st_mtime, 1), **info})
+        try:
+            has_thumb = thumbs_mod.thumb_path(p, thumbs_dir).is_file()
+        except OSError:
+            has_thumb = False
+        items.append({"name": p.name, "bytes": st.st_size, "mtime": round(st.st_mtime, 1),
+                      **info, "has_thumb": has_thumb,
+                      "slam": _sidecar_summary(p, results_dir)})
     items.sort(key=lambda x: x["mtime"], reverse=True)
     return items
 
@@ -2246,8 +2375,8 @@ class SessionController:
 
     def __init__(self, *, live_source, live_label, stage, stats, slot, fault, bus,
                  client, recorder, pacer, sensor_state, metrics,
-                 captures_dir=CAPTURES_DIR, initial_replay_path=None,
-                 initial_speed_fps=0.0):
+                 captures_dir=CAPTURES_DIR, results_dir=RESULTS_DIR,
+                 initial_replay_path=None, initial_speed_fps=0.0):
         self._live_underlying = live_source
         self._live_proxy = _NoCloseSource(live_source) if live_source is not None else None
         self.live_label = live_label
@@ -2263,6 +2392,9 @@ class SessionController:
         self.sensor_state = sensor_state
         self.metrics = metrics
         self.captures_dir = str(captures_dir)
+        # Where reconstruction sidecars live, so rename/delete can carry them
+        # with the capture. Keyword-defaulted: every existing caller is unchanged.
+        self.results_dir = str(results_dir)
 
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -2510,8 +2642,88 @@ class SessionController:
         if not old_path.is_file() or new_path.exists():
             return None
         old_path.rename(new_path)
+        _forget_capture_caches(old_path)
+        _move_sidecars_and_thumbs(old_path, new_path, self.results_dir)
         self._last_recorded_name = new_base
         return new_base
+
+    # ---- rename / delete ANY capture (§12, the View-page file browser) ------
+
+    def rename_capture(self, old_name, new_name) -> str | None:
+        """Rename an arbitrary capture in the library. Returns the new basename,
+        or None if it was refused.
+
+        Distinct from `rename_last_recording`, which addresses "the take that
+        just stopped" and is what the post-recording modal uses. Refusals:
+
+          * the source doesn't resolve (traversal / separators / not a `.bin` /
+            missing) or the target is invalid or already taken;
+          * the source is the **active recording target** -- `Recorder` holds an
+            open write handle and `_last_recorded_name` would go stale. Renaming
+            it is the one case that is genuinely wrong rather than merely
+            awkward, so it is refused rather than silently no-op'd (the caller
+            publishes which file and why).
+
+        The currently-**replaying** capture is HANDLED, not refused: POSIX
+        `rename(2)` keeps `FileSource`'s already-open fd valid, so the replay
+        does not even hiccup -- we rename under the lock and then repoint
+        `self.replay_path` so the session label and any later seek are correct.
+        On Windows that `rename` raises `OSError` (the open handle blocks it);
+        we catch it and report the refusal rather than crashing the handler.
+        """
+        src = sanitize_capture_name(old_name, self.captures_dir)
+        if src is None:
+            return None
+        if self.recorder.active and self.recorder.path and \
+                Path(self.recorder.path).resolve() == src.resolve():
+            return None                              # active write handle
+        new_base = sanitize_new_capture_name(new_name, self.captures_dir)
+        if new_base is None:
+            return None
+        dst = Path(self.captures_dir) / new_base
+        with self._lock:
+            try:
+                os.replace(src, dst)
+            except OSError:
+                return None                          # Windows: open replay handle
+            if self.replay_path and Path(self.replay_path).resolve() == src.resolve():
+                self.replay_path = str(dst)
+            if self._last_recorded_name == src.name:
+                self._last_recorded_name = new_base
+        _forget_capture_caches(src)
+        _move_sidecars_and_thumbs(src, dst, self.results_dir)
+        self.bus.publish(f"renamed {src.name} -> {new_base}")
+        return new_base
+
+    def delete_capture(self, name, *, sidecars: bool = True) -> dict | None:
+        """Unlink one capture (and, by default, its sidecar + thumbnail).
+
+        Returns ``{name, bytes, sidecars: [...]}`` or None when the name does not
+        resolve. **Refusing** the actively-recording or currently-replaying file
+        is the CALLER's job (`_handle_inbound`), because the fix for a replaying
+        file is to switch the source away first -- which needs the event loop.
+        """
+        src = sanitize_capture_name(name, self.captures_dir)
+        if src is None:
+            return None
+        try:
+            size = src.stat().st_size
+        except OSError:
+            size = 0
+        removed: list[str] = []
+        freed = 0
+        if sidecars:
+            removed, freed = detailed_delete_sidecar(src, self.results_dir)
+            _remove_thumbs(src)
+        try:
+            src.unlink()
+        except OSError:
+            return None
+        _forget_capture_caches(src)
+        if self._last_recorded_name == src.name:
+            self._last_recorded_name = None
+        self.bus.publish(f"deleted {src.name}")
+        return {"name": src.name, "bytes": size + freed, "sidecars": removed}
 
     def close(self) -> None:
         self._stop_reader()
@@ -2529,7 +2741,7 @@ class SessionController:
 
     def session_message(self, position, now=None) -> dict:
         """`now` is accepted for callers' convenience and DELIBERATELY unused for
-        the recording clock -- see BUG-048. Every caller passed `time.time()`,
+        the recording clock -- see BUG-050. Every caller passed `time.time()`,
         but `_record_started` is a `time.monotonic()` stamp, so subtracting them
         yielded the Unix epoch (a 90 s take reported elapsed_s = 1784067285.5).
         The two clocks share no origin; read the recording elapsed off the same
@@ -2758,6 +2970,93 @@ async def api_restart() -> JSONResponse:
                          "argv": argv})
 
 
+# --- capture thumbnails: GET /thumb/{name} (§12) ----------------------------
+#
+# Delivered over HTTP, deliberately NOT as a binary `/ws` tag. An `<img
+# loading="lazy">` gives viewport-paced fetching, browser disk caching,
+# per-image cancellation and parallelism for free; a TAG_THUMB would need
+# request/response correlation bolted onto a channel that is strictly one-way
+# server push, and ~34 x ~25 KB PNGs would interleave with the 30 Hz POINT_CLOUD
+# and add head-of-line delay to the live render. `/results` is the precedent for
+# file-shaped payloads over HTTP.
+#
+# `sanitize_capture_name` is the WHOLE security surface, same as `load_capture`:
+# basename-only, `.bin`-suffixed, must exist under the captures dir.
+
+_THUMB_SEM = asyncio.Semaphore(2)          # concurrent generations, see below
+_THUMB_INFLIGHT: dict[str, asyncio.Future] = {}
+
+
+def _captures_dir_of(state) -> str:
+    ctrl = getattr(state, "controller", None)
+    return getattr(ctrl, "captures_dir", None) or CAPTURES_DIR
+
+
+async def _ensure_thumb(path: Path) -> str:
+    """Generate `path`'s thumbnail off the event loop, coalescing duplicates.
+
+    A grid of lazy `<img>` tags fires many requests at once and a browser will
+    happily re-request the same tile. Two guards:
+
+      * a `Semaphore(2)` so thumbnail generation cannot monopolise the shared
+        default executor -- `load_capture`, `seek` and `_broadcast_captures` all
+        run their filesystem work in `to_thread` too, and a 34-tile grid would
+        otherwise starve them;
+      * an in-flight future map so N concurrent requests for the SAME capture do
+        the work once.
+    """
+    key = str(path)
+    fut = _THUMB_INFLIGHT.get(key)
+    if fut is not None:
+        return await asyncio.shield(fut)
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    _THUMB_INFLIGHT[key] = fut
+    try:
+        async with _THUMB_SEM:
+            kind = await asyncio.to_thread(thumbs_mod.make_thumbnail, path,
+                                           thumbs_mod.THUMBS_DIR)
+        fut.set_result(kind)
+        return kind
+    except Exception as exc:                          # never propagate: see below
+        fut.set_result("")
+        log.warning("thumbnail generation failed for %s: %s", path.name, exc)
+        return ""
+    finally:
+        _THUMB_INFLIGHT.pop(key, None)
+
+
+@app.get("/thumb/{name}", include_in_schema=False)
+async def get_thumb(name: str) -> Response:
+    """A capture's thumbnail PNG, generated on demand.
+
+    NEVER 500s (the `/api/*` precedent): an unknown name, a truncated capture or
+    a render failure are all 404 + `no-store`, so the browser shows the tile's
+    placeholder and retries next time rather than caching a failure.
+
+    A successful response is `immutable` because the capture's identity is baked
+    into both the cache filename (`<stem>__<size>_<mtime_ns>.png`) and the
+    client's `?v=` -- rewriting the capture changes the URL.
+    """
+    miss = Response(status_code=404, headers={"Cache-Control": "no-store"})
+    try:
+        path = sanitize_capture_name(name, _captures_dir_of(app.state))
+        if path is None:
+            return miss
+        dest = thumbs_mod.thumb_path(path, thumbs_mod.THUMBS_DIR)
+        if not dest.is_file():
+            if await _ensure_thumb(path) == "":
+                return miss
+        data = await asyncio.to_thread(dest.read_bytes)
+    except Exception as exc:
+        log.warning("thumb route failed for %r: %s", name, exc)
+        return miss
+    if not data:
+        return miss
+    return Response(content=data, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
 # --- sensor auto-idle (SET_STANDBY, laser-wear reduction) -------------------
 #
 # The device streams continuously once a host attaches, firing the VCSEL every
@@ -2896,6 +3195,118 @@ async def _broadcast_captures(state, ctrl) -> None:
     broadcaster, and a just-stopped recording is guaranteed cache-cold."""
     msg = await asyncio.to_thread(build_captures_message, ctrl.captures_dir)
     await _broadcast_text(state.clients, json.dumps(msg))
+
+
+async def _handle_delete_captures(state, ctrl, msg: dict) -> dict:
+    """`delete_captures {"names": [...], "sidecars": true}` -- **the only
+    destructive action in the app**.
+
+    Returns (and broadcasts) what was ACTUALLY deleted, not what was requested.
+    A batch delete that silently drops one file is worse than one that refuses
+    it loudly, so every rejection carries a reason.
+
+    Order matters, and this is why:
+
+      1. `names` must be a list; the batch is capped (a WS peer is untrusted).
+      2. Each name resolves through `sanitize_capture_name` -- the same whole
+         security surface as `load_capture`. An unresolvable entry (traversal,
+         separator, non-`.bin`, already gone) is logged and **dropped**, never
+         fatal to the rest of the batch.
+      3. The **currently-replaying** capture is switched away from FIRST.
+         Unlinking under a running replay reader gives a broken stream, not a
+         clean state: on POSIX the reader's fd keeps the inode alive and it
+         plays a file that no longer exists, and any later seek re-opens by
+         path and fails. If there is NO live source to switch to (a
+         `--replay`-launched process), that one file is refused -- there is
+         nowhere safe to go.
+      4. The **actively-recording** file is refused outright: the `Recorder`
+         holds an open write handle, so deleting it deletes a file still being
+         appended to.
+      5. Only then is anything unlinked, off the event loop.
+
+    Sidecars and thumbnails go with the capture by default (`sidecars: false`
+    keeps them): they are derived artifacts of a file that no longer exists. An
+    orphaned `.ply` would keep appearing in the Saved-maps list pointing at
+    nothing, and an orphaned thumb is unreachable anyway (`/thumb/<name>` 404s).
+    """
+    ui: UiState = state.ui_state
+    names = msg.get("names")
+    if not isinstance(names, list):
+        log.warning("delete_captures: `names` must be a list, got %r", type(names).__name__)
+        state.bus.publish("delete -> malformed request")
+        return {"deleted": [], "refused": [], "bytes": 0}
+    if len(names) > _MAX_DELETE_BATCH:
+        log.warning("delete_captures: batch of %d exceeds cap %d", len(names), _MAX_DELETE_BATCH)
+        state.bus.publish(f"delete -> refused, batch larger than {_MAX_DELETE_BATCH}")
+        return {"deleted": [], "refused": [], "bytes": 0}
+    want_sidecars = msg.get("sidecars", True)
+    if not isinstance(want_sidecars, bool):
+        want_sidecars = True
+
+    refused: list[dict] = []
+    resolved: list[Path] = []
+    for n in names:
+        p = sanitize_capture_name(n, ctrl.captures_dir)
+        if p is None:
+            log.warning("delete_captures: unknown/invalid name %r", n)
+            refused.append({"name": str(n)[:120], "reason": "not found"})
+            continue
+        if p not in resolved:
+            resolved.append(p)
+
+    rec_path = ctrl.recorder.path if ctrl.recorder.active else None
+    rec_resolved = Path(rec_path).resolve() if rec_path else None
+    replay_resolved = Path(ctrl.replay_path).resolve() if ctrl.replay_path else None
+
+    deletable: list[Path] = []
+    switch_away = False
+    for p in resolved:
+        rp = p.resolve()
+        if rec_resolved is not None and rp == rec_resolved:
+            refused.append({"name": p.name, "reason": "currently recording"})
+            continue
+        if replay_resolved is not None and rp == replay_resolved:
+            if not ctrl.has_live:
+                refused.append({"name": p.name, "reason": "currently playing and there is no live source to switch to"})
+                continue
+            switch_away = True
+        deletable.append(p)
+
+    if switch_away:
+        await _stop_slam_auto_record(state, ctrl)
+        await asyncio.to_thread(ctrl.switch_to_live)
+        await _reset_slam(state)
+        ui.source, ui.selected_capture = "live", None
+        if ui.display == "detailed":
+            ui.display = "point_cloud"
+        ui.mode = "realtime" if ui.display == "point_cloud" else "slam"
+        state.bus.publish("switched to live: the capture being played was deleted")
+
+    def _unlink_all() -> list[dict]:
+        out = []
+        for p in deletable:
+            res = ctrl.delete_capture(p.name, sidecars=want_sidecars)
+            if res is not None:
+                out.append(res)
+        return out
+
+    deleted = await asyncio.to_thread(_unlink_all)
+    done = {d["name"] for d in deleted}
+    for p in deletable:
+        if p.name not in done:
+            refused.append({"name": p.name, "reason": "delete failed"})
+    total = sum(d["bytes"] for d in deleted)
+    result = {"type": "deleted", "deleted": deleted, "refused": refused, "bytes": total}
+    if deleted:
+        state.bus.publish(f"deleted {len(deleted)} capture(s), {total} bytes freed")
+
+    await _broadcast_text(state.clients, json.dumps(result))
+    await _broadcast_captures(state, ctrl)
+    saved = await asyncio.to_thread(build_saved_message, RESULTS_DIR)
+    await _broadcast_text(state.clients, json.dumps(saved))
+    await _broadcast_session(state)
+    await _broadcast_state(state)
+    return result
 
 
 async def _reset_slam(state) -> None:
@@ -3475,11 +3886,51 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         await _broadcast_captures(state, ctrl)
 
     elif mtype == "rename_capture" and ctrl is not None:
-        new_name = await asyncio.to_thread(ctrl.rename_last_recording, msg.get("name"))
+        # `from` is OPTIONAL and additive (§12). Absent => byte-identical to the
+        # pre-2026-07-31 behaviour, which the post-recording modal and the
+        # `rig_*` MCP tools depend on: "rename the take that just stopped".
+        # Present => rename that specific capture, from the View-page browser.
+        src = msg.get("from")
+        if src is None:
+            new_name = await asyncio.to_thread(ctrl.rename_last_recording, msg.get("name"))
+        elif not isinstance(src, str):
+            log.warning("rename_capture: non-string `from` %r", src)
+            new_name = None
+        else:
+            new_name = await asyncio.to_thread(ctrl.rename_capture, src, msg.get("name"))
         if new_name is None:
             state.bus.publish("rename -> invalid name or already exists")
         await _broadcast_session(state)
         await _broadcast_captures(state, ctrl)
+        await _broadcast_state(state)      # replay_path/label may have moved
+
+    elif mtype == "delete_captures" and ctrl is not None:
+        await _handle_delete_captures(state, ctrl, msg)
+
+    elif mtype == "set_browser":
+        # No PARTIAL mutation on a bad enum (the set_idle / set_orientation
+        # shape): validate everything first, then apply, so a malformed message
+        # leaves the persisted prefs exactly as they were.
+        sort = msg.get("sort")
+        view = msg.get("view")
+        thumbs = msg.get("thumbs")
+        if sort is not None and sort not in _VALID_BROWSER_SORTS:
+            log.warning("set_browser: invalid sort %r", sort)
+            return
+        if view is not None and view not in _VALID_BROWSER_VIEWS:
+            log.warning("set_browser: invalid view %r", view)
+            return
+        if thumbs is not None and not isinstance(thumbs, bool):
+            log.warning("set_browser: non-bool thumbs %r", thumbs)
+            return
+        if sort is not None:
+            ui.browser_sort = sort
+        if view is not None:
+            ui.browser_view = view
+        if thumbs is not None:
+            ui.browser_thumbs = thumbs
+        _persist_ui(state)
+        await _broadcast_state(state)
 
     elif mtype == "load_capture" and ctrl is not None:
         path = sanitize_capture_name(msg.get("name"), ctrl.captures_dir)
@@ -3670,9 +4121,19 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             path = sanitize_capture_name(ui.selected_capture, ctrl.captures_dir)
             if path is not None:
                 await asyncio.to_thread(ctrl.switch_to_replay, path)
-                ui.source = "view"
+            ui.source = "view"
         else:
-            state.bus.publish("View -> select a capture first")
+            # View with nothing selected is a legitimate state: it is the
+            # capture BROWSER (§12). Before the browser existed this returned
+            # early with "select a capture first" -- which became a dead end the
+            # moment the library moved onto the View page, since the only way to
+            # select a capture is a card that only renders when source == view.
+            # So the page opens; the reader is deliberately left alone (still
+            # live, `is_replay` false, so the Playback card stays hidden) until
+            # a `load_capture` from the browser actually swaps it.
+            ui.source = "view"
+            state.bus.publish("View -> pick a capture from the browser")
+            await _broadcast_state(state)
             return
         await _reset_slam(state)
         ui.display, ui.mode = "point_cloud", "realtime"

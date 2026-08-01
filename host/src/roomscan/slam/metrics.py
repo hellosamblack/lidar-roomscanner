@@ -17,6 +17,41 @@ def trajectory_stats(poses: list[np.ndarray]) -> dict:
             "max_step_m": float(steps.max())}
 
 
+def footprint_area_m2(points, cell_m: float = 0.1, up_axis: int = 1) -> float:
+    """Floor area covered by a reconstruction: the up axis is dropped, the other
+    two coordinates are binned onto a `cell_m` grid, and the occupied cells are
+    counted x cell area.
+
+    **A floor-projected footprint, not `mesh.get_surface_area()`.** "Area
+    covered" is the floor swept. `get_surface_area()` sums walls, ceiling, and
+    both faces of every noisy sliver and TSDF speckle -- so a 2 m corridor with
+    tall walls would outscore a large open room, and the number would grow with
+    mesh density rather than with coverage.
+
+    `up_axis` defaults to 1 because the Open3D CV world is **Y-down**: axis 1 is
+    the vertical one (`roomscan.slam.mapper.world_up()` is -Y), so dropping it
+    leaves the X/Z ground plane.
+
+    Quantized deliberately: a 0.1 m cell means a single stray vertex 5 m off the
+    map adds 0.01 m2, not a convex hull's worth. Returns 0.0 for an empty or
+    all-non-finite input rather than raising -- it feeds a UI tile.
+    """
+    p = np.asarray(points, dtype=np.float64)
+    if p.ndim != 2 or p.shape[0] == 0 or p.shape[1] < 3:
+        return 0.0
+    if not (0 <= up_axis < 3):
+        raise ValueError(f"up_axis must be 0, 1 or 2; got {up_axis}")
+    if cell_m <= 0:
+        raise ValueError(f"cell_m must be > 0; got {cell_m}")
+    ground = p[:, [a for a in range(3) if a != up_axis]]
+    ground = ground[np.isfinite(ground).all(axis=1)]
+    if ground.shape[0] == 0:
+        return 0.0
+    cells = np.floor(ground / cell_m).astype(np.int64)
+    n_cells = len(np.unique(cells, axis=0))
+    return float(n_cells * cell_m * cell_m)
+
+
 def tracking_stats(lost_flags: list[bool]) -> dict:
     """Summarize tracking loss, separating "a few dropped frames" from "the run
     died and never recovered".

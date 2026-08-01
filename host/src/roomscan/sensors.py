@@ -480,6 +480,25 @@ T_WORLD_TO_CV = np.array([
     [ 1.0,  0.0,  0.0]
 ])
 
+
+def display_rotation(quat) -> np.ndarray | None:
+    """Body -> Open3D-CV-world rotation used to gravity-align the live display,
+    or None when there is no orientation yet (ToF-only session).
+
+    This is the one composed mapping from `docs/coordinate-frames.md`
+    (`T_WORLD_TO_CV @ R @ T_CV_TO_BODY`) — the same matrix the desktop panel
+    applied to its orbit-mode cloud (`panel.py:1337`) and the same one shipped to
+    the client as the gizmo's `rot`. Never re-derive it locally.
+
+    Lives here rather than in `web.py` (where it was until 2026-07-31) so the
+    thumbnail renderer can use it: `thumbs.py` must not import `web`, which
+    imports the whole server, the SLAM stack and this module — a cycle. `web.py`
+    re-exports it, so every existing caller is unchanged."""
+    if quat is None:
+        return None
+    return T_WORLD_TO_CV @ quat_to_matrix(*quat) @ T_CV_TO_BODY
+
+
 def gizmo_pose(quat: tuple[float, float, float, float], scale: float,
                anchor: tuple[float, float, float]) -> np.ndarray:
     """4x4 pose for the orientation gizmo: rotation from quaternion, uniform scale, placed

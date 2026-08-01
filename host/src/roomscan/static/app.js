@@ -15,6 +15,7 @@ import { createControls } from './controls.js';
 import { createSensors } from './sensors.js';
 import { createMagcal } from './magcal.js';
 import { createCapture } from './capture.js';
+import { createBrowser } from './browser.js';
 import { createSlam } from './slam.js';
 import { createAdmin } from './admin.js';
 
@@ -29,7 +30,10 @@ createHud(hub);
 createLog(hub);
 createControls(hub);
 createSensors(hub);
-createCapture(hub);
+// browser.js takes capture.js's handle so the two share ONE rename dialog
+// (§12) instead of growing a second copy that drifts from it.
+const captureApi = createCapture(hub);
+createBrowser(hub, captureApi);
 createIr(hub);
 // Top-bar maintenance actions. Talks to /api/* over fetch, not the hub — it
 // takes `hub` only to watch 'conn' so the Restart button can clear its busy

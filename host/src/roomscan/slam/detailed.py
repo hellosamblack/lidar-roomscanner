@@ -66,6 +66,64 @@ def build_manifest(capture: str | Path, preset: DetailedSlamPreset, *, stats: di
             "stats": stats}
 
 
+def rename_sidecar(old_capture: str | Path, new_capture: str | Path,
+                   results_dir: str | Path) -> list[str]:
+    """Move a capture's reconstruction sidecar to follow a renamed capture.
+
+    Returns the basenames actually moved. Best-effort and never raises: the
+    capture rename has already happened by the time this is called, and a
+    failure here must degrade to "the sidecar looks stale", not to a half-renamed
+    library.
+
+    **Patching `manifest["capture"]["name"]` is the load-bearing half.**
+    `sidecar_status` compares the manifest's `capture` identity against
+    `capture_identity(capture)`, whose `name` is the basename -- so a moved-but-
+    unpatched manifest reports `stale` forever and the UI offers a rebuild that
+    would recompute a byte-identical result.
+    """
+    old_paths = sidecar_paths(old_capture, results_dir)
+    new_paths = sidecar_paths(new_capture, results_dir)
+    moved: list[str] = []
+    for key in ("ply", "tum", "manifest"):
+        src, dst = old_paths[key], new_paths[key]
+        if src == dst or not src.is_file():
+            continue
+        try:
+            os.replace(src, dst)
+            moved.append(dst.name)
+        except OSError:
+            continue
+    mpath = new_paths["manifest"]
+    if mpath.is_file():
+        try:
+            data = json.loads(mpath.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("capture"), dict):
+                data["capture"]["name"] = Path(new_capture).name
+                write_manifest_atomic(mpath, data)
+        except (OSError, json.JSONDecodeError):
+            pass
+    return moved
+
+
+def delete_sidecar(capture: str | Path, results_dir: str | Path) -> tuple[list[str], int]:
+    """Unlink a capture's sidecar. Returns (basenames removed, bytes freed).
+
+    Derived artifacts of a file that no longer exists: an orphaned `.ply` keeps
+    appearing in the Saved-maps list pointing at nothing. Never raises.
+    """
+    removed: list[str] = []
+    freed = 0
+    for p in sidecar_paths(capture, results_dir).values():
+        try:
+            if p.is_file():
+                freed += p.stat().st_size
+                p.unlink()
+                removed.append(p.name)
+        except OSError:
+            continue
+    return removed, freed
+
+
 def write_manifest_atomic(path: str | Path, manifest: dict) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

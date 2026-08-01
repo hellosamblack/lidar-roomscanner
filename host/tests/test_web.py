@@ -2078,7 +2078,7 @@ def test_controller_session_message_live_vs_replay(tmp_path):
 
 
 def test_recording_elapsed_is_measured_on_the_clock_that_started_it(tmp_path, monkeypatch):
-    """BUG-048: `elapsed_s` was `time.time() - time.monotonic()`, i.e. the epoch.
+    """BUG-050: `elapsed_s` was `time.time() - time.monotonic()`, i.e. the epoch.
 
     Every caller passed `time.time()` as `now`, but `_record_started` is a
     `time.monotonic()` stamp. The two clocks share no origin, so a 90-second take
@@ -3119,11 +3119,14 @@ def test_rail_cards_data_attributes_and_default_collapsed_states():
         "sensors": True,     # Collapsed
         "slam-hud": True,    # Collapsed
         "resources": False,  # Expanded (only rendered at all in Live SLAM)
+        "browser": False,    # Expanded (§12: the View page's file browser)
+        "preview": False,    # Expanded (§12: rendered only with a tile selected)
         "ir-view": True,     # Collapsed
         "diag": True,        # Collapsed
         "device": True,      # Collapsed
         "view": False,       # Expanded
-        "capture": True,     # Collapsed
+        "capture": False,    # Expanded (§11: one Record button, Live page only)
+        "transport": False,  # Expanded (§11: Playback, rendered only in replay)
         "slam-ctrl": True,   # Collapsed
         "log": True,         # Collapsed
     }
@@ -3810,3 +3813,588 @@ def test_device_vram_name_is_the_fallback_when_pynvml_is_absent():
     assert snap is not None
     assert snap.gpu_source == "n/a"
     assert snap.gpu_name == "TestGPU 9000"
+
+
+# =============================================================================
+# §12 -- the View page's capture file browser (owner ask, 2026-07-31)
+# =============================================================================
+#
+# Server half: `list_captures`'s new fields, `_sidecar_summary`, the `/thumb`
+# route, `SessionController.rename_capture` / `delete_capture`, and the three
+# inbound handlers (`rename_capture` with `from`, `delete_captures`,
+# `set_browser`). Every new inbound type gets a happy path, a reject/no-op, and
+# an adversarial/malformed-input case.
+
+def _cap_with_quat(path: Path, n_frames: int = 12, w: int = 8, h: int = 6) -> None:
+    """DEPTH_ZF32 + IMU_QUAT capture -- enough for `has_stream_9` and a thumbnail."""
+    out = bytearray()
+    for i in range(n_frames):
+        q = struct.pack("<4f", 1.0, 0.0, 0.0, 0.0)
+        out += pack_frame(FrameHeader(FrameType.DATA, StreamId.IMU_QUAT, 0, i,
+                                      i * 35000, 0, 0, len(q)), q)
+        depth = np.full((h, w), 1000.0 + 5.0 * i, dtype=np.float32)
+        payload = depth.astype("<f4").tobytes()
+        out += pack_frame(FrameHeader(FrameType.DATA, StreamId.DEPTH_ZF32, 0, i + 1,
+                                      i * 35000, w, h, len(payload)), payload)
+    path.write_bytes(bytes(out))
+
+
+def _write_sidecar(results_dir: Path, capture: Path, *, stats: dict) -> None:
+    from roomscan.slam.detailed import build_manifest, sidecar_paths
+    from roomscan.slam.config import DetailedSlamPreset
+    results_dir.mkdir(parents=True, exist_ok=True)
+    paths = sidecar_paths(capture, results_dir)
+    paths["ply"].write_bytes(b"ply\n")
+    paths["tum"].write_text("0 0 0 0 0 0 0 1\n")
+    manifest = build_manifest(capture, DetailedSlamPreset(), stats=stats,
+                              estimate={"frames": 1, "seconds": 1.0})
+    paths["manifest"].write_text(json.dumps(manifest), encoding="utf-8")
+
+
+# --- list_captures: additive fields, existing keys untouched ----------------
+
+def test_list_captures_keeps_its_existing_keys_and_gains_the_browser_ones(tmp_path):
+    """`list_captures(dir)` must stay call-compatible: `results_dir`/`thumbs_dir`
+    are keyword-defaulted precisely so every existing caller and test is
+    untouched by §12."""
+    cap = tmp_path / "a.bin"
+    _cap_with_quat(cap)
+    (items,) = web.list_captures(tmp_path, results_dir=tmp_path / "results",
+                                 thumbs_dir=tmp_path / "thumbs")
+    for key in ("name", "bytes", "mtime", "frames", "has_stream_9", "duration_s", "timestamped"):
+        assert key in items, key
+    assert items["has_thumb"] is False
+    assert items["slam"] is None
+
+
+def test_list_captures_reports_the_reconstruction_where_one_exists(tmp_path):
+    cap = tmp_path / "a.bin"
+    _cap_with_quat(cap)
+    results = tmp_path / "results"
+    _write_sidecar(results, cap, stats={"frames": 900, "path_m": 23.9, "gap_m": 0.74,
+                                        "area_m2": 31.2})
+    (item,) = web.list_captures(tmp_path, results_dir=results, thumbs_dir=tmp_path / "t")
+    assert item["slam"] == {"exists": True, "current": True, "frames": 900,
+                            "path_m": 23.9, "gap_m": 0.74, "area_m2": 31.2}
+
+
+def test_sidecar_summary_reads_a_pre_area_manifest_as_none(tmp_path):
+    """`area_m2` is additive: every manifest written before 2026-07-31 lacks it
+    and must read as None (the tile renders an em dash), NOT as 0 -- a
+    reconstruction that covered nothing and one that was never measured are
+    different facts."""
+    cap = tmp_path / "a.bin"
+    _cap_with_quat(cap)
+    results = tmp_path / "results"
+    _write_sidecar(results, cap, stats={"frames": 10, "path_m": 1.0, "gap_m": 0.1})
+    summary = web._sidecar_summary(cap, results)
+    assert summary["area_m2"] is None
+    assert summary["path_m"] == 1.0
+
+
+def test_sidecar_summary_cache_is_keyed_on_the_manifest_not_the_capture(tmp_path):
+    """The sidecar changes independently of the capture (a rebuild rewrites it
+    while the capture is byte-identical), so a capture-keyed cache would serve a
+    stale summary forever."""
+    cap = tmp_path / "a.bin"
+    _cap_with_quat(cap)
+    results = tmp_path / "results"
+    _write_sidecar(results, cap, stats={"frames": 1, "path_m": 1.0, "gap_m": 0.0, "area_m2": 1.0})
+    assert web._sidecar_summary(cap, results)["area_m2"] == 1.0
+    _write_sidecar(results, cap, stats={"frames": 2, "path_m": 2.0, "gap_m": 0.0, "area_m2": 9.0})
+    assert web._sidecar_summary(cap, results)["area_m2"] == 9.0
+
+
+def test_forget_capture_caches_drops_both_caches(tmp_path):
+    """Both caches are unbounded and keyed on (path, size, mtime_ns): without
+    this a long-lived server orphans one dead entry per rename/delete forever."""
+    cap = tmp_path / "a.bin"
+    _cap_with_quat(cap)
+    results = tmp_path / "results"
+    _write_sidecar(results, cap, stats={"frames": 1, "path_m": 1.0, "gap_m": 0.0})
+    web._capture_info(cap)
+    web._sidecar_summary(cap, results)
+    assert any(k[0] == str(cap) for k in web._CAPTURE_INFO_CACHE)
+    assert any(Path(k[0]).name == "a.slam.json" for k in web._SIDECAR_SUMMARY_CACHE)
+    web._forget_capture_caches(cap)
+    assert not any(k[0] == str(cap) for k in web._CAPTURE_INFO_CACHE)
+    assert not any(Path(k[0]).name == "a.slam.json" for k in web._SIDECAR_SUMMARY_CACHE)
+
+
+# --- GET /thumb/{name} ------------------------------------------------------
+
+def _thumb_client(tmp_path, monkeypatch):
+    import types
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(web.thumbs_mod, "THUMBS_DIR", str(tmp_path / "thumbs"))
+    monkeypatch.setattr(web.app.state, "controller",
+                        types.SimpleNamespace(captures_dir=str(tmp_path)), raising=False)
+    return TestClient(web.app)
+
+
+def test_thumb_route_generates_and_serves_a_png(tmp_path, monkeypatch):
+    cap = tmp_path / "a.bin"
+    _cap_with_quat(cap, n_frames=20)
+    client = _thumb_client(tmp_path, monkeypatch)
+    r = client.get("/thumb/a.bin")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+    # Safe to mark immutable: the capture's identity is in the cache filename
+    # AND the client's ?v=, so a rewritten capture is a different URL.
+    assert "immutable" in r.headers["cache-control"]
+
+
+@pytest.mark.parametrize("name", ["../../etc/passwd", "..%2Fsecret.bin", "sub/dir.bin",
+                                  "nope.bin", "a.txt", "", "a.bin.png"])
+def test_thumb_route_never_500s_on_a_hostile_or_unknown_name(tmp_path, monkeypatch, name):
+    """`sanitize_capture_name` is the WHOLE security surface, same as
+    `load_capture`. Everything else is 404 + no-store -- never a 500, never a
+    cached failure."""
+    _cap_with_quat(tmp_path / "a.bin")
+    client = _thumb_client(tmp_path, monkeypatch)
+    r = client.get("/thumb/" + name)
+    assert r.status_code == 404
+    if r.headers.get("cache-control"):
+        assert r.headers["cache-control"] == "no-store"
+
+
+def test_thumb_route_404s_a_capture_it_cannot_render(tmp_path, monkeypatch):
+    (tmp_path / "junk.bin").write_bytes(b"not a capture")
+    client = _thumb_client(tmp_path, monkeypatch)
+    r = client.get("/thumb/junk.bin")
+    assert r.status_code == 404
+    assert r.headers["cache-control"] == "no-store"
+
+
+# --- SessionController.rename_capture ---------------------------------------
+
+def test_rename_capture_moves_the_sidecar_and_patches_the_manifest(tmp_path):
+    """The manifest patch is the load-bearing half: `sidecar_status` compares
+    `manifest["capture"]` against `capture_identity(capture)`, whose `name` is
+    the basename -- so a moved-but-unpatched manifest reports `stale` forever
+    and the UI offers a rebuild that would recompute a byte-identical result."""
+    caps, results, thumbs_dir = tmp_path / "caps", tmp_path / "results", tmp_path / "thumbs"
+    caps.mkdir()
+    cap = caps / "old.bin"
+    _cap_with_quat(cap)
+    _write_sidecar(results, cap, stats={"frames": 5, "path_m": 3.0, "gap_m": 0.1, "area_m2": 7.0})
+    thumbs_dir.mkdir()
+    (thumbs_dir / f"old__256_{cap.stat().st_mtime_ns}.png").write_bytes(b"png")
+
+    import roomscan.thumbs as thumbs_mod
+    old_dir = thumbs_mod.THUMBS_DIR
+    thumbs_mod.THUMBS_DIR = str(thumbs_dir)
+    try:
+        ctrl, _ = _make_controller(tmp_path, captures_dir=caps)
+        ctrl.results_dir = str(results)
+        try:
+            assert ctrl.rename_capture("old.bin", "new name") == "new name.bin"
+        finally:
+            ctrl.close()
+    finally:
+        thumbs_mod.THUMBS_DIR = old_dir
+
+    assert not (caps / "old.bin").exists() and (caps / "new name.bin").is_file()
+    assert (results / "new name.ply").is_file() and (results / "new name.tum").is_file()
+    manifest = json.loads((results / "new name.slam.json").read_text())
+    assert manifest["capture"]["name"] == "new name.bin"
+    from roomscan.slam.detailed import sidecar_status
+    assert sidecar_status(caps / "new name.bin", results)["current"] is True
+    assert list(thumbs_dir.glob("new name__*.png"))
+
+
+@pytest.mark.parametrize("bad", ["../escape.bin", "sub/dir.bin", "missing.bin",
+                                 "notabin.txt", "", None, 17, ["a.bin"]])
+def test_rename_capture_rejects_a_hostile_source(tmp_path, bad):
+    caps = tmp_path / "caps"
+    caps.mkdir()
+    _cap_with_quat(caps / "real.bin")
+    ctrl, _ = _make_controller(tmp_path, captures_dir=caps)
+    try:
+        assert ctrl.rename_capture(bad, "whatever") is None
+        assert (caps / "real.bin").is_file()      # nothing collateral happened
+    finally:
+        ctrl.close()
+
+
+@pytest.mark.parametrize("bad_target", ["../escape", "sub/dir", "", "   ", None, 5])
+def test_rename_capture_rejects_a_hostile_target(tmp_path, bad_target):
+    caps = tmp_path / "caps"
+    caps.mkdir()
+    _cap_with_quat(caps / "real.bin")
+    ctrl, _ = _make_controller(tmp_path, captures_dir=caps)
+    try:
+        assert ctrl.rename_capture("real.bin", bad_target) is None
+        assert (caps / "real.bin").is_file()
+    finally:
+        ctrl.close()
+
+
+def test_rename_capture_refuses_the_file_being_recorded(tmp_path):
+    """The `Recorder` holds an open write handle and `_last_recorded_name` would
+    go stale -- this is genuinely wrong rather than merely awkward, so it is
+    refused rather than silently no-op'd."""
+    caps = tmp_path / "caps"
+    caps.mkdir()
+
+    class FakeLive:
+        def read(self): return b""
+        def write(self, d): pass
+        def close(self): pass
+
+    ctrl, _ = _make_controller(tmp_path, live_source=FakeLive(), captures_dir=caps)
+    try:
+        ctrl.start_record()
+        active = Path(ctrl.recorder.path).name
+        assert ctrl.rename_capture(active, "sneaky") is None
+        assert (caps / active).is_file()
+        ctrl.stop_record()
+    finally:
+        ctrl.close()
+
+
+def test_rename_capture_handles_the_capture_being_replayed(tmp_path):
+    """POSIX `rename(2)` keeps `FileSource`'s open fd valid, so the replay does
+    not even hiccup -- but `replay_path` must follow, or the session label and
+    any later seek address a file that is no longer there."""
+    caps = tmp_path / "caps"
+    caps.mkdir()
+    cap = caps / "playing.bin"
+    _make_depth_capture_flat(cap, n_frames=5, base=1000.0)
+    ctrl, _ = _make_controller(tmp_path, captures_dir=caps, replay_path=str(cap))
+    try:
+        assert ctrl.rename_capture("playing.bin", "renamed") == "renamed.bin"
+        assert Path(ctrl.replay_path).name == "renamed.bin"
+        assert ctrl.session_message(None, time.time())["playback"]["capture_name"] == "renamed.bin"
+    finally:
+        ctrl.close()
+
+
+# --- inbound: rename_capture with the optional `from` -----------------------
+
+def test_inbound_rename_capture_without_from_is_unchanged(tmp_path):
+    """Absent `from` MUST be byte-identical to the pre-§12 behaviour: the
+    post-recording modal and the `rig_*` MCP tools depend on "rename the take
+    that just stopped"."""
+    import types
+    caps = tmp_path / "caps"
+    caps.mkdir()
+    _cap_with_quat(caps / "web_20260101_000000.bin")
+    ctrl, _ = _make_controller(tmp_path, captures_dir=caps)
+    ctrl._last_recorded_name = "web_20260101_000000.bin"
+    state = types.SimpleNamespace(controller=ctrl, clients=set(), bus=_LogBus(),
+                                  ui_state=web.UiState(), detailed_runner=None)
+    asyncio.run(web._handle_inbound(state, {"type": "rename_capture", "name": "last take"}))
+    assert (caps / "last take.bin").is_file()
+    assert ctrl._last_recorded_name == "last take.bin"
+    ctrl.close()
+
+
+def test_inbound_rename_capture_with_from_renames_that_file(tmp_path):
+    import types
+    caps = tmp_path / "caps"
+    caps.mkdir()
+    _cap_with_quat(caps / "target.bin")
+    _cap_with_quat(caps / "web_recent.bin")
+    ctrl, _ = _make_controller(tmp_path, captures_dir=caps)
+    ctrl._last_recorded_name = "web_recent.bin"
+    state = types.SimpleNamespace(controller=ctrl, clients=set(), bus=_LogBus(),
+                                  ui_state=web.UiState(), detailed_runner=None)
+    asyncio.run(web._handle_inbound(state, {"type": "rename_capture",
+                                            "from": "target.bin", "name": "renamed"}))
+    assert (caps / "renamed.bin").is_file() and not (caps / "target.bin").exists()
+    assert (caps / "web_recent.bin").is_file()    # the last take was NOT touched
+    assert ctrl._last_recorded_name == "web_recent.bin"
+    ctrl.close()
+
+
+@pytest.mark.parametrize("src", ["../escape.bin", "sub/x.bin", "missing.bin", 42, ["a"]])
+def test_inbound_rename_capture_with_a_hostile_from_is_a_no_op(tmp_path, src):
+    import types
+    caps = tmp_path / "caps"
+    caps.mkdir()
+    _cap_with_quat(caps / "safe.bin")
+    ctrl, _ = _make_controller(tmp_path, captures_dir=caps)
+    bus = _LogBus()
+    handle = bus.subscribe()
+    state = types.SimpleNamespace(controller=ctrl, clients=set(), bus=bus,
+                                  ui_state=web.UiState(), detailed_runner=None)
+    asyncio.run(web._handle_inbound(state, {"type": "rename_capture",
+                                            "from": src, "name": "x"}))
+    assert sorted(p.name for p in caps.glob("*.bin")) == ["safe.bin"]
+    assert any("rename ->" in line for line in bus.drain(handle))
+    ctrl.close()
+
+
+# --- inbound: delete_captures ----------------------------------------------
+
+def _delete_state(tmp_path, ctrl):
+    import types
+    return types.SimpleNamespace(controller=ctrl, clients=set(), bus=_LogBus(),
+                                 ui_state=web.UiState(), detailed_runner=None,
+                                 slam_runner=None, config=None)
+
+
+def test_delete_captures_removes_the_files_and_their_sidecars(tmp_path):
+    caps, results = tmp_path / "caps", tmp_path / "results"
+    caps.mkdir()
+    for n in ("a.bin", "b.bin", "keep.bin"):
+        _cap_with_quat(caps / n)
+    _write_sidecar(results, caps / "a.bin", stats={"frames": 1, "path_m": 1.0, "gap_m": 0.0})
+    ctrl, _ = _make_controller(tmp_path, captures_dir=caps)
+    ctrl.results_dir = str(results)
+    state = _delete_state(tmp_path, ctrl)
+    res = asyncio.run(web._handle_delete_captures(
+        state, ctrl, {"type": "delete_captures", "names": ["a.bin", "b.bin"]}))
+    assert sorted(d["name"] for d in res["deleted"]) == ["a.bin", "b.bin"]
+    assert res["refused"] == []
+    assert res["bytes"] > 0
+    assert sorted(p.name for p in caps.glob("*.bin")) == ["keep.bin"]
+    assert not (results / "a.ply").exists()      # an orphan .ply would keep
+    assert not (results / "a.slam.json").exists()  # showing in the Saved list
+    ctrl.close()
+
+
+def test_delete_captures_can_keep_the_sidecars(tmp_path):
+    caps, results = tmp_path / "caps", tmp_path / "results"
+    caps.mkdir()
+    _cap_with_quat(caps / "a.bin")
+    _write_sidecar(results, caps / "a.bin", stats={"frames": 1, "path_m": 1.0, "gap_m": 0.0})
+    ctrl, _ = _make_controller(tmp_path, captures_dir=caps)
+    ctrl.results_dir = str(results)
+    state = _delete_state(tmp_path, ctrl)
+    asyncio.run(web._handle_delete_captures(
+        state, ctrl, {"names": ["a.bin"], "sidecars": False}))
+    assert not (caps / "a.bin").exists()
+    assert (results / "a.ply").is_file() and (results / "a.slam.json").is_file()
+    ctrl.close()
+
+
+def test_delete_captures_refuses_the_file_being_recorded(tmp_path):
+    """The `Recorder` holds an open write handle: deleting it deletes a file
+    still being appended to."""
+    caps = tmp_path / "caps"
+    caps.mkdir()
+
+    class FakeLive:
+        def read(self): return b""
+        def write(self, d): pass
+        def close(self): pass
+
+    ctrl, _ = _make_controller(tmp_path, live_source=FakeLive(), captures_dir=caps)
+    try:
+        ctrl.start_record()
+        active = Path(ctrl.recorder.path).name
+        state = _delete_state(tmp_path, ctrl)
+        res = asyncio.run(web._handle_delete_captures(state, ctrl, {"names": [active]}))
+        assert res["deleted"] == []
+        assert res["refused"] == [{"name": active, "reason": "currently recording"}]
+        assert (caps / active).is_file()
+        ctrl.stop_record()
+    finally:
+        ctrl.close()
+
+
+def test_delete_captures_refuses_the_replaying_file_when_there_is_no_live_source(tmp_path):
+    """Unlinking under a running replay reader gives a broken stream, not a
+    clean state -- and a `--replay`-launched process has nowhere to switch to."""
+    caps = tmp_path / "caps"
+    caps.mkdir()
+    cap = caps / "playing.bin"
+    _make_depth_capture_flat(cap, n_frames=5, base=1000.0)
+    ctrl, _ = _make_controller(tmp_path, captures_dir=caps, replay_path=str(cap))
+    try:
+        assert ctrl.has_live is False
+        state = _delete_state(tmp_path, ctrl)
+        res = asyncio.run(web._handle_delete_captures(state, ctrl, {"names": ["playing.bin"]}))
+        assert res["deleted"] == []
+        assert res["refused"][0]["name"] == "playing.bin"
+        assert "no live source" in res["refused"][0]["reason"]
+        assert cap.is_file()
+    finally:
+        ctrl.close()
+
+
+def test_delete_captures_switches_away_from_the_replaying_file_first(tmp_path):
+    caps = tmp_path / "caps"
+    caps.mkdir()
+    cap = caps / "playing.bin"
+    _make_depth_capture_flat(cap, n_frames=5, base=1000.0)
+
+    class FakeLive:
+        def read(self): return b""
+        def write(self, d): pass
+        def close(self): pass
+
+    ctrl, _ = _make_controller(tmp_path, live_source=FakeLive(), captures_dir=caps,
+                               replay_path=str(cap))
+    try:
+        state = _delete_state(tmp_path, ctrl)
+        state.ui_state.source = "view"
+        state.ui_state.selected_capture = "playing.bin"
+        res = asyncio.run(web._handle_delete_captures(state, ctrl, {"names": ["playing.bin"]}))
+        assert [d["name"] for d in res["deleted"]] == ["playing.bin"]
+        assert not cap.exists()
+        assert ctrl.mode == "live"
+        assert state.ui_state.source == "live"
+        assert state.ui_state.selected_capture is None
+        assert state.ui_state.display == "point_cloud"
+    finally:
+        ctrl.close()
+
+
+@pytest.mark.parametrize("names", ["a.bin", None, 5, {"a": 1}])
+def test_delete_captures_rejects_a_non_list_names(tmp_path, names):
+    caps = tmp_path / "caps"
+    caps.mkdir()
+    _cap_with_quat(caps / "a.bin")
+    ctrl, _ = _make_controller(tmp_path, captures_dir=caps)
+    state = _delete_state(tmp_path, ctrl)
+    res = asyncio.run(web._handle_delete_captures(state, ctrl, {"names": names}))
+    assert res == {"deleted": [], "refused": [], "bytes": 0}
+    assert (caps / "a.bin").is_file()
+    ctrl.close()
+
+
+@pytest.mark.parametrize("hostile", ["../../etc/passwd", "..", "sub/dir.bin",
+                                     "a.txt", "", None, 3, ["nested"]])
+def test_delete_captures_drops_hostile_names_without_touching_anything(tmp_path, hostile):
+    """An unresolvable entry is logged and DROPPED, never fatal to the rest of
+    the batch -- but it is reported as refused, because a batch delete that
+    silently skips a file is worse than one that refuses it loudly."""
+    caps = tmp_path / "caps"
+    caps.mkdir()
+    _cap_with_quat(caps / "real.bin")
+    ctrl, _ = _make_controller(tmp_path, captures_dir=caps)
+    state = _delete_state(tmp_path, ctrl)
+    res = asyncio.run(web._handle_delete_captures(state, ctrl, {"names": [hostile]}))
+    assert res["deleted"] == []
+    assert len(res["refused"]) == 1 and res["refused"][0]["reason"] == "not found"
+    assert (caps / "real.bin").is_file()
+    ctrl.close()
+
+
+def test_delete_captures_mixed_batch_reports_what_actually_happened(tmp_path):
+    """"The result must report what was ACTUALLY deleted, not what was
+    requested" -- the whole point of the refusal list."""
+    caps = tmp_path / "caps"
+    caps.mkdir()
+    _cap_with_quat(caps / "gone.bin")
+    _cap_with_quat(caps / "stays.bin")
+    ctrl, _ = _make_controller(tmp_path, captures_dir=caps)
+    state = _delete_state(tmp_path, ctrl)
+    res = asyncio.run(web._handle_delete_captures(
+        state, ctrl, {"names": ["gone.bin", "../evil.bin", "ghost.bin"]}))
+    assert [d["name"] for d in res["deleted"]] == ["gone.bin"]
+    assert {r["name"] for r in res["refused"]} == {"../evil.bin", "ghost.bin"}
+    assert (caps / "stays.bin").is_file()
+    ctrl.close()
+
+
+def test_delete_captures_caps_the_batch(tmp_path):
+    caps = tmp_path / "caps"
+    caps.mkdir()
+    _cap_with_quat(caps / "a.bin")
+    ctrl, _ = _make_controller(tmp_path, captures_dir=caps)
+    state = _delete_state(tmp_path, ctrl)
+    res = asyncio.run(web._handle_delete_captures(
+        state, ctrl, {"names": ["a.bin"] * (web._MAX_DELETE_BATCH + 1)}))
+    assert res == {"deleted": [], "refused": [], "bytes": 0}
+    assert (caps / "a.bin").is_file()
+    ctrl.close()
+
+
+def test_delete_captures_is_gated_on_a_controller(tmp_path):
+    """The whole record/load_capture family is gated this way; without it a
+    `delete_captures` before the controller is attached would raise inside the
+    socket handler."""
+    import types
+    state = types.SimpleNamespace(controller=None, clients=set(), bus=_LogBus(),
+                                  ui_state=web.UiState(), config=None)
+    asyncio.run(web._handle_inbound(state, {"type": "delete_captures", "names": ["a.bin"]}))
+
+
+# --- inbound: set_browser ---------------------------------------------------
+
+def test_set_browser_persists(tmp_path):
+    import types
+    import roomscan.config as config_mod
+    p = tmp_path / "roomscan.toml"
+    cfg = ViewerConfig()
+    state = types.SimpleNamespace(config=cfg, ui_state=web.UiState(), clients=set(),
+                                  controller=None, detailed_runner=None)
+    orig = config_mod.config_path
+    config_mod.config_path = lambda: p
+    try:
+        asyncio.run(web._handle_inbound(state, {"type": "set_browser", "sort": "size",
+                                                "view": "list", "thumbs": False}))
+    finally:
+        config_mod.config_path = orig
+    assert (state.ui_state.browser_sort, state.ui_state.browser_view,
+            state.ui_state.browser_thumbs) == ("size", "list", False)
+    loaded = ViewerConfig.load(p)
+    assert loaded.web_browser_sort == "size"
+    assert loaded.web_browser_view == "list"
+    assert loaded.web_browser_thumbs is False
+    assert web.ui_from_config(loaded).browser_sort == "size"
+
+
+@pytest.mark.parametrize("msg", [
+    {"sort": "bogus"}, {"view": "carousel"}, {"thumbs": "yes"}, {"thumbs": 1},
+    {"sort": "name", "view": "carousel"},         # valid + invalid: NO partial mutation
+])
+def test_set_browser_rejects_bad_values_without_partial_mutation(msg):
+    import types
+    ui = web.UiState()
+    state = types.SimpleNamespace(config=None, ui_state=ui, clients=set(),
+                                  controller=None, detailed_runner=None)
+    asyncio.run(web._handle_inbound(state, {"type": "set_browser", **msg}))
+    assert (ui.browser_sort, ui.browser_view, ui.browser_thumbs) == ("recent", "grid", True)
+
+
+def test_state_message_carries_the_browser_prefs():
+    ui = web.UiState(browser_sort="duration", browser_view="list", browser_thumbs=False)
+    m = web._state_message(ui)
+    assert m["browser_sort"] == "duration"
+    assert m["browser_view"] == "list"
+    assert m["browser_thumbs"] is False
+
+
+def test_ui_from_config_ignores_a_corrupt_browser_pref():
+    cfg = ViewerConfig()
+    cfg.web_browser_sort = "sideways"
+    cfg.web_browser_view = "hologram"
+    ui = web.ui_from_config(cfg)
+    assert (ui.browser_sort, ui.browser_view) == ("recent", "grid")
+
+
+def test_set_source_view_with_nothing_selected_opens_the_browser(tmp_path):
+    """View with no capture selected is a legitimate state -- it is the capture
+    BROWSER (§12).
+
+    Before the browser existed this returned early with "select a capture
+    first", which became a dead end the moment the library moved onto the View
+    page: the only way to select a capture is a card that only renders when
+    `source == "view"`. The reader is deliberately NOT swapped (still live,
+    `is_replay` false, so the Playback card stays hidden) until a `load_capture`
+    from the browser does it.
+    """
+    import types
+    caps = tmp_path / "caps"
+    caps.mkdir()
+    _cap_with_quat(caps / "a.bin")
+    ctrl, _ = _make_controller(tmp_path, captures_dir=caps)
+    bus = _LogBus()
+    handle = bus.subscribe()
+    state = types.SimpleNamespace(controller=ctrl, clients=set(), bus=bus, config=None,
+                                  ui_state=web.UiState(), detailed_runner=None,
+                                  slam_runner=None)
+    try:
+        asyncio.run(web._handle_inbound(state, {"type": "set_source", "source": "view"}))
+        assert state.ui_state.source == "view"
+        assert state.ui_state.selected_capture is None
+        assert ctrl.mode == "live"                 # reader untouched
+        assert any("pick a capture" in line for line in bus.drain(handle))
+    finally:
+        ctrl.close()

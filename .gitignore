@@ -87,4 +87,7 @@ references/kicad/roomscanner-stack/datasheets/
 # Editor local-history cache
 .history/
 results/
+# Capture thumbnails (§12): a regenerable on-demand cache keyed on the
+# capture's own (stem, size, mtime_ns), same class of artifact as results/.
+thumbs/
 logs/

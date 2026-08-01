@@ -85,6 +85,21 @@ The architecture consists of two main pillars:
 *   **Real-time SLAM:** Point-to-plane ICP frame-to-model tracking against a TSDF VoxelBlockGrid using Open3D's tensor API on the GPU.
 *   **Visualization:** A FastAPI and Three.js-based web server (`roomscan-web`) serving a rich real-time visualizer for point clouds, SLAM meshes, sensor states, and IMU metrics.
 
+### Runtime data path
+
+The MCU owns sensor timing: it triggers the ToF sensor, DMA-reads alternating raw
+buffers, stamps the frame-ready edge, and packages raw ToF, calibration, and
+available IMU/environment streams into CRC-protected `RSCN` frames. It can send
+the same frames over native USB CDC and Ethernet UDP.
+
+On the PC, one transport-neutral reader decodes live USB/UDP data or an
+identically formatted recording. It records raw bytes when requested, builds the
+native ToF transform from `CALIB`, transforms `RAW_3DMD` into depth and image
+arrays, then feeds the web visualizer and optional GPU SLAM worker. Browser
+controls travel back over the same protocol as COMMAND/ACK frames. See the
+[runtime architecture guide](docs/system-architecture.md) for the complete
+firmware and host flow.
+
 ---
 
 ## <img src="https://api.iconify.design/material-symbols/folder-open.svg?color=white#gh-dark-mode-only" width="28" height="28" align="absmiddle"><img src="https://api.iconify.design/material-symbols/folder-open.svg#gh-light-mode-only" width="28" height="28" align="absmiddle"> Repository Layout

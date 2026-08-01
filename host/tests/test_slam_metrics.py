@@ -89,3 +89,63 @@ def test_tracking_stats_short_trailing_tail_is_not_death():
     s = metrics.tracking_stats([False] * 100 + [True] * 5)
     assert s["trailing_lost"] == 5
     assert s["died"] is False
+
+
+# ---------------------------------------------------------------------------
+# footprint_area_m2 -- "area covered" for the View browser's tiles (§12)
+# ---------------------------------------------------------------------------
+
+def _floor_patch(side_m=2.0, n=50):
+    """A dense square patch of points on the ground plane (Open3D CV: Y-down,
+    so the up axis is 1 and the ground is X/Z)."""
+    xs, zs = np.meshgrid(np.linspace(0, side_m, n), np.linspace(0, side_m, n))
+    return np.stack([xs.ravel(), np.zeros(xs.size), zs.ravel()], axis=1)
+
+
+def test_footprint_area_matches_the_swept_square():
+    """A 2 x 2 m patch on a 0.1 m grid occupies 21 x 21 cells (both edges land
+    on a cell boundary), i.e. 4.41 m2 -- the quantization is deliberate."""
+    assert metrics.footprint_area_m2(_floor_patch()) == pytest.approx(4.41)
+
+
+def test_footprint_ignores_height_so_a_wall_adds_nothing():
+    """This is the whole reason it is NOT `mesh.get_surface_area()`: "area
+    covered" is the floor swept, and a tall wall standing on already-covered
+    floor contributes no new coverage. A surface-area metric would let a narrow
+    corridor with high walls outscore a large open room."""
+    floor = _floor_patch()
+    wall = np.stack([floor[:, 0], np.linspace(0, 3, len(floor)), np.zeros(len(floor))], axis=1)
+    assert metrics.footprint_area_m2(np.vstack([floor, wall])) == pytest.approx(
+        metrics.footprint_area_m2(floor))
+
+
+def test_footprint_is_bounded_by_a_stray_speckle():
+    """A single TSDF speckle 5 m off the map adds ONE cell (0.01 m2), not a
+    convex hull's worth -- the difference between a quantized count and an
+    extent-based measure."""
+    base = metrics.footprint_area_m2(_floor_patch())
+    with_speckle = np.vstack([_floor_patch(), [[5.0, 0.0, 5.0]]])
+    assert metrics.footprint_area_m2(with_speckle) == pytest.approx(base + 0.01)
+
+
+def test_footprint_up_axis_is_selectable():
+    """Y-down is the default because the Open3D CV world is; a caller in a
+    Z-up frame passes up_axis=2 and gets the same answer for the same shape."""
+    pts = _floor_patch()
+    zup = pts[:, [0, 2, 1]]                      # move the flat axis to index 2
+    assert metrics.footprint_area_m2(zup, up_axis=2) == pytest.approx(
+        metrics.footprint_area_m2(pts, up_axis=1))
+
+
+@pytest.mark.parametrize("bad", [np.zeros((0, 3)), np.full((10, 3), np.nan),
+                                 np.zeros((5, 2)), np.zeros(3)])
+def test_footprint_degenerate_inputs_are_zero_not_an_exception(bad):
+    """It feeds a UI tile; a mesh with no vertices renders 0, never a traceback."""
+    assert metrics.footprint_area_m2(bad) == 0.0
+
+
+@pytest.mark.parametrize("kw", [{"up_axis": 3}, {"up_axis": -1}, {"cell_m": 0.0},
+                                {"cell_m": -0.1}])
+def test_footprint_rejects_nonsense_parameters(kw):
+    with pytest.raises(ValueError):
+        metrics.footprint_area_m2(_floor_patch(), **kw)

@@ -18,8 +18,20 @@ This directory contains the embedded firmware components for the Roomscanner pro
     *   `53L9A1/` - ST's reference package. We treat this as a **read-only reference** rather than editing it in place.
 
 ## <img src="https://api.iconify.design/material-symbols/settings.svg?color=white#gh-dark-mode-only" width="28" height="28" align="absmiddle"><img src="https://api.iconify.design/material-symbols/settings.svg#gh-light-mode-only" width="28" height="28" align="absmiddle"> Architecture Highlights
-The firmware acquires frames using a double-buffered DMA setup via I3C, processing them with ST's `vl53l9-transform-c` pipeline (if done on-device) and streaming raw or processed buffers (along with synchronized IMU quaternions) to the host PC. 
+The active firmware owns the sensor-time-critical work: it starts manual ToF
+exposures, stamps the frame-ready edge, and DMA-reads into alternating raw
+buffers. While one buffer is being filled, it can package the completed buffer,
+drain the optional IMU FIFO, and start the next exposure. Commands and recovery
+run only at a safe point after readout acknowledgement, so they cannot race an
+in-flight trigger.
 
-It handles multiple streams (Depth/Raw ToF, IMU SFLP Quat, Env Sensors) multiplexed into a single binary transport protocol.
+The normal build streams raw `3DMD` ToF data plus periodic calibration to the
+PC, where the transform runs. It also emits available quaternion,
+environmental, raw-IMU, and clock-synchronization streams. A shared versioned
+binary protocol carries DATA, COMMAND, ACK, and EVENT frames over USB CDC and
+Ethernet UDP; the host may receive either transport or replay the exact bytes
+from a capture file.
 
-For build instructions (`cmake`, `ninja`), debugging setup, and detailed architecture, refer to the root [**`CLAUDE.md`**](../CLAUDE.md) file.
+For the end-to-end sequence, see [**`docs/system-architecture.md`**](../docs/system-architecture.md).
+For wire details, see [**`docs/protocol.md`**](../docs/protocol.md). Build and
+firmware-loop guidance remains in [**`CLAUDE.md`**](../CLAUDE.md).

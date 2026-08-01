@@ -107,8 +107,17 @@ real-time view modes `#seg-view-mode button[data-viewmode=world|fpv|mirror]`
 plus their camera framing `sl-cam-distance`/`sl-cam-height`/`sl-cam-rotation`
 and `btn-cam-reset` (each edits the *selected* mode's framing) plus the
 world-only auto-orbit `chk-orbit`/`sl-orbit-speed`,
-capture controls `btn-record`, `btn-refresh-caps`, `#cap-list .cap-row`,
-`btn-playpause`, `seg-speed button[data-fps=…]`, `chk-loop`, `seek`, and the
+the Record card `btn-record` (Live page only), the Playback card
+`#transport-card` with `btn-golive`, `btn-playpause`, `btn-transport-restart`
+(**not** `btn-restart`, which is the top bar's Restart Server — see BUG-047),
+`seg-speed button[data-fps=…]`, `chk-loop`, `seek`, `pos-status`, the §12
+View-page capture browser `#browser-card` with `#cap-grid .cap-tile[data-name]`,
+its per-tile `input[data-check]`, `#seg-browser-sort button[data-sort=…]`,
+`#seg-browser-view button[data-view=…]`, `chk-browser-thumbs`,
+`btn-browser-refresh`, `btn-browser-delete` and the confirm modal
+`#delete-modal` / `chk-delete-sidecars` / `btn-delete-confirm`, the preview card
+`#preview-card` with `btn-preview-load`/`btn-preview-rename`/`btn-preview-build`,
+and the
 Web-Phase-4 SLAM controls `#seg-mode button[data-mode=realtime|slam]`,
 `chk-slam-traj`, `chk-slam-follow`, `#seg-walls button[data-walls=split|solid]`,
 `btn-save`, `#saved-list .cap-row a`, and the diagnostics toggle `diag-toggle`).
@@ -299,11 +308,15 @@ auto-open. If you're driving a run where you want the log visible regardless:
 `document.getElementById('diag-card').classList.remove('collapsed')`.
 
 Driving gotchas (cost time in Web Phase 3):
-- **Wait for server-rendered lists before clicking them.** Rows built from a
-  `captures`/`session` message (the capture library, any server-driven list) don't
+- **Wait for server-rendered lists before clicking them.** Tiles built from a
+  `captures`/`session` message (the capture browser, any server-driven list) don't
   exist until that message arrives (~0.5–1.5 s after `list_captures`/connect). A step
-  that does `[...cap-row].find(r=>r.dataset.name===X).click()` too soon calls `.click()`
+  that does `[...cap-tile].find(r=>r.dataset.name===X).click()` too soon calls `.click()`
   on `undefined` and the step throws — the action never fires and you debug a phantom.
+- **The browser and preview cards only exist on the View page.** They carry
+  `.hidden` until a `state` echo says `source === "view"`, so a screenshot taken
+  on Live shows neither. Send `{"type":"set_source","source":"view"}` (or use
+  `rig_view(source="view")`) and let the echo land before asserting on them.
   Give the prior step ≥1.5 s `wait`, or first emit the rendered rows via
   `window.__diag(...)` and confirm the target is present.
 - **Don't interleave exploratory clicks across `web_ui_shot.py` runs.** Each run is a

@@ -4,6 +4,7 @@ Welcome to the documentation hub. This directory contains engineering convention
 
 ## <img src="https://api.iconify.design/material-symbols/description.svg?color=white#gh-dark-mode-only" width="28" height="28" align="absmiddle"><img src="https://api.iconify.design/material-symbols/description.svg#gh-light-mode-only" width="28" height="28" align="absmiddle"> Key Specifications & Guidelines
 
+*   [**`system-architecture.md`**](system-architecture.md) - How a measurement moves through the STM32 acquisition loop, transport, host transform, web viewer, and SLAM pipeline.
 *   [**`engineering-practices.md`**](engineering-practices.md) - The constitution for contributing. Defines repo rules, commit structures, C/Python coding standards, and firmware loop practices.
 *   [**`protocol.md`**](protocol.md) - The binary wire protocol specification defining the transport layer between the MCU and Host PC.
 *   [**`web-protocol.md`**](web-protocol.md) - The WebSocket JSON/Binary protocol for the `roomscan-web` frontend.

@@ -45,6 +45,17 @@ _MESH_EVERY = 25
 _CPU = o3d.core.Device("CPU:0")
 
 
+def _footprint_of(mesh) -> float:
+    """`footprint_area_m2` of a tensor mesh's vertices, tolerant of an empty or
+    device-resident mesh. Never raises: this is one field of a progress stats
+    dict, and a stats failure must not lose the whole reconstruction."""
+    try:
+        pts = mesh.vertex.positions.cpu().numpy()
+    except Exception:
+        return 0.0
+    return round(_metrics.footprint_area_m2(pts), 2)
+
+
 def _empty_mesh() -> "o3d.t.geometry.TriangleMesh":
     """A 0-vertex/0-triangle mesh of the same shape/dtypes `TsdfMap.mesh()`
     itself returns for an empty map (see tsdf.py) -- used when there's no
@@ -151,6 +162,15 @@ class PostProcessWorker:
                 "path_m": tstats["path_length_m"],
                 "verts": int(len(mesh.vertex.positions)),
                 "lost": mapper.tracking_lost_count,
+                # Floor-projected footprint of the mesh, NOT its surface area
+                # -- see footprint_area_m2's docstring. Computed here because
+                # this is the one place the finished mesh is in hand; `_commit`
+                # passes `stats` straight into `build_manifest`, so the sidecar
+                # gains the field with no change in detailed.py. Additive: the
+                # manifest `schema` is deliberately NOT bumped (`sidecar_status`
+                # never reads `stats`), so a pre-existing manifest simply has no
+                # `area_m2` and the UI renders an em dash.
+                "area_m2": _footprint_of(mesh),
             }
         progress = Progress(
             fraction=(frames_done / total) if total else 1.0,
