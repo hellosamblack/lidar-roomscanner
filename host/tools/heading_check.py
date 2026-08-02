@@ -45,6 +45,14 @@ so a magnetometer whose fit is rotated (DT0103, still open) moves them together
 and this tool sees nothing. It says the heading is a heading; it does not say it
 points at north. That needs the braced fixed-bearing tilt sweep, ROADMAP DC-E.
 
+That is not hypothetical: hours after this tool was written, BUG-059 turned out
+to be a flat **180 deg** offset -- the field vector was anti-parallel -- and this
+tool scores the capture IDENTICALLY before and after, because it regresses slopes
+and a constant offset lives in the intercept it discards. The check that catches
+THAT one is the dip: rotate the calibrated field into the world frame and its Z
+must be negative. `check_capture` reports `inclination_deg` for exactly this
+reason -- read it alongside the coefficients, not instead of them.
+
 **Anything, on a capture that does not move.** Each axis reports its own
 `range_deg` for that reason: a regression over 3 deg of roll cannot exonerate
 the roll axis, and that axis says `inconclusive` rather than `good` when the
@@ -54,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -65,7 +74,8 @@ sys.path.insert(0, str(REPO / "host"))       # `tools` is a top-level package ro
 
 from roomscan.magcal import MagCalibration                        # noqa: E402
 from roomscan.sensors import (AXIS_CONVENTION, absolute_heading,  # noqa: E402
-                              boresight_bearing_deg, boresight_view_deg)
+                              boresight_bearing_deg, boresight_view_deg,
+                              quat_to_matrix)
 from tools.mag_check import default_cal_path, read_mag_frames     # noqa: E402
 
 # Below this an axis simply was not exercised, so its coefficient is fitted on
@@ -172,6 +182,21 @@ def score(bearing_deg, heading_deg, roll_deg, rate_hz: float = 30.0) -> dict:
     return {**out, "verdict": verdict, "reason": "; ".join(reasons) if reasons else None}
 
 
+def inclination_deg(world_field) -> float:
+    """Mean dip of a world-frame field, in degrees: POSITIVE means it points
+    below the horizon, which is what Earth's field does in the northern
+    hemisphere (~70 deg here).
+
+    The constant-offset check `score()` is structurally blind to: an
+    anti-parallel vector puts magnetic north 180 deg out and reverses every
+    heading (BUG-059), while leaving both regression coefficients untouched.
+    Averaged first, then measured -- the field is world-fixed, so the mean over
+    a capture is a better estimate of it than any single noisy sample.
+    """
+    wm = np.asarray(world_field, dtype=np.float64).reshape(-1, 3).mean(axis=0)
+    return math.degrees(math.atan2(-wm[2], math.hypot(wm[0], wm[1])))
+
+
 def check_capture(path, cal_path=None) -> dict:
     """Score the heading reported over the capture at `path`."""
     p = Path(path)
@@ -191,10 +216,11 @@ def check_capture(path, cal_path=None) -> dict:
         return {"error": "capture carries no stream 9 (IMU_QUAT) -- heading needs orientation",
                 "path": str(p), "cal_path": str(cal_p)}
 
-    bearing, heading, roll, undefined = [], [], [], 0
+    bearing, heading, roll, world, undefined = [], [], [], [], 0
     for q, m in zip(quats, mags):
         qt = tuple(float(v) for v in q)
         cal_mag = tuple(AXIS_CONVENTION @ cal.apply(tuple(float(v) for v in m)))
+        world.append(quat_to_matrix(*qt) @ np.asarray(cal_mag))
         b = boresight_bearing_deg(qt)
         h = absolute_heading(qt, cal_mag)
         if b is None or h is None:
@@ -204,6 +230,8 @@ def check_capture(path, cal_path=None) -> dict:
         heading.append(h)
         roll.append(boresight_view_deg(qt)[2])
 
+    inclination = inclination_deg(world)
+
     dur = float(t_s[-1] - t_s[0]) if t_s.size > 1 else 0.0
     rate = (mags.shape[0] / dur) if dur > 0 else 30.0
     return {
@@ -212,6 +240,11 @@ def check_capture(path, cal_path=None) -> dict:
         "samples": int(mags.shape[0]),
         "duration_s": dur,
         "undefined_frac": (undefined / mags.shape[0]) if mags.shape[0] else 0.0,
+        "inclination_deg": inclination,
+        "inclination_verdict": ("good" if inclination > 0 else "bad"),
+        "inclination_note": (None if inclination > 0 else
+                             "the calibrated field points UP -- anti-parallel to Earth's, so "
+                             "magnetic north is 180 deg out and every heading is reversed (BUG-059)"),
         **score(bearing, heading, roll, rate_hz=rate),
     }
 
@@ -222,7 +255,10 @@ def format_report(r: dict) -> str:
     lines = [f"{r['path']}",
              f"  cal {r['cal_path']}",
              f"  {r['samples']} samples over {r['duration_s']:.1f} s; "
-             f"{r['undefined_frac']:.1%} of frames aimed within 10 deg of vertical (no bearing)"]
+             f"{r['undefined_frac']:.1%} of frames aimed within 10 deg of vertical (no bearing)",
+             f"  field inclination: {r['inclination_deg']:+.1f} deg "
+             f"({'below' if r['inclination_deg'] > 0 else 'ABOVE'} horizontal)  "
+             f"{r['inclination_verdict'].upper()}"]
     for key, label, want in (("bearing", "bearing", "+1.000"), ("roll", "ROLL   ", " 0.000")):
         a = r.get(key)
         if not a:

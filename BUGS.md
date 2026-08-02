@@ -67,6 +67,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-056 | fixed   | host/web      | A finished Detailed build's "Completed in" kept counting up — `DetailedRunner.status()` derives `elapsed_s` from `time.monotonic() - _started_at` with nothing stopping it at `done`. A ~3.5-minute build read **81:01** an hour later, and `elapsed_s` was observed climbing 4910.5 → 4914.5 in four seconds |
 | BUG-057 | fixed   | host/web      | The HUD's **Gaps** counter booked a source swap as lost frames — `Stats._last_seq` survives live→replay→live, but sequence numbers are per-source, so the numbering difference lands in `seq_gaps`. Observed **1,529,274 gaps** in a session with 0 drops streaming cleanly at 30 fps. Discredits the exact counter BUG-049's transport-loss work reads |
 | BUG-058 | fixed   | host/sensors  | Heading swung 154° while the device was rolled at a fixed bearing — `absolute_heading` stripped yaw with `yaw_twist_deg`, and world-Z twist absorbs roll about a horizontal boresight degree for degree. `YawFusion` compounded it: `heading - yaw` differenced a device bearing against a world-Z twist, so the fused quat came out **mirrored**, at −bearing |
+| BUG-059 | fixed   | host/sensors  | **Every heading ever displayed was 180° out** — aimed north, the instrument read south. The calibrated field vector is delivered ANTI-PARALLEL to Earth's: it sat 70–72° *above* the horizon on every capture, where the northern-hemisphere field is that far below it. `AXIS_CONVENTION` carried the mounting rotation but not the field-direction sign. Predates BUG-058 and was hidden by it |
 
 ---
 
@@ -2567,3 +2568,60 @@ now stated without an escape hatch: **no scalar "yaw" off an attitude is the bea
 Ask for the bearing of the axis you actually mean. Second lesson: every assertion in the yaw-fusion
 suite was on the *magnitude* of a correction, and a 180°-mirrored filter passed all of them — sign
 conventions need a test that names a physical direction, not a number.
+
+---
+## BUG-059 — The magnetometer vector was anti-parallel: north read as south
+
+**Status:** fixed 2026-08-02 · **Area:** host/sensors (`sensors.py` `AXIS_CONVENTION`) ·
+**Found by:** owner, immediately after BUG-058 made the heading mean something — "when facing
+north, the heading shows south".
+
+A clean +180°, and the cause needs no compass to find. Earth's field points north **and down** —
+about 70° below horizontal at mid-northern latitudes. Rotating the calibrated, axis-corrected
+vector into the quat's world frame put it **70.0° ABOVE** the horizon on `NorthFacingRoll.bin` and
+**72.4°** above on `roomSweepFull20260730.bin`: anti-parallel, right magnitude, exactly reversed.
+An inverted field puts magnetic north 180° from where it is, so `absolute_heading` read 186.9° on a
+capture the owner had aimed north.
+
+The frame that test assumes was verified rather than trusted: rotating the **accelerometer's**
+gravity into the same world frame gives (0.000, 0.000, −1.000) over that capture, so world Z is up
+as documented and the dip sign means what it says.
+
+**Which half was wrong.** Enumerating all 48 signed permutations against three constraints
+separates them. The field is world-fixed, so magnetic north's bearing must be *constant* over a
+360° sweep — that needs no ground truth, and only the existing axis assignment and its negation
+hold it (sd 6.1°; every other permutation scatters north 75–79°). Of those two, only one puts the
+field below the horizon. So the **mounting rotation was always right** and only the overall
+**sign** was wrong. `AXIS_CONVENTION` is now written as its two factors,
+`MAG_FIELD_SIGN * MAG_MOUNT_ROTATION`, because they rest on different evidence.
+
+The product has **det −1**, which is correct and is not a defect to tidy away: a sign convention
+composed with a rotation is not a rotation. Same class as `gravity_body_from_imu_raw` negating the
+accelerometer's sensed reaction.
+
+**Age.** This predates BUG-058 and is independent of it. The old `absolute_heading` also derived
+north from this vector, so it carried the same 180° — it was simply invisible underneath a number
+that swung 154° with the operator's wrist. Every heading displayed and every `YawFusion` datum since
+BUG-004 set this matrix on 2026-07-10 was reversed; before that the matrix was identity, which was
+wrong differently.
+
+**Verified.** Inclination −70.0° → **+70.0°**; heading on the owner's north-facing capture
+**186.9° → 6.9°**, the residual being magnetic declination plus how precisely "north" is held by
+hand. `mag_cal.json` is untouched and unaffected — the ellipsoid fit is applied *before* this
+matrix, so no recalibration is needed.
+
+**Regression tests.** `test_axis_convention_puts_the_field_below_the_horizon` and
+`test_heading_reads_north_on_the_owners_north_facing_capture` run on 16 real (quat, raw mag)
+samples embedded from that capture, with the calibration inlined so a re-fit cannot move them;
+`test_the_mounting_half_of_the_axis_convention_is_a_proper_rotation` pins the decomposition and
+says in its docstring why det −1 is deliberate. All three proved by reintroducing the sign.
+
+**Lesson.** BUG-004 recorded `AXIS_CONVENTION` as "verified against all 24 permutations" — but the
+criterion available then was |B|, which is invariant under **every** signed permutation, including
+the ones that invert the field. **A check that cannot distinguish the candidates is not a
+verification, however many candidates it is run against.** The discriminating check was cheap and
+sitting there the whole time: the field has a *direction* relative to gravity, and gravity is
+measured. Note also that `capture_heading`, written hours earlier for BUG-058, scores this capture
+identically before and after — it regresses slopes, so a constant offset is invisible to it. Its
+docstring already said it cannot see absolute direction; this is that limitation biting on the
+very next bug.

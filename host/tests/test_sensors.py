@@ -598,3 +598,97 @@ def test_no_new_yaw_twist_consumers():
 
     stale = set(_YAW_TWIST_CALLERS) - set(found)
     assert not stale, f"_YAW_TWIST_CALLERS entries no longer call it: {sorted(stale)}"
+
+
+# --- BUG-059: the magnetometer's field-direction sign -------------------------
+#
+# 16 (quat, RAW mag uT) samples spread over captures/NorthFacingRoll.bin, the
+# owner's north-facing take. Real device data, embedded because captures/ is
+# gitignored -- and because the defect this pins is invisible to synthetic data:
+# it lives in the mapping from what the sensor reports to what the field is.
+_NORTH_FACING_SAMPLES = [
+    ((+0.556115, -0.550163, +0.433350, -0.447510), (+28.7250, +43.4250, +29.0250)),
+    ((+0.556288, -0.549988, +0.433350, -0.447510), (+28.5750, +43.5750, +28.5000)),
+    ((+0.556578, -0.550293, +0.433464, -0.446663), (+29.2500, +43.5000, +29.1000)),
+    ((+0.648830, -0.458040, +0.518197, -0.317318), (+8.1000, +41.4000, +26.5500)),
+    ((+0.752645, -0.262996, +0.597018, -0.089036), (-18.1500, +23.2500, +20.8500)),
+    ((+0.762545, -0.070072, +0.639161, +0.071331), (-26.3250, +1.0500, +18.0000)),
+    ((+0.761195, -0.056620, +0.640625, +0.083521), (-26.4000, -0.3750, +17.1750)),
+    ((+0.739624, -0.285068, +0.591835, -0.146372), (-14.4000, +28.6500, +20.6250)),
+    ((+0.561491, -0.560129, +0.414864, -0.445951), (+29.3250, +43.7250, +27.9000)),
+    ((+0.312782, -0.672276, +0.162621, -0.650974), (+67.5750, +23.7000, +27.3000)),
+    ((+0.249728, -0.679199, +0.108505, -0.681580), (+72.1500, +16.7250, +26.9250)),
+    ((+0.494342, -0.642204, +0.311287, -0.496286), (+43.2000, +39.1500, +30.9000)),
+    ((+0.562102, -0.593966, +0.388978, -0.424196), (+29.3250, +43.0500, +29.7000)),
+    ((+0.568809, -0.566895, +0.419815, -0.422897), (+27.3750, +43.1250, +29.0250)),
+    ((+0.571106, -0.566894, +0.418213, -0.421387), (+27.0750, +43.1250, +29.4000)),
+    ((+0.570938, -0.566895, +0.418442, -0.421387), (+27.9000, +43.7250, +29.7000)),
+]
+
+# The fit that was live when those samples were recorded. Inlined so the test
+# does not depend on ./mag_cal.json, which the owner re-fits.
+_CAL_2026_08_01 = {
+    "offset": (26.049428523033182, -3.7305385783057714, 10.337675252286388),
+    "matrix": ((0.9706357733276592, 0.006956543594606199, -0.021686889736132087),
+               (0.006956543594606218, 1.0305181512755879, -0.03681335666176377),
+               (-0.021686889736132076, -0.036813356661763795, 1.0015792750377008)),
+    "field_ut": 50.50833493454933,
+}
+
+
+def _calibrated_world_field(quat, raw_mag):
+    from roomscan.magcal import MagCalibration
+    from roomscan.sensors import AXIS_CONVENTION
+    cal = MagCalibration(**_CAL_2026_08_01)
+    return quat_to_matrix(*quat) @ (AXIS_CONVENTION @ cal.apply(raw_mag))
+
+
+def test_axis_convention_puts_the_field_below_the_horizon():
+    """Earth's field points DOWN in the northern hemisphere. As delivered the
+    calibrated vector pointed 70 deg UP instead, which put magnetic north 180
+    deg out: aimed north, the instrument read south (BUG-059, owner).
+
+    This needs no compass and no ground truth -- gravity fixes 'down', and the
+    accelerometer independently confirms the quat's world Z is up (measured
+    (0,0,-1) over the same capture). It is the check `capture_magcheck` cannot
+    make, because |B| is invariant under every signed permutation including the
+    inverting ones.
+    """
+    zs = [_calibrated_world_field(q, m)[2] for q, m in _NORTH_FACING_SAMPLES]
+    assert all(z < 0 for z in zs), f"field points UP -- sign inverted; world Z = {zs[:3]}"
+    horiz = [np.hypot(*_calibrated_world_field(q, m)[:2]) for q, m in _NORTH_FACING_SAMPLES]
+    dip = np.degrees(np.arctan2([-z for z in zs], horiz))
+    assert 55.0 < dip.mean() < 80.0, f"inclination {dip.mean():.1f} deg is not a mid-latitude dip"
+
+
+def test_heading_reads_north_on_the_owners_north_facing_capture():
+    """The end the owner sees. 186.9 deg under the inverted sign, 6.9 deg after
+    -- the residual being declination plus how precisely 'north' is held by hand.
+    """
+    from roomscan.sensors import absolute_heading
+    from roomscan.magcal import MagCalibration
+    from roomscan.sensors import AXIS_CONVENTION
+    cal = MagCalibration(**_CAL_2026_08_01)
+    headings = []
+    for q, m in _NORTH_FACING_SAMPLES:
+        h = absolute_heading(q, tuple(AXIS_CONVENTION @ cal.apply(m)))
+        if h is not None:
+            headings.append(h)
+    assert len(headings) > 10
+    mean = np.degrees(np.arctan2(np.sin(np.radians(headings)).mean(),
+                                 np.cos(np.radians(headings)).mean()))
+    assert abs(wrap180(mean)) < 25.0, f"aimed north, reported {mean % 360:.1f} deg"
+
+
+def test_the_mounting_half_of_the_axis_convention_is_a_proper_rotation():
+    """The decomposition is load-bearing: the mounting is a rotation (det +1)
+    and is corroborated by north staying put over a 360 deg sweep; the sign is
+    separate and is what was wrong. AXIS_CONVENTION itself has det -1 by design
+    -- a convention composed with a rotation is not a rotation, and 'correcting'
+    that determinant reintroduces BUG-059.
+    """
+    from roomscan.sensors import AXIS_CONVENTION, MAG_FIELD_SIGN, MAG_MOUNT_ROTATION
+    assert np.linalg.det(MAG_MOUNT_ROTATION) == pytest.approx(1.0)
+    assert MAG_FIELD_SIGN == -1.0
+    assert np.allclose(AXIS_CONVENTION, MAG_FIELD_SIGN * MAG_MOUNT_ROTATION)
+    assert np.linalg.det(AXIS_CONVENTION) == pytest.approx(-1.0)

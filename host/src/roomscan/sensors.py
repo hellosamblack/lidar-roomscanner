@@ -698,8 +698,35 @@ def ir_gravity_residual_deg(quat: tuple[float, float, float, float]) -> float:
     return wrap180(angle - 90.0 * (int(round(angle / 90.0)) % 4))
 
 
-AXIS_CONVENTION = np.diag([1.0, -1.0, -1.0])   # mag-mounting-vs-IMU sign/permutation; resolved on-target
-AXIS_CONVENTION.setflags(write=False)   # module constant — guard against in-place mutation
+# Magnetometer axes -> SFLP body frame. TWO factors, deliberately written out
+# rather than folded into one literal, because they are established by different
+# evidence and only one of them has ever been wrong (BUG-059):
+#
+#   MAG_MOUNT_ROTATION  the LIS2MDL's mounting relative to the LSM6DSV16X. A
+#       proper rotation (det +1). Corroborated without any ground truth: over a
+#       360 deg room sweep, magnetic north's bearing must be CONSTANT, and this
+#       is the only assignment that holds it (sd 6.1 deg; every other signed
+#       permutation scatters it 75-79 deg).
+#
+#   -1  the FIELD-DIRECTION sign. As delivered, the calibrated vector points
+#       ANTI-PARALLEL to Earth's field: it came out 70-72 deg ABOVE the horizon
+#       on every capture, and in the northern hemisphere the field points that
+#       far BELOW it. That put magnetic north 180 deg out, so a device aimed
+#       north reported south (BUG-059, owner). Same class as
+#       `gravity_body_from_imu_raw` negating the accelerometer's sensed
+#       reaction: a convention, not a rotation.
+#
+# The product therefore has det -1, which is correct and is NOT a bug to "fix"
+# back -- a sign convention composed with a rotation is not itself a rotation.
+# The dip test is the check that matters and it needs no compass: rotate the
+# calibrated field into the world frame (world Z is up, verified against the
+# accelerometer at (0,0,-1)) and its Z must be NEGATIVE. `host/tools/heading_check.py`
+# scores it, and `test_axis_convention_puts_the_field_below_the_horizon` pins it.
+MAG_MOUNT_ROTATION = np.diag([1.0, -1.0, -1.0])
+MAG_FIELD_SIGN = -1.0
+AXIS_CONVENTION = MAG_FIELD_SIGN * MAG_MOUNT_ROTATION
+for _m in (MAG_MOUNT_ROTATION, AXIS_CONVENTION):
+    _m.setflags(write=False)   # module constants — guard against in-place mutation
 
 
 class YawFusion:

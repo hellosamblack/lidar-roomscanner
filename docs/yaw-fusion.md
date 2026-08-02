@@ -22,6 +22,14 @@ within 15° of |ZYX pitch| = 90°. Because the SFLP body frame has **X = Up**, |
 the normal upright handheld grip, so the gate fired permanently in ordinary use — and what it was
 defending was not the filter but the filter's own choice of yaw convention.
 
+**The field-direction sign is part of `AXIS_CONVENTION` and was wrong until 2026-08-02**
+(BUG-059): the calibrated vector was delivered anti-parallel to Earth's field, so magnetic north sat
+180° from where it is and a device aimed north reported south. It is now written as its two factors,
+`MAG_FIELD_SIGN * MAG_MOUNT_ROTATION` — the mounting is a proper rotation and was always right; the
+sign is a convention and has det −1, deliberately. The check that catches it needs no compass: rotate
+the calibrated field into the world frame and its Z must be **negative** (the field points down in
+the northern hemisphere), which `host/tools/heading_check.py` reports and |B| can never see.
+
 Separately, **`absolute_heading`** — the World-mode readout and the compass — is now the boresight's
 compass bearing referenced to magnetic north: two bearings read in the same frame, differenced, so
 the drifting datum cancels identically. It is `None` when the sensor is aimed within 10° of vertical,
@@ -88,14 +96,32 @@ never crashes uncalibrated). Config keys (in `roomscan.toml` `[viewer]`):
 The panel logs `yaw-fusion -> active | gated:anomaly | gated:motion | gated:no-cal` on each
 state change.
 
-## 3. On-target axis-convention check (one-time)
+## 3. Checking `AXIS_CONVENTION`
 
-`AXIS_CONVENTION` in `host/src/roomscan/sensors.py` (default `np.eye(3)`) reconciles the LIS2MDL mounting
-with the SFLP body frame. A frame mismatch silently **mirrors or offsets** yaw with no other symptom. To
-verify: with the rig level and pointed at a known magnetic heading, compare the fused/compass heading
-against the known value. If it rotates the wrong way or is mirrored, set `AXIS_CONVENTION` to the
-permutation/sign matrix that fixes it. Default identity is correct when the mag axes align with the LSM
-body frame.
+`AXIS_CONVENTION` in `host/src/roomscan/sensors.py` reconciles the LIS2MDL with the SFLP body frame,
+as `MAG_FIELD_SIGN * MAG_MOUNT_ROTATION`. A mismatch silently **mirrors or offsets** yaw with no
+other symptom, so check it against physics, not against an eyeball:
+
+```sh
+host/.venv/bin/python host/tools/heading_check.py captures/<a-real-scan>.bin
+```
+
+Two independent constraints, neither needing a compass:
+
+1. **Inclination must be POSITIVE** — Earth's field points down in the northern hemisphere (~70°
+   below horizontal here), so the calibrated vector rotated into the world frame must have a
+   negative Z. Negative inclination means the vector is anti-parallel and every heading is 180° out
+   (BUG-059). This is the one that fixes the **sign**.
+2. **`bearing.coef` → 1, `roll.coef` → 0** — the mag-referenced heading must track the quat's own
+   boresight bearing 1:1 and ignore roll (BUG-058). A wrong *permutation* also makes magnetic north
+   wander over a 360° sweep, which shows up as a large residual.
+
+**Do not verify this with |B|.** It is invariant under all 48 signed permutations, including the
+inverting ones, so it cannot distinguish any of them — BUG-004 recorded the convention as "verified
+against all 24 permutations" on exactly that basis and the sign stayed wrong for three weeks.
+Likewise, pointing the rig at a known heading and eyeballing the readout is only conclusive if you
+try bearings that are **not** multiples of 90° (BUG-051), and cannot separate a 180° offset from a
+mirrored sense if you only try north.
 
 ## Out of scope (see the design doc)
 

@@ -93,3 +93,32 @@ def test_score_is_deterministic():
     a = score(bearing, heading, roll, rate_hz=RATE)
     b = score(bearing, heading, roll, rate_hz=RATE)
     assert a["roll"]["ci95"] == b["roll"]["ci95"]
+
+
+def test_inclination_is_positive_for_a_northern_hemisphere_field():
+    """Earth's field points north and DOWN here, ~70 deg below horizontal."""
+    from tools.heading_check import inclination_deg
+    dip = np.radians(70.0)
+    field = np.tile([50 * np.cos(dip), 0.0, -50 * np.sin(dip)], (100, 1))
+    assert inclination_deg(field) == pytest.approx(70.0, abs=0.1)
+
+
+def test_inclination_is_negative_for_an_anti_parallel_field():
+    """BUG-059's signature: right magnitude, exactly reversed. Measured -70.0 on
+    captures/NorthFacingRoll.bin before the fix and +70.0 after."""
+    from tools.heading_check import inclination_deg
+    dip = np.radians(70.0)
+    field = np.tile([50 * np.cos(dip), 0.0, -50 * np.sin(dip)], (100, 1))
+    assert inclination_deg(-field) == pytest.approx(-70.0, abs=0.1)
+
+
+def test_a_constant_offset_is_invisible_to_the_regression():
+    """Why the dip check exists at all: shift every heading by 180 deg and the
+    coefficients do not move. Pinning this stops someone 'simplifying' the
+    inclination field away as redundant."""
+    bearing, roll, _ = _series(bearing_amp=140.0)
+    good = score(bearing, bearing + 37.0, roll, rate_hz=RATE)
+    flipped = score(bearing, bearing + 37.0 + 180.0, roll, rate_hz=RATE)
+    assert flipped["bearing"]["coef"] == pytest.approx(good["bearing"]["coef"])
+    assert flipped["roll"]["coef"] == pytest.approx(good["roll"]["coef"])
+    assert flipped["verdict"] == good["verdict"] == "good"
