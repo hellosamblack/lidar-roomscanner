@@ -207,6 +207,43 @@ def capture_skew(path: str, window_s: float = 2.0) -> dict:
 
 
 @mcp.tool()
+def capture_heading(path: str, cal_path: str = "") -> dict:
+    """Is the heading a HEADING, or is it wearing another axis's clothes (BUG-058)?
+
+    Regresses the mag-referenced `absolute_heading` on the quat's OWN boresight
+    bearing AND its roll, together -- the two must differ only by the SFLP
+    frame's arbitrary datum, so `bearing.coef` -> 1 and `roll.coef` -> 0. On the
+    same real capture this returns +0.016 for today's heading and **-0.984** for
+    the pre-BUG-058 one, which is the class of defect the owner has now caught by
+    eye twice.
+
+    Read the per-axis `verdict`, not the point estimate: each is judged against
+    a block-bootstrap 95% interval, so an axis the capture never exercised, or a
+    drifty capture that cannot resolve the band, reads `inconclusive` rather than
+    `good` or `bad`. Most captures certify only one of the two axes.
+
+    It says the heading IS a heading; it cannot say it points at true north --
+    both estimates share the quaternion and the calibration, so a rotated mag fit
+    (DT0103) moves them together. That still needs ROADMAP DC-E's braced sweep.
+
+    `cal_path` defaults to the calibration a roomscan-web on this box would load.
+
+    Wraps `host/tools/heading_check.py::check_capture()`.
+    """
+    from tools.heading_check import check_capture
+
+    p = (REPO / path) if not Path(path).is_absolute() else Path(path)
+    if not p.is_file():
+        return {"error": f"no such capture: {rel(p)}"}
+    cp = Path(cal_path) if cal_path else None
+    if cp is not None and not cp.is_absolute():
+        cp = REPO / cp
+    rep = check_capture(p, cp)
+    rep["path"] = rel(p)
+    return rep
+
+
+@mcp.tool()
 def slam_ensemble(capture: str, n: int = 10, device: str = "", voxel_size: float = 0.0,
                   block_count: int = 0, icp_mode: str = "", max_frames: int = 0,
                   include_runs: bool = True, timeout_s: int = 3600) -> dict:

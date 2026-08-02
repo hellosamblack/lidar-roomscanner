@@ -84,7 +84,7 @@ function*, not a state object -- read what it logged via `ui_screenshot`'s tail.
 
 **data** — `capture_list()` (includes `has_stream_9`, which SLAM and orientation work
 ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, compare?)`,
-`capture_skew(path, window_s?)`, `capture_motion(path)`,
+`capture_skew(path, window_s?)`, `capture_motion(path)`, `capture_heading(path, cal_path?)`,
 `slam_rerender(capture, voxel_size?, block_count?, device?, max_frames?)`,
 `slam_ensemble(capture, n?, device?, voxel_size?, block_count?)`,
 `doctor()`, `orientation_probe(mode)`.
@@ -177,6 +177,20 @@ absorbed into the trend) and `tilt_ramp.ratio` (|B| max/min across boresight-til
 detrend-free, so it catches exactly what the first one hides). `field` is
 `magsweep.field_consistency`, correct for a stationary tumble but it under-rates a good
 calibration on a walk. `compare=[...]` scores several fits against one capture.
+
+`capture_heading` asks the different question that BUG-058 needed and `capture_magcheck`
+structurally cannot answer: not "is the magnetometer calibrated" but "is the number labelled
+heading actually a heading". It regresses `absolute_heading` on the quat's own boresight
+bearing **and** its roll together — they differ only by the SFLP frame's arbitrary datum, so
+the coefficients must be 1 and 0. On `NorthFacingRoll.bin` today's heading scores +0.016 and
+the pre-BUG-058 one **−0.984**, on a capture `capture_magcheck` calls excellent (0.18%).
+Read the per-axis `verdict`, never the bare coefficient: each is judged against a
+block-bootstrap 95% interval — blocks, because the residual is yaw drift and room field that
+wander over seconds, and treating that as white noise reported a real circuit's roll axis as
+`bad` at 0.181 when the honest answer was "36° of roll and 5.8° of drift cannot resolve it".
+Most captures certify one axis and leave the other `inconclusive`. It cannot see absolute
+direction — both estimates share the quaternion and the calibration, so a rotated fit
+(DT0103) moves them together; that is still ROADMAP DC-E's braced sweep.
 
 **build** — `fw_build()`, `fw_flash()`, `run_tests()`. These encode the host facts
 that bite every session: Ninja comes from the venv, the packaged stlink 1.8.0 cannot

@@ -496,7 +496,7 @@ def test_triad_roll_zero_when_up_ref_points_true_up():
 # `quat_yaw_deg` is a ZYX Tait-Bryan yaw, and this device's SFLP body frame has
 # X = Up -- so its gimbal lock sits at the NORMAL UPRIGHT GRIP, not at some
 # exotic attitude. Using it as a *quantity* (a heading, a heading error, a yaw to
-# strip or to zero against) has now shipped as a bug five times:
+# strip or to zero against) has now shipped as a bug four times:
 #
 #   BUG-039  imufusion._correct_yaw nulled it            -> graft_yaw_error_deg
 #   BUG-048  absolute_heading stripped it                -> (same defect as 051)

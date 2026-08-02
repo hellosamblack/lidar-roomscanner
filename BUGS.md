@@ -2552,9 +2552,17 @@ boresight*, which is what catches the mirror; `test_absolute_heading_is_none_whe
 pins the pole. `test_no_new_yaw_twist_consumers` is a new AST guard, empty by design. All proved by
 reintroducing the defect.
 
+**Instrument.** `host/tools/heading_check.py` / MCP `capture_heading` — regresses `absolute_heading`
+on the quat's own boresight bearing *and* its roll together, which must come out 1 and 0. It scores
+**−0.984 [−1.036, −0.944]** for the old heading on `NorthFacingRoll.bin` and **+0.016 [−0.036,
++0.056]** for the new one, so it is proved against a known-bad input and not only against a working
+one. Per-axis verdicts sit on a block-bootstrap interval: the residual is yaw drift and room field
+wandering over seconds, and treating that as white noise called a real circuit's roll axis `bad` at
+0.181 when the honest answer is that 36° of roll and 5.8° of drift cannot resolve it.
+
 **Lesson.** The BUG-051 fix replaced one wrong yaw scalar with another and its regression test swept
 the axis that had just burned it — bearing — while holding **roll** fixed; the fix's own test could
-not see the bug the fix introduced. Fifth instance of the class (BUG-039/048/051/058), so the rule is
+not see the bug the fix introduced. Fourth instance of the class (BUG-039/048/051/058), so the rule is
 now stated without an escape hatch: **no scalar "yaw" off an attitude is the bearing of an axis.**
 Ask for the bearing of the axis you actually mean. Second lesson: every assertion in the yaw-fusion
 suite was on the *magnitude* of a correction, and a 180°-mirrored filter passed all of them — sign
