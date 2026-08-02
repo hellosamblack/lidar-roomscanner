@@ -1704,6 +1704,18 @@ to the installed 0.19 build (`tsdf.py`'s `_MAX_SAFE_EXTRACT_BLOCKS` says so), an
 would make this sub-phase unnecessary. Re-bisect with the same method — extract once at a known
 block count, no other extractions in flight — before writing any stitching code.
 
+> **No tool exists for that re-bisect yet** (noted 2026-08-01). The original bisection was run from
+> throwaway scripts, and per CLAUDE.md a repeatable agent-facing measurement should land as an MCP
+> tool rather than be re-derived. Two things are worth productionising together, because the second
+> is what caught BUG-052 and neither is captured anywhere but prose:
+> **(a)** the extraction-ceiling bisector — step a capture to a target block count with no
+> extractions in flight, then extract once on a named device and report survived/crashed (it has to
+> run the extraction in a **subprocess**: the failure mode is a segfault/`terminate`, so an in-process
+> harness dies with it); **(b)** the **GIL-starvation watchdog** — a thread that records how late its
+> own fixed-interval ticks fire, reported as *% of wall clock starved* + *worst single stall*. That
+> pair is what turns "the UI feels frozen" into a number, and it is reusable well beyond this
+> sub-phase.
+
 #### Sub-phase 6.H — Audible coverage feedback ("geiger counter" buzzer)  ← **proposed (owner, 2026-07-31)**
 
 > **Owner's framing:** *"add a buzzer to the board that clicks when a new voxel has been received. If we
