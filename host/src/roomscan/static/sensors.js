@@ -88,6 +88,7 @@ const FUSION_HELP = {
     'gated:no-cal': 'No magnetometer calibration loaded — run Calibrate Mag.',
     'gated:motion': 'Turning faster than 40°/s — slow the sweep.',
     'gated:anomaly': 'Field strength is >30% off the calibrated value — move away from metal/magnets; take it off the tripod.',
+    'gated:no-field': 'The field is pointing straight down — no north to steer to. Expected only at a magnetic pole or inside shielding.',
 };
 
 // Match index.html's design tokens (canvas can't read CSS vars directly).

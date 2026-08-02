@@ -373,3 +373,36 @@ def test_camera_views_cover_every_display_and_slam_uses_the_shared_scanner_model
     assert "from './devicemodel.js'" in slam and "createDeviceMesh" in slam
     assert "SphereGeometry(0.03" not in slam
     assert "viewMode === 'mirror' ? 'scaleX(-1)'" in browser
+
+
+def test_every_fusion_status_has_a_label_and_a_remedy():
+    """Every `YawFusion.status` string the server can emit must have a HUD label
+    (`web._FUSION_LABELS`) and a remedy line (`sensors.js` `FUSION_HELP`).
+
+    A status with neither renders as the bare key -- "gated:no-field" in the
+    Sensors card -- with nothing telling the operator what to do about it.
+    Enforced rather than remembered: `gated:no-field` (BUG-058) is the fourth
+    gate added to this filter, and the convention was documented nowhere.
+    """
+    import ast
+
+    from roomscan import web
+
+    src = (Path(__file__).parent.parent / "src" / "roomscan" / "sensors.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    cls = next(n for n in ast.walk(tree)
+               if isinstance(n, ast.ClassDef) and n.name == "YawFusion")
+    statuses = {n.value for n in ast.walk(cls)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                and (n.value in ("init", "active") or n.value.startswith("gated:"))}
+    assert "gated:no-field" in statuses, "AST scan found no statuses -- the check is broken"
+
+    help_keys = set(re.findall(r"^\s*'?([a-z:-]+)'?\s*:", 
+                               re.search(r"const FUSION_HELP = \{(.*?)\n\};",
+                                         (STATIC / "sensors.js").read_text(encoding="utf-8"),
+                                         re.DOTALL).group(1), re.MULTILINE))
+    missing_label = statuses - set(web._FUSION_LABELS)
+    # "active" is the working state and deliberately has no remedy line.
+    missing_help = statuses - help_keys - {"active"}
+    assert not missing_label, f"YawFusion statuses with no HUD label: {sorted(missing_label)}"
+    assert not missing_help, f"YawFusion statuses with no remedy line: {sorted(missing_help)}"

@@ -168,6 +168,13 @@ and sweep tilt level → 45° → vertical, holding each. Heading should stay co
 `mag_check` on the capture should show a flat tilt table (it will) *and* the holds should agree in
 `absolute_heading`. DT0103's accelerometer-assisted fit is the remedy if they do not.
 
+**⚠ Score this with a post-BUG-058 build (2026-08-01) and no earlier.** Until then `absolute_heading`
+tracked **roll**, not bearing (slope −0.978 on `captures/NorthFacingRoll.bin`) — and this action is a
+tilt sweep held at one bearing, precisely the geometry it was wrong for, so any earlier score of the
+heading clause is an artifact for the second time (after BUG-048). Expect `None` for the vertical
+holds: the fixed build reports no bearing within 10° of vertical, because none exists. `DebugCapE.bin`
+(collected to spec 2026-07-31) is still the capture to score.
+
 ### 4.5 Handheld dynamic verification **(needs the owner)**
 Every claim about tracking during motion is inferred from stationary data plus arithmetic. A
 deliberate pan is the only way to confirm the timing fixes and the fusion filter actually help.

@@ -59,13 +59,14 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-049 | open    | host/transport | Multi-second **whole-group** frame loss on the multi-room captures — 2.29% / 4.28% / 9.35% of RAW frames lost while byte-clean and 0 CRC, in outages up to 215 frames (7.1 s). Cost DC-B take 2 a 628-frame (21.2 s) tracking collapse. Recurring 63-frame quantum in all three takes; not RF range (the bridge rides on the scanner, never roamed, signal > 80%) |
 | BUG-047 | fixed   | host/web      | `id="btn-restart"` named **two** buttons — the top bar's "Restart Server" and the playback "Restart". `getElementById` takes the first, so playback Restart was dead and its transport handler landed on Restart Server, which therefore fired a transport restart *and* `POST /api/restart` |
 | BUG-050 | fixed   | host/web      | Recording `elapsed_s` was `time.time() - time.monotonic()` -- two clocks with no shared origin -- so a 90-second take reported 1784067285.5 s. Every caller passed the wall clock; the start stamp was monotonic |
-| BUG-051 | fixed   | host/sensors  | The yaw-fusion gimbal gate fired **permanently in the normal upright grip** and its message named the wrong axis: ZYX pitch is the elevation of body **X = Up**, so upright *is* ZYX gimbal lock (measured 2.7° from it against a 15° threshold) while the boresight sat 2.1° off horizontal. Same root cause gave `absolute_heading` an **18.4° systematic error** at the operating pose (26.57° reported for a true 45°, exact only on the cardinal four), and put World's Roll readout on the ±180 wrap at 178.30°. Closes BUG-048 |
+| BUG-051 | fixed (amended by BUG-058) | host/sensors  | The yaw-fusion gimbal gate fired **permanently in the normal upright grip** and its message named the wrong axis: ZYX pitch is the elevation of body **X = Up**, so upright *is* ZYX gimbal lock (measured 2.7° from it against a 15° threshold) while the boresight sat 2.1° off horizontal. Same root cause gave `absolute_heading` an **18.4° systematic error** at the operating pose (26.57° reported for a true 45°, exact only on the cardinal four), and put World's Roll readout on the ±180 wrap at 178.30°. Closes BUG-048 |
 | BUG-052 | fixed   | host/slam     | Detailed build froze the whole web UI: `TsdfMap._extract_vbg()` copied the **entire preallocated** VoxelBlockGrid to the host on every extraction (`block_count`-sized, not map-sized), 1.11 s with the GIL held, once per 25 frames — starving roomscan-web's asyncio loop for **78–84% of wall clock**. Extracting in place on the device is 0.04 s |
 | BUG-053 | vendor  | host/slam     | Open3D 0.19's marching cubes **crashes the process** above ~260k active blocks — host segfaults, CUDA raises "illegal memory access" then `terminate()`s. Bisected: fine at 258,161 blocks, fatal at 273,521, on **both** devices. Driven by the absolute block count, not load factor or free memory (same count dies at 68.4% load in a 400k grid), so raising `block_count` does not help. Mitigated by refusing to extract above 250,000 |
 | BUG-054 | fixed   | host/slam     | The Detailed preset's `voxel_size = 0.005` could never build a room-sized capture — DebugCapB1 crosses BUG-053's ceiling at frame 2625 of 4808. Its own `benchmark_note` ("benchmark me on CUDA:0 with a full-room capture") had never been run; 5 mm was only exercised on captures small enough to fit. Default is now 0.01 |
 | BUG-055 | fixed   | host/web      | The SLAM/Detailed map's scanner pose marker was drawn **4.44x oversize** — a 62 cm slab in a metres-scale room. `slam.js` passed no `dims` to `createDeviceMesh`, taking `DEVICE_DIMS`, which is documented as magcal3d's unitless *shell* scale, not metres |
 | BUG-056 | fixed   | host/web      | A finished Detailed build's "Completed in" kept counting up — `DetailedRunner.status()` derives `elapsed_s` from `time.monotonic() - _started_at` with nothing stopping it at `done`. A ~3.5-minute build read **81:01** an hour later, and `elapsed_s` was observed climbing 4910.5 → 4914.5 in four seconds |
 | BUG-057 | fixed   | host/web      | The HUD's **Gaps** counter booked a source swap as lost frames — `Stats._last_seq` survives live→replay→live, but sequence numbers are per-source, so the numbering difference lands in `seq_gaps`. Observed **1,529,274 gaps** in a session with 0 drops streaming cleanly at 30 fps. Discredits the exact counter BUG-049's transport-loss work reads |
+| BUG-058 | fixed   | host/sensors  | Heading swung 154° while the device was rolled at a fixed bearing — `absolute_heading` stripped yaw with `yaw_twist_deg`, and world-Z twist absorbs roll about a horizontal boresight degree for degree. `YawFusion` compounded it: `heading - yaw` differenced a device bearing against a world-Z twist, so the fused quat came out **mirrored**, at −bearing |
 
 ---
 
@@ -2296,6 +2297,12 @@ decomposition used as a *quantity* rather than a display. Any `quat_yaw_deg` con
 is suspect. And a test suite that exercises only the identity attitude cannot see a bug whose whole
 domain is the pose the device is actually held in.
 
+**⚠ Amended by BUG-058 (2026-08-01): this fix was itself wrong.** `yaw_twist_deg` is not a bearing
+either — it absorbs roll about a horizontal boresight one-for-one, so heading tracked ROLL, and the
+fusion's `heading − yaw` came out mirrored. The replacement above (`yaw_twist_deg`) is superseded by
+`boresight_bearing_deg` / `magnetic_north_bearing_deg`; `test_absolute_heading_recovers_true_bearing_at_the_operating_pose`
+survives but no longer fits a convention offset. Read BUG-058 before touching any of this.
+
 ## BUG-052 — Detailed build starved the web server's event loop for 80% of wall clock
 
 **Status:** fixed 2026-08-01 · **Area:** host/slam (`slam/tsdf.py`) · **Found by:** owner — "the
@@ -2489,3 +2496,66 @@ exactly the same per-source reason.
 real gap, swaps to a distant numbering, and asserts the swap adds nothing while the earlier total
 and the running frame count survive — then that real gaps are still counted afterwards. Proved by
 reintroducing the defect.
+
+---
+## BUG-058 — Heading tracked ROLL, and the yaw fusion came out mirrored
+
+**Status:** fixed 2026-08-01 · **Area:** host/sensors (`sensors.py` `absolute_heading`, `YawFusion`) ·
+**Found by:** owner — `captures/NorthFacingRoll.bin`, "the device was always facing north" while the
+reported heading swung wildly.
+
+Rolling the instrument in the hand at a fixed bearing moved the reported heading **154°** over 153°
+of roll (circular range; the raw min-max crosses the ±180 wrap), at slope **−0.978** against roll and **+0.005** against the device's actual bearing. It is
+not a calibration problem: `capture_magcheck` scores that capture `attitude_locked 0.18%`, and the
+field's own world-frame azimuth is flat across it (sd 2.2°).
+
+`absolute_heading` stripped the quat's yaw with `yaw_twist_deg` — the swing–twist twist about world
+Z — then read the de-tilted field. But **world-Z twist is a property of the whole rotation, not the
+azimuth of any axis**: with the boresight horizontal, a roll about it is a rotation about a
+*horizontal* world axis, and the twist absorbs it one-for-one. So the function reduced to
+`constant − roll`. It read exactly right at roll 0 and 180 — the two grips anyone checks.
+
+**`YawFusion` had a worse form of the same defect, and it was live.** Its correction was
+`heading − yaw`, a device bearing minus a world-Z twist. Those are not the same quantity and the
+device term does not cancel, so every turn was counted twice: fed a synthetic device at a known
+bearing with a known yaw drift, the fused quaternion's boresight came out at **−bearing**, mirrored,
+at every roll and pitch tried. Since `SensorState.fused_quat()` is the primary orientation — gizmo,
+World readout, cloud rotation, SLAM rotation prior — that mirror was in the shipped path from the
+day BUG-051 first let the filter run (2026-07-31; before that the gimbal gate had frozen it
+permanently, which is why this never showed up earlier).
+
+**Fix.** Stop extracting a scalar yaw from an attitude at all.
+* `magnetic_north_bearing_deg(quat, mag)` — the compass bearing of magnetic north *in the quat's own
+  frame*, i.e. how far that frame's +X datum has drifted off north. Reads no body axis, so it has no
+  attitude singularity, and it is exactly the correction: `_delta` converges on it directly.
+* `absolute_heading` — the boresight's bearing minus north's, both read in the same frame. The
+  drifting datum cancels identically rather than being stripped, and the answer is roll-invariant
+  because neither term touches roll. `None` within 10° of vertical (`boresight_bearing_deg`), where a
+  bearing does not exist; `web.orientation_view` reports the reason and the client already drew a dash.
+* `YawFusion` gains `gated:no-field` (horizontal field ≈ 0) and drops its heading/yaw terms entirely.
+
+**Verified.** On the owner's capture the heading-minus-bearing residual falls from sd 42.7° / span
+154.6° to sd 2.2° / span 11.0°, and it holds on three more real captures spanning full 360° yaw
+(`roomSweepFull20260730` sd 6.1°, `coffeeRoomCircuitNoMnt` sd 6.0°) — the mag-derived bearing now
+tracks the quat's own bearing 1:1, which is what "same physical quantity" has to look like.
+`tilt_sweep_20260729` correctly returns no heading at all: it is aimed 89.7° up for its whole length.
+
+Then end-to-end on the running server, replaying that capture and reading the World card's own
+`/ws` `sensor` messages: over the full 152.8° of roll the reported Heading moves 19.3°, slope
+**+0.022** deg per deg of roll (was −0.978), residual sd 4.11°. The `gated:no-field` path is
+unreachable on this capture and correctly never fires.
+
+**Regression tests.** `test_absolute_heading_is_unmoved_by_roll_about_the_boresight` sweeps roll
+(and pitch) at four bearings; `test_fusion_lands_the_fused_boresight_on_the_true_magnetic_bearing`
+drives the filter from ground truth across bearing × roll × pitch × drift and asserts the *fused
+boresight*, which is what catches the mirror; `test_absolute_heading_is_none_where_no_bearing_exists`
+pins the pole. `test_no_new_yaw_twist_consumers` is a new AST guard, empty by design. All proved by
+reintroducing the defect.
+
+**Lesson.** The BUG-051 fix replaced one wrong yaw scalar with another and its regression test swept
+the axis that had just burned it — bearing — while holding **roll** fixed; the fix's own test could
+not see the bug the fix introduced. Fifth instance of the class (BUG-039/048/051/058), so the rule is
+now stated without an escape hatch: **no scalar "yaw" off an attitude is the bearing of an axis.**
+Ask for the bearing of the axis you actually mean. Second lesson: every assertion in the yaw-fusion
+suite was on the *magnitude* of a correction, and a 180°-mirrored filter passed all of them — sign
+conventions need a test that names a physical direction, not a number.

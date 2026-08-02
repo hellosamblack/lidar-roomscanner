@@ -844,11 +844,15 @@ def orientation_view(mode: str, quat, mag_ut_raw=None, heading_full: float | Non
         reasons = [r for r in (mag_reason,) if r]
         if motion_flag:
             reasons.append("device is accelerating -- gravity tilt reference degraded")
+        if heading is None and mag_valid:
+            # A good mag reading with no heading means the aim itself has no
+            # bearing -- say which, rather than leaving a bare "—" (BUG-058).
+            reasons.append("boresight within 10 deg of vertical -- no compass bearing exists")
         margin = 90.0 - abs(tilt)
         return {"roll_deg": roll, "pitch_deg": tilt, "yaw_deg": heading,
                 "singularity_margin_deg": margin,
                 "near_singularity": margin < ORIENTATION_SINGULARITY_MARGIN_DEG,
-                "valid": mag_valid and not motion_flag,
+                "valid": mag_valid and not motion_flag and heading is not None,
                 "reason": "; ".join(reasons) if reasons else None,
                 "gravity_source": gravity_source,
                 "mag_norm_ut": mag_norm, "mag_expected_ut": mag_expected,
@@ -1292,6 +1296,7 @@ _FUSION_LABELS = {
     "gated:no-cal": "No mag calibration",
     "gated:motion": "Fast motion",
     "gated:anomaly": "Mag anomaly",
+    "gated:no-field": "No horizontal field",
 }
 
 
@@ -1388,8 +1393,11 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
             mag = tuple(float(v) for v in AXIS_CONVENTION @ mag_cal.apply(mag))
         mag_out = [round(float(v), 2) for v in mag]
         if quat is not None:
+            # None where a boresight bearing does not exist -- aimed within 10
+            # deg of straight up/down (BUG-058). The client already renders a
+            # null heading as "—"; World mode reports the reason below.
             heading_full = absolute_heading(quat, tuple(mag))
-            heading = round(heading_full, 1)
+            heading = round(heading_full, 1) if heading_full is not None else None
 
     orientation_raw = {
         "quat": [round(float(v), 6) for v in quat] if quat is not None else None,

@@ -932,7 +932,10 @@ def test_build_sensor_message_rot_is_display_transform():
 
 def test_build_sensor_message_env_fields_and_history():
     ss = SensorState()
-    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", 1.0, 0.0, 0.0, 0.0)))
+    # A real grip (boresight horizontal), not the identity quat: identity aims
+    # straight up, where no compass bearing exists and `heading` is correctly
+    # None (BUG-058).
+    ss.feed(_sframe(StreamId.IMU_QUAT, struct.pack("<4f", *_Q_86_PITCH)))
     for i in range(3):
         ss.feed(_sframe(StreamId.ENV, struct.pack("<5f", 101000.0 + i, 1.0, 2.0, 3.0, 22.0 + i), t_us=1000 + i * 3_000_000))
     msg = web.build_sensor_message(ss, None)

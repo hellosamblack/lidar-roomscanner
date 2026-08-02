@@ -48,7 +48,11 @@ def test_fused_quat_seam_uses_correction():
                          matrix=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
                          field_ut=50.0)
     st = SensorState(fusion=YawFusion(tau_s=0.5, calibration=cal))
-    target_mag = np.array([50.0 * math.cos(math.radians(60.0)), 50.0 * math.sin(math.radians(60.0)), 0.0])
+    # North at compass bearing 60 (CW: atan2(-y, x)) in the raw quat's world
+    # frame, so the correction the filter must find is +60. Built CCW until
+    # BUG-058, which made the fused quat come out mirrored while this assertion
+    # -- on the magnitude of a yaw -- stayed green.
+    target_mag = np.array([50.0 * math.cos(math.radians(60.0)), -50.0 * math.sin(math.radians(60.0)), 0.0])
     mag = tuple(AXIS_CONVENTION @ target_mag)
     for i in range(300):
         st.feed(_env_frame(101325.0, mag, 20.0))

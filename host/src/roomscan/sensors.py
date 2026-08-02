@@ -438,14 +438,22 @@ def _unit_quat(quat) -> tuple[float, float, float, float]:
 
 def yaw_twist_deg(quat) -> float:
     """How far `quat` is rotated about **world +Z**, in degrees [-180, 180) --
-    the swing-twist twist, and the singularity-free replacement for
-    `quat_yaw_deg` wherever "the heading part of this attitude" is meant
-    (BUG-051).
+    the swing-twist twist.
+
+    **This is not a heading, and no live path may use it as one (BUG-058).**
+    It is a property of the whole rotation: roll the device about a horizontal
+    boresight, turning not at all, and this changes degree for degree. It was
+    adopted as the heading term in BUG-051 and was wrong for that job in the
+    same way `quat_yaw_deg` had been, just on a different axis. Its legitimate
+    use is a *residual* between two attitudes -- "how much pure yaw separates
+    these two quats" -- which is `graft_yaw_error_deg`. For where something
+    points, use `boresight_bearing_deg`; for where north is, use
+    `magnetic_north_bearing_deg`.
 
     Identical to ``-graft_yaw_error_deg((1,0,0,0), quat)`` (pinned by a test);
     written out because it is the primitive and that function is the loop form.
 
-    Two properties `quat_yaw_deg` lacks, both of which the callers need:
+    Two properties `quat_yaw_deg` lacks, both of which the residual form needs:
 
     * **No singularity.** ZYX yaw is ill-conditioned as its pitch approaches
       +-90 deg, and this device's SFLP body frame has **X = Up**, so ZYX pitch
@@ -466,40 +474,115 @@ def tilt_compensated_heading(
     quat: tuple[float, float, float, float],
     mag_ut: tuple[float, float, float],
 ) -> float:
-    """Heading in degrees [0,360): de-tilt the mag vector into the horizontal plane using
-    the orientation, then atan2. Rotates the body-frame mag into world frame and reads the
-    horizontal components, so the heading is correct when the device is not level."""
+    """Azimuth in degrees [0,360) of the magnetic field vector **in the quat's
+    own world frame**, measured CCW from world +X (`atan2(m_y, m_x)`).
+
+    Read the name with care: this is where NORTH lies, not where the DEVICE
+    points, and it is CCW while every compass bearing in this module
+    (`boresight_view_deg`, `magnetic_north_bearing_deg`, `absolute_heading`) is
+    CW. Because the field is fixed in the world, the value is independent of
+    how the device is held -- rotating the device cannot change it. It is
+    therefore *not* a device heading in any attitude, and using it as one cost
+    BUG-058; `magnetic_north_bearing_deg` is the same measurement in the
+    module's compass convention and is what the fusion consumes.
+
+    Kept because the deprecated desktop panel's compass draws it directly."""
     r = quat_to_matrix(*quat)
     m_world = r @ np.array(mag_ut, dtype=np.float64)
     heading = np.degrees(np.arctan2(m_world[1], m_world[0]))
     return float(heading % 360.0)
 
 
-def absolute_heading(quat, mag_ut) -> float:
-    """Drift-free magnetic heading in degrees [0,360): de-tilt the mag using ONLY
-    the orientation's roll/pitch (yaw stripped), so the result depends on the
-    device's true heading and tilt but NOT on any yaw drift in `quat`.
+# Horizontal field below this is too short to point anywhere: no north, hence no
+# bearing. Only reachable at a magnetic pole or inside a shield -- ~19 uT of
+# horizontal field is typical at mid-latitudes -- but a silent atan2(0, 0) = 0
+# would read as "due north" rather than "unknown".
+MIN_HORIZONTAL_FIELD_UT = 0.5
 
-    This is the yaw reference the fusion steers toward. Passing the full quat to
-    `tilt_compensated_heading` instead would rotate the mag by the drifting yaw
-    too, re-injecting exactly the drift the fusion exists to remove.
+# A compass bearing for the boresight stops existing as it swings to vertical
+# (aim at the ceiling and the device has no forward direction to name), and its
+# noise grows as 1/cos(elevation) on the way there. Same singularity
+# `boresight_view_deg` documents for its roll, and the same margin the web UI
+# already warns at (`ORIENTATION_SINGULARITY_MARGIN_DEG`).
+BEARING_SINGULARITY_MARGIN_DEG = 10.0
 
-    Yaw is stripped with `yaw_twist_deg`, **not** `quat_yaw_deg` (BUG-051).
-    Because `graft_yaw` only rotates about world Z, this whole function reduces
-    to ``tilt_compensated_heading(quat, mag) - <the stripped yaw>`` -- a
-    well-conditioned quantity minus the stripped one -- so the strip's
-    conditioning *is* the result's conditioning. With ZYX yaw, at the attitude
-    this device is actually held (ZYX pitch ~87 deg, see `yaw_twist_deg`), that
-    cost a measured **18.4 deg** of systematic heading error at a true bearing
-    of 45 deg, plus ~1.6 deg of swing per 0.1 deg of quat tilt noise. It read
-    exact at bearings of 0/90/180/270 deg, which is why it survived. The twist
-    strip recovers the true bearing exactly at every attitude tested.
 
-    Drift-freedom is preserved and is in fact now exact: a pure world-Z drift
-    of `d` raises both `tilt_compensated_heading` and `yaw_twist_deg` by exactly
-    `d`, so it cancels."""
-    tilt_only = graft_yaw(quat, -yaw_twist_deg(quat))
-    return tilt_compensated_heading(tilt_only, mag_ut)
+def magnetic_north_bearing_deg(quat, mag_ut) -> float | None:
+    """Compass bearing (CW, [-180, 180)) at which magnetic north lies **in the
+    frame `quat` is expressed in** -- i.e. how far that frame's +X datum has
+    ended up from north. None when the field has no usable horizontal
+    component (`MIN_HORIZONTAL_FIELD_UT`).
+
+    This is the whole yaw-drift measurement, and the *only* magnetometer term
+    the fusion needs. SFLP is 6-axis, so its world +X is an arbitrary datum
+    fixed at boot that then drifts; this says by how much, at any attitude,
+    with no singularity -- the field is a world-fixed vector, so rotating the
+    device cannot change it, and nothing here reads a body axis.
+
+    Exactly additive under `graft_yaw`, with the sign that makes the fixed
+    point trivial: ``magnetic_north_bearing_deg(graft_yaw(q, d), m) ==
+    wrap180(<this> - d)``, so grafting by exactly this value lands the fused
+    frame's +X on magnetic north and leaves nothing to iterate.
+
+    `mag_ut` must already be calibrated and axis-corrected (`MagCalibration.apply`
+    then `AXIS_CONVENTION`) -- this function only reads a direction, it cannot
+    tell a hard-iron offset from a real field."""
+    r = quat_to_matrix(*quat)
+    m_world = r @ np.asarray(mag_ut, dtype=np.float64)
+    if float(math.hypot(m_world[0], m_world[1])) < MIN_HORIZONTAL_FIELD_UT:
+        return None
+    return wrap180(math.degrees(math.atan2(-float(m_world[1]), float(m_world[0]))))
+
+
+def boresight_bearing_deg(quat) -> float | None:
+    """Compass bearing [0,360) of the ToF optical axis in the frame `quat` is
+    expressed in, or None within `BEARING_SINGULARITY_MARGIN_DEG` of vertical
+    where a bearing does not exist. `boresight_view_deg`'s azimuth, gated.
+
+    Exactly additive under `graft_yaw` (a world-Z rotation of `d` swings the
+    boresight's bearing by `-d`) at every attitude it returns a number for --
+    the property `quat_yaw_deg` (BUG-051) and then `yaw_twist_deg` (BUG-058)
+    were each adopted for and each lacked."""
+    azimuth, elevation, _roll = boresight_view_deg(quat)
+    if 90.0 - abs(elevation) < BEARING_SINGULARITY_MARGIN_DEG:
+        return None
+    return azimuth
+
+
+def absolute_heading(quat, mag_ut) -> float | None:
+    """Drift-free magnetic compass bearing of the BORESIGHT, in degrees
+    [0,360) -- where the sensor is aimed, referenced to magnetic north instead
+    of to the SFLP world frame's drifting +X datum. None when either half is
+    undefined: the boresight within `BEARING_SINGULARITY_MARGIN_DEG` of
+    vertical, or no horizontal field.
+
+    It is the difference of two bearings read in the same frame -- the
+    boresight's, and magnetic north's -- so `quat`'s yaw datum cancels
+    identically and the answer is drift-free by construction rather than by
+    stripping anything.
+
+    **Do not reintroduce a "strip the yaw, then de-tilt" formulation.** Both
+    predecessors were that shape and both failed the same way, on the axis
+    their regression test happened not to sweep:
+
+      * `quat_yaw_deg` (ZYX yaw) -- BUG-051, 18.4 deg of systematic error at a
+        true bearing of 45 deg, exact at 0/90/180/270 so the cardinal-bearing
+        check passed.
+      * `yaw_twist_deg` (swing-twist about world Z) -- BUG-058, and its test
+        DID sweep off-axis bearings; what it held fixed was ROLL. World-Z twist
+        absorbs roll about a horizontal boresight one-for-one, so with the
+        device aimed at a fixed bearing and simply rolled in the hand, this
+        function tracked the roll at slope -0.978 (`captures/NorthFacingRoll.bin`,
+        154 deg of reported heading swing for 0 deg of real turn).
+
+    The lesson under both: a scalar "yaw" extracted from an attitude is a
+    property of the whole rotation, not of the direction the sensor points. Ask
+    for the bearing of the axis you actually mean."""
+    north = magnetic_north_bearing_deg(quat, mag_ut)
+    bearing = boresight_bearing_deg(quat)
+    if north is None or bearing is None:
+        return None
+    return (bearing - north) % 360.0
 
 
 # True physical mapping derived from board orientation:
@@ -624,15 +707,20 @@ class YawFusion:
     tilt-compensated magnetometer heading onto the SFLP quaternion. Tilt is
     taken from SFLP unchanged; only heading is corrected.
 
+    What it steers on is `magnetic_north_bearing_deg` -- the angle between this
+    quat's world +X datum and magnetic north -- and nothing else. That is the
+    drift being corrected, measured directly; the filter never forms, and so
+    cannot mis-form, a "device heading" (BUG-058). It reads no body axis, so it
+    has no attitude singularity: `gated:no-field` fires only if the horizontal
+    field itself vanishes.
+
     There is no gimbal gate (removed, BUG-051). There used to be one -- freeze
     within `gimbal_margin_deg` of |ZYX pitch| = 90 -- and it was not defending
     the *filter*, it was defending this class's own use of `quat_yaw_deg`. On a
     device whose body X is Up, ZYX pitch is the elevation of the structural up
     axis, so held upright (the normal grip, measured 87.3 deg) the gate tripped
     permanently and yaw fusion could never run: the UI reported "Gimbal lock"
-    while the boresight sat 2.1 deg off horizontal. Both the yaw term here and
-    `absolute_heading` now use `yaw_twist_deg`, which has no singularity at any
-    attitude, so there is nothing left to gate on."""
+    while the boresight sat 2.1 deg off horizontal."""
 
     def __init__(self, tau_s: float = 20.0, calibration: MagCalibration | None = None,
                  anomaly_frac: float = 0.3, motion_rate_dps: float = 40.0):
@@ -675,21 +763,26 @@ class YawFusion:
             self.status = "gated:anomaly"
             self._last_t = t_us
             return
-        heading = absolute_heading(quat, tuple(cal_mag))
-        # Must be the SAME yaw convention `absolute_heading` strips with, or
-        # `_delta` chases a moving difference of two unlike quantities
-        # (BUG-051). `yaw_twist_deg` is additionally EXACTLY additive under the
-        # `graft_yaw` that `fused_quat` applies, so a converged `_delta` lands
-        # the fused quat's heading precisely on `heading` rather than near it.
-        yaw = yaw_twist_deg(quat)
+        # The correction IS the measurement: how far this quat's world +X datum
+        # has drifted from magnetic north. There is no device-heading term and
+        # no yaw extracted from the attitude, so there is nothing to go
+        # singular and nothing to double-count. The old `heading - yaw` was a
+        # difference of two unlike quantities (BUG-058) whose device-bearing
+        # terms did not cancel: driven at a known bearing, the fused quat came
+        # out MIRRORED, its boresight reading -bearing.
+        target = magnetic_north_bearing_deg(quat, tuple(cal_mag))
+        if target is None:
+            self.status = "gated:no-field"
+            self._last_t = t_us
+            return
         if not self._have_delta:
-            self._delta = wrap180(heading - yaw)   # snap on first valid sample
+            self._delta = target                   # snap on first valid sample
             self._have_delta = True
         else:
             gain = dt / (self.tau_s + dt)
-            # first-order low-pass toward the mag heading; re-wrap so delta stays
-            # in [-180, 180) even after many ±180 crossings (diagnostic sanity).
-            self._delta = wrap180(self._delta + gain * wrap180(heading - (yaw + self._delta)))
+            # first-order low-pass toward the measured datum error; re-wrap so
+            # delta stays in [-180, 180) even after many ±180 crossings.
+            self._delta = wrap180(self._delta + gain * wrap180(target - self._delta))
         self.status = "active"
         self._last_t = t_us
 

@@ -2,21 +2,30 @@
 
 The SFLP quaternion (stream 9) is **6-axis**: its tilt (roll/pitch) is gravity-referenced and
 drift-free, but its **yaw drifts** — SFLP never consumes the magnetometer, and the LSM6DSV16X has no
-on-chip 9-axis fusion. The host closes that loop by grafting a gated, long-time-constant,
-tilt-compensated magnetometer heading (LIS2MDL, stream 10) onto the SFLP yaw. Tilt stays 100% SFLP;
-only yaw is nudged toward the magnetic reference. This bounds the live gizmo's heading drift and gives
-the future ICP rotation prior a drift-bounded orientation.
+on-chip 9-axis fusion. The host closes that loop by measuring how far the SFLP world frame's **+X
+datum has wandered from magnetic north** (LIS2MDL, stream 10) and grafting a gated,
+long-time-constant correction about world Z. Tilt stays 100% SFLP; only yaw is nudged. This bounds
+the live gizmo's heading drift and gives the ICP rotation prior a drift-bounded orientation.
 
 It is a **gentle drift bound, not a hard heading source** — indoor magnetic yaw is worse than
 point-cloud ICP yaw (rebar/wiring distortion), so the correction is slow (default τ ≈ 20 s) and freezes
 on magnetic anomalies and fast motion.
 
+**The correction is that datum error and nothing else** (`magnetic_north_bearing_deg`, BUG-058,
+2026-08-01). The filter used to difference a *device heading* against a *scalar yaw* pulled off the
+attitude, and the device term did not cancel: driven at a known bearing, the fused quaternion came
+out mirrored, at −bearing. The measurement now reads no body axis at all, which is also why it has
+no attitude singularity — `gated:no-field` can only fire if the horizontal field itself vanishes.
+
 There is deliberately **no gimbal gate** (BUG-051, 2026-07-31). One existed, freezing the correction
-within 15° of |ZYX pitch| = 90°. It defended a singularity the filter no longer has — both
-`absolute_heading` and the fusion's own yaw term now use `yaw_twist_deg` (swing–twist about world Z),
-which is well-conditioned at every attitude the device can reach — and because the SFLP body frame has
-**X = Up**, |ZYX pitch| ≈ 90° *is* the normal upright handheld grip, so the gate fired permanently
-in ordinary use.
+within 15° of |ZYX pitch| = 90°. Because the SFLP body frame has **X = Up**, |ZYX pitch| ≈ 90° *is*
+the normal upright handheld grip, so the gate fired permanently in ordinary use — and what it was
+defending was not the filter but the filter's own choice of yaw convention.
+
+Separately, **`absolute_heading`** — the World-mode readout and the compass — is now the boresight's
+compass bearing referenced to magnetic north: two bearings read in the same frame, differenced, so
+the drifting datum cancels identically. It is `None` when the sensor is aimed within 10° of vertical,
+where no bearing exists.
 
 Design + rationale: `docs/superpowers/specs/2026-07-10-lsm6dsv16x-mag-yaw-correction-design.md`.
 

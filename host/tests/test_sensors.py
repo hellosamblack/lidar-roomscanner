@@ -243,14 +243,21 @@ def test_quat_mul_identity():
 
 def test_absolute_heading_independent_of_yaw():
     # Body-fixed mag: absolute_heading must be the same regardless of the quat's
-    # (drifting) yaw, since it de-tilts with yaw stripped. This is what makes the
-    # fusion reference drift-free.
-    from roomscan.sensors import absolute_heading
-    mag_body = (30.0, 10.0, 0.0)
-    h0 = absolute_heading((1.0, 0.0, 0.0, 0.0), mag_body)          # yaw 0
-    s = np.sqrt(0.5)
-    h90 = absolute_heading((s, 0.0, 0.0, s), mag_body)             # yaw 90, same tilt
-    assert h0 == pytest.approx(h90, abs=1e-6)
+    # (drifting) yaw -- it differences two bearings read in that same frame, so
+    # the frame's datum cancels. This is what makes the fusion reference
+    # drift-free.
+    #
+    # The attitude is a real grip (boresight horizontal), not the identity quat
+    # this used to use: identity aims the boresight straight UP, the one pose
+    # that has no compass bearing at all, so the old version of this test was
+    # comparing two undefined headings and would now compare two Nones.
+    from roomscan.sensors import absolute_heading, graft_yaw
+    q = (0.604421, 0.35965, 0.593567, -0.391159)                   # owner's live grip
+    mag_body = (30.0, 10.0, 20.0)
+    h0 = absolute_heading(q, mag_body)
+    assert h0 is not None
+    for drift in (90.0, -37.0, 179.0):
+        assert absolute_heading(graft_yaw(q, drift), mag_body) == pytest.approx(h0, abs=1e-6)
 
 
 def test_fused_quat_falls_back_to_raw_without_fusion():
@@ -268,7 +275,11 @@ def test_fused_quat_applies_yaw_correction():
                          matrix=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
                          field_ut=50.0)
     st = SensorState(fusion=YawFusion(tau_s=0.5, calibration=cal))
-    target_mag = np.array([50.0 * math.cos(math.radians(60.0)), 50.0 * math.sin(math.radians(60.0)), 0.0])
+    # North at compass bearing 60 (CW: atan2(-y, x)) in the raw quat's world
+    # frame, so the correction the filter must find is +60. Built CCW until
+    # BUG-058, which made the fused quat come out mirrored while this assertion
+    # -- on the magnitude of a yaw -- stayed green.
+    target_mag = np.array([50.0 * math.cos(math.radians(60.0)), -50.0 * math.sin(math.radians(60.0)), 0.0])
     mag = tuple(AXIS_CONVENTION @ target_mag)
     for i in range(300):
         st.feed(_frame(StreamId.ENV, struct.pack("<5f", 101325.0, *mag, 20.0)))
@@ -480,25 +491,36 @@ def test_triad_roll_zero_when_up_ref_points_true_up():
     assert roll == pytest.approx(0.0, abs=1e-6)
 
 
-# --- BUG-039 / BUG-048 / BUG-051: no ZYX yaw as a quantity in a live path -----
+# --- BUG-039/048/051/058: no scalar "yaw" as a quantity in a live path --------
 
 # `quat_yaw_deg` is a ZYX Tait-Bryan yaw, and this device's SFLP body frame has
 # X = Up -- so its gimbal lock sits at the NORMAL UPRIGHT GRIP, not at some
 # exotic attitude. Using it as a *quantity* (a heading, a heading error, a yaw to
-# strip or to zero against) has now shipped as a bug four times:
+# strip or to zero against) has now shipped as a bug five times:
 #
 #   BUG-039  imufusion._correct_yaw nulled it            -> graft_yaw_error_deg
 #   BUG-048  absolute_heading stripped it                -> (same defect as 051)
 #   BUG-051  absolute_heading + YawFusion's yaw term     -> yaw_twist_deg
+#   BUG-058  ...and `yaw_twist_deg` was wrong for the job too, on the axis
+#            BUG-051's test held fixed: world-Z twist absorbs roll about a
+#            horizontal boresight one-for-one, so rolling the device in the
+#            hand read as a 154 deg turn -> boresight_bearing_deg /
+#            magnetic_north_bearing_deg
 #
-# It remains legitimate as a *display decomposition* -- "what is the ZYX yaw of
-# this attitude" is a fair question to render, and its own ill-conditioning is
+# The through-line is not "ZYX is bad, use twist". It is that a scalar yaw
+# extracted from an attitude is a property of the WHOLE rotation, and no such
+# scalar is the bearing of an axis. Name the axis you mean.
+#
+# Both remain legitimate as a *display decomposition* -- "what is the ZYX yaw of
+# this attitude" is a fair question to render, and the ill-conditioning is
 # information the UI reports (that is what `near_singularity` is for).
 #
-# This test pins the callers so a fifth instance cannot land quietly. If it
-# fails on a NEW call site, the question to answer is: am I rendering the ZYX
-# decomposition, or am I computing with a heading? If the latter, use
-# `yaw_twist_deg` (swing-twist about world Z) or `graft_yaw_error_deg`.
+# `test_no_new_zyx_yaw_consumers` and `test_no_new_yaw_twist_consumers` pin the
+# call sites of each so a sixth instance cannot land quietly. If one fails on a
+# NEW call site, the question to answer is: am I rendering a decomposition, or
+# computing with a heading? If the latter, use `boresight_bearing_deg` (where
+# the sensor points), `magnetic_north_bearing_deg` (where north is), or
+# `graft_yaw_error_deg` (pure yaw between two attitudes).
 _ZYX_YAW_DISPLAY_CALLERS = {
     # (module, enclosing function) -> why it is allowed
     ("web.py", "orientation_view"): "renders the 'zyx' decomposition mode itself",
@@ -512,7 +534,10 @@ _ZYX_YAW_DISPLAY_CALLERS = {
 }
 
 
-def test_no_new_zyx_yaw_consumers():
+def _call_sites(func_name):
+    """{(module, enclosing function): [lineno, ...]} for calls to `func_name`
+    anywhere in the package. Keyed on the enclosing FUNCTION, never a line
+    number, so unrelated edits above a call site cannot rot the allow-list."""
     import ast
     import pathlib
 
@@ -527,9 +552,13 @@ def test_no_new_zyx_yaw_consumers():
             for node in ast.walk(fn):
                 if (isinstance(node, ast.Call)
                         and isinstance(node.func, ast.Name)
-                        and node.func.id == "quat_yaw_deg"):
+                        and node.func.id == func_name):
                     found.setdefault((path.name, fn.name), []).append(node.lineno)
+    return found
 
+
+def test_no_new_zyx_yaw_consumers():
+    found = _call_sites("quat_yaw_deg")
     unexpected = {k: v for k, v in found.items() if k not in _ZYX_YAW_DISPLAY_CALLERS}
     assert not unexpected, (
         "New `quat_yaw_deg` call site(s): "
@@ -543,3 +572,29 @@ def test_no_new_zyx_yaw_consumers():
     # And the allow-list must not rot: every entry still has to be a real call site.
     stale = set(_ZYX_YAW_DISPLAY_CALLERS) - set(found)
     assert not stale, f"_ZYX_YAW_DISPLAY_CALLERS entries no longer call it: {sorted(stale)}"
+
+
+# `yaw_twist_deg` inherits the same rule, and inherits it *because* it was the
+# BUG-051 replacement that then shipped BUG-058. Empty on purpose: after the
+# fix, no live path takes a scalar yaw off an attitude at all. The one
+# legitimate consumer is `graft_yaw_error_deg`, which is the residual between
+# two attitudes and computes the twist inline rather than calling this.
+_YAW_TWIST_CALLERS: dict[tuple[str, str], str] = {}
+
+
+def test_no_new_yaw_twist_consumers():
+    found = _call_sites("yaw_twist_deg")
+    unexpected = {k: v for k, v in found.items() if k not in _YAW_TWIST_CALLERS}
+    assert not unexpected, (
+        "New `yaw_twist_deg` call site(s): "
+        + ", ".join(f"{m}::{f} (line {ls[0]})" for (m, f), ls in sorted(unexpected.items()))
+        + ". World-Z twist is not a heading: roll the device about a horizontal "
+          "boresight, turning not at all, and it moves degree for degree (BUG-058, "
+          "154 deg of phantom heading swing on captures/NorthFacingRoll.bin). For "
+          "where the sensor points use `boresight_bearing_deg`; for where north is "
+          "use `magnetic_north_bearing_deg`; for the pure yaw between two attitudes "
+          "use `graft_yaw_error_deg`. If it really is a decomposition being "
+          "rendered, add it to _YAW_TWIST_CALLERS with a reason.")
+
+    stale = set(_YAW_TWIST_CALLERS) - set(found)
+    assert not stale, f"_YAW_TWIST_CALLERS entries no longer call it: {sorted(stale)}"

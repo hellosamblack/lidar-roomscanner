@@ -3082,8 +3082,12 @@ class ControlPanel:
             mag = env.mag_ut
             if self._mag_cal is not None:
                 mag = tuple(AXIS_CONVENTION @ self._mag_cal.apply(mag))
-            heading = absolute_heading(quat, mag)
-            heading_valid = True
+            # None when the boresight is within 10 deg of vertical (no bearing
+            # exists there) -- the overlay's existing invalid path, not a 0.0
+            # that draws as due north (BUG-058).
+            bearing = absolute_heading(quat, mag)
+            heading_valid = bearing is not None
+            heading = bearing if heading_valid else 0.0
             if hasattr(self, "compass_widget"):   # settings-dialog Sensors group (if built)
                 self.compass_widget.update_image(self._np_to_o3d(render_compass(heading)))
         press_hist = self.sensor_state.pressure_history()
