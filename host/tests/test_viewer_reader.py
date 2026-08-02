@@ -1,5 +1,6 @@
 import queue
 import struct
+from types import SimpleNamespace
 
 from roomscan.decoder import StreamDecoder
 from roomscan.protocol import FrameHeader, FrameType, StreamId, pack_frame
@@ -107,3 +108,23 @@ def test_reader_paces_frames_with_min_interval():
     # 0.08 keeps a scheduling-jitter margin while still discriminating
     # unambiguously: with pacing off, elapsed is ~0.001 s.
     assert elapsed >= 0.08
+
+
+def test_stats_new_stream_forgets_the_sequence_without_losing_the_totals():
+    """A source swap is not a gap. Sequence numbers are per-source, so the first
+    frame after live->replay->live differs from the last by however far apart the
+    two numberings are -- booked as lost frames it read 1,529,274 gaps in a
+    session with 0 drops streaming cleanly at 30 fps (BUG-057). The running
+    totals must survive: BUG-049's transport-loss work reads them."""
+    s = Stats()
+    for seq in (1, 2, 4):                 # one real gap of 1
+        s.update(SimpleNamespace(seq=seq, flags=0))
+    assert (s.frames, s.seq_gaps) == (3, 1)
+
+    s.new_stream()
+    s.update(SimpleNamespace(seq=900000, flags=0))     # other source's numbering
+    assert s.seq_gaps == 1, "the swap itself must not count as ~900k lost frames"
+    assert s.frames == 4, "totals are session-level and must not reset"
+
+    s.update(SimpleNamespace(seq=900002, flags=0))     # real gaps still counted
+    assert s.seq_gaps == 2

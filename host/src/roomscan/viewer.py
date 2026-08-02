@@ -28,6 +28,18 @@ class Stats:
         self.dropped_flags = 0
         self._last_seq = None
 
+    def new_stream(self):
+        """Forget the last sequence number without clearing the totals.
+
+        Sequence numbers are per-source, so the first frame after a source swap
+        is a discontinuity by construction, not a gap. Without this, going Live
+        after viewing a capture books the whole numbering difference as lost
+        frames -- measured 1,529,274 "gaps" in a session with 0 drops streaming
+        cleanly at 30 fps (BUG-057). The totals are deliberately kept: they are
+        a session-level health count, and BUG-049's transport-loss work reads
+        them."""
+        self._last_seq = None
+
     def update(self, header):
         self.frames += 1
         if header.flags & FLAG_DROPPED:

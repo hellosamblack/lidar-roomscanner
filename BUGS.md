@@ -65,6 +65,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-054 | fixed   | host/slam     | The Detailed preset's `voxel_size = 0.005` could never build a room-sized capture — DebugCapB1 crosses BUG-053's ceiling at frame 2625 of 4808. Its own `benchmark_note` ("benchmark me on CUDA:0 with a full-room capture") had never been run; 5 mm was only exercised on captures small enough to fit. Default is now 0.01 |
 | BUG-055 | fixed   | host/web      | The SLAM/Detailed map's scanner pose marker was drawn **4.44x oversize** — a 62 cm slab in a metres-scale room. `slam.js` passed no `dims` to `createDeviceMesh`, taking `DEVICE_DIMS`, which is documented as magcal3d's unitless *shell* scale, not metres |
 | BUG-056 | fixed   | host/web      | A finished Detailed build's "Completed in" kept counting up — `DetailedRunner.status()` derives `elapsed_s` from `time.monotonic() - _started_at` with nothing stopping it at `done`. A ~3.5-minute build read **81:01** an hour later, and `elapsed_s` was observed climbing 4910.5 → 4914.5 in four seconds |
+| BUG-057 | fixed   | host/web      | The HUD's **Gaps** counter booked a source swap as lost frames — `Stats._last_seq` survives live→replay→live, but sequence numbers are per-source, so the numbering difference lands in `seq_gaps`. Observed **1,529,274 gaps** in a session with 0 drops streaming cleanly at 30 fps. Discredits the exact counter BUG-049's transport-loss work reads |
 
 ---
 
@@ -2462,3 +2463,29 @@ unfrozen subtraction and confirming the failure.
 **Lesson.** Third clock/duration defect in this file after BUG-050 and the recording elapsed. A
 duration derived from `now - start` needs an explicit answer to "when does it stop?", and "when the
 thing finishes" has to be written down, not assumed.
+## BUG-057 — Going Live after viewing a capture booked 1.5M phantom frame gaps
+
+**Status:** fixed 2026-08-01 · **Area:** host/web (`viewer.py` `Stats`, `web.py` `SessionController`) ·
+**Found by:** restoring the owner's live view at the end of the BUG-052 session — the HUD came back
+reading 1,529,274 gaps against 0 drops at a clean 30 fps.
+
+`SessionController` holds one long-lived `Stats`, and `Stats._last_seq` is never cleared when the
+source changes. Sequence numbers are **per-source**, so the first live frame after a replay differs
+from the last replayed frame by however far apart the two numberings happen to be — and
+`update()` adds that entire difference to `seq_gaps` as lost frames.
+
+**Why it matters more than a cosmetic counter.** `seq_gaps` is one of the numbers BUG-049's
+whole-group transport-loss investigation reads. A counter that silently absorbs a six-figure
+artifact the moment an operator previews a capture and goes back to live is worse than no counter:
+it is the same trap as BUG-040 (`drops`/`gaps` structurally pinned at 0) seen from the other end —
+**a number nobody has confirmed is reset is not evidence.**
+
+**Fix.** `Stats.new_stream()` clears `_last_seq` while deliberately keeping `frames` /
+`seq_gaps` / `dropped_flags` — those are session-level health totals. `switch_to_replay` and
+`switch_to_live` both call it, beside the existing `sensor_state.clear_imu_raw()` which exists for
+exactly the same per-source reason.
+
+**Regression test.** `test_stats_new_stream_forgets_the_sequence_without_losing_the_totals` counts a
+real gap, swaps to a distant numbering, and asserts the swap adds nothing while the earlier total
+and the running frame count survive — then that real gaps are still counted afterwards. Proved by
+reintroducing the defect.

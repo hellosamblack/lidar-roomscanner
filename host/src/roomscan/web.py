@@ -2662,6 +2662,7 @@ class SessionController:
             # with no stream 11 must fall back to the quat-derived gravity
             # vector, not silently inherit the old source's real one.
             self.sensor_state.clear_imu_raw()
+            self.stats.new_stream()   # per-source seq numbering; see Stats.new_stream
             self.mode = "replay"
             self.replay_path = str(path)
             self.index = build_capture_index(self.replay_path)
@@ -2685,6 +2686,7 @@ class SessionController:
             except Exception:
                 pass
             self.sensor_state.clear_imu_raw()              # see switch_to_replay's comment
+            self.stats.new_stream()   # per-source seq numbering; see Stats.new_stream
             self.mode = "live"
             self.replay_path = None
             self.index = None
