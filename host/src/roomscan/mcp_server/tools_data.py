@@ -523,3 +523,63 @@ def slam_rerender(capture: str, voxel_size: float = 0.0, block_count: int = 0,
             f"trajectory tail and start_end_gap_m are not measurements. The map is "
             f"only valid up to that point.")
     return result
+
+
+@mcp.tool()
+def slam_stall_profile(capture: str, frames: int = 1500, device: str = "",
+                       decimate: bool = False, mesh_every: int = 5,
+                       block_count: int = 0, timeout_s: float = 1800.0) -> dict:
+    """Find which live-SLAM stage freezes the server, and for how long (BUG-060).
+
+    Replays a capture through the real pipeline (Mapper.step -> mapper.mesh() ->
+    prepare_packet -> pack_mesh) and reports, per stage, both the wall time and
+    the GIL starvation a watchdog thread measured. Read the starvation numbers,
+    not the wall time: these are native calls and Open3D holds the GIL, so a
+    stage's starvation IS how long `roomscan-web`'s asyncio loop was frozen --
+    and the two differ by an order of magnitude. `prepare_packet` costs 178 ms
+    p50 but only 11.9% of wall in starvation (mostly numpy, which releases the
+    GIL); with `decimate=True` the same stage costs 2440 ms p50 and 94.3%.
+
+    Run it at SCALE. 1200 frames of a near-static capture showed zero stalls on
+    code that freezes for 1261 ms on a real room sweep -- every cost here grows
+    with map size, so pick a capture with real operator motion.
+
+    Runs in a subprocess (it holds a TSDF grid on the GPU for minutes) and never
+    binds the device, so it is safe beside a live `roomscan-web` -- though both
+    will be slower while it runs.
+
+    Wraps `host/tools/slam_stall_profile.py::profile_capture()`.
+    """
+    import json
+
+    p = (REPO / capture) if not Path(capture).is_absolute() else Path(capture)
+    if not p.is_file():
+        return {"error": f"no such capture: {rel(p)}"}
+    cmd = [str(VENV_PY), str(HOST / "tools" / "slam_stall_profile.py"), str(p),
+           "--frames", str(frames), "--mesh-every", str(mesh_every), "--json"]
+    if device:
+        cmd += ["--device", device]
+    if block_count:
+        cmd += ["--block-count", str(block_count)]
+    if decimate:
+        cmd += ["--decimate"]
+    try:
+        proc = subprocess.run(cmd, cwd=str(REPO), timeout=timeout_s,
+                              capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "cmd": " ".join(cmd),
+                "error": f"timed out after {timeout_s}s -- lower `frames`"}
+    if proc.returncode != 0:
+        return {"ok": False, "cmd": " ".join(cmd), "returncode": proc.returncode,
+                "stdout": proc.stdout[-2000:], "stderr": proc.stderr[-2000:]}
+    rep = json.loads(proc.stdout)
+    rep["ok"] = True
+    rep["capture"] = rel(p)
+    if rep.get("worst_stall_ms", 0) >= 300:
+        worst = max(rep["gil_starvation"].items(),
+                    key=lambda kv: kv[1]["starved_s"])[0]
+        rep["warning"] = (
+            f"worst single freeze {rep['worst_stall_ms']} ms, {rep['starved_pct_of_wall']}% "
+            f"of wall starved; the biggest contributor is the {worst!r} stage. A freeze "
+            f"this long stops the broadcaster, plain HTTP, and the SLAM feed alike.")
+    return rep

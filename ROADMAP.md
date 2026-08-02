@@ -939,6 +939,35 @@ was dead *and* "Restart Server" fired a transport restart first) and **BUG-050**
 `elapsed_s` was `time.time() - time.monotonic()`; a 90 s take reported 1.78e9 s, and it survived
 because the tests asserted the value was a *float*).
 
+#### Web Phase 7 — Live-SLAM throughput  ← **✅ Complete (2026-08-02)**
+
+> **BUG-060.** The owner reported Live SLAM's viewport updating at ~1 Hz on a 144 Hz display fed by
+> a 30 Hz stream, with the GPU at 0% / 10 W. The GPU was idle because it was only being *asked* for
+> ~5 frames a second: `uvicorn.run()` defaults `ws_per_message_deflate=True` and `_broadcast_bytes`
+> awaits `send_bytes` **per client**, so every 3.2 MB MESH was zlib-deflated once per connected tab,
+> synchronously on the event loop — **+130 ms of whole-process freeze per client, +0 ms for clients
+> negotiating no compression**, and six were attached. A plain HTTP probe stalling by the same
+> ~780 ms as `/ws` is what proved the loop itself was frozen rather than the client being slow.
+>
+> Because `SlamRunner.submit()` ran only from that frozen broadcaster, the mapper was fed 5.00 fps
+> against a 30.3 Hz stream and **5 frames in 6 never reached the TSDF, silently** — a reconstruction
+> defect, not a UI one. Fixed by disabling deflate, moving the SLAM feed onto the **reader thread**
+> (new `reader._run_reader(on_frame=…)`; `SlamRunner` now builds its CUDA pipeline asynchronously so
+> it cannot stall the reader), packing the mesh on `MeshPrep`'s thread, and evaluating the
+> Turbo/Gray colormap in the vertex shader instead of per-vertex in JS.
+>
+> **Measured on the live rig:** mapper 5.00 → **30.40 fps**, MESH 1.03 → **6.11/s**, HTTP p90
+> 766 → **4.8 ms**, stalls >300 ms 22 → **0** in 20 s, per-client scaling gone.
+>
+> **The obvious fix was the wrong one.** `MeshPrep`'s vertex budget is dead code on the web path
+> (its `note_upload_ms` feedback only exists in `panel.py`), so the live mesh streams full-res
+> forever — 30.97 MB by frame 1500 of `roomSweepFull20260730.bin`. Forcing decimation on costs
+> **14× what it saves**: `prepare_packet` 178 → 2440 ms p50, GIL starvation 11.9% → **94.3%**.
+> Payload is bounded by **cadence** instead (`[slam] live_mesh_bytes_per_s`, default 12 MB/s).
+> **Still open:** that governor bounds the wire *rate*, not the *peak* — the map is re-sent whole
+> and grows without bound. Delta / dirty-region mesh transport is the real answer, and is the same
+> incremental-extraction idea 6.I already wants. Full write-up in `BUGS.md` → BUG-060.
+
 **Open, non-blocking:** the narrow-viewport overlap probes (1280×800 / 1100×560 / 820×700) were not
 run — `ui_screenshot`'s width/height did not resize the viewport, so only 1600×1000 is measured
 (0 overlaps with browser + preview + Playback open). `MOUNT_ROTATION` and the merged mag-cal view
@@ -1728,7 +1757,15 @@ block count, no other extractions in flight — before writing any stitching cod
 > extractions in flight, then extract once on a named device and report survived/crashed (it has to
 > run the extraction in a **subprocess**: the failure mode is a segfault/`terminate`, so an in-process
 > harness dies with it); **(b)** the **GIL-starvation watchdog** — a thread that records how late its
-> own fixed-interval ticks fire, reported as *% of wall clock starved* + *worst single stall*. That
+> own fixed-interval ticks fire, reported as *% of wall clock starved* + *worst single stall*.
+>
+> **(b) SHIPPED 2026-08-02** as `host/tools/slam_stall_profile.py` / MCP `slam_stall_profile`
+> (BUG-060): per-stage timings for the whole live pipeline *plus* that watchdog. It earned itself
+> immediately — it is what separated `prepare_packet` at 178 ms p50 / **11.9%** starved (fine:
+> mostly numpy, which releases the GIL) from the same stage under forced decimation at 2440 ms p50
+> / **94.3%** starved (`simplify_quadric_decimation`, C++, which never releases it). Wall time
+> ranks those two 14:1; blocking cost ranks them 8:1 the other way, and only the watchdog sees it.
+> **(a)**, the extraction-ceiling re-bisector, still does not exist. That
 > pair is what turns "the UI feels frozen" into a number, and it is reusable well beyond this
 > sub-phase.
 

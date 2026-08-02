@@ -30,8 +30,46 @@ export function createSlam(hub, sceneApi) {
     group.visible = false;
     sceneApi.scene.add(group);
 
+    // --- colormap in the shader, not on the CPU (BUG-060) -----------------
+    // Mesh packets carry a shaded scalar encoded as RGB, and the View card's
+    // Turbo/Gray choice re-maps it. That used to run per-vertex in JS on every
+    // mesh AND on every palette change, allocating a fresh Float32Array each
+    // time — O(map) main-thread work at mesh rate, for a function of one
+    // uniform. Evaluating it in the vertex shader instead means a new mesh
+    // uploads its raw colors once and a palette change costs a single uniform
+    // write with no geometry touch at all.
+    //
+    // One shared uniform object and ONE shared onBeforeCompile function across
+    // all four materials (both submeshes + their see-through twins): three.js
+    // keys the program cache on `onBeforeCompile.toString()`, so sharing the
+    // function shares the compiled program, and sharing the uniform object
+    // means one assignment moves every draw.
+    const colormapUniform = { value: 0.0 };          // 0 = turbo, 1 = gray
+    function paletteOnBeforeCompile(shader) {
+        shader.uniforms.uColormap = colormapUniform;
+        shader.vertexShader = shader.vertexShader
+            .replace('#include <common>', [
+                '#include <common>',
+                'uniform float uColormap;',
+                'vec3 rs_palette(float t) {',
+                '    t = clamp(t, 0.0, 1.0);',
+                '    if (uColormap > 0.5) return vec3(t);',
+                // Google's Turbo polynomial — the same coefficients the CPU
+                // path used, so the rendered result is unchanged.
+                '    float r = 0.13572138 + t * (4.61539260 + t * (-42.66032258 + t * (132.13108234 + t * (-152.94239396 + t * 59.28637943))));',
+                '    float g = 0.09140261 + t * (2.19418839 + t * (4.84296658 + t * (-14.18503333 + t * (4.27729857 + t * 2.82956604))));',
+                '    float b = 0.10667330 + t * (12.64194608 + t * (-60.58204836 + t * (110.36276771 + t * (-89.90310912 + t * 27.34824973))));',
+                '    return clamp(vec3(r, g, b), 0.0, 1.0);',
+                '}',
+            ].join('\n'))
+            .replace('#include <color_vertex>', [
+                '#include <color_vertex>',
+                'vColor = rs_palette(dot(color, vec3(0.2126, 0.7152, 0.0722)));',
+            ].join('\n'));
+    }
     const nonWallMat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
     const wallMat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+    nonWallMat.onBeforeCompile = wallMat.onBeforeCompile = paletteOnBeforeCompile;
     const nonWallMesh = new THREE.Mesh(new THREE.BufferGeometry(), nonWallMat);
     const wallMesh = new THREE.Mesh(new THREE.BufferGeometry(), wallMat);
     const floorLines = new THREE.LineSegments(
@@ -113,31 +151,13 @@ export function createSlam(hub, sceneApi) {
     function renderMeshes() {
         if (!lastMeshes) return;
         const m = lastMeshes;
-        applyMesh(nonWallMesh, xrayNonWall, m.nwPos, palette(m.nwCol), m.nwIdx);
-        applyMesh(wallMesh, xrayWall, m.wPos, palette(m.wCol), m.wIdx);
+        applyMesh(nonWallMesh, xrayNonWall, m.nwPos, m.nwCol, m.nwIdx);
+        applyMesh(wallMesh, xrayWall, m.wPos, m.wCol, m.wIdx);
     }
 
-    // Mesh packets carry a shaded scalar encoded as RGB. Re-map that scalar in
-    // the browser so the View card's Turbo/Gray choice applies equally to live
-    // SLAM and the offline Detailed mesh, without changing reconstruction data.
-    function palette(colors) {
-        const out = new Float32Array(colors.length);
-        for (let i = 0; i < colors.length; i += 3) {
-            const t = Math.max(0, Math.min(1, 0.2126 * colors[i] + 0.7152 * colors[i + 1] + 0.0722 * colors[i + 2]));
-            if (state.view_colormap === 'gray') out[i] = out[i + 1] = out[i + 2] = t;
-            else {
-                // Google's Turbo polynomial, evaluated client-side on the same
-                // normalised scalar the Gray path exposes.
-                const r = 0.13572138 + t * (4.61539260 + t * (-42.66032258 + t * (132.13108234 + t * (-152.94239396 + t * 59.28637943))));
-                const g = 0.09140261 + t * (2.19418839 + t * (4.84296658 + t * (-14.18503333 + t * (4.27729857 + t * 2.82956604))));
-                const b = 0.10667330 + t * (12.64194608 + t * (-60.58204836 + t * (110.36276771 + t * (-89.90310912 + t * 27.34824973))));
-                out[i] = Math.max(0, Math.min(1, r));
-                out[i + 1] = Math.max(0, Math.min(1, g));
-                out[i + 2] = Math.max(0, Math.min(1, b));
-            }
-        }
-        return out;
-    }
+    // The palette is a uniform now (see paletteOnBeforeCompile): a Turbo/Gray
+    // change re-renders nothing, it just moves the uniform every draw reads.
+    function applyColormap(name) { colormapUniform.value = name === 'gray' ? 1.0 : 0.0; }
 
     // `twin` is the see-through draw of the same map: it shares the geometry
     // object (one set of GPU buffers, disposed once here), differing only in
@@ -147,9 +167,13 @@ export function createSlam(hub, sceneApi) {
         g.dispose();                                   // free the old GPU buffers
         const ng = new THREE.BufferGeometry();
         if (pos.length) {
-            ng.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
-            ng.setAttribute('color', new THREE.BufferAttribute(new Float32Array(col), 3));
-            if (idx.length) ng.setIndex(new THREE.BufferAttribute(new Uint32Array(idx), 1));
+            // The typed arrays are already views onto the received frame's
+            // buffer, correctly typed and 4-byte aligned (the MESH header is
+            // 9 u32). Copying them again just to hand them to three.js was
+            // pure waste at mesh rate — upload the views (BUG-060).
+            ng.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            ng.setAttribute('color', new THREE.BufferAttribute(col, 3));
+            if (idx.length) ng.setIndex(new THREE.BufferAttribute(idx, 1));
         }
         mesh.geometry = ng;
         twin.geometry = ng;
@@ -255,7 +279,6 @@ export function createSlam(hub, sceneApi) {
 
     // --- server `state` echo drives mode + toggles + visibility ----------
     hub.on('state', (msg) => {
-        const paletteChanged = state.view_colormap !== (msg.view_colormap || 'turbo');
         state = {
             source: msg.source || 'live',
             display: msg.display || (msg.mode === 'slam' ? 'slam' : 'point_cloud'),
@@ -268,7 +291,7 @@ export function createSlam(hub, sceneApi) {
             view_colormap: msg.view_colormap || 'turbo',
             view_mode: msg.view_mode || 'world',
         };
-        if (paletteChanged) renderMeshes();
+        applyColormap(state.view_colormap);
         if (msg.see_through !== undefined) {
             seeThrough = Math.min(1, Math.max(0, Number(msg.see_through) || 0));
             xrayNonWallMat.opacity = xrayWallMat.opacity = seeThrough;

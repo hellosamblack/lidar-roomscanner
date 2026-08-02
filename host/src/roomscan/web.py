@@ -1146,6 +1146,17 @@ def pack_mesh(packet) -> bytes:
             + f_v.tobytes() + f_l.tobytes())
 
 
+def _packed_or_pack(packet) -> bytes | None:
+    """MESH bytes for a packet, preferring the ones `MeshPrep` already produced
+    on its own thread (BUG-060). Packing is O(map) numpy work; doing it here, on
+    the broadcaster, put that straight on the asyncio event loop. Falls back to
+    packing inline for a MeshPrep built without a `packer` (tests, and any
+    caller that hasn't opted in)."""
+    if packet is None:
+        return None
+    return packet.packed if packet.packed is not None else pack_mesh(packet)
+
+
 def build_slam_message(step, trajectory, *, frames_integrated: int, mesh_seq: int,
                        source_vertex_count: int) -> dict:
     """FrameStep + trajectory -> `slam` JSON (web Phase 4). Follow-camera
@@ -2106,6 +2117,18 @@ class SlamRunner:
         self._mesh_seq = 0
         self._last_mesh = object()      # identity sentinel; never == a real mesh
         self._last_source_verts = 0
+        # Construction now happens on its own thread (BUG-060): `submit` is
+        # called from the READER thread, and building the Open3D/CUDA pipeline
+        # inline there would stall the reader long enough to overflow the UDP
+        # socket. `_generation` invalidates a build that finishes after a
+        # teardown, so a swap mid-construction can't install a stale worker.
+        self._building = False
+        self._generation = 0
+        # Byte-rate governor state (BUG-060); see `poll`. The rate is replaced
+        # from [slam] when the pipeline is built -- this default only governs
+        # the window before that, and a hand-built runner in tests.
+        self._mesh_bytes_per_s = 12_000_000.0
+        self._next_mesh_at = 0.0
 
     # ---- lifecycle (inbound thread, via to_thread) --------------------------
     def set_active(self, on: bool) -> None:
@@ -2135,8 +2158,10 @@ class SlamRunner:
         self._mesh_seq = 0
         self._last_mesh = object()
         self._last_source_verts = 0
+        self._next_mesh_at = 0.0     # a fresh map publishes its first mesh at once
+        self._generation += 1        # orphan any build still in flight
 
-    def _build_locked(self, width: int, height: int) -> None:
+    def _construct(self, width: int, height: int):
         # Mirror panel._maybe_start_slam (panel.py:1539): fov from args, device
         # auto (CUDA:0 here), backend picked by make_slam_worker from [slam].
         # MeshPrep budgets from the [slam] view config, same as the desktop.
@@ -2153,33 +2178,71 @@ class SlamRunner:
                                   baro_authority=cfg.baro_authority,
                                   baro_tau_frames=cfg.baro_tau_frames)
         worker.start()
+        # `packer`: serialising the packet is O(map) numpy work and used to
+        # run on the broadcaster, i.e. on the event loop. It belongs to the
+        # prep thread (BUG-060). Decimation stays OFF here -- see MeshPrep.
         meshprep = MeshPrep(vertex_budget=cfg.live_vertex_budget,
-                            fps_budget_ms=cfg.fps_budget_ms)
+                            fps_budget_ms=cfg.fps_budget_ms, packer=pack_mesh)
+        self._mesh_bytes_per_s = float(cfg.live_mesh_bytes_per_s)
         meshprep.start()
-        self._worker, self._meshprep, self._wh = worker, meshprep, (width, height)
         self._bus.publish(f"[slam] worker started on {device} ({width}x{height})")
+        return worker, meshprep
 
-    # ---- feed + poll (broadcaster / async task) -----------------------------
+    def _build_async(self, width: int, height: int, generation: int) -> None:
+        """Construct off the caller's thread, then install under the lock --
+        unless a teardown/swap happened meanwhile, in which case the freshly
+        built pipeline is stopped rather than adopted."""
+        worker = meshprep = None
+        try:
+            worker, meshprep = self._construct(width, height)
+        except Exception as exc:
+            self._bus.publish(f"[slam] worker construction failed: {exc!r}")
+        with self._lock:
+            self._building = False
+            stale = worker is None or not self._active or generation != self._generation
+            if not stale:
+                self._worker, self._meshprep, self._wh = worker, meshprep, (width, height)
+        if stale:
+            for obj in (worker, meshprep):
+                if obj is not None:
+                    try:
+                        obj.stop()
+                    except Exception:
+                        pass
+
+    # ---- feed (reader thread) + poll (broadcaster) --------------------------
     def submit(self, depth, quat, pressure, reflectance=None, confidence=None) -> None:
         """Forward the newest frame to the worker (latest-wins drop). No-op when
         inactive or when there is no orientation prior yet (SLAM needs the quat;
         without it the mapper loses tracking immediately -- see the 07-08
-        no-stream-9 capture note in docs/…web-phase4…)."""
+        no-stream-9 capture note in docs/…web-phase4…).
+
+        Called from the READER thread (BUG-060), so it must never block on
+        anything slow: the first frame after arming kicks an async build and is
+        itself dropped, and every frame until that build lands is dropped too.
+        That costs the map its first ~second of frames, which is the same cost
+        the old inline build paid -- but pays it without stalling the reader."""
         if quat is None:
             return
         with self._lock:
             if not self._active:
                 return
-            if self._worker is None:
-                h, w = np.asarray(depth).shape
-                self._build_locked(w, h)
             worker = self._worker
+            if worker is None:
+                if not self._building:
+                    h, w = np.asarray(depth).shape
+                    self._building = True
+                    threading.Thread(target=self._build_async,
+                                     args=(w, h, self._generation),
+                                     daemon=True).start()
+                return
         worker.submit(depth, quat, pressure, reflectance=reflectance, confidence=confidence)
 
     def poll(self, wall_mode: str) -> tuple[dict | None, bytes | None]:
         """Latest (`slam` message, MESH bytes-or-None). MESH is emitted only when
-        the worker published a new mesh (identity check) and MeshPrep has a
-        packet ready; the `slam` message ticks every processed frame."""
+        the worker published a new mesh (identity check), the byte-rate governor
+        allows another one, and MeshPrep has a packet ready; the `slam` message
+        ticks every processed frame."""
         with self._lock:
             worker, meshprep = self._worker, self._meshprep
         if worker is None or meshprep is None:
@@ -2188,7 +2251,16 @@ class SlamRunner:
         if res is None:
             return None, None
         mesh, trajectory, step = res
-        if mesh is not None and mesh is not self._last_mesh:
+        # Byte-rate governor (BUG-060). The map is re-sent WHOLE every update
+        # and grows without bound, so at a fixed cadence a big map saturates
+        # the link and stalls the broadcaster on socket backpressure. Space
+        # publishes by how big the last one actually was: a small map is
+        # unaffected (0.27 s at 3.2 MB, below the extraction cadence anyway), a
+        # 31 MB map drops to one update per ~2.6 s -- which is fine, because a
+        # map that big changes slowly. This also bounds MeshPrep's GIL cost,
+        # since prep only runs on a submitted mesh.
+        now = time.monotonic()
+        if mesh is not None and mesh is not self._last_mesh and now >= self._next_mesh_at:
             self._mesh_seq += 1
             meshprep.submit(mesh, mesh_seq=self._mesh_seq, glow_origin=None,
                             wall_mode=wall_mode)
@@ -2197,7 +2269,9 @@ class SlamRunner:
         pkt = meshprep.latest()
         if pkt is not None:
             self._last_source_verts = pkt.source_vertex_count
-            mesh_bytes = pack_mesh(pkt)
+            mesh_bytes = _packed_or_pack(pkt)
+            rate = self._mesh_bytes_per_s
+            self._next_mesh_at = now + (len(mesh_bytes) / rate if rate > 0 else 0.0)
         frames_integrated = max(0, len(trajectory) - worker.tracking_lost_count)
         msg = build_slam_message(
             step, trajectory, frames_integrated=frames_integrated,
@@ -2319,7 +2393,8 @@ class DetailedRunner:
             kw = self.preset.mapper_kwargs()
             worker = PostProcessWorker.from_capture(str(capture), mesh_every=self.preset.mesh_every, **kw)
             worker.start()
-            prep = MeshPrep(vertex_budget=150000, fps_budget_ms=8.0)
+            prep = MeshPrep(vertex_budget=150000, fps_budget_ms=8.0,
+                            packer=pack_mesh)
             prep.start()
             self._worker, self._meshprep, self._capture = worker, prep, capture
             self._cached_mesh = None
@@ -2375,7 +2450,8 @@ class DetailedRunner:
             import open3d as o3d
             mesh = o3d.t.io.read_triangle_mesh(str(paths["ply"]))
             pose = _last_tum_pose(paths["tum"])
-            prep = MeshPrep(vertex_budget=150000, fps_budget_ms=8.0)
+            prep = MeshPrep(vertex_budget=150000, fps_budget_ms=8.0,
+                            packer=pack_mesh)
             prep.start()
         except Exception as exc:
             with self._lock:
@@ -2476,7 +2552,7 @@ class DetailedRunner:
                      "mesh_seq": self._mesh_seq}
             if cached_pose is not None:
                 state["pose"] = [round(float(v), 5) for v in cached_pose.reshape(-1)]
-            return state, pack_mesh(packet) if packet is not None else None
+            return state, _packed_or_pack(packet)
         progress = worker.latest()
         if progress is None:
             return self.status(), None
@@ -2485,7 +2561,7 @@ class DetailedRunner:
             prep.submit(progress.mesh, mesh_seq=self._mesh_seq, glow_origin=None, wall_mode=wall_mode)
             self._last_mesh = progress.mesh
         packet = prep.latest()
-        mesh = pack_mesh(packet) if packet is not None else None
+        mesh = _packed_or_pack(packet)
         state = self.status() or {}
         state.update({"type": "detailed", "mesh_seq": self._mesh_seq})
         if progress.done and not self._committed:
@@ -2544,6 +2620,36 @@ class DetailedRunner:
                     pass
 
 
+def make_slam_feed(state):
+    """Reader-thread tap that feeds the SLAM mapper at the STREAM's rate.
+
+    Sub-phase of BUG-060. This used to live in the broadcaster, which made
+    reconstruction throughput a function of display health: the broadcaster is
+    also the thing that serialises and fans out the mesh, so every event-loop
+    stall starved the mapper. Measured on the live rig, Live SLAM ran at
+    5.0 fps against a 30.3 Hz stream -- 5 frames in 6 never reached the TSDF,
+    silently, which is a reconstruction-quality bug and not only a UI one.
+
+    Everything downstream is already latest-wins (`SlamWorker._in_slot`), so
+    feeding faster costs the reader nothing but the submit itself; the mapper
+    still processes exactly as many frames as it can."""
+    def _feed(header, outputs):
+        ui = getattr(state, "ui_state", None)
+        slam = getattr(state, "slam_runner", None)
+        if slam is None or ui is None or ui.display != "slam":
+            return
+        depth = outputs.get("depth")
+        if depth is None:
+            return
+        sensor = state.sensor_state
+        env = sensor.latest_env()
+        slam.submit(depth, sensor.fused_quat(),
+                    env.pressure_pa if env is not None else None,
+                    reflectance=outputs.get("reflectance"),
+                    confidence=outputs.get("confidence"))
+    return _feed
+
+
 class SessionController:
     """Owns the reader-thread lifecycle so the source can be swapped live<->replay
     at runtime without disturbing the single broadcaster or the shared `slot`
@@ -2555,7 +2661,8 @@ class SessionController:
     def __init__(self, *, live_source, live_label, stage, stats, slot, fault, bus,
                  client, recorder, pacer, sensor_state, metrics,
                  captures_dir=CAPTURES_DIR, results_dir=RESULTS_DIR,
-                 initial_replay_path=None, initial_speed_fps=_SPEED_BASE_FPS):
+                 initial_replay_path=None, initial_speed_fps=_SPEED_BASE_FPS,
+                 on_frame=None):
         self._live_underlying = live_source
         self._live_proxy = _NoCloseSource(live_source) if live_source is not None else None
         self.live_label = live_label
@@ -2571,6 +2678,10 @@ class SessionController:
         self.sensor_state = sensor_state
         self.metrics = metrics
         self.captures_dir = str(captures_dir)
+        # Per-frame tap handed to the reader body, so a consumer that must run
+        # at stream rate (the SLAM mapper) is not paced by the broadcaster.
+        # Survives every source swap because `_run` reads it on each respawn.
+        self.on_frame = on_frame
         # Where reconstruction sidecars live, so rename/delete can carry them
         # with the capture. Keyword-defaulted: every existing caller is unchanged.
         self.results_dir = str(results_dir)
@@ -2637,7 +2748,8 @@ class SessionController:
             _run_reader(
                 source, decoder, self.stage, self.stats, self.slot, self.fault,
                 self.bus, client, self.recorder, self.pacer, self._stop.is_set,
-                state=self.sensor_state, metrics=self.metrics)
+                state=self.sensor_state, metrics=self.metrics,
+                on_frame=self.on_frame)
             if self._stop.is_set():
                 return                                    # manual stop / swap
             if self.mode == "replay" and self.loop:
@@ -3826,17 +3938,12 @@ async def _broadcaster() -> None:
                 if last_pc_bytes is not None:
                     await _broadcast_bytes(clients, last_pc_bytes)
 
-            # SLAM mode (web Phase 4): feed the newest frame to the worker and
-            # ship the latest `slam` message + (throttled) MESH. The feed/poll
-            # touch off-thread workers; nothing blocks the event loop here.
+            # SLAM mode (web Phase 4): ship the latest `slam` message +
+            # (throttled) MESH. The FEED is not here -- it runs on the reader
+            # thread (`make_slam_feed`) so reconstruction rate is independent
+            # of this loop's health (BUG-060). Poll only reads published slots.
             slam = getattr(state, "slam_runner", None)
             if ui.display == "slam" and slam is not None:
-                quat = state.sensor_state.fused_quat()
-                env = state.sensor_state.latest_env()
-                pressure = env.pressure_pa if env is not None else None
-                slam.submit(depth, quat, pressure,
-                            reflectance=outputs.get("reflectance"),
-                            confidence=outputs.get("confidence"))
                 smsg, mesh_bytes = slam.poll(ui.slam_walls)
                 if mesh_bytes is not None:
                     await _broadcast_bytes(clients, mesh_bytes)
@@ -4714,7 +4821,11 @@ def main(argv=None) -> int:
         live_source=live_source, live_label=live_label, stage=stage, stats=stats,
         slot=slot, fault=fault, bus=bus, client=client, recorder=recorder, pacer=pacer,
         sensor_state=sensor_state, metrics=metrics, captures_dir=CAPTURES_DIR,
-        initial_replay_path=args.replay, initial_speed_fps=initial_speed_fps)
+        initial_replay_path=args.replay, initial_speed_fps=initial_speed_fps,
+        # Feeds the SLAM mapper at stream rate, off the broadcaster (BUG-060).
+        # Reads `app.state` lazily, so it is safe to build before the rest of
+        # app.state exists -- the reader thread only starts at controller.start().
+        on_frame=make_slam_feed(app.state))
 
     # SLAM mode (web Phase 4): armed lazily on the first `set_mode slam`; builds
     # no Open3D/GPU state until then, so real-time launches are unaffected.
@@ -4801,7 +4912,18 @@ def main(argv=None) -> int:
     # Small delay to let the server start before opening the browser.
     threading.Timer(1.0, lambda: _open_browser(url)).start()
 
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    # permessage-deflate OFF (BUG-060). uvicorn defaults it ON, and
+    # `_broadcast_bytes` awaits `send_bytes` PER CLIENT -- so every binary
+    # payload is zlib-deflated once per connected tab, synchronously on the
+    # event loop. Measured on the live rig with a ~63k-vertex SLAM mesh
+    # (3.2 MB): +130 ms of whole-process freeze per additional client (0->1
+    # +128 ms, 1->2 +133 ms), against +0 ms for clients that negotiate no
+    # compression. Six clients (one real browser, five stale headless/MCP
+    # connections) froze the server 630 ms out of every second. What the cost
+    # bought: float32 geometry deflates to 80%. Turning it off trades ~20% more
+    # LAN bytes for the loop back.
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning",
+                ws_per_message_deflate=False)
     return 0
 
 

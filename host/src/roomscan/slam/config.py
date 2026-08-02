@@ -128,6 +128,17 @@ class SlamConfig:
     mesh_upload_hz: float = 3.0
     live_vertex_budget: int = 150000
     fps_budget_ms: float = 8.0
+    # Live MESH publish budget, bytes/second (BUG-060). The live map is sent
+    # whole every update and grows without bound -- 3.2 MB at 63k verts, 31 MB
+    # at 611k (1500 frames of roomSweepFull) -- so at the raw extraction cadence
+    # a grown map would push >100 MB/s at the browser and stall the broadcaster
+    # on socket backpressure. `SlamRunner` therefore spaces publishes by
+    # `last_payload_bytes / live_mesh_bytes_per_s`: a small map still updates at
+    # the full extraction rate, a big one updates more slowly, and the wire rate
+    # is flat. This bounds the payload by CADENCE rather than by decimating it,
+    # because quadric decimation measured 14x more expensive than the bandwidth
+    # it saved (see meshprep.MeshPrep). 12 MB/s ~= 100 Mbit/s.
+    live_mesh_bytes_per_s: float = 12_000_000.0
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "SlamConfig":

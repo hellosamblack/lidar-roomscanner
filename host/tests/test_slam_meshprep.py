@@ -205,3 +205,28 @@ def test_meshprep_small_map_stays_full_res_even_when_latched():
     prep.submit(m, mesh_seq=1, glow_origin=None, wall_mode="solid")
     prep.run_once()
     assert prep.latest().decimated is False
+
+
+def test_meshprep_packs_on_its_own_thread_when_given_a_packer():
+    """The packer runs in `run_once`, i.e. on the prep thread -- the whole point
+    is that the caller's event loop never pays for the O(map) serialisation."""
+    m = _corner_tensor_mesh()
+    seen = []
+
+    def _pack(pkt):
+        seen.append(pkt.mesh_seq)
+        return b"packed:%d" % pkt.mesh_seq
+
+    prep = MeshPrep(vertex_budget=10_000, packer=_pack)
+    prep.submit(m, mesh_seq=7, glow_origin=None, wall_mode="solid")
+    prep.run_once()
+    assert seen == [7]                       # packed exactly once, during run_once
+    assert prep.latest().packed == b"packed:7"
+
+
+def test_meshprep_packed_is_none_without_a_packer():
+    m = _corner_tensor_mesh()
+    prep = MeshPrep(vertex_budget=10_000)
+    prep.submit(m, mesh_seq=1, glow_origin=None, wall_mode="solid")
+    prep.run_once()
+    assert prep.latest().packed is None

@@ -19,9 +19,11 @@ import threading
 import time
 from dataclasses import fields
 from pathlib import Path
+import pathlib
 
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
 from roomscan import panel, web
 from roomscan.control import CommandDispatcher
@@ -2316,13 +2318,29 @@ def test_slamrunner_no_quat_is_noop(_fake_slam):
     assert "worker" not in _fake_slam
 
 
+def _await_build(runner, made, timeout=5.0):
+    """BUG-060: `SlamRunner.submit` is now called from the READER thread, so it
+    kicks the Open3D/CUDA construction onto its own thread and drops frames
+    until that lands rather than stalling the reader (which would overflow the
+    UDP socket). Tests that want a built pipeline have to wait for it."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with runner._lock:
+            if runner._worker is not None:
+                return
+        time.sleep(0.005)
+    raise AssertionError(f"SLAM worker was never built (made={list(made)})")
+
+
 def test_slamrunner_lazy_build_and_poll(_fake_slam):
     r = web.SlamRunner(bus=LogBus())
     r.set_active(True)
     depth = np.zeros((6, 8), np.float32)
-    r.submit(depth, (1, 0, 0, 0), 101325.0)
+    r.submit(depth, (1, 0, 0, 0), 101325.0)              # kicks the async build
+    _await_build(r, _fake_slam)
     assert _fake_slam["wh"] == (8, 6)                    # width, height from depth shape
     assert _fake_slam["worker"].started and _fake_slam["mp"].started
+    r.submit(depth, (1, 0, 0, 0), 101325.0)
     assert len(_fake_slam["worker"].submitted) == 1
     msg, mesh_bytes = r.poll("split")
     assert msg is not None and msg["type"] == "slam"
@@ -2336,6 +2354,7 @@ def test_slamrunner_set_active_false_tears_down(_fake_slam):
     r = web.SlamRunner(bus=LogBus())
     r.set_active(True)
     r.submit(np.zeros((6, 8), np.float32), (1, 0, 0, 0), None)
+    _await_build(r, _fake_slam)
     w, mp = _fake_slam["worker"], _fake_slam["mp"]
     r.set_active(False)
     assert w.stopped and mp.stopped
@@ -4615,3 +4634,188 @@ def test_set_source_view_with_nothing_selected_opens_the_browser(tmp_path):
         assert any("pick a capture" in line for line in bus.drain(handle))
     finally:
         ctrl.close()
+
+
+# --- BUG-060: the live-SLAM 1 Hz viewport ------------------------------------
+
+def test_uvicorn_runs_with_permessage_deflate_disabled():
+    """uvicorn defaults `ws_per_message_deflate` ON, and `_broadcast_bytes`
+    awaits `send_bytes` PER CLIENT -- so each binary payload is deflated once
+    per connected tab, on the event loop. Measured at +130 ms of whole-process
+    freeze per client on a 3.2 MB SLAM mesh, for an 80% compression ratio.
+    A source guard, because the cost is invisible until someone profiles it."""
+    src = pathlib.Path(web.__file__).read_text()
+    call = src[src.index("uvicorn.run(app"):]
+    call = call[:call.index(")") + 1]
+    assert "ws_per_message_deflate=False" in call, call
+
+
+def test_slam_config_carries_a_live_mesh_byte_budget():
+    from roomscan.slam.config import SlamConfig
+    assert SlamConfig().live_mesh_bytes_per_s == 12_000_000.0
+
+
+class _ConsumeOncePrep:
+    """MeshPrep's real contract: `latest()` yields a packet once per submit."""
+    def __init__(self): self.subs = []; self._out = None
+    def submit(self, mesh, *, mesh_seq, glow_origin, wall_mode):
+        self.subs.append(mesh_seq)
+        self._out = _synthetic_mesh_packet(mesh_seq=mesh_seq)
+    def latest(self):
+        out, self._out = self._out, None
+        return out
+    def stop(self): pass
+
+
+def _governed_runner(rate):
+    r = web.SlamRunner(bus=LogBus())
+    prep = _ConsumeOncePrep()
+    with r._lock:
+        r._active = True
+        r._worker = _FakeWorker()
+        r._meshprep = prep
+    r._mesh_bytes_per_s = rate
+    return r, prep
+
+
+def test_slamrunner_governor_spaces_publishes_by_payload_size():
+    """BUG-060: the map is re-sent whole and grows without bound (3.2 MB at 63k
+    verts, 31 MB at 611k), so cadence must fall as size rises or the link
+    saturates and the broadcaster stalls on socket backpressure."""
+    r, prep = _governed_runner(1_000_000.0)      # 1 MB/s, so the maths is readable
+    _msg, first = r.poll("split")
+    assert first is not None                     # first mesh publishes immediately
+    hold_s = len(first) / 1_000_000.0
+    assert r._next_mesh_at >= time.monotonic() + hold_s - 0.05
+
+    r._worker._mesh = object()                   # a NEW worker mesh is available
+    assert r.poll("split")[1] is None            # ...but the governor withholds it
+    assert prep.subs == [1]                      # nothing was even prepped
+
+    r._next_mesh_at = 0.0                        # pretend the interval elapsed
+    assert r.poll("split")[1] is not None
+    assert prep.subs == [1, 2]
+
+
+def test_slamrunner_governor_off_when_rate_is_zero():
+    """A zero/absent budget must mean "never withhold", not "divide by zero"."""
+    r, prep = _governed_runner(0.0)
+    assert r.poll("split")[1] is not None
+    r._worker._mesh = object()
+    assert r.poll("split")[1] is not None
+    assert prep.subs == [1, 2]
+
+
+def test_slamrunner_governor_resets_on_a_map_teardown():
+    """A source swap starts a fresh map; its first mesh must not wait out the
+    old map's (possibly multi-second) interval."""
+    r = web.SlamRunner(bus=LogBus())
+    r._next_mesh_at = time.monotonic() + 999.0
+    r.reset()
+    assert r._next_mesh_at == 0.0
+
+
+def test_packed_or_pack_prefers_the_bytes_meshprep_already_made():
+    """Packing is O(map) numpy work; MeshPrep does it on its own thread now."""
+    prepacked = SimpleNamespace(packed=b"from-the-prep-thread")
+    assert web._packed_or_pack(prepacked) == b"from-the-prep-thread"
+    assert web._packed_or_pack(None) is None
+
+
+def _feed_state(display, *, quat=(1.0, 0.0, 0.0, 0.0), env=None):
+    submitted = []
+    slam = SimpleNamespace(submit=lambda *a, **k: submitted.append((a, k)))
+    state = SimpleNamespace(
+        ui_state=SimpleNamespace(display=display),
+        slam_runner=slam,
+        sensor_state=SimpleNamespace(fused_quat=lambda: quat,
+                                     latest_env=lambda: env))
+    return state, submitted
+
+
+def test_slam_feed_submits_every_frame_in_slam_display():
+    state, submitted = _feed_state("slam", env=SimpleNamespace(pressure_pa=98000.0))
+    feed = web.make_slam_feed(state)
+    outputs = {"depth": np.zeros((4, 4), np.float32),
+               "reflectance": np.ones((4, 4), np.float32),
+               "confidence": np.ones((4, 4), np.float32)}
+    for _ in range(3):
+        feed(SimpleNamespace(seq=1), outputs)
+    assert len(submitted) == 3
+    (depth, quat, pressure), kw = submitted[0]
+    assert depth is outputs["depth"] and quat == (1.0, 0.0, 0.0, 0.0)
+    assert pressure == 98000.0
+    assert kw["reflectance"] is outputs["reflectance"]
+    assert kw["confidence"] is outputs["confidence"]
+
+
+def test_slam_feed_is_silent_outside_slam_display():
+    state, submitted = _feed_state("point_cloud")
+    web.make_slam_feed(state)(SimpleNamespace(seq=1),
+                              {"depth": np.zeros((4, 4), np.float32)})
+    assert submitted == []
+
+
+def test_slam_feed_tolerates_a_frame_with_no_depth():
+    state, submitted = _feed_state("slam")
+    web.make_slam_feed(state)(SimpleNamespace(seq=1), {"reflectance": None})
+    assert submitted == []
+
+
+def test_broadcaster_no_longer_feeds_slam():
+    """The feed moved to the reader thread. If it comes back to the broadcaster,
+    reconstruction rate silently becomes a function of event-loop health again
+    -- which is what held Live SLAM at 5.0 fps against a 30.3 Hz stream."""
+    src = pathlib.Path(web.__file__).read_text()
+    body = src[src.index("async def _broadcaster()"):]
+    assert "slam.submit(" not in body
+    assert "slam.poll(" in body          # the poll side legitimately stays
+
+
+def test_slamrunner_first_submit_does_not_block_the_caller(_fake_slam, monkeypatch):
+    """`submit` runs on the reader thread. Building inline there stalls the
+    stream long enough to overflow the UDP socket, so the build is kicked onto
+    its own thread and the caller returns immediately (BUG-060)."""
+    import roomscan.slam.backend as backend
+    gate = threading.Event()
+    real = backend.make_slam_worker
+
+    def _slow(*a, **k):
+        gate.wait(5.0)                       # a build that takes "forever"
+        return real(*a, **k)
+
+    monkeypatch.setattr(backend, "make_slam_worker", _slow)
+    r = web.SlamRunner(bus=LogBus())
+    r.set_active(True)
+    t0 = time.monotonic()
+    r.submit(np.zeros((6, 8), np.float32), (1, 0, 0, 0), None)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.5, f"submit blocked {elapsed:.2f}s on the build"
+    assert r.poll("split") == (None, None)   # nothing published until it lands
+    gate.set()
+    _await_build(r, _fake_slam)
+
+
+def test_slamrunner_teardown_during_build_discards_the_stale_worker(_fake_slam, monkeypatch):
+    """A source swap mid-construction must not adopt the pipeline it orphaned."""
+    import roomscan.slam.backend as backend
+    gate = threading.Event()
+    real = backend.make_slam_worker
+
+    def _slow(*a, **k):
+        gate.wait(5.0)
+        return real(*a, **k)
+
+    monkeypatch.setattr(backend, "make_slam_worker", _slow)
+    r = web.SlamRunner(bus=LogBus())
+    r.set_active(True)
+    r.submit(np.zeros((6, 8), np.float32), (1, 0, 0, 0), None)
+    r.reset()                                # swap lands while the build is in flight
+    gate.set()
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and "worker" not in _fake_slam:
+        time.sleep(0.005)
+    time.sleep(0.1)                          # let _build_async finish installing/dropping
+    with r._lock:
+        assert r._worker is None             # the orphan was NOT installed
+    assert _fake_slam["worker"].stopped      # ...and was stopped rather than leaked

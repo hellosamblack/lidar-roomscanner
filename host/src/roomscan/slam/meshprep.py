@@ -31,6 +31,10 @@ class MeshPacket:
     source_vertex_count: int
     decimated: bool
     wall_mode: str
+    # Wire bytes, filled by `MeshPrep` when it was given a `packer` so the
+    # serialisation happens on its worker thread instead of the caller's event
+    # loop (BUG-060). None when no packer was supplied.
+    packed: bytes | None = None
 
 
 def _submesh_arrays(verts: np.ndarray, colors: np.ndarray, tris: np.ndarray):
@@ -121,10 +125,26 @@ class MeshPrep:
     shape (daemon thread, lock-guarded slots, bounded-join stop)."""
 
     def __init__(self, vertex_budget: int = 150_000, fps_budget_ms: float = 8.0,
-                 up=None):
+                 up=None, packer=None):
         self._vertex_budget = int(vertex_budget)
         self._fps_budget_ms = float(fps_budget_ms)
         self._up = up
+        # NOTE (BUG-060): `roomscan-web` deliberately does NOT arm this
+        # controller. Its input is `note_upload_ms`, which only a frontend that
+        # measures its own GPU upload can supply -- i.e. only panel.py -- so
+        # `vertex_budget` is dead code on the web path. That was tried the
+        # other way and measured: forcing decimation on took `prepare_packet`
+        # from 178 ms p50 to 2440 ms p50 (max 8.4 s) on 1500 frames of
+        # roomSweepFull, and GIL starvation from 11.9% of wall to 94.3%,
+        # because `simplify_quadric_decimation` is C++ holding the GIL the
+        # whole way. It cost 14x what it saved. web.py bounds the PUBLISH RATE
+        # by payload size instead (`SlamRunner._mesh_bytes_per_s`), which is
+        # free. Do not "fix" the dead budget by latching this on.
+        # Optional off-thread packer (BUG-060). When set, `run_once` also
+        # serialises the packet HERE, on this worker thread, so the caller's
+        # event loop never pays for it. Kept optional so the shape of the
+        # packed bytes stays a frontend concern (web.py's `pack_mesh`).
+        self._packer = packer
         self._last_upload_ms = 0.0
         self._decimating = False
 
@@ -159,6 +179,8 @@ class MeshPrep:
         pkt = prepare_packet(mesh, wall_mode=wall_mode, glow_origin=glow_origin,
                              mesh_seq=mesh_seq, vertex_budget=self._vertex_budget,
                              decimate=decimate, up=self._up)
+        if self._packer is not None:
+            pkt.packed = self._packer(pkt)
         with self._out_lock:
             self._out_slot = pkt
         return True

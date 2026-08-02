@@ -339,3 +339,43 @@ def test_reader_paces_frames_with_interval():
     assert stats.frames == 3
     # frames 2 and 3 each wait ~50 ms; theoretical min 0.10 s, 0.08 keeps jitter margin
     assert elapsed >= 0.08
+
+
+# --- BUG-060: the reader-thread tap that decouples SLAM from the broadcaster ---
+
+def test_reader_on_frame_tap_sees_every_transformed_frame():
+    """SLAM is fed from HERE, not from the broadcaster, so its throughput does
+    not depend on event-loop health (BUG-060)."""
+    seen = []
+    stats = Stats()
+    slot: queue.Queue = queue.Queue(maxsize=1)
+    bus = LogBus()
+    frames = b"".join(_depth_frame(s) for s in (1, 2, 3))
+    _run_reader(_OneShotSource(frames), StreamDecoder(), TransformStage(), stats,
+                slot, {}, bus, None, Recorder(), _Pacer(0.0), lambda: False,
+                on_frame=lambda h, o: seen.append((h.seq, o["depth"].shape)))
+    assert [s for s, _ in seen] == [1, 2, 3]      # every frame, not just the latest
+    assert all(shape == (2, 2) for _, shape in seen)
+
+
+def test_reader_on_frame_fault_never_kills_the_reader():
+    """A downstream consumer's exception must not take the stream down: the
+    reader is the only thing feeding the render slot and the recorder."""
+    calls = []
+
+    def _boom(header, outputs):
+        calls.append(header.seq)
+        raise RuntimeError("consumer exploded")
+
+    stats = Stats()
+    slot: queue.Queue = queue.Queue(maxsize=1)
+    fault: dict = {}
+    frames = b"".join(_depth_frame(s) for s in (1, 2))
+    _run_reader(_OneShotSource(frames), StreamDecoder(), TransformStage(), stats,
+                slot, fault, LogBus(), None, Recorder(), _Pacer(0.0), lambda: False,
+                on_frame=_boom)
+    assert calls == [1, 2]          # kept being called after the first raise
+    assert stats.frames == 2        # both frames still reached the slot path
+    # The only fault is _OneShotSource's own end-of-data terminator; the
+    # consumer's exception never became a reader fault.
+    assert "consumer exploded" not in repr(fault.get("error"))

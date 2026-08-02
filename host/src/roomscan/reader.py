@@ -70,7 +70,7 @@ class _Pacer:
 
 
 def _run_reader(source, decoder, stage, stats, slot, fault, bus, client, recorder,
-                pacer, is_stopped, state=None, metrics=None):
+                pacer, is_stopped, state=None, metrics=None, on_frame=None):
     """Reader-thread body (module-level so it's unit-testable without a window).
 
     Owns source+decoder+transform; routes device EVENT -> log bus, ACK ->
@@ -81,6 +81,16 @@ def _run_reader(source, decoder, stage, stats, slot, fault, bus, client, recorde
     SensorState, optional -- defaults to None for callers that don't care about
     IMU/env streams, e.g. existing tests) is fed every DATA frame; it ignores
     any stream that isn't IMU_QUAT/ENV, mirroring `stage.feed`'s own filtering.
+
+    `on_frame(header, outputs)` (optional) is called for every transformed DATA
+    frame, right before the render slot is refilled. It exists so a consumer
+    whose throughput must NOT be coupled to display cadence -- SLAM -- can be
+    fed at the stream's own rate. `roomscan-web` used to submit frames to the
+    mapper from its broadcaster, which meant any event-loop hiccup starved the
+    reconstruction: a 630 ms loop freeze per mesh (BUG-060) held Live SLAM at
+    5.0 fps against a 30.3 Hz stream, silently discarding 5 frames in 6 from
+    the map. Exceptions are swallowed for the same reason `state.feed`'s are:
+    a downstream consumer must never kill the reader.
     """
     last_pace = 0.0
     last_paced_seq = None
@@ -130,6 +140,11 @@ def _run_reader(source, decoder, stage, stats, slot, fault, bus, client, recorde
                     time.sleep(wait)
                 last_pace = time.monotonic()
                 last_paced_seq = header.seq
+            if on_frame is not None:
+                try:
+                    on_frame(header, outputs)
+                except Exception:
+                    pass  # a consumer fault must never kill the reader
             try:
                 slot.get_nowait()
             except queue.Empty:

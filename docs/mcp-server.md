@@ -87,7 +87,20 @@ ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, com
 `capture_skew(path, window_s?)`, `capture_motion(path)`, `capture_heading(path, cal_path?)`,
 `slam_rerender(capture, voxel_size?, block_count?, device?, max_frames?)`,
 `slam_ensemble(capture, n?, device?, voxel_size?, block_count?)`,
+`slam_stall_profile(capture, frames?, device?, decimate?)`,
 `doctor()`, `orientation_probe(mode)`.
+
+`slam_stall_profile` answers "why does the live view feel frozen?" with a number.
+It replays a capture through the real Live-SLAM pipeline and reports, per stage,
+both wall time and the **GIL starvation** a watchdog thread measured — read the
+starvation, not the wall time. These are native calls and Open3D holds the GIL,
+so a stage's starvation *is* how long the asyncio loop could not run, and the two
+differ by an order of magnitude: `prepare_packet` costs 178 ms p50 but only 11.9%
+of wall starved (mostly numpy, which releases the GIL), while the same stage with
+`decimate=True` costs 2440 ms p50 and **94.3%**. Run it at scale — 1200 frames of
+a near-static capture showed zero stalls on code that freezes 1261 ms on a real
+room sweep. It runs in a subprocess and never binds the device, so it is safe
+beside a live server (both just get slower). Found BUG-060.
 
 `slam_loop_closure_gate(baseline, loop_closure)` applies the pre-registered paired 95% confidence gate to
 the two matched circuit ensembles; global loop closure stays disabled unless both

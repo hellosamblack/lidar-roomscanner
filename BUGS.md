@@ -2625,3 +2625,74 @@ measured. Note also that `capture_heading`, written hours earlier for BUG-058, s
 identically before and after — it regresses slopes, so a constant offset is invisible to it. Its
 docstring already said it cannot see absolute direction; this is that limitation biting on the
 very next bug.
+
+
+## BUG-060 — Live SLAM ran at 5 fps and updated the view once a second, on an idle GPU
+
+**Status:** fixed 2026-08-02 · **Area:** host/web (`web.py` broadcaster + `SlamRunner`,
+`reader.py`, `slam/meshprep.py`, `static/slam.js`) · **Found by:** owner — "in SLAM mode the GPU
+and CPU are hardly working at all, yet the viewport updates extremely jerkily (1 Hz). The display
+is 144 Hz and the data stream is 30 Hz. nvidia-smi shows 10 W and 0% gpu-util."
+
+The idle GPU was the clue, not the puzzle: the pipeline was only being *asked* for ~5 frames of
+work a second. Measured on the live rig — MESH 1.03/s, `slam` messages 5.05/s, mapper
+`frames_integrated` growing 5.00 fps against a 30.3 Hz stream.
+
+**It was the event loop, and a plain HTTP probe proved it.** Hammering
+`GET /static/index.html` alongside a `/ws` probe showed HTTP stalling by the *same* ~780 ms inside
+every websocket gap (p50 4.4 ms, p90 766 ms). That rules out the client and rules out websocket
+send-backpressure: the whole loop was frozen, ~630 ms out of every second.
+
+**Cause: `permessage-deflate`, once per client, on the loop.** `uvicorn.run()` defaults
+`ws_per_message_deflate=True`, and `_broadcast_bytes` awaits `send_bytes` **per client** — so each
+3.2 MB MESH payload was zlib-deflated once per connected tab, synchronously. The A/B on the live
+server is clean: **+130 ms of whole-process freeze per additional deflate client** (0→1 +128 ms,
+1→2 +133 ms), **+0 ms** for clients negotiating `compression=None`. Six clients were attached (the
+owner's browser plus three stale headless-Chrome connections and two MCP clients) ≈ 630 ms. What
+the cost bought: float32 geometry deflates to **80%**.
+
+**The consequence nobody would have seen.** `SlamRunner.submit()` was called only from that frozen
+broadcaster, so the mapper was fed 5 fps and **5 frames in 6 never reached the TSDF** — silently.
+That is a reconstruction-quality defect, not a UI one, and it is why the viewport sat at 1 Hz:
+`mesh_every = 5` on a 5 fps worker is one mesh per second.
+
+**Fixes.** (1) `ws_per_message_deflate=False`. (2) A new `on_frame` tap in `reader.py` feeds SLAM
+from the **reader thread**, so reconstruction rate no longer depends on display health; the
+broadcaster only polls. `SlamRunner` therefore builds its Open3D/CUDA pipeline **asynchronously**
+(inline construction on the reader thread would overflow the UDP socket) and drops frames until it
+lands, with a `_generation` counter so a source swap mid-build cannot install an orphan.
+(3) `MeshPrep` gained an optional `packer`, moving the O(map) serialisation off the loop.
+(4) `slam.js` evaluates the Turbo/Gray colormap in the **vertex shader** instead of recoloring
+every vertex in JS on every mesh, and uploads the received typed-array views instead of copying
+them.
+
+**Verified on the live rig**, 20 s in Live SLAM: mapper 5.00 → **30.40 fps**, MESH 1.03 → **6.11/s**,
+`slam` 5.05 → **30.05/s**, HTTP p90 766 → **4.8 ms** / max 816 → **16.7 ms**, stalls over 300 ms
+22 → **0**. The per-client scaling is gone entirely (0/+1/+2 clients: no stalls at all).
+
+**The wrong fix, measured and reverted.** `MeshPrep`'s adaptive decimation arms only via
+`note_upload_ms()`, which **only `panel.py` calls** — so `live_vertex_budget = 150000` is dead code
+on the web path and the live mesh streams full-res forever (611,290 verts / **30.97 MB** by frame
+1500 of `roomSweepFull20260730.bin`). Forcing decimation on looks obviously right and is 14× worse:
+`prepare_packet` went 178 → **2440 ms p50** (max 383 → **8377 ms**) and GIL starvation 11.9% →
+**94.3% of wall**, because `simplify_quadric_decimation` is C++ that never releases the GIL.
+Reverted. The payload is bounded by **cadence** instead — a byte-rate governor in `SlamRunner.poll`
+spaces publishes by `len(last_payload) / live_mesh_bytes_per_s` (new `[slam]` key, default
+12 MB/s), which is free: a small map is unaffected, a 31 MB map updates once per ~2.6 s, and a map
+that big changes slowly anyway.
+
+**Still open.** The governor bounds the wire *rate*, not the *peak* — the map is still re-sent
+whole and grows without bound. Delta / dirty-region mesh transport is the real answer and is worth
+its own sub-phase; it is the same incremental-extraction idea ROADMAP 6.I already wants.
+
+**New instrument.** `host/tools/slam_stall_profile.py` / MCP `slam_stall_profile` — per-stage
+timings *and* the GIL-starvation watchdog ROADMAP 6.I asked for. It is the tool that separated the
+two decimation results above, and the reason to read starvation rather than wall time.
+
+**Lessons.** (a) **A native call's wall time is not its blocking cost** — `prepare_packet` at
+178 ms costs 11.9% of wall, at 2440 ms it costs 94.3%; only the watchdog distinguishes numpy
+(releases the GIL) from Open3D C++ (does not). (b) **Cost a mitigation against the failure it
+prevents** — second instance after BUG-052, and this time the mitigation was mine. (c) **Test at
+scale**: 1200 frames of a near-static capture showed *zero* stalls on code that freezes 1261 ms on
+a real room sweep. (d) **Connection count is a performance variable here** — five stale
+headless/MCP connections were 5/6 of the freeze.
