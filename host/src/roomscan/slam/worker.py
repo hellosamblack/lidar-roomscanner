@@ -37,12 +37,16 @@ class SlamWorker:
     confidence are optional (Task 13) and simply forwarded to `Mapper.step`;
     the live panel does not yet supply them (a follow-up task wires that), so
     today they default to None and the live preview stays uncolored/
-    ungated, unchanged from before this task. `run_once()` pops it, steps the mapper, and
-    publishes `(mesh, trajectory, FrameStep)` -- mesh extraction is throttled
-    to every `mesh_every` *successful* (non-tracking-lost) frames, since only
-    those integrate into the TSDF (always on the first success, so a caller
-    sees geometry as soon as there is any); trajectory + step publish every
-    frame regardless, so the HUD keeps updating even while tracking-lost.
+    ungated, unchanged from before this task. `run_once()` pops it, steps the
+    mapper, and publishes `(mesh, trajectory, FrameStep)` to `latest()` --
+    TWICE, if extraction runs: once immediately with the *previous* mesh
+    (fresh pose, stale mesh, so a caller is never held up by extraction) and
+    again with the fresh mesh once `mapper.mesh()` returns (BUG-061). Mesh
+    extraction itself is throttled to every `mesh_every` *successful*
+    (non-tracking-lost) frames, since only those integrate into the TSDF
+    (always on the first success, so a caller sees geometry as soon as there
+    is any); trajectory + step publish every frame regardless, so the HUD
+    keeps updating even while tracking-lost.
     `start()`/`stop()` run `run_once()` in a background loop, mirroring
     `panel.py`'s `_run_reader` lifecycle (daemon thread, joined on stop).
     """
@@ -84,11 +88,19 @@ class SlamWorker:
         depth, quat, pressure, reflectance, confidence = item
         step = self._mapper.step(depth, quat, pressure, reflectance=reflectance, confidence=confidence)
         self._frames_processed += 1
+        trajectory = list(self._mapper.trajectory)   # copy: caller must not see it mutate later
+        # Publish the pose the instant it's known -- stale mesh, fresh pose --
+        # so a caller never waits out the extraction below (tens of ms) to see
+        # where the sensor is (BUG-061: this used to be the only publish, and
+        # it sat after extraction, so the pose lagged by however long that
+        # took).
+        with self._out_lock:
+            self._out_slot = (self._last_mesh, trajectory, step)
         if not step.tracking_lost:
             # Only a successful (integrated) frame can have changed the TSDF,
             # and only then is `mesh()` guaranteed non-empty -- gate the
             # throttle on this count, not on frames merely processed. A
-            # tracking-lost frame still publishes below (HUD keeps updating),
+            # tracking-lost frame still published above (HUD keeps updating),
             # it just doesn't force a fresh (and, on a still-empty map,
             # pointless) mesh extraction. See tsdf.py's own empty-map guard
             # for the belt-and-braces backstop.
@@ -108,9 +120,11 @@ class SlamWorker:
                         self.extraction_blocked_reason = str(exc)
                         logging.getLogger(__name__).warning(
                             "[slam] live map view frozen: %s", exc)
-        trajectory = list(self._mapper.trajectory)   # copy: caller must not see it mutate later
-        with self._out_lock:
-            self._out_slot = (self._last_mesh, trajectory, step)
+                else:
+                    # Republish: trajectory/step are unchanged from the publish
+                    # above, but the mesh just got fresher.
+                    with self._out_lock:
+                        self._out_slot = (self._last_mesh, trajectory, step)
         return True
 
     def latest(self):

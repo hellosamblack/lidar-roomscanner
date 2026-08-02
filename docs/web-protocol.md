@@ -1,10 +1,13 @@
 # The `roomscan-web` `/ws` protocol
 
-The desktop panel talks Python-to-Python; the web app talks **browser ↔ FastAPI over a single
-WebSocket** at `/ws`. That contract has grown one message type at a time across Web Phases 1–3, and
-it lives entirely inside `host/src/roomscan/web.py` builder functions — there is **no enum registry**
-the way the *binary wire* protocol has `docs/protocol.md` + `protocol.py`. This doc is that missing
-index: every `/ws` frame, its shape, and where it is built/consumed, so the next phase (SLAM
+The desktop panel talks Python-to-Python; the web app talks **browser ↔ FastAPI over WebSocket**.
+Through Web Phase 6 that was a single socket at `/ws`; BUG-061 (2026-08-02) split off a second,
+dedicated `/ws-mesh` socket for the binary MESH stream (see "The mesh channel — /ws-mesh" below) —
+everything else (metrics/sensor/state/session/cmd/etc, and the other binary tags) is unchanged on
+`/ws`. That contract has grown one message type at a time across Web Phases 1–3, and it lives
+entirely inside `host/src/roomscan/web.py` builder functions — there is **no enum registry** the
+way the *binary wire* protocol has `docs/protocol.md` + `protocol.py`. This doc is that missing
+index: every `/ws`(-mesh) frame, its shape, and where it is built/consumed, so the next phase (SLAM
 trajectory + mesh) has one place to hook into.
 
 This is the **app protocol** (host ↔ browser). It is unrelated to the **device wire protocol**
@@ -18,14 +21,19 @@ transformed, and *re-encoded* into these `/ws` messages.
 
 ## Framing
 
-One socket, two encodings, distinguished by WS frame opcode:
+**Two sockets**, `/ws` and `/ws-mesh`, each carrying two encodings distinguished by WS frame opcode:
 
 - **Binary frames** — high-rate render payloads. First 4 bytes are a little-endian `u32` **tag**;
   the frontend switches on it (`ws.js`). Tags: `TAG_POINT_CLOUD = 1`, `TAG_IR_IMAGE = 2`,
-  `TAG_MESH = 3`, `TAG_SURFACE = 4`, `TAG_MAGPOSE = 5` (`web.py`). Add new binary tags here and keep
-  them contiguous, and in lockstep across `web.py` / `ws.js` / this table (the `protocol-change` skill).
+  `TAG_MESH = 3`, `TAG_SURFACE = 4`, `TAG_MAGPOSE = 5` (`web.py`). **`TAG_MESH` is the one tag that
+  does not ride `/ws`**: since BUG-061 it travels exclusively on the dedicated `/ws-mesh` socket
+  (own connect/reconnect, credit-gated — see "The mesh channel — /ws-mesh" below); `/ws` no longer
+  emits it. Every other tag is unchanged. Add new binary tags here and keep them contiguous, and in
+  lockstep across `web.py` / `ws.js` / this table (the `protocol-change` skill) — and if a tag ever
+  needs to move sockets again, treat it as a breaking wire change (see Invariants).
 - **Text frames** — JSON objects, always with a `"type"` string field. Everything that isn't a
-  per-frame render payload (metrics, sensors, UI state, control echoes, logs) is JSON.
+  per-frame render payload (metrics, sensors, UI state, control echoes, logs) is JSON on `/ws`. The
+  sole exception is `mesh_ack`, the one JSON message type that lives on `/ws-mesh` instead.
 
 All numeric binary fields are little-endian. JSON numbers go raw over the wire; the frontend formats
 for display (units, precision).
@@ -43,6 +51,45 @@ unchanged, just with `msl_source: "fallback"`. Location comes from `[viewer] lat
 cadence from `[viewer] msl_refresh_s`. If a second outbound request is ever added, it belongs in
 this section — the property worth keeping is that the list is short enough to read.
 
+## The mesh channel — `/ws-mesh`
+
+**BUG-061 (2026-08-02).** `roomscan-web`'s WebSocket layer (uvicorn/ASGI) has no write-side
+backpressure: `send_bytes` just hands the frame to the OS and returns, so a single broadcaster
+`await`ing it for one slow client blocks every other message queued behind it on that connection —
+pose, metrics, everything. A whole-map MESH resend is multiple MB; on a slow/Wi-Fi link that turned
+into the reported 15 s of display lag, because the 30 Hz `slam` pose JSON was sharing a connection
+(and an `await`) with an occasional multi-MB mesh. MESH now has its own socket, `/ws-mesh`, with
+credit-based flow control (`MeshFlow`, `_pump_mesh`, `web.py`) so it can never again sit in front of
+anything on `/ws`:
+
+- **One mesh in flight per connection.** A connection gets a new mesh only once it has acknowledged
+  (or timed out on) the last one it was sent — never a queue of stale intermediate meshes.
+- **Latest-wins, by bytes identity.** `_cache_latest_mesh` holds exactly one cached mesh (the newest);
+  a mesh a flow never got to send before it was superseded is simply never sent — its `superseded`
+  counter increments instead. Identity is by the `bytes` object itself, **not** `mesh_seq`: the seq
+  resets to 0 on `_reset_slam` (map teardown), so a seq comparison would wedge a flow that had already
+  seen a higher number from the previous map.
+- **Current mesh pushed on connect.** A late joiner (a fresh tab, or a reconnect) gets whatever is
+  cached immediately in `websocket_mesh_endpoint`, rather than waiting for SLAM/Detailed to produce a
+  "new" one.
+- **Never-acked ("legacy") connections are throttled, not starved.** A connection that never sends
+  `mesh_ack` (an old cached client, a diagnostic tool) still gets the latest mesh, just capped to at
+  most one push per `LEGACY_MESH_INTERVAL_S` (5 s) instead of an open loop.
+- **A 60 s ack timeout clears the credit, not the mesh.** `MESH_ACK_TIMEOUT_S` frees a flow that never
+  acked so it isn't wedged forever, but it does **not** re-push the same bytes — `last_sent_obj` is
+  untouched, so `_pump_mesh`'s identity check still sees "nothing new" until an actual new mesh is
+  cached; only then does the flow send again.
+
+Protocol on the wire: `/ws-mesh` sends binary `TAG_MESH` frames only (no other tag, no JSON out) and
+accepts one JSON message in, `{"type": "mesh_ack", "seq": <mesh_seq>}` — see the inbound table below.
+The client (`slam.js`) only sends that ack once the mesh is actually consumed: after `renderMeshes`/
+`applyLines` swap the geometry in, inside a `requestAnimationFrame` callback, so the credit reflects
+"uploaded to the GPU," not "bytes parsed." `window.__slamDiag` exposes `lastMeshSeq`/`lastMeshAt`/
+`acksSent` for headless verification of that latency. `session.py`'s `RigSession` (the MCP client)
+auto-acks every mesh immediately on its own best-effort `/ws-mesh` connection — it has no rendering
+to wait on, so it exists only to keep `binary_counts`/`streaming` accurate, never to exercise
+backpressure.
+
 ## Outbound — server → browser
 
 ### Binary
@@ -51,7 +98,7 @@ this section — the property worth keeping is that the list is short enough to 
 |-----|------|--------|----------|
 | 1 | `POINT_CLOUD` | `u32 tag · f32[3N] positions · f32[3N] colors` (positions then colors, concatenated) | `pack_point_cloud` |
 | 2 | `IR_IMAGE` | `u32 tag · u16 width · u16 height · u8[w*h*3] RGB` | `pack_ir_image` `web.py:212` |
-| 3 | `MESH` | `9×u32 header (tag, mesh_seq, flags, then 6 counts) · per-submesh f32 pos·f32 col·u32 idx · floor f32 pos·u32 line-idx` | `pack_mesh` (web Phase 4) — a SLAM `MeshPacket`; flags bit0=decimated, bit1=walls_split; emitted on the mesh-throttle cadence only |
+| 3 | `MESH` | `9×u32 header (tag, mesh_seq, flags, then 6 counts) · per-submesh f32 pos·f32 col·u32 idx · floor f32 pos·u32 line-idx` | `pack_mesh` (web Phase 4) — a SLAM `MeshPacket`; flags bit0=decimated, bit1=walls_split; emitted on the mesh-throttle cadence only. **Delivered exclusively over `/ws-mesh`, not `/ws`, since BUG-061** — see "The mesh channel — /ws-mesh" above for the credit-gated delivery contract |
 | 4 | `SURFACE` | `u32 tag · u16 w · u16 h · u32 n_tris · f32[3·W·H] positions · f32[3·W·H] colors · u8[W·H] valid · u32[3·T] tri_indices · u8[W·H] covered` | `pack_surface_cloud` — grid-ordered positions+colors + triangulated mesh indices; sent instead of POINT_CLOUD when `surface_enabled` is true |
 | 5 | `MAGPOSE` | `u32 tag · u32 seq · f32[4] quat(w,x,y,z) · f32[3] field_dir_body · f32[3] gravity_body · f32 field_ut · f32 dev_pct · f32 dip_deg · i16 live_cell · i16 filled_cell · u16 flags · u16 pad` — **68 bytes**, ~2.0 kB/s at 30 Hz | `pack_magpose` / `build_magpose` (magcal 3D feedback, 2026-07-29) — sent **only to `state.magcal_clients`** on the 30 Hz broadcaster tick. `live_cell`/`filled_cell` are `-1` for none; `dev_pct`/`dip_deg` may be `NaN` (no calibration / no gravity). `flags`: bit0 collecting, bit1 stationary, bit2 mag_anomaly *(reserved, Phase 2)*, bit3 have_quat, bit4 provisional_binning, bit5 sample_rejected. See "Magnetometer sweep" below |
 
@@ -416,13 +463,13 @@ exact body-axis rotation above, plus a countdown of the cells left in the gap be
 
 | type | key fields | built by | notes |
 |------|-----------|----------|-------|
-| `metrics` | `render_fps`, `streams[]{stream_id,label,device_hz,host_hz,bytes_per_s,jitter_ms}`, `link_bytes_per_s`, `resources`{proc_cpu_percent,n_cores,proc_rss,ram_total,ram_used,sys_cpu_percent,gpu_util,proc_vram,vram_total,gpu_name,gpu_source,device_vram_used,device_vram_total,device_vram_source}, `drops`, `gaps` | `build_metrics_message` / `resources_to_dict` | metrics cadence (4 Hz); `device_hz`/`jitter_ms` may be null. `resources` was hardcoded null from Phase 1 until 2026-07-31; a `ResourceSampler` is now constructed in `main()` and passed to the `MetricsRegistry`. It carries **two scopes**: this process (`proc_*`, psutil + per-process NVML) and the **box** (`sys_cpu_percent`, `ram_used`/`ram_total`, `device_vram_*`) — the owner's question is headroom, and the ceiling belongs to the box. Device VRAM comes from `slam.gpumem.Nvml` (ctypes NVML, **no dependency**); `pynvml` is *not* installed here, so `gpu_util`/`proc_vram`/`gpu_name` are normally null and `gpu_source` is `"n/a"`. Every field except `proc_cpu_percent`/`n_cores`/`proc_rss`/`ram_total` is null-able — a GPU-less box reports absence, never a 0 that reads as free headroom. `resources` itself is null until the sampler's first sample (and forever on a state built without one, e.g. tests) |
+| `metrics` | `render_fps`, `streams[]{stream_id,label,device_hz,host_hz,bytes_per_s,jitter_ms}`, `link_bytes_per_s`, `resources`{proc_cpu_percent,n_cores,proc_rss,ram_total,ram_used,sys_cpu_percent,gpu_util,proc_vram,vram_total,gpu_name,gpu_source,device_vram_used,device_vram_total,device_vram_source}, `drops`, `gaps`, `ws`{clients,mesh_clients,mesh_in_flight,legacy_mesh_clients,mesh_superseded_total,mesh_ack_lag_s_max,mesh_ack_timeouts_total,latest_mesh_bytes} | `build_metrics_message` / `resources_to_dict` / `ws_flow_counters` | metrics cadence (4 Hz); `device_hz`/`jitter_ms` may be null. `resources` was hardcoded null from Phase 1 until 2026-07-31; a `ResourceSampler` is now constructed in `main()` and passed to the `MetricsRegistry`. It carries **two scopes**: this process (`proc_*`, psutil + per-process NVML) and the **box** (`sys_cpu_percent`, `ram_used`/`ram_total`, `device_vram_*`) — the owner's question is headroom, and the ceiling belongs to the box. Device VRAM comes from `slam.gpumem.Nvml` (ctypes NVML, **no dependency**); `pynvml` is *not* installed here, so `gpu_util`/`proc_vram`/`gpu_name` are normally null and `gpu_source` is `"n/a"`. Every field except `proc_cpu_percent`/`n_cores`/`proc_rss`/`ram_total` is null-able — a GPU-less box reports absence, never a 0 that reads as free headroom. `resources` itself is null until the sampler's first sample (and forever on a state built without one, e.g. tests). `ws` (BUG-061 Part A4, 2026-08-02) is `/ws` + `/ws-mesh` connection/credit health, straight off the two live client collections (no I/O): `clients` is the `/ws` connection count (also a performance variable — see BUG-060 above); `mesh_clients` is `/ws-mesh` connections; `mesh_in_flight` is flows currently holding an un-acked mesh; `legacy_mesh_clients` counts flows that have never once acked (throttled to `LEGACY_MESH_INTERVAL_S`); `mesh_superseded_total` and `mesh_ack_timeouts_total` are cumulative counters — the number that should climb under load is `mesh_superseded_total`, never a growing queue; `mesh_ack_lag_s_max` is the slowest observed ack round-trip across flows (`null` with no acks yet); `latest_mesh_bytes` is the size of the currently cached mesh (`0` when none has been produced yet) |
 | `sensor` | `have_quat`, `rot`[9 row-major], `heading`, `pressure_pa`, `temp_c`, `mag_ut`[3], `fusion`(human label), `fusion_key`(raw status), `has_mag_cal`, `pressure_hist[]`, `temp_hist[]`, `orientation_raw`{quat[4],roll_deg,pitch_deg,yaw_deg,heading_deg}, `jitter`{window_s,roll/pitch/yaw/heading/orientation→{mean_deg,p95_deg,n}}, `orientation_view`{mode,labels[3],roll_deg,pitch_deg,yaw_deg,singularity_margin_deg,near_singularity,valid,reason,yaw_offset_deg,...}, `ir_roll_deg`, `elevation_ft`, `elevation_datum_ft`, `elevation_hist[]`, `pressure_hpa`, `msl_pa`, `msl_source`(api\|stale\|fallback), `msl_age_s`, `elevation_tau_s` | `build_sensor_message` | **None (silent) on a ToF-only session**; `rot`/`heading` computed server-side so the frontend never re-derives sign/permutation matrices — see `docs/coordinate-frames.md`. `fusion` is a human-friendly label (`_FUSION_LABELS`); `fusion_key` is the raw `YawFusion.status` (`off`/`init`/`active`/`gated:no-cal`/`gated:motion`/`gated:anomaly`; `gated:gimbal` was removed by BUG-051 and no longer appears on the wire). `pressure_hist`/`temp_hist` are decimated (1 sample/2 s, ~10 min window) for sparklines. `orientation_raw`/`jitter` add full-precision numerics + noise stats alongside the existing (also raw, just rounded) `rot`/`heading` — see the frame-of-reference section above; `rot`/`heading` themselves are unchanged by this addition. `orientation_view` is the selected-mode decomposition + singularity/validity — see "Orientation decomposition modes" above; `yaw_offset_deg` echoes the applied "Zero yaw here" offset (0.0 in World mode, where it never applies) — see "Zero yaw here" below. `ir_roll_deg` is the residual in-plane gravity roll the IR pane's server-side quarter-turn snap leaves behind, CCW-positive, `null` until the display quat exists — see the `IR_IMAGE` paragraph above; `ir.js` applies it as a CSS transform and must negate it. **Elevation (owner ask, 2026-07-31):** `elevation_ft` is barometric height above sea level in feet, computed with `slam.frames.baro_height_m` — the *same* formula SLAM uses, never a second one — against `msl_pa`, and **low-passed** by a `elevation_tau_s`-second EMA (BUG-037 measured ~267 mm RMS of white noise per barometer sample, ~1.2 ft: a raw readout is unreadable). `pressure_pa`/`pressure_hist` are **kept** (the Diagnostics drawer still shows the raw Pascals); `elevation_hist` is those same decimated samples in feet, so the sparkline and the readout are one quantity. `msl_source` reports where the sea-level reference came from and is **not** cosmetic: `fallback` means no reference was fetched and the absolute height may be a couple of hundred feet off (the Δ reading is unaffected — a constant reference cancels in a difference). `elevation_datum_ft` echoes `UiState.elevation_datum_ft`, and is `null` when the readout is absolute |
 | `state` | `source`(live\|view), `display`(point_cloud\|preview\|slam\|detailed), `selected_capture`, `slam_available`, `detailed`{exists,current,stale,paths,manifest?}, plus the existing color/IR/view/SLAM preferences | `_state_message` | `mode` remains a compatibility alias only; clients must use `source` + `display`. Preview is View-only and shows the selected capture's orientation-only thumbnail. Detailed cache state is capture-keyed and never implies regeneration. The message is sent first on connect and after every source/display change. |
 | `session` | `mode`(live\|replay), `source_label`, `has_live`, `recording{active,path,elapsed_s,bytes,last_name}`, `playback{is_replay,capture_name,paused,speed_fps,loop,position,total_frames,elapsed_s,duration_s,timestamped}` | `build_session_message` | `elapsed_s`/`duration_s` come from valid monotonic DATA `FrameHeader.t_us` (TIM2); legacy captures fall back to frame count / 30 FPS. |
 | `captures` | `items[]{name,bytes,mtime,frames,has_stream_9,duration_s,timestamped,has_thumb,slam,detailed_estimate}` (newest first) | `build_captures_message` | `detailed_estimate` is `{frames,seconds,calibrated,cpu_warning,note}` from the active server preset, used by the Build confirmation before any job starts; an uncalibrated preset says so instead of inventing a duration. `has_stream_9=false` means Point cloud remains usable but SLAM choices must be disabled. **§12 additions:** `has_thumb` says a tile is already cached on disk (the client requests `/thumb/<name>` either way — the route generates on demand); `slam` is `{exists,current,frames,path_m,gap_m,area_m2}` from the capture's `results/<stem>.slam.json`, or `null`. Distance and area only exist where a reconstruction does — they are outputs of the SLAM run, not of the capture — so the browser renders an em dash, never a 0. `area_m2` is absent from every manifest written before 2026-07-31 and reads as `null`; it is deliberately not backfilled (recomputing it means re-running the reconstruction). |
 | `detailed` | `started?`, `estimate?`, `capture`, `phase`(frames\|extracting_mesh\|offline_only\|loading_cached\|cached\|failed), `processed`, `total`, `fraction`, `done`, `elapsed_s`, `eta_s`, `mesh_every`, `pose?[16]`, `stats?`, `mesh_seq`, `reason?` | `DetailedRunner` | The start acknowledgement carries `total` + `mesh_every` immediately, so the client can show that the click took effect before the first worker batch. Thereafter progress is server-owned: `elapsed_s` is wall-clock time since this build started and `eta_s` is the current progress-derived remaining time (`null` before one frame completes; `0` when done). `extracting_mesh` is emitted before Open3D synchronizes/extracts a progressive preview, so a temporarily unchanged frame count is explained rather than looking hung. `loading_cached` is emitted immediately while a saved PLY is read off the event loop; Detailed pauses replay because playback cannot affect its immutable reconstruction. `mesh_every` says when the next progressive geometry extraction is expected. `pose` is the latest world←camera pose (or the final sidecar `.tum` pose for a cached build), letting FPV/Mirror frame the fixed map around its scanner. The viewport keeps the progress overlay visible while each reconstructed MESH packet arrives on the existing binary tag. `cached` is a saved sidecar being viewed, not an active build. |
-| `slam` | `pose`[16], `follow{eye,center,up}`, `traj_tail[][3]`, `traj_len`, `fitness`, `rmse`, `tracking_lost`, `slam_ms`, `frames_integrated`, `mesh_seq`, `mesh_verts`, `blocks_used`, `blocks_capacity`, `blocks_configured` | `build_slam_message` (web Phase 4) | every processed frame in SLAM mode; follow eye/center/up computed server-side; traj downsampled to ≤256. The three `blocks_*` fields (2026-07-31) are the TSDF hash-grid gauge — BUG-035's ceiling, which stalls map growth and collapses frame-to-model tracking ~30 frames later with **no error at all**. `blocks_capacity` is the grid's LIVE capacity (Open3D rehashes to grow); `blocks_configured` is the `[slam] block_count` the operator can actually raise. Sampled inside `Mapper` at ~4 Hz, **not per frame** — `TsdfMap.block_usage()` is a device sync on CUDA — so all three are `null` between samples, before the first one, and from a worker predating the gauge. Null means *unknown*, never *empty map* |
+| `slam` | `ts`, `pose`[16], `follow{eye,center,up}`, `traj_tail[][3]`, `traj_len`, `fitness`, `rmse`, `tracking_lost`, `slam_ms`, `frames_integrated`, `mesh_seq`, `mesh_verts`, `blocks_used`, `blocks_capacity`, `blocks_configured`, `device` | `build_slam_message` (web Phase 4) | every processed frame in SLAM mode; follow eye/center/up computed server-side; traj downsampled to ≤256. `ts` and `device` are BUG-061 Part B additions (2026-08-02): `ts` is the server's wall-clock `time.time()` at build time, letting the client measure its own pose age (`slamAgeS`) without trusting frame-arrival timing to infer staleness — previously invisible now that MESH and `slam` can arrive on different sockets at different cadences. `device` is the resolved SLAM compute device string (e.g. `"CUDA:0"`) — `null`/omitted until `SlamRunner` has actually built its worker, since the build is async; before BUG-061 this was visible only in a log line. **`follow` is no longer consumed by the web client in World view** (owner choice, 2026-08-02, "track, keep my framing"): in World + Follow, `slam.js` now pans the orbit camera+target from `pose`'s own translation (`sceneApi.trackTarget`) instead of jumping to the server's fixed nose-camera `follow.eye/center/up` shot, which preserves the user's own zoom/angle across the scan. `follow` itself is unchanged on the wire and still consumed as before by FPV/Mirror (which stay scanner-relative via `setSlamPose`) — only the World-view branch stopped reading it. The three `blocks_*` fields (2026-07-31) are the TSDF hash-grid gauge — BUG-035's ceiling, which stalls map growth and collapses frame-to-model tracking ~30 frames later with **no error at all**. `blocks_capacity` is the grid's LIVE capacity (Open3D rehashes to grow); `blocks_configured` is the `[slam] block_count` the operator can actually raise. Sampled inside `Mapper` at ~4 Hz, **not per frame** — `TsdfMap.block_usage()` is a device sync on CUDA — so all three are `null` between samples, before the first one, and from a worker predating the gauge. Null means *unknown*, never *empty map* |
 | `saved` | `items[]{name,bytes,mtime}` (newest first) | `build_saved_message` (web Phase 4) | `results/*.ply`; on connect and after a Save completes |
 | `deleted` | `deleted[]{name,bytes,sidecars[]}`, `refused[]{name,reason}`, `bytes` | `_handle_delete_captures` (§12) | The result of one `delete_captures`. Reports what was **actually** deleted, not what was requested — every refusal carries a reason (`not found` / `currently recording` / `currently playing and there is no live source to switch to` / `delete failed`). Followed immediately by fresh `captures` + `saved` + `session` + `state`. |
 | `magcal` | `collecting`, `sample_count`, `elapsed_s`, `cells`(92), `cell_counts`[92], `cell_dev_pct`[92] (null = empty cell), `view`(current\|candidate), `live_cell`, `live_dir`[3], `gaps[]{size,fraction,centroid[3],face}`, `guidance`, `guidance_axis`{axis[3],angle_deg,text,target[3],target_cell,region_size,from_face,to_face}, `live_fit`{samples,used,field_ut,std_pct,bias_pct,residual_rms_ut,spread_verdict,bias_verdict,verdict,error}, `motion`{stationary,spread_deg,window_s,n}, `has_current`, `has_candidate`, `binning`(candidate\|current\|provisional\|raw), `fit_error`, `current`/`candidate`→{samples,samples_verdict,field{mean_ut,std_ut,std_pct,min_ut,max_ut,ratio,residual_rms_ut,expected_ut,bias_pct,spread_verdict,bias_verdict,verdict},coverage{cells,occupied,empty,fraction,verdict},verdict,limited_by,reason}, `current_field_ut`, `candidate_field_ut`, `saved_path`; **on `open` only**: `cell_dirs`[92][3], `t_world_to_cv`[9] (row-major) | `magsweep.build_report` via `web._magcal_report` | **Per-tab, not broadcast**: sent at `MAGCAL_INTERVAL` (**5 Hz**) only to sockets in `state.magcal_clients` (i.e. tabs that sent `magcal/open`), plus immediately on `open` and after every state-changing action. A session with the modal closed everywhere costs nothing. `cell_dirs`/`t_world_to_cv` are deterministic constants and ride the `open` report ONLY (4490 B → 1982 B per tick, a 56% cut); the client caches them. The 30 Hz render payload is the binary `MAGPOSE` channel, not this one. See "Magnetometer sweep" below |
@@ -436,10 +483,18 @@ is gated against `command_labels` (labels we actually dispatched) so it can't be
 
 ## Inbound — browser → server
 
-All inbound is JSON with a `"type"`; routed by `_handle_inbound` (`web.py:942`). Unknown types warn
-and are dropped. The `record`/`list_captures`/`load_capture`/`go_live`/`transport`/`rename_capture`
-handlers all require a `SessionController` (`ctrl is not None`) — absent in a `--replay`-launched
-process with no live source.
+All inbound is JSON with a `"type"`; routed by `_handle_inbound` (`web.py:942`) for messages sent on
+**`/ws`**. Unknown types warn and are dropped. The `record`/`list_captures`/`load_capture`/`go_live`/
+`transport`/`rename_capture` handlers all require a `SessionController` (`ctrl is not None`) — absent
+in a `--replay`-launched process with no live source.
+
+One inbound type lives entirely outside `_handle_inbound`, on the separate `/ws-mesh` socket instead:
+
+| type | fields | effect | handler |
+|------|--------|--------|---------|
+| `mesh_ack` | `seq` (echoes the acked `mesh_seq`) | **Sent on `/ws-mesh`, never `/ws`.** Frees that connection's one in-flight MESH credit (`flow.in_flight = False`, `flow.acked_ever = True`) and, if a newer mesh has been cached since, immediately sends it rather than waiting for the next broadcaster tick — see "The mesh channel — `/ws-mesh`" above. No echo; the effect is observable only via `metrics.ws` | `websocket_mesh_endpoint` |
+
+The rest of the table below is `/ws` only:
 
 | type | fields | effect | handler |
 |------|--------|--------|---------|
@@ -503,6 +558,15 @@ saved sidecar.
   (`web._persist_ui`, best-effort, reload-then-save). A new *durable* toggle adds a `ViewerConfig` field +
   the map on both sides; a purely *ephemeral* one stays out of the file. Persistence never adds a message —
   it rides the existing connect-time `state` echo, so the one-way-flow invariant is untouched.
+- **Moving a binary tag to a different socket is a breaking wire change.** BUG-061 moved `TAG_MESH`
+  from `/ws` to `/ws-mesh`; that is not a payload-format change (`pack_mesh` didn't move) but it still
+  requires the client and every socket consumer to change in the **same commit** — `ws.js` (second
+  socket + demux), `slam.js` (ack timing), and `RigSession` in `host/src/roomscan/mcp_server/session.py`
+  (the MCP client, which reconnects both sockets and auto-acks). A server shipped without the matching
+  client update silently stops delivering that tag to old clients; `session.py`'s `_connect_mesh` is
+  deliberately best-effort for exactly this reason (an older server with no `/ws-mesh` route must not
+  take down the main session). Treat any future tag-to-socket move the same way the `protocol-change`
+  skill treats a wire-format change: spec + both ends + this doc, in lockstep.
 
 ## Outside the socket — `GET /thumb/{name}` (capture thumbnails, §12)
 

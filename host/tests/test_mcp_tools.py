@@ -346,3 +346,140 @@ def test_cdp_cache_disable_is_non_fatal_on_an_old_target():
 
     s.cmd = boom                          # type: ignore[method-assign]
     asyncio.run(s._disable_http_cache())  # must not raise
+
+
+# --- RigSession /ws-mesh (BUG-061 A6) ----------------------------------------
+
+class _FakeMeshWs:
+    """Enough of a websockets connection for `_pump_mesh` to drive."""
+
+    def __init__(self, frames):
+        self._frames = frames
+        self.sent: list[str] = []
+
+    def __aiter__(self):
+        return self._gen()
+
+    async def _gen(self):
+        for f in self._frames:
+            yield f
+
+    async def send(self, msg):
+        self.sent.append(msg)
+
+
+def _mesh_frame(seq: int, tag: int = 3, tail: bytes = b"\x00" * 16) -> bytes:
+    """A MESH (tag 3) packet: u32 tag, u32 mesh_seq at byte offset 4 (per
+    docs/web-protocol.md's `/ws-mesh` credit contract), then arbitrary payload.
+    """
+    return struct.pack("<II", tag, seq) + tail
+
+
+def test_rig_session_auto_acks_mesh_frames():
+    """`_pump_mesh` must count tag 3 into `binary_counts` (so `rig_status`'s
+    `binary_tags_seen`/`streaming` keep seeing MESH after it moves off `/ws`)
+    and immediately ack with the seq carried at byte offset 4.
+    """
+    import asyncio
+    import json as _json
+
+    from roomscan.mcp_server.session import RigSession
+
+    fake = _FakeMeshWs([_mesh_frame(seq=42)])
+    rig = RigSession()
+    rig._ws_mesh = fake
+
+    asyncio.run(rig._pump_mesh())
+
+    assert rig.binary_counts.get(3) == 1
+    assert len(fake.sent) == 1
+    assert _json.loads(fake.sent[0]) == {"type": "mesh_ack", "seq": 42}
+
+
+def test_rig_session_acks_each_frame_in_sequence():
+    """Multiple mesh frames each get their own ack with the matching seq."""
+    import asyncio
+    import json as _json
+
+    from roomscan.mcp_server.session import RigSession
+
+    fake = _FakeMeshWs([_mesh_frame(seq=1), _mesh_frame(seq=2), _mesh_frame(seq=5)])
+    rig = RigSession()
+    rig._ws_mesh = fake
+
+    asyncio.run(rig._pump_mesh())
+
+    assert rig.binary_counts.get(3) == 3
+    acked_seqs = [_json.loads(m)["seq"] for m in fake.sent]
+    assert acked_seqs == [1, 2, 5]
+
+
+def test_rig_session_mesh_connect_failure_is_non_fatal():
+    """`/ws-mesh` is best-effort (an older server has no such route): a failed
+    connect must leave `mesh_connect_error` set but must not raise and must not
+    touch the main-session state.
+    """
+    import asyncio
+
+    from roomscan.mcp_server.session import RigSession
+
+    rig = RigSession(url="ws://127.0.0.1:1/ws")  # port 1: nothing listens, refused fast
+    asyncio.run(rig._connect_mesh(timeout=1.0))
+
+    assert rig._ws_mesh is None
+    assert rig.mesh_connected is False
+    assert rig.mesh_connect_error is not None
+    assert "ws-mesh" in rig.mesh_connect_error
+
+
+def test_rig_session_stays_functional_when_ws_mesh_is_unavailable(monkeypatch):
+    """End-to-end via `connect()`: the main `/ws` socket must come up and stay
+    usable even when `/ws-mesh` is unreachable -- graceful degradation is the
+    whole point of making the mesh socket best-effort (BUG-061 A6).
+    """
+    import asyncio
+
+    import websockets
+
+    from roomscan.mcp_server.session import RigSession
+
+    class _FakeMainWs:
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            # Never terminates on its own -- mirrors a live connection that's
+            # still open, so the reader task stays pending (not `.done()`).
+            await asyncio.Future()
+            yield  # pragma: no cover - unreachable, satisfies generator syntax
+
+        async def close(self):
+            pass
+
+    call_urls: list[str] = []
+
+    async def fake_connect(url, max_size=None):
+        call_urls.append(url)
+        if url.endswith("/ws-mesh"):
+            raise OSError("connection refused")
+        return _FakeMainWs()
+
+    monkeypatch.setattr(websockets, "connect", fake_connect)
+
+    rig = RigSession(url="ws://localhost:8000/ws")
+
+    async def run():
+        # Assertions must happen before the loop closes: `asyncio.run` cancels
+        # any still-pending tasks (the reader, by design here) once its
+        # coroutine returns, so checking `rig.connected` afterwards would see
+        # a task the runner itself just tore down, not the state `connect()`
+        # actually left behind.
+        ok = await rig.connect(timeout=1.0)
+        assert ok is True
+        assert rig.connected is True
+        assert rig.mesh_connected is False
+        assert rig.mesh_connect_error is not None
+        assert call_urls == ["ws://localhost:8000/ws", "ws://localhost:8000/ws-mesh"]
+        await rig.close()
+
+    asyncio.run(run())

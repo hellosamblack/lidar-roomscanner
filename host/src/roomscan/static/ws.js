@@ -18,6 +18,18 @@
 // Connection lifecycle is published as a local hub event: emit("conn", {state})
 // with state ∈ {"connecting","open","closed","error"} so hud/topbar can render
 // the connection dot without reaching into this module.
+//
+// Second socket, `/ws-mesh` (BUG-061, Part A): MESH (tag 3) moved off `/ws` so
+// a whole-map re-send can never sit in front of the 30 Hz pose JSON. It is a
+// SEPARATE WebSocket with its own connect/reconnect-with-backoff, mirroring
+// the pattern above; its only inbound traffic is binary tag-3 frames (demuxed
+// exactly like the main socket, -> emit('mesh', buffer)), and its only
+// outbound traffic is `mesh_ack`, sent by `hub.ackMesh(seq)` after the client
+// has actually consumed the mesh (uploaded it to the GPU) — see slam.js's
+// `requestAnimationFrame(() => hub.ackMesh(seq))`. The main socket keeps its
+// old tag-3 branch too: harmless (the server no longer sends tag 3 there),
+// and it means a stale cached client that hasn't picked up ws-mesh yet still
+// degrades to "no mesh" rather than throwing.
 
 const D = (m, l) => { try { window.__diag && window.__diag('ws.js: ' + m, l); } catch (e) {} };
 
@@ -34,6 +46,7 @@ const RECONNECT_MS = 2000;
 export function createHub() {
     const handlers = new Map();   // type -> Set<fn>
     let socket = null;
+    let meshSocket = null;
 
     function on(type, fn) {
         let set = handlers.get(type);
@@ -59,6 +72,59 @@ export function createHub() {
             try { socket.send(JSON.stringify(obj)); }
             catch (e) { D('send failed: ' + (e && e.message), 'error'); }
         }
+    }
+
+    // Ack a consumed mesh on the DEDICATED mesh socket (never the main one —
+    // the whole point of the split is that these two channels don't share a
+    // queue). Silent no-op when the mesh socket isn't open: the server's
+    // ack-timeout path (MESH_ACK_TIMEOUT_S) already covers "client vanished",
+    // and a reconnect will get pushed the current latest mesh as a late
+    // joiner, so there's nothing to retry here.
+    function ackMesh(seq) {
+        if (meshSocket && meshSocket.readyState === WebSocket.OPEN) {
+            try { meshSocket.send(JSON.stringify({ type: 'mesh_ack', seq })); }
+            catch (e) { D('mesh ack send failed: ' + (e && e.message), 'error'); }
+        }
+    }
+
+    function connectMesh() {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = `${protocol}//${window.location.host}/ws-mesh`;
+        D('mesh: connecting -> ' + url);
+        try {
+            meshSocket = new WebSocket(url);
+        } catch (e) {
+            D('mesh: constructor threw: ' + e.message, 'error');
+            setTimeout(connectMesh, RECONNECT_MS);
+            return;
+        }
+        meshSocket.binaryType = 'arraybuffer';
+
+        meshSocket.onopen = () => { D('mesh: OPEN'); };
+
+        meshSocket.onclose = (ev) => {
+            D('mesh: CLOSE code=' + ev.code + ' reason="' + (ev.reason || '') + '" wasClean=' + ev.wasClean, 'error');
+            setTimeout(connectMesh, RECONNECT_MS);   // reconnect-with-backoff
+        };
+
+        meshSocket.onerror = () => { D('mesh: ERROR (see close code next)', 'error'); };
+
+        meshSocket.onmessage = (event) => {
+            // The mesh socket only ever carries binary tag-3 frames, but demux
+            // it the same defensive way as the main socket rather than assume.
+            if (typeof event.data === 'string') {
+                D('mesh: unexpected text frame dropped: ' + event.data.slice(0, 80), 'error');
+                return;
+            }
+            const buffer = event.data;
+            if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 4) {
+                console.warn('[ws] mesh frame too short, dropped');
+                return;
+            }
+            const tag = new DataView(buffer).getUint32(0, true);
+            if (tag === TAG_MESH) emit('mesh', buffer);
+            else console.warn('[ws] unexpected tag ' + tag + ' on /ws-mesh, dropped');
+        };
     }
 
     function connect() {
@@ -112,5 +178,12 @@ export function createHub() {
         };
     }
 
-    return { on, emit, send, connect };
+    // One `connect()` call starts BOTH sockets — callers (app.js) don't need
+    // to know the mesh socket exists.
+    function connectAll() {
+        connect();
+        connectMesh();
+    }
+
+    return { on, emit, send, ackMesh, connect: connectAll };
 }

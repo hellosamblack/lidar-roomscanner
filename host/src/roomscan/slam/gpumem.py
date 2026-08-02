@@ -24,6 +24,11 @@ class _NvmlMemory(ctypes.Structure):
                 ("used", ctypes.c_ulonglong)]
 
 
+class _NvmlUtilization(ctypes.Structure):
+    _fields_ = [("gpu", ctypes.c_uint),
+                ("memory", ctypes.c_uint)]
+
+
 class Nvml:
     """Minimal NVML binding: device-wide used/total bytes.
 
@@ -91,6 +96,23 @@ class Nvml:
         mem = self._mem()
         return int(mem.free) if mem is not None else 0
 
+    def utilization(self) -> dict | None:
+        """Device-wide {"gpu_pct": int, "mem_pct": int}, or None.
+
+        NVML's own definitions, not a free-vs-total ratio: `gpu` is the
+        percent of the last sampling period the device executed >=1 kernel,
+        `memory` the percent it was reading/writing device memory. Added for
+        the Live SLAM resources card (BUG-061 Part B) -- `probe_gpu_process`
+        (metrics.py) reads null here because `pynvml` is absent, so this is
+        the only utilization number the UI can show, and it is device-wide
+        like the rest of this module (see the module docstring)."""
+        if not self.ok:
+            return None
+        util = _NvmlUtilization()
+        if self._lib.nvmlDeviceGetUtilizationRates(self._handle, ctypes.byref(util)) != 0:
+            return None
+        return {"gpu_pct": int(util.gpu), "mem_pct": int(util.memory)}
+
     def close(self) -> None:
         if self.ok:
             self._lib.nvmlShutdown()
@@ -101,3 +123,16 @@ class Nvml:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+def device_utilization() -> dict | None:
+    """Device-wide GPU/memory utilization percentages via NVML, or None.
+
+    Returns {"gpu_pct": int, "mem_pct": int} for device 0. None when NVML is
+    unavailable. Device-wide, not per-process (pynvml is absent on this host).
+    """
+    try:
+        with Nvml() as nvml:
+            return nvml.utilization()
+    except Exception:
+        return None

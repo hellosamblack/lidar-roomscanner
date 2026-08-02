@@ -4689,6 +4689,11 @@ def test_slamrunner_governor_spaces_publishes_by_payload_size():
     assert r._next_mesh_at >= time.monotonic() + hold_s - 0.05
 
     r._worker._mesh = object()                   # a NEW worker mesh is available
+    # The tiny synthetic payload's real hold window is a few ms, which wall
+    # time can consume between two polls on a loaded machine; the spacing
+    # arithmetic is already asserted above, so pin the clock inside the
+    # window to make the withhold check deterministic.
+    r._next_mesh_at = time.monotonic() + 60.0
     assert r.poll("split")[1] is None            # ...but the governor withholds it
     assert prep.subs == [1]                      # nothing was even prepped
 
@@ -4819,3 +4824,338 @@ def test_slamrunner_teardown_during_build_discards_the_stale_worker(_fake_slam, 
     with r._lock:
         assert r._worker is None             # the orphan was NOT installed
     assert _fake_slam["worker"].stopped      # ...and was stopped rather than leaked
+
+
+def test_slamrunner_poll_reports_the_resolved_device(_fake_slam):
+    """BUG-061 Part B: the SLAM compute device was only visible in a log line
+    (`[slam] worker started on {device} ...`) -- it now rides in the `slam`
+    message so the HUD can show it without trusting a log grep."""
+    r = web.SlamRunner(bus=LogBus())
+    assert r._device is None
+    r.set_active(True)
+    r.submit(np.zeros((6, 8), np.float32), (1, 0, 0, 0), None)
+    _await_build(r, _fake_slam)
+    assert isinstance(r._device, str) and r._device
+    msg, _mesh = r.poll("split")
+    assert msg["device"] == r._device
+
+
+# ---------------------------------------------------------------------------
+# BUG-061 Part A -- credit-gated `/ws-mesh` mesh transport
+# ---------------------------------------------------------------------------
+#
+# No real backpressure exists on `/ws`: `send_bytes` on an unbounded transport
+# buffer returns immediately no matter how big the payload or how slow the
+# link, so the old open-loop broadcast (resend the whole map every tick MESH
+# was ready) piled MESH bytes ahead of the 30 Hz `slam` pose on the same
+# socket -- seconds of head-of-line blocking on Wi-Fi, which is what the
+# owner saw as a 15 s display lag. `/ws-mesh` fixes it with one credit in
+# flight per client, latest-wins by identity (never `mesh_seq`, which resets
+# to 0 on `_reset_slam`).
+
+class _FakeMeshWs:
+    """Stand-in for a `/ws-mesh` WebSocket -- just records what it was sent."""
+    def __init__(self, fail: bool = False):
+        self.sent: list[bytes] = []
+        self._fail = fail
+        self.closed = False
+
+    async def send_bytes(self, data: bytes) -> None:
+        if self._fail:
+            raise RuntimeError("send failed")
+        self.sent.append(data)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _mesh_bytes(seq: int) -> bytes:
+    """Minimal bytes shaped enough for `_cache_latest_mesh`'s
+    `struct.unpack_from("<I", b, 4)` seq parse -- not a real `pack_mesh` frame."""
+    return struct.pack("<III", web.TAG_MESH, seq, 0) + b"\x00" * 8
+
+
+def _mesh_state(**extra) -> SimpleNamespace:
+    return SimpleNamespace(mesh_clients={}, latest_mesh=None, latest_mesh_seq=0, **extra)
+
+
+def test_mesh_delivery_is_credit_gated_one_in_flight():
+    """The headline contract test: under the OLD open-loop broadcast this
+    would fail immediately, because there was no credit check at all -- every
+    cached mesh would go out to every client on every tick. Here: an un-acked
+    flow gets nothing further, a mesh that was overwritten before ever being
+    sent counts as `superseded` (not silently redelivered), and an ack
+    advances a flow straight to the newest mesh, skipping anything in between."""
+    state = _mesh_state()
+    a, b = _FakeMeshWs(), _FakeMeshWs()
+    flow_a, flow_b = web.MeshFlow(), web.MeshFlow()
+    state.mesh_clients[a] = flow_a
+    state.mesh_clients[b] = flow_b
+    now = time.monotonic()
+
+    web._cache_latest_mesh(state, _mesh_bytes(1))
+    asyncio.run(web._pump_mesh(state, now))
+    assert len(a.sent) == 1 and len(b.sent) == 1
+    assert flow_a.superseded == 0 and flow_b.superseded == 0
+
+    # Two more meshes land with nobody acking -- neither flow has a free
+    # credit, so nothing more goes out no matter how many tick.
+    web._cache_latest_mesh(state, _mesh_bytes(2))
+    asyncio.run(web._pump_mesh(state, now))
+    web._cache_latest_mesh(state, _mesh_bytes(3))
+    asyncio.run(web._pump_mesh(state, now))
+    assert len(a.sent) == 1 and len(b.sent) == 1
+    # Mesh #2 was cached over and never sent to either flow before #3 arrived.
+    assert flow_a.superseded == 1 and flow_b.superseded == 1
+
+    # A acks its outstanding credit -> jumps straight to #3 (never sees #2).
+    flow_a.in_flight = False
+    flow_a.acked_ever = True
+    flow_a.acks += 1
+    asyncio.run(web._pump_mesh(state, now))
+    assert len(a.sent) == 2
+    tag, seq, _flags = struct.unpack_from("<III", a.sent[-1], 0)
+    assert (tag, seq) == (web.TAG_MESH, 3)
+    assert flow_a.superseded == 1          # unchanged by the ack/resend itself
+    # B never acked -- still holds #1, no further legacy send inside the window.
+    assert len(b.sent) == 1
+
+
+def test_mesh_legacy_client_is_throttled_to_the_interval():
+    """A client that never sends `mesh_ack` (an old cached tab, a diagnostic
+    tool) still gets the latest mesh, but at a bounded cadence rather than
+    every tick -- `LEGACY_MESH_INTERVAL_S`."""
+    state = _mesh_state()
+    ws = _FakeMeshWs()
+    state.mesh_clients[ws] = web.MeshFlow()
+    t0 = 1_000.0
+
+    web._cache_latest_mesh(state, _mesh_bytes(1))
+    asyncio.run(web._pump_mesh(state, t0))
+    assert len(ws.sent) == 1
+
+    web._cache_latest_mesh(state, _mesh_bytes(2))
+    asyncio.run(web._pump_mesh(state, t0 + 1.0))     # inside the window
+    assert len(ws.sent) == 1
+
+    asyncio.run(web._pump_mesh(state, t0 + web.LEGACY_MESH_INTERVAL_S + 0.1))
+    assert len(ws.sent) == 2
+
+
+def test_mesh_ack_timeout_clears_credit_without_resending_the_same_mesh():
+    """An ack that never arrives must not wedge the credit forever, but the
+    timeout alone does not re-push identical bytes -- newness is by identity,
+    so only a genuinely new mesh gets sent after the credit frees up."""
+    state = _mesh_state()
+    ws = _FakeMeshWs()
+    flow = web.MeshFlow(acked_ever=True)     # a normal acking client
+    state.mesh_clients[ws] = flow
+    t0 = 2_000.0
+
+    web._cache_latest_mesh(state, _mesh_bytes(1))
+    asyncio.run(web._pump_mesh(state, t0))
+    assert len(ws.sent) == 1 and flow.in_flight and flow.ack_timeouts == 0
+
+    asyncio.run(web._pump_mesh(state, t0 + 10.0))    # well before the timeout
+    assert len(ws.sent) == 1 and flow.ack_timeouts == 0
+
+    asyncio.run(web._pump_mesh(state, t0 + web.MESH_ACK_TIMEOUT_S + 1.0))
+    assert flow.ack_timeouts == 1 and not flow.in_flight
+    assert len(ws.sent) == 1                          # same mesh, not resent
+
+    web._cache_latest_mesh(state, _mesh_bytes(2))
+    asyncio.run(web._pump_mesh(state, t0 + web.MESH_ACK_TIMEOUT_S + 2.0))
+    assert len(ws.sent) == 2                          # the freed credit is usable again
+
+
+def test_mesh_pump_drops_a_client_whose_send_fails():
+    state = _mesh_state()
+    ws = _FakeMeshWs(fail=True)
+    state.mesh_clients[ws] = web.MeshFlow()
+    web._cache_latest_mesh(state, _mesh_bytes(1))
+    asyncio.run(web._pump_mesh(state, time.monotonic()))
+    assert ws not in state.mesh_clients
+    assert ws.closed
+
+
+def test_reset_slam_clears_the_cached_mesh_survives_flow_identity():
+    """`_reset_slam` drops the cache so a torn-down map's mesh is never resent
+    -- but flow bookkeeping is untouched, and a fresh map's first mesh (a new
+    bytes object) reaches an already-acked flow even though nothing compares
+    `mesh_seq` (BUG-061: seq resets to 0 on reset, so a seq-based newness
+    check would wedge here)."""
+    old_mesh = _mesh_bytes(9)
+    state = SimpleNamespace(mesh_clients={}, latest_mesh=old_mesh, latest_mesh_seq=9,
+                            slam_runner=None)
+    ws = _FakeMeshWs()
+    state.mesh_clients[ws] = web.MeshFlow(acked_ever=True, last_sent_obj=old_mesh)
+
+    asyncio.run(web._reset_slam(state))
+    assert state.latest_mesh is None and state.latest_mesh_seq == 0
+
+    web._cache_latest_mesh(state, _mesh_bytes(1))
+    asyncio.run(web._pump_mesh(state, time.monotonic()))
+    assert len(ws.sent) == 1
+
+
+def test_ws_mesh_late_joiner_gets_the_cached_mesh_and_cleans_up_on_disconnect():
+    from starlette.testclient import TestClient
+    client = TestClient(web.app)
+    mesh = _mesh_bytes(7)
+    web.app.state.mesh_clients = {}
+    web.app.state.latest_mesh = mesh
+    web.app.state.latest_mesh_seq = 7
+    with client.websocket_connect("/ws-mesh") as ws:
+        data = ws.receive_bytes()
+        assert data == mesh
+        assert len(web.app.state.mesh_clients) == 1
+        flow = next(iter(web.app.state.mesh_clients.values()))
+        assert flow.sent == 1 and flow.in_flight
+    assert len(web.app.state.mesh_clients) == 0     # disconnect popped the flow
+
+
+def test_ws_mesh_ack_advances_straight_to_a_newer_cached_mesh():
+    from starlette.testclient import TestClient
+    client = TestClient(web.app)
+    web.app.state.mesh_clients = {}
+    web.app.state.latest_mesh = _mesh_bytes(1)
+    web.app.state.latest_mesh_seq = 1
+    with client.websocket_connect("/ws-mesh") as ws:
+        first = ws.receive_bytes()
+        assert first == _mesh_bytes(1)
+        web.app.state.latest_mesh = _mesh_bytes(2)   # a newer map lands before the ack
+        ws.send_text(json.dumps({"type": "mesh_ack"}))
+        second = ws.receive_bytes()
+        assert second == _mesh_bytes(2)
+        flow = next(iter(web.app.state.mesh_clients.values()))
+        assert flow.acked_ever and flow.acks == 1 and flow.sent == 2
+
+
+def test_broadcaster_sends_slam_and_detailed_pose_before_caching_mesh():
+    """BUG-061 A2: pose JSON must never sit behind mesh bytes in the same
+    tick. Source-level, mirroring `test_broadcaster_no_longer_feeds_slam`."""
+    src = pathlib.Path(web.__file__).read_text()
+    body = src[src.index("async def _broadcaster()"):src.index('@app.websocket("/ws")')]
+
+    slam_block = body[body.index('if ui.display == "slam" and slam is not None'):
+                      body.index("# IR_IMAGE on its own slower cadence")]
+    assert (slam_block.index("_broadcast_text(clients, json.dumps(smsg))")
+            < slam_block.index("_cache_latest_mesh(state, mesh_bytes)"))
+
+    detailed_block = body[body.index('if ui.display == "detailed" and detailed is not None'):
+                          body.index("# Give every")]
+    assert (detailed_block.index("_broadcast_text(clients, json.dumps(dmsg))")
+            < detailed_block.index("_cache_latest_mesh(state, mesh_bytes)"))
+
+
+def test_broadcaster_no_longer_broadcasts_mesh_on_ws():
+    """MESH (tag 3) moved to `/ws-mesh` entirely (BUG-061 A3) -- if
+    `_broadcast_bytes` ever gets called with mesh bytes again on the main
+    socket, pose is back to sitting behind a multi-MB payload."""
+    src = pathlib.Path(web.__file__).read_text()
+    body = src[src.index("async def _broadcaster()"):src.index('@app.websocket("/ws")')]
+    assert "_broadcast_bytes(clients, mesh_bytes)" not in body
+
+
+def test_ws_flow_counters_shape():
+    state = _mesh_state(clients={object(), object()})
+    ws1, ws2 = object(), object()
+    state.mesh_clients[ws1] = web.MeshFlow(in_flight=True, acked_ever=True,
+                                           superseded=2, ack_timeouts=1,
+                                           last_ack_lag_s=0.05)
+    state.mesh_clients[ws2] = web.MeshFlow(in_flight=False, acked_ever=False)
+    state.latest_mesh = b"1234"
+    counters = web.ws_flow_counters(state)
+    assert counters == {
+        "clients": 2,
+        "mesh_clients": 2,
+        "mesh_in_flight": 1,
+        "legacy_mesh_clients": 1,
+        "mesh_superseded_total": 2,
+        "mesh_ack_lag_s_max": 0.05,
+        "mesh_ack_timeouts_total": 1,
+        "latest_mesh_bytes": 4,
+    }
+
+
+def test_ws_flow_counters_is_getattr_safe_on_a_bare_state():
+    """A hand-built `app.state` (most unit tests) has neither `mesh_clients`
+    nor `latest_mesh` -- this must degrade to zeros/empty, never raise."""
+    state = SimpleNamespace()
+    counters = web.ws_flow_counters(state)
+    assert counters["clients"] == 0 and counters["mesh_clients"] == 0
+    assert counters["latest_mesh_bytes"] == 0
+    assert counters["mesh_ack_lag_s_max"] is None
+
+
+def test_broadcaster_metrics_attach_ws_counters_beside_transport():
+    src = pathlib.Path(web.__file__).read_text()
+    body = src[src.index("async def _broadcaster()"):]
+    chunk = body[body.index('msg["transport"] = transport_counters(state)'):]
+    assert 'msg["ws"] = ws_flow_counters(state)' in chunk[:200]
+
+
+def test_build_slam_message_carries_ts_and_device():
+    step = _FrameStep(pose=np.eye(4), fitness=0.9, rmse=0.01,
+                      tracking_lost=False, slam_ms=3.0)
+    before = time.time()
+    msg = web.build_slam_message(step, [np.eye(4)], frames_integrated=1, mesh_seq=1,
+                                 source_vertex_count=10, device="CUDA:0")
+    after = time.time()
+    assert before <= msg["ts"] <= after
+    assert msg["device"] == "CUDA:0"
+
+    msg2 = web.build_slam_message(step, [np.eye(4)], frames_integrated=1, mesh_seq=1,
+                                  source_vertex_count=10)
+    assert msg2["device"] is None
+
+
+# ---------------------------------------------------------------------------
+# BUG-061 Part B -- device-wide GPU utilization fallback
+# ---------------------------------------------------------------------------
+
+def test_resources_to_dict_falls_back_to_device_wide_gpu_util(monkeypatch):
+    """`pynvml` is absent here, so the per-process sampler always reports
+    `gpu_util=None`; the device-wide NVML utilization now fills that hole
+    rather than leaving the HUD blank."""
+    res = _resource_snapshot(gpu_util=None, gpu_source="n/a")
+    monkeypatch.setattr(web, "_device_gpu_util", lambda: {"gpu_pct": 42, "mem_pct": 10})
+    out = web.resources_to_dict(res)
+    assert out["gpu_util"] == 42.0
+    assert out["gpu_source"] == "nvml-device"
+
+
+def test_resources_to_dict_prefers_the_per_process_gpu_util_when_present():
+    """If a future host ever has `pynvml`, that per-process figure must win
+    over the coarser device-wide fallback, not be silently overwritten."""
+    res = _resource_snapshot(gpu_util=17.0, gpu_source="pynvml")
+    out = web.resources_to_dict(res)
+    assert out["gpu_util"] == 17.0
+    assert out["gpu_source"] == "pynvml"
+
+
+def test_resources_to_dict_stays_null_when_no_gpu_source_at_all(monkeypatch):
+    res = _resource_snapshot(gpu_util=None, gpu_source="n/a")
+    monkeypatch.setattr(web, "_device_gpu_util", lambda: None)
+    out = web.resources_to_dict(res)
+    assert out["gpu_util"] is None
+    assert out["gpu_source"] == "n/a"
+
+
+def test_device_gpu_util_is_defensive_when_gpumem_lacks_the_function(monkeypatch):
+    """`device_utilization()` lands in `roomscan.slam.gpumem` from a change
+    landing CONCURRENTLY with this one -- it may not exist yet when this runs.
+    That must never be the reason a `metrics` message fails to build."""
+    import roomscan.slam.gpumem as gpumem
+    monkeypatch.delattr(gpumem, "device_utilization", raising=False)
+    assert web._device_gpu_util() is None
+
+
+def test_device_gpu_util_returns_none_on_a_probe_exception(monkeypatch):
+    import roomscan.slam.gpumem as gpumem
+
+    def _boom():
+        raise RuntimeError("nvml broke")
+
+    monkeypatch.setattr(gpumem, "device_utilization", _boom)
+    assert web._device_gpu_util() is None

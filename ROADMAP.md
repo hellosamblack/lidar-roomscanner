@@ -981,6 +981,29 @@ verification (7+ min on a 759-frame capture) — pre-existing, worth its own loo
 > vs the ToF-alone 27.76-28.6 band).
 >
 > - **Bus** (per the HUB1 design below, plus one fix the plan missed): PartID-keyed multi-device ENTDAA
+>
+> **BUG-061 — the sequel, and it corrects the sentence above.** Removing the freeze did not remove
+> the *queue*: the owner still saw ephemeral SLAM lag **up to 15 s**, in playback and worse live.
+> `ss -tnp` on the browser's connection read **32.8 MB unread client-side + 4.1 MB server send-Q =
+> 37 MB in flight**, while the MCP connection on the same server sat at 0/0. The reason the cadence
+> governor could not save it: **`/ws` has no backpressure at all.** uvicorn's
+> `WebSocketsSansIOProtocol` never blocks `send_bytes` (the `writable` event is never cleared), so
+> the per-client transport buffer is unbounded and the 12 MB/s budget is metered against an
+> *assumed* drain rate with no relationship to the real link. So the governor is **open-loop** —
+> anywhere BUG-060's write-up implies backpressure bounds the queue, it is wrong. Compounding it,
+> the 30 Hz `slam` pose JSON was enqueued *after* the mesh bytes on the same ordered stream, so
+> orientation was head-of-line blocked behind the whole backlog — which is why the *camera* lagged
+> as badly as the geometry and pointed nowhere near the cause. Fixed by moving MESH off `/ws` onto
+> a credit-gated **`/ws-mesh`** (one in flight per client, latest-wins, released by `mesh_ack`,
+> newness by bytes identity because `mesh_seq` resets on `_reset_slam`), sending pose first, and
+> publishing pose in `SlamWorker.run_once` before the throttled extraction. Backlog 37 MB → **0**;
+> `slam` pose age on a client that keeps up p50 **1.1 ms** / p95 **4.8 ms** (n=575).
+> **Honest limit:** on the 2 fps llvmpipe headless client pose age is p95 **2.82 s** — now bounded
+> by that client's own render rate rather than by transport (the ack is tied to `rAF` by design, so
+> a slow consumer starves itself), which means the ≤0.15 s contract is demonstrated only on a
+> client that can keep up; the owner's real browser was never instrumented, only its socket queues.
+> **The payload item above is unchanged** — `/ws-mesh` bounds the *backlog*, not the *peak*, and
+> delta/dirty-region transport is still the real answer. Full write-up in `BUGS.md` → BUG-061.
 >   (ToF `0x0102`→`0x52`, LSM6DSV16X `0x0070`→`0x50`). Stacked, the IKS4A1's NXS0108 auto-direction
 >   translator can't pass 12.5 MHz I3C push-pull, so `rs_assign_dynamic_addresses()` slows the PP clock
 >   **for ENTDAA only** (ranging stays full-speed) — ToF enumeration went from intermittent to 100% stable (105/105 passes).

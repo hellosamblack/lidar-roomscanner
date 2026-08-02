@@ -154,6 +154,28 @@ Full detail in `ROADMAP.md`. Summary:
   (`[slam] live_mesh_bytes_per_s`). **A native call's wall time is not its blocking cost** — new
   instrument `host/tools/slam_stall_profile.py` / MCP `slam_stall_profile` measures the difference,
   and closes half of 6.I's tooling ask.)*
+  *(2026-08-02 — **BUG-061, the sequel**: removing the freeze did not remove the **queue**. Ephemeral
+  SLAM still lagged **up to 15 s**, and `ss -tnp` read **37 MB in flight** on the owner's browser
+  connection (32.8 MB unread client-side + 4.1 MB server send-Q) while the MCP connection sat at
+  0/0. **`/ws` has no backpressure at all** — uvicorn's `WebSocketsSansIOProtocol` never blocks
+  `send_bytes`, so the per-client transport buffer is unbounded and BUG-060's 12 MB/s governor is
+  **open-loop**, metered against an *assumed* drain rate with no relationship to the real link.
+  Worse, the 30 Hz `slam` pose JSON was enqueued **after** the mesh bytes on the same ordered
+  stream, so the camera was head-of-line blocked behind the whole backlog — the symptom (stale
+  *orientation*) pointed nowhere near the cause (mesh size). MESH now has its own credit-gated
+  **`/ws-mesh`**: one in flight per client, latest-wins, released by an inbound `mesh_ack`,
+  **newness by bytes identity — not `mesh_seq`, which resets on `_reset_slam`**; a never-acking
+  legacy client still gets a bounded 1 mesh / 5 s. Pose is sent first at both tick sites, and
+  `SlamWorker.run_once` publishes it right after `Mapper.step`, before the throttled extraction.
+  Client-side: `frustumCulled = false` on all six SLAM objects (BUG-033's trap again), geometry
+  reused rather than rebuilt per packet, and the ack fired from `rAF` **after** the render, so a
+  slow consumer starves itself instead of the server. Backlog 37 MB → **0**; pose age p50
+  **1.1 ms** / p95 **4.8 ms** (n=575) on a client that keeps up. **Stated honestly:** on the 2 fps
+  llvmpipe headless client pose age is p95 **2.82 s** — bounded by its own render rate, so the
+  ≤0.15 s contract is demonstrated only where the client can keep up; the owner's real browser was
+  never instrumented, only its socket queues. Payload is still the whole map (ROADMAP 6.I).
+  **Ordering matters on an ordered transport, and "no backpressure" is a property of the stack** —
+  never assume a rate governor bounds a queue.)*
   *(2026-07-31 follow-up: the display enum additionally includes `preview`, a View-only orientation-thumbnail mode. Playback now defaults to 1×; Detailed build opens an honest estimate/confirmation dialog; Turbo/Gray applies to Point cloud, SLAM, and Detailed presentation.)*
 - **Phase 4 — ✅ done. X-NUCLEO-IKS4A1 integrated** (2026-07-10): streams 9 (SFLP quat) + 10 (env via LSM sensor hub), panel sensors group, host yaw fusion — see the architecture bullet above for what's still open. Edge-AI (in-sensor MLC/ISPU) belongs at this tier, not on the M33 — see the edge-ai-tooling memory.
 - **Phase 5 — ✅ Complete: transport upgrade to Ethernet** (lwIP/UDP + zero-config direct link). The device successfully streams raw frames over Ethernet. PTP support remains an optional future addition if required by SLAM. *(2026-07-21: the host→device COMMAND channel now works over Ethernet too — it was CDC-only, the ETH transport discarded inbound datagrams; inbound UDP now feeds the same command parser as CDC.)* *(2026-07-28: **the board now runs untethered** — the NUCLEO-H563ZI has no HSE crystal, so the system clock was the ST-LINK's MCO and the firmware wedged before `ETH_Init()` whenever CN1 was unplugged. PLL1 now sources from HSI unconditionally, same 250 MHz SYSCLK; power from USB_USER with JP2 at 9-10. Boot-progress LEDs added — LD1 green = clocks up, LD2 yellow blinking = acquisition loop alive, LD3 red = wedged. BUG-023/024/025.)*

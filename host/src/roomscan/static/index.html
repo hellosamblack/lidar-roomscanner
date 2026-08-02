@@ -1224,6 +1224,7 @@
                 <div class="hud-row"><span>Frames</span><span class="hud-val" id="slam-frames">0</span></div>
                 <div class="hud-row"><span>Vertices</span><span class="hud-val" id="slam-verts">0</span></div>
                 <div class="hud-row"><span>SLAM</span><span class="hud-val" id="slam-ms">—</span></div>
+                <div class="hud-row" title="The compute device running the SLAM reconstruction (CUDA:0 = GPU-accelerated). Absent/blank on a server that hasn't reported one."><span>Device</span><span class="hud-val" id="slam-device">—</span></div>
             </div>
         </div>
 
@@ -1362,6 +1363,14 @@
                             <button data-viewmode="fpv" title="Follow the scanner's own viewpoint in any display while keeping the horizon level">FPV</button>
                             <button data-viewmode="mirror" title="Like FPV but flipped left-right in every display, including the preview thumbnail and IR pane">Mirror</button>
                         </div>
+                        <!-- Follow camera (moved here from the SLAM card, BUG-061: that
+                             card ships hidden/collapsed so the toggle had never been
+                             seen). Only meaningful for the SLAM/Detailed map display,
+                             and only in World -- FPV/Mirror always follow the scanner
+                             regardless of this toggle. slam.js manages `disabled` +
+                             `title` from server state (id unchanged: chk-slam-follow,
+                             still wired to the same `slam_opt` message). -->
+                        <label class="toggle" title="Camera automatically follows the device position (SLAM/Detailed display, World view only)"><input type="checkbox" id="chk-slam-follow" checked><span>Follow camera</span></label>
                         <div class="field-label">Camera <span class="hud-val" id="cam-mode-val">World</span></div>
                         <div class="field-label field-label--sub">Distance <span class="hud-val" id="cam-distance-val">4.2 m</span></div>
                         <input type="range" class="slider" id="sl-cam-distance" min="0" max="15" step="0.05" value="4.2" title="How far the camera sits back along the view axis — 0 puts it at the sensor, where the view goes flat for lack of parallax">
@@ -1491,7 +1500,9 @@
             <button class="control-group__header"><span>SLAM</span><span class="chevron">&#9662;</span></button>
             <div class="control-group__body">
                 <label class="toggle" title="Show or hide the path the device has traveled"><input type="checkbox" id="chk-slam-traj" checked><span>Trajectory trail</span></label>
-                <label class="toggle" title="Camera automatically follows the device position"><input type="checkbox" id="chk-slam-follow" checked><span>Follow camera</span></label>
+                <!-- Follow camera moved to the View card's Camera & Pose section
+                     (owner ask, BUG-061): this card ships `hidden collapsed` by
+                     default, so the toggle had never actually been seen here. -->
                 <div class="field-label">Walls</div>
                 <div class="segmented segmented--sm" id="seg-walls">
                     <button data-walls="split" title="Render walls and non-walls as separate meshes">Split</button>

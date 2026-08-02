@@ -68,6 +68,8 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-057 | fixed   | host/web      | The HUD's **Gaps** counter booked a source swap as lost frames — `Stats._last_seq` survives live→replay→live, but sequence numbers are per-source, so the numbering difference lands in `seq_gaps`. Observed **1,529,274 gaps** in a session with 0 drops streaming cleanly at 30 fps. Discredits the exact counter BUG-049's transport-loss work reads |
 | BUG-058 | fixed   | host/sensors  | Heading swung 154° while the device was rolled at a fixed bearing — `absolute_heading` stripped yaw with `yaw_twist_deg`, and world-Z twist absorbs roll about a horizontal boresight degree for degree. `YawFusion` compounded it: `heading - yaw` differenced a device bearing against a world-Z twist, so the fused quat came out **mirrored**, at −bearing |
 | BUG-059 | fixed   | host/sensors  | **Every heading ever displayed was 180° out** — aimed north, the instrument read south. The calibrated field vector is delivered ANTI-PARALLEL to Earth's: it sat 70–72° *above* the horizon on every capture, where the northern-hemisphere field is that far below it. `AXIS_CONVENTION` carried the mounting rotation but not the field-direction sign. Predates BUG-058 and was hidden by it |
+| BUG-060 | fixed   | host/web      | Live SLAM ran at 5 fps and updated the view once a second on an idle GPU — `uvicorn.run()` defaults `ws_per_message_deflate=True` and `_broadcast_bytes` awaits `send_bytes` **per client**, so each 3.2 MB MESH was zlib-deflated once per connected tab on the event loop. Worse than the UI symptom: `SlamRunner.submit()` ran only from that broadcaster, so **5 frames in 6 never reached the TSDF**, silently |
+| BUG-061 | fixed   | host/web      | Ephemeral SLAM lagged **up to 15 s** behind the operator, in playback and far worse live. `/ws` has no write backpressure, so the 12 MB/s MESH governor was open-loop and the whole-map re-sends piled into an unbounded transport buffer — **37 MB in flight** on the owner's connection. The 30 Hz `slam` pose JSON was queued *behind* those megabytes on the same ordered stream, so the camera lagged with the geometry |
 
 ---
 
@@ -2696,3 +2698,88 @@ prevents** — second instance after BUG-052, and this time the mitigation was m
 scale**: 1200 frames of a near-static capture showed *zero* stalls on code that freezes 1261 ms on
 a real room sweep. (d) **Connection count is a performance variable here** — five stale
 headless/MCP connections were 5/6 of the freeze.
+
+---
+
+## BUG-061 — Ephemeral SLAM lagged 15 s behind the operator: 37 MB of unbounded websocket backlog
+
+**Status:** fixed 2026-08-02 · **Area:** host/web (`web.py` mesh flow, `static/ws.js` ·
+`slam.js` · `scene.js` · `index.html`, `slam/worker.py`, `slam/gpumem.py`,
+`mcp_server/session.py`) · **Found by:** owner — "Ephemeral SLAM is still extremely laggy, even in
+playback mode. When in live mode, it's terrible. After we start moving the camera around, the
+camera will take up to 15 seconds to reflect its new orientation and show new points."
+
+This is BUG-060's sequel, and it survived that fix because BUG-060 removed the event-loop *freeze*,
+not the *queue*. The byte-rate governor it added bounds the wire **rate**; nothing bounded the
+backlog.
+
+**Proved before a line changed.** `ss -tnp | grep :8000` on the owner's browser connection:
+**32,861,676 bytes unread client-side + 4,132,544 bytes in the server's send queue ≈ 37 MB in
+flight**, while the MCP client's connection on the same server sat at 0/0. 37 MB draining at the
+governor's assumed 12 MB/s *is* the ~15 s the owner saw. The queue held the answer, and one
+command read it.
+
+**Cause: `/ws` has no backpressure, and pose rode behind the mesh.** uvicorn's
+`WebSocketsSansIOProtocol` never blocks `send_bytes` — the `writable` event is never cleared — so
+the per-client asyncio transport buffer is unbounded and the MESH governor is **open-loop**: it
+meters whole-map re-sends against an *assumed* 12 MB/s that has no relationship to the real link
+(the rig is behind a Wi-Fi bridge). Every excess byte accumulated. The 30 Hz `slam` pose JSON was
+then enqueued **after** those megabytes on the same ordered TCP stream, so orientation was
+head-of-line blocked behind the entire backlog — which is why the *pose* lagged exactly as badly
+as the geometry, and why the lag grew without bound as the map grew.
+
+The client compounded it: a `dispose()` + brand-new `BufferGeometry` per MESH, and no
+`frustumCulled = false`, so every packet also cost an O(N) `computeBoundingSphere` on the render
+thread.
+
+**Fixes.**
+1. **MESH moved off `/ws` entirely, onto a new credit-gated `/ws-mesh`** — one mesh in flight per
+   client, latest-wins, credit released by an inbound `{"type":"mesh_ack","seq":N}`. Newness is
+   decided by **bytes identity, not `mesh_seq`** (the sequence resets on `_reset_slam`). A client
+   that never acks (legacy) still gets a bounded 1 mesh / 5 s; an unanswered credit clears after
+   60 s. *Accepted deviation:* the ack timeout clears credit but does **not** re-push identical
+   bytes — the next new mesh flows, which is what live SLAM always produces.
+2. **Pose goes out first.** Both broadcaster tick sites send the `slam` JSON before touching mesh
+   bytes, and `SlamWorker.run_once` now publishes the pose **immediately after `Mapper.step`** —
+   before the throttled `mesh()` extraction — republishing only when extraction actually
+   succeeded. Pose age no longer depends on extraction cadence at all.
+3. **Client**: `frustumCulled = false` on all six SLAM objects and the scanner (the BUG-033
+   stale-bounding-sphere trap again), geometry **reused** via `ensureAttrCapacity` /
+   `ensureIndexCapacity` with 1.5× headroom instead of rebuilt per packet, and the ack fired from
+   `requestAnimationFrame` *after* the render — so credit returns only when a frame really landed.
+4. `metrics.ws` flow counters, `ts` + `device` on the `slam` message, and an NVML utilization row.
+   It is labelled `gpu_source = "nvml-device"` because device-wide utilization **cannot** prove
+   that *SLAM* used the GPU.
+5. The MCP `RigSession` opens `/ws-mesh` best-effort and auto-acks, so an agent client can never
+   become the stalled client that starves the owner's browser.
+
+**Verified** on a restarted server replaying `web_20260802_124501.bin` at 1× in SLAM display:
+
+| | before | after |
+|---|---|---|
+| backlog, owner's browser connection | 32.8 MB unread + 4.1 MB send-Q | **0 / 0** (peak 7,888 B) |
+| `slam` pose age, client that keeps up | unbounded, ~15 s | p50 **1.1 ms**, p95 **4.8 ms**, max 63.4 ms (n=575) |
+| SLAM compute device in the HUD | not shown | **CUDA:0** |
+
+Credit is demonstrably cycling (32 acks across mesh seq 113→162), and FPV/Mirror now hide the
+scanner model with Follow disabled.
+
+**The residual, stated plainly.** On the *headless llvmpipe* client pose age is p50 2.61 s /
+p95 2.82 s — it does **not** meet the ≤0.15 s target. That client renders at **2 fps**, and the
+ack is deliberately tied to `rAF`, so its pose age is now bounded by its own render rate instead
+of by transport. That is the intended shape of the fix — a slow consumer starves *itself* and
+never accumulates a server-side queue — but it means the ≤0.15 s figure is only demonstrated on a
+client that can keep up. **The owner's real browser was never instrumented**, only its socket
+queues, which were clean.
+
+**Still open.** Unchanged from BUG-060: the map is re-sent **whole** and grows without bound.
+`/ws-mesh` bounds the *backlog*, not the *payload*. Delta / dirty-region extraction and quantized
+mesh transport remain ROADMAP 6.I.
+
+**Lessons.** (a) **"No backpressure" is a property of the stack, not something to assume away** —
+a governor metered against an *assumed* drain rate is open-loop, and the socket queue is where the
+truth was. (b) **Ordering matters on an ordered transport**: putting a 30 Hz control message behind
+a multi-megabyte payload on one stream turns a bandwidth problem into a latency problem, and the
+symptom (stale *camera*) points nowhere near the cause (mesh size). (c) A credit/ack loop makes a
+slow consumer starve itself rather than the server — but then **the contract must be measured on a
+client that can keep up**, or you are measuring the renderer, not the transport.

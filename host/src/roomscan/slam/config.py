@@ -90,7 +90,12 @@ class SlamConfig:
     # source_cloud/register). "CPU:0" today -- the installed Open3D 0.19
     # build here has no CUDA support -- but "CUDA:0" (or any other
     # o3d.core.Device string) runs unchanged once a CUDA-enabled build is
-    # installed; see slam/mapper.py's docstring.
+    # installed; see slam/mapper.py's docstring. NOT read by the web app's
+    # live SLAM path: `web.SlamRunner._construct` calls `preferred_device()`
+    # directly (CUDA:0 when available) and never looks at this field or this
+    # dataclass's instance at all -- this default only reaches the CLI/offline
+    # paths (slam/cli.py) and DetailedSlamPreset.mapper_kwargs, which also
+    # overrides it with `preferred_device()`.
     device: str = "CPU:0"
     # Sub-phase 6.G (long-scan OOM): on CUDA, release Open3D's cached-but-unused
     # device blocks every N mesh/point-cloud EXTRACTIONS. The per-frame

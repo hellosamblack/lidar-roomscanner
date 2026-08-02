@@ -140,6 +140,55 @@ def test_submit_defaults_reflectance_and_confidence_to_none():
     assert not latest[2].tracking_lost
 
 
+def test_pose_published_before_mesh_extraction(monkeypatch):
+    """BUG-061 / A1: the pose must reach `latest()` the instant `Mapper.step`
+    finishes, not only after the (potentially tens-of-ms) mesh extraction that
+    follows it. Proven from the inside: a spied `Mapper.mesh()` reads
+    `latest()` *during* its own call -- under the old code (single publish,
+    placed after extraction) that observes the PREVIOUS out_slot, which is
+    still None on this, the very first frame; under the fixed code it already
+    sees this frame's fresh trajectory/step."""
+    from roomscan.slam.mapper import Mapper
+
+    w = SlamWorker(W, H, voxel_size=0.02, mesh_every=1)
+    seen = {}
+    orig_mesh = Mapper.mesh
+
+    def spy_mesh(self):
+        seen["latest_during_mesh"] = w.latest()
+        return orig_mesh(self)
+
+    monkeypatch.setattr(Mapper, "mesh", spy_mesh)
+    w.submit(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    w.run_once()
+
+    assert "latest_during_mesh" in seen        # mesh() really was called
+    mid_latest = seen["latest_during_mesh"]
+    assert mid_latest is not None              # pose already published -- this is the fix
+    _, mid_traj, mid_step = mid_latest
+    assert len(mid_traj) == 1                  # this frame's pose, not a stale one
+    assert not mid_step.tracking_lost
+
+
+def test_mesh_republished_fresh_after_extraction(monkeypatch):
+    """After a throttled extraction runs, the resulting publish must carry
+    the mesh `mapper.mesh()` just returned (identity-checked), not the value
+    `_last_mesh` held going into `run_once()`."""
+    from roomscan.slam.mapper import Mapper
+
+    sentinel = object()
+    monkeypatch.setattr(Mapper, "mesh", lambda self: sentinel)
+    w = SlamWorker(W, H, voxel_size=0.02, mesh_every=1)
+    w.submit(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    w.run_once()
+
+    mesh, traj, step = w.latest()
+    assert mesh is sentinel                    # republished with the fresh mesh
+    assert w._last_mesh is sentinel
+    assert len(traj) == 1
+    assert not step.tracking_lost
+
+
 def test_start_stop_processes_in_background_and_does_not_hang():
     w = SlamWorker(W, H, voxel_size=0.02)
     w.start()

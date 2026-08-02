@@ -18,9 +18,13 @@
 //   makeXrayMaterial(THREE, material) -> the see-through twin of a material
 //   createScene(hub) -> { resetCamera, THREE, scene, camera,
 //                         setPointsVisible(bool), setFollow(bool),
-//                         setFollowTarget(eye, center, up), setSlamPose(pose),
-//                         setViewportMirror(bool),
+//                         setFollowTarget(eye, center, up), trackTarget(pos),
+//                         setSlamPose(pose), setViewportMirror(bool),
 //                         setRenderActive(bool) }
+// trackTarget(pos) is World+Follow's "track, keep my framing": pans the orbit
+// toward `pos` (a [x,y,z]) by translating camera+target by the same delta,
+// preserving the user's zoom/angle. setFollowTarget's eye/center/up snap is
+// for FPV/Mirror only (a fixed scanner-relative shot).
 // slam.js (web Phase 4) uses the returned handle to add its mesh/trajectory
 // group to the same scene and to drive the follow camera (which must coordinate
 // with OrbitControls — only one may own the camera per frame).
@@ -284,6 +288,37 @@ export function createScene(hub) {
         followCenter.set(center[0], center[1], center[2]);
         if (up) followUp.set(up[0], up[1], up[2]);
         haveFollowTarget = true;
+    }
+
+    // World + Follow, "track, keep my framing" (owner choice #1, BUG-061 Part
+    // C). This is deliberately NOT `setFollowTarget` + the eye/center lerp
+    // above: that snaps the CAMERA onto a server-computed nose position, which
+    // is correct for FPV/Mirror (a fixed scanner-relative shot) but wrong for
+    // World, where the user has their own zoom and orbit angle dialed in and
+    // "follow" should mean the view pans to keep the scanner in frame WITHOUT
+    // touching that framing.
+    //
+    // Mechanism: translate `controls.target` toward `pos` and translate
+    // `camera.position` by the exact same delta. The vector from camera to
+    // target — i.e. the zoom distance and orbit angle — is unchanged, so the
+    // next `controls.update()` (still called every frame in the normal World
+    // branch below) recomputes OrbitControls' internal spherical state from
+    // the new position/target pair and finds the same radius/angles it had
+    // before, plus whatever the user has orbited/zoomed since. OrbitControls
+    // stays `enabled` throughout, so user drag/zoom keeps working between
+    // calls — this only ever nudges the pivot both ends are hung from.
+    const trackTargetVec = new THREE.Vector3();
+    const trackTargetDelta = new THREE.Vector3();
+    function trackTarget(pos) {
+        if (viewMode !== 'world') return;
+        trackTargetVec.set(pos[0], pos[1], pos[2]);
+        // Same velocity-adaptive lerp shape as the FPV/Mirror follow above:
+        // steady when the scanner is nearly stationary, snappier under motion.
+        const d = controls.target.distanceTo(trackTargetVec);
+        const alpha = Math.min(1, Math.max(0.12, d / 0.03));
+        trackTargetDelta.copy(trackTargetVec).sub(controls.target).multiplyScalar(alpha);
+        controls.target.add(trackTargetDelta);
+        camera.position.add(trackTargetDelta);
     }
 
     // --- real-time view mode (owner ask, 2026-07-29) ------------------------
@@ -629,7 +664,14 @@ export function createScene(hub) {
             if (viewMode === 'world') { updateOscillate(); controls.update(dt); }
             return;
         }
-        if (followOn && haveFollowTarget) {
+        // The eye/center lerp below is the FPV/Mirror follow camera only.
+        // World's follow is `trackTarget` above, called directly by slam.js on
+        // each pose — it must NOT run this branch, or a stale `haveFollowTarget`
+        // left over from a previous FPV/Mirror session (it is never cleared)
+        // would snap World onto that old nose-camera pose the instant
+        // `slam_follow` is on. Gating on `viewMode !== 'world'` here, not just
+        // on whether a target was ever set, is what makes that safe.
+        if (followOn && haveFollowTarget && viewMode !== 'world') {
             controls.enabled = false;
             // Velocity-adaptive lerp: fast when the sensor moves, steady when still.
             const d = camera.position.distanceTo(followEye);
@@ -671,5 +713,5 @@ export function createScene(hub) {
     }
 
     return { resetCamera, THREE, scene, camera, controls, setPointsVisible, setFollow,
-             setFollowTarget, setSlamPose, setViewportMirror, setRenderActive };
+             setFollowTarget, trackTarget, setSlamPose, setViewportMirror, setRenderActive };
 }

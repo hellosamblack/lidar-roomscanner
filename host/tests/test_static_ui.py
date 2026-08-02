@@ -375,6 +375,116 @@ def test_camera_views_cover_every_display_and_slam_uses_the_shared_scanner_model
     assert "viewMode === 'mirror' ? 'scaleX(-1)'" in browser
 
 
+# ---------------------------------------------------------------------------
+# BUG-061 -- credit-based /ws-mesh transport, World-follow "track, keep my
+# framing", and scanner-model visibility keyed on view mode.
+# ---------------------------------------------------------------------------
+
+SLAM_JS = STATIC / "slam.js"
+SCENE_JS = STATIC / "scene.js"
+WS_JS = STATIC / "ws.js"
+
+
+def test_ws_js_opens_a_dedicated_mesh_socket():
+    """MESH (tag 3) moved off `/ws` onto `/ws-mesh` so a whole-map re-send can
+    never sit in front of the 30 Hz pose JSON (BUG-061 Part A). The client
+    needs its own socket + ack path, not just a demux branch."""
+    js = WS_JS.read_text(encoding="utf-8")
+    assert "/ws-mesh" in js
+    assert "ackMesh" in js
+    assert "mesh_ack" in js
+
+
+def test_slam_js_reuses_geometry_and_does_not_frustum_cull():
+    """Two BUG-061 client-side requirements, both load-bearing for the same
+    failure mode (a live-updating buffer silently going stale/invisible):
+
+    - `frustumCulled = false` on the live-updating SLAM objects -- otherwise
+      three.js caches `boundingSphere` from the first (possibly empty) packet
+      and never recomputes it (see scene.js's own comment on `points`).
+    - `mesh_ack` proves the client only frees the server's one-mesh-in-flight
+      credit after the mesh is actually applied, not merely received.
+    """
+    js = SLAM_JS.read_text(encoding="utf-8")
+    assert "frustumCulled = false" in js
+    assert "mesh_ack" in js or "ackMesh" in js
+
+
+def test_scanner_model_visible_only_in_world():
+    """BUG-061 Part D: the pose marker used to be forced visible in every view
+    mode, including FPV/Mirror where the camera sits AT the scanner and the
+    model rendered as a giant box wrapped around the viewpoint. A single
+    helper is the source of truth so the three call sites (both pose handlers
+    plus the state-driven `applyState`) can't drift from each other."""
+    js = SLAM_JS.read_text(encoding="utf-8")
+    assert re.search(r"scanner\.visible\s*=.*view_mode\s*===\s*'world'", js), (
+        "scanner visibility must be keyed on `state.view_mode === 'world'`"
+    )
+    # Regression guard: the historical unconditional `scanner.visible = true`
+    # inside a pose handler must be gone from both sites.
+    assert js.count("scanner.visible = true") == 0, (
+        "a pose handler still force-shows the scanner outside World"
+    )
+
+
+def test_world_follow_tracks_target_without_snapping_camera():
+    """Owner choice #1 for World + Follow ON, "track, keep my framing": the
+    camera's zoom/orbit angle must survive a follow update, which rules out
+    the FPV/Mirror-style eye/center snap (`setFollowTarget`). scene.js must
+    expose a distinct API for it, and slam.js's World branch must call that
+    API rather than the snap one."""
+    scene = SCENE_JS.read_text(encoding="utf-8")
+    slam = SLAM_JS.read_text(encoding="utf-8")
+    assert "trackTarget" in scene, "scene.js must export a trackTarget API"
+    assert "trackTarget" in slam, "slam.js must drive World-follow via trackTarget"
+    # The World+follow branch in slam.js must not hand the server's nose-camera
+    # eye/center to setFollowTarget -- that framing belongs to FPV/Mirror only.
+    world_follow_block = re.search(
+        r"view_mode\s*===\s*'world'[^;]*\{\s*\n\s*sceneApi\.(\w+)\(", slam)
+    assert world_follow_block is not None, (
+        "could not locate the World+follow branch in slam.js's `slam` handler"
+    )
+    assert world_follow_block.group(1) == "trackTarget"
+
+
+def test_follow_toggle_lives_in_the_view_card():
+    """Follow used to be buried in the SLAM card, which ships `hidden
+    collapsed` -- the owner had never seen it. It must now sit in the View
+    card's Camera & Pose sub-area, next to the World/FPV/Mirror segmented
+    control, as a straight move (same id, so BUG-047's duplicate-id class
+    can't recur) rather than a second mirrored control."""
+    html = _index()
+    ids = re.findall(r'\sid="([^"]+)"', html)
+    assert ids.count("chk-slam-follow") == 1, (
+        "chk-slam-follow must appear exactly once (a mirrored control needs a "
+        "distinct id wired to the same slam_opt message, per BUG-047)"
+    )
+    view_card = re.search(
+        r'data-card-id="view">.*?data-subgroup-id="view-camera"(.*?)</details>',
+        html, re.DOTALL)
+    assert view_card is not None, "could not locate the View card's Camera & Pose sub-area"
+    assert 'id="chk-slam-follow"' in view_card.group(1), (
+        "chk-slam-follow must be inside the View card's Camera & Pose sub-area"
+    )
+    assert 'id="chk-slam-follow"' not in html.split('data-card-id="view"')[0], (
+        "chk-slam-follow must not still be inside the SLAM card"
+    )
+
+
+def test_slam_hud_shows_the_compute_device():
+    """Part B (GPU visibility, client half): the `slam` message's new `device`
+    field (e.g. "CUDA:0") must reach the HUD, with a tooltip like every other
+    HUD readout."""
+    html = _index()
+    assert 'id="slam-device"' in html
+    assert re.search(r'<div class="hud-row"[^>]*title="[^"]+"[^>]*>\s*'
+                      r'<span>Device</span><span class="hud-val" id="slam-device">', html), (
+        "the Device HUD row must carry a title tooltip"
+    )
+    slam = (STATIC / "slam.js").read_text(encoding="utf-8")
+    assert "slam-device" in slam and "m.device" in slam
+
+
 def test_every_fusion_status_has_a_label_and_a_remedy():
     """Every `YawFusion.status` string the server can emit must have a HUD label
     (`web._FUSION_LABELS`) and a remedy line (`sensors.js` `FUSION_HELP`).

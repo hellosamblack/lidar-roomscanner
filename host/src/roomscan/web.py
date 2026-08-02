@@ -7,7 +7,7 @@ competing gets stole frames from one another when two tabs were open (§5.3).
 The wire is multiplexed on one `/ws` socket: binary messages (point cloud, IR
 image) carry a leading little-endian uint32 tag; JSON text messages carry a
 `type` discriminator (metrics/event/log/cmd/state). See the design spec
-docs/superpowers/specs/2026-07-15-web-phase1-core-instrument-design.md §6.
+docs/superpowers/specs/completed/2026-07-15-web-phase1-core-instrument-design.md §6.
 
 Pure, socket-free helpers (classify_bus_line / select_colors /
 pack_point_cloud / pack_ir_image / build_metrics_message) are factored out at
@@ -1158,12 +1158,18 @@ def _packed_or_pack(packet) -> bytes | None:
 
 
 def build_slam_message(step, trajectory, *, frames_integrated: int, mesh_seq: int,
-                       source_vertex_count: int) -> dict:
+                       source_vertex_count: int, device: str | None = None) -> dict:
     """FrameStep + trajectory -> `slam` JSON (web Phase 4). Follow-camera
     eye/center/up are computed server-side (reader.follow_camera_target) per the
     web-protocol "server-side math stays server-side" rule -- the browser just
     places its camera. `traj_tail` is downsampled to <=_TRAJ_TAIL_MAX positions
-    so the JSON stays small on a long scan; `traj_len` carries the true length."""
+    so the JSON stays small on a long scan; `traj_len` carries the true length.
+
+    `ts` (wall-clock seconds) lets the client measure its own pose age
+    (`slamAgeS`, BUG-061) without trusting frame arrival timing. `device` is
+    the resolved SLAM compute device (e.g. "CUDA:0", BUG-061 Part B -- GPU use
+    was previously visible only in a log line); null/omitted when no worker
+    has been built yet."""
     pose = np.asarray(step.pose, dtype=np.float64)
     eye, center, up = follow_camera_target(pose)
     n = len(trajectory)
@@ -1176,6 +1182,7 @@ def build_slam_message(step, trajectory, *, frames_integrated: int, mesh_seq: in
                  for p in tail]
     return {
         "type": "slam",
+        "ts": time.time(),
         "pose": [round(float(v), 5) for v in pose.reshape(-1)],   # row-major 16
         "follow": {"eye": [round(float(v), 4) for v in eye],
                    "center": [round(float(v), 4) for v in center],
@@ -1196,6 +1203,7 @@ def build_slam_message(step, trajectory, *, frames_integrated: int, mesh_seq: in
         "blocks_used": _opt_int(getattr(step, "blocks_used", None)),
         "blocks_capacity": _opt_int(getattr(step, "blocks_capacity", None)),
         "blocks_configured": _opt_int(getattr(step, "blocks_configured", None)),
+        "device": device,
     }
 
 
@@ -1237,6 +1245,24 @@ def build_saved_message(results_dir) -> dict:
     return {"type": "saved", "items": list_results(results_dir)}
 
 
+def _device_gpu_util() -> dict | None:
+    """Device-wide GPU utilization fallback (BUG-061 Part B) via the ctypes
+    NVML wrapper in `roomscan.slam.gpumem` -- the only utilization number
+    available on this host, since `probe_gpu_process` (metrics.py) needs
+    `pynvml` (absent) for a per-process figure. Imported lazily and
+    defensively: another change lands `device_utilization()` concurrently
+    with this one, so it may not exist yet, and this must never be the reason
+    a `metrics` message fails to build."""
+    try:
+        from .slam.gpumem import device_utilization
+    except (ImportError, AttributeError):
+        return None
+    try:
+        return device_utilization()
+    except Exception:
+        return None
+
+
 def resources_to_dict(res) -> dict | None:
     """ResourceSnapshot -> the `metrics.resources` JSON object, or None.
 
@@ -1247,9 +1273,20 @@ def resources_to_dict(res) -> dict | None:
     field except the two the sampler always has (`proc_*`) can be null: no
     GPU, no NVML, or a psutil error all report absence rather than a zero that
     reads as a measurement (the trap in the verify-the-knob memory).
+
+    `gpu_util`/`gpu_source` fall back to device-wide NVML utilization
+    (`_device_gpu_util`, "nvml-device") when the per-process sampler has
+    nothing (`res.gpu_util is None`) -- the common case here, since this box
+    has no `pynvml`. The per-process figure, when present, always wins.
     """
     if res is None:
         return None
+    gpu_util, gpu_source = res.gpu_util, res.gpu_source
+    if gpu_util is None:
+        dev_util = _device_gpu_util()
+        if dev_util is not None:
+            gpu_util = float(dev_util["gpu_pct"])
+            gpu_source = "nvml-device"
     return {
         "proc_cpu_percent": round(float(res.proc_cpu_percent), 1),
         "n_cores": int(res.n_cores),
@@ -1258,11 +1295,11 @@ def resources_to_dict(res) -> dict | None:
         "ram_used": None if res.ram_used is None else int(res.ram_used),
         "sys_cpu_percent": (None if res.sys_cpu_percent is None
                             else round(float(res.sys_cpu_percent), 1)),
-        "gpu_util": None if res.gpu_util is None else round(float(res.gpu_util), 1),
+        "gpu_util": None if gpu_util is None else round(float(gpu_util), 1),
         "proc_vram": None if res.proc_vram is None else int(res.proc_vram),
         "vram_total": None if res.vram_total is None else int(res.vram_total),
         "gpu_name": res.gpu_name,
-        "gpu_source": res.gpu_source,
+        "gpu_source": gpu_source,
         "device_vram_used": (None if res.device_vram_used is None
                              else int(res.device_vram_used)),
         "device_vram_total": (None if res.device_vram_total is None
@@ -2117,6 +2154,10 @@ class SlamRunner:
         self._mesh_seq = 0
         self._last_mesh = object()      # identity sentinel; never == a real mesh
         self._last_source_verts = 0
+        # Resolved compute device string (e.g. "CUDA:0"), for the `slam`
+        # message / HUD (BUG-061 Part B -- SLAM's device was invisible: the
+        # owner had to trust a log line). None until a worker exists.
+        self._device: str | None = None
         # Construction now happens on its own thread (BUG-060): `submit` is
         # called from the READER thread, and building the Open3D/CUDA pipeline
         # inline there would stall the reader long enough to overflow the UDP
@@ -2158,6 +2199,7 @@ class SlamRunner:
         self._mesh_seq = 0
         self._last_mesh = object()
         self._last_source_verts = 0
+        self._device = None
         self._next_mesh_at = 0.0     # a fresh map publishes its first mesh at once
         self._generation += 1        # orphan any build still in flight
 
@@ -2186,15 +2228,15 @@ class SlamRunner:
         self._mesh_bytes_per_s = float(cfg.live_mesh_bytes_per_s)
         meshprep.start()
         self._bus.publish(f"[slam] worker started on {device} ({width}x{height})")
-        return worker, meshprep
+        return worker, meshprep, str(device)
 
     def _build_async(self, width: int, height: int, generation: int) -> None:
         """Construct off the caller's thread, then install under the lock --
         unless a teardown/swap happened meanwhile, in which case the freshly
         built pipeline is stopped rather than adopted."""
-        worker = meshprep = None
+        worker = meshprep = device = None
         try:
-            worker, meshprep = self._construct(width, height)
+            worker, meshprep, device = self._construct(width, height)
         except Exception as exc:
             self._bus.publish(f"[slam] worker construction failed: {exc!r}")
         with self._lock:
@@ -2202,6 +2244,7 @@ class SlamRunner:
             stale = worker is None or not self._active or generation != self._generation
             if not stale:
                 self._worker, self._meshprep, self._wh = worker, meshprep, (width, height)
+                self._device = device
         if stale:
             for obj in (worker, meshprep):
                 if obj is not None:
@@ -2275,7 +2318,8 @@ class SlamRunner:
         frames_integrated = max(0, len(trajectory) - worker.tracking_lost_count)
         msg = build_slam_message(
             step, trajectory, frames_integrated=frames_integrated,
-            mesh_seq=self._mesh_seq, source_vertex_count=self._last_source_verts)
+            mesh_seq=self._mesh_seq, source_vertex_count=self._last_source_verts,
+            device=self._device)
         return msg, mesh_bytes
 
     @property
@@ -3458,6 +3502,130 @@ async def _broadcast_text(clients: set, text: str) -> None:
             await _drop_client(clients, ws)
 
 
+# --- /ws-mesh: credit-gated MESH transport (BUG-061 Part A) ------------------
+#
+# `/ws` pose JSON must never sit behind a whole-map MESH resend on a slow link
+# -- an open-loop broadcast of a 31 MB mesh on Wi-Fi is seconds of head-of-line
+# blocking, which is what turned into the reported 15 s display lag. MESH
+# moves to its own socket with one-in-flight, latest-wins, ack-gated delivery:
+# a client's GPU upload finishes, it acks, and only then does the server hand
+# it whatever is newest -- never a queue of stale intermediate meshes. A
+# client that never acks (an old cached tab, a diagnostic tool) still gets the
+# latest mesh, just throttled to a bounded cadence instead of an open loop.
+#
+# Newness is ALWAYS by bytes-object identity, never by `mesh_seq` -- the seq
+# resets to 0 on `_reset_slam`, so a seq comparison would wedge after a map
+# teardown (a fresh map's first mesh has a "smaller" seq than the last one a
+# flow saw). An object identity has no such wraparound.
+
+MESH_ACK_TIMEOUT_S = 60.0        # clears an in-flight credit nothing ever acked
+LEGACY_MESH_INTERVAL_S = 5.0     # bounded cadence for a client that never acks
+
+
+@dataclass
+class MeshFlow:
+    """Per-`/ws-mesh`-client delivery state (one credit in flight, latest-wins)."""
+    in_flight: bool = False
+    sent_at: float = 0.0
+    last_sent_obj: object = None
+    acked_ever: bool = False
+    last_legacy_send: float = 0.0
+    sent: int = 0
+    acks: int = 0
+    superseded: int = 0
+    ack_timeouts: int = 0
+    last_ack_lag_s: float | None = None
+
+
+def _mesh_clients(state) -> dict:
+    """Lazily-created `{WebSocket: MeshFlow}` map, same pattern as
+    `_magcal_clients` -- a hand-built `app.state` (tests) needn't know about
+    it, and the broadcaster/pump/endpoint all share one dict via `state`."""
+    clients = getattr(state, "mesh_clients", None)
+    if clients is None:
+        clients = state.mesh_clients = {}
+    return clients
+
+
+def _cache_latest_mesh(state, mesh_bytes: bytes) -> None:
+    """Cache the newest MESH bytes for `/ws-mesh` to pump out -- replaces
+    broadcasting MESH on `/ws` (BUG-061). `MeshPrep.latest()` POPS, so this is
+    the only place the bytes are held for a resend.
+
+    Any flow that had not yet sent the mesh being overwritten missed it
+    entirely (it will never get sent -- `latest_mesh` just moved past it):
+    that flow's `superseded` counts up. This is the number that should climb
+    under load, not a growing queue."""
+    prev = getattr(state, "latest_mesh", None)
+    state.latest_mesh = mesh_bytes
+    state.latest_mesh_seq = struct.unpack_from("<I", mesh_bytes, 4)[0]
+    if prev is None:
+        return
+    for flow in _mesh_clients(state).values():
+        if flow.last_sent_obj is not prev:
+            flow.superseded += 1
+
+
+async def _drop_mesh_client(state, ws) -> None:
+    """Mirror `_drop_client`, but for `/ws-mesh` -- deliberately WITHOUT the
+    `_viewer_left` idle coupling, since viewer-idle stays keyed to `/ws` (a
+    dead mesh socket alone must not idle the sensor)."""
+    _mesh_clients(state).pop(ws, None)
+    try:
+        await ws.close()
+    except Exception:
+        pass
+
+
+async def _pump_mesh(state, now: float) -> None:
+    """Run every broadcaster tick: give each `/ws-mesh` flow its one credit
+    if it is free (acked, or a legacy client whose throttle window is open)
+    and there is something newer than what it last got."""
+    latest = getattr(state, "latest_mesh", None)
+    if latest is None:
+        return
+    for ws, flow in list(_mesh_clients(state).items()):
+        if flow.in_flight and now - flow.sent_at > MESH_ACK_TIMEOUT_S:
+            flow.in_flight = False
+            flow.ack_timeouts += 1
+        if latest is flow.last_sent_obj:
+            continue
+        ready = (not flow.in_flight if flow.acked_ever
+                 else now - flow.last_legacy_send >= LEGACY_MESH_INTERVAL_S)
+        if not ready:
+            continue
+        try:
+            await ws.send_bytes(latest)
+        except Exception:
+            await _drop_mesh_client(state, ws)
+            continue
+        flow.in_flight = True
+        flow.sent_at = now
+        flow.last_sent_obj = latest
+        flow.sent += 1
+        flow.last_legacy_send = now
+
+
+def ws_flow_counters(state) -> dict:
+    """`/ws` + `/ws-mesh` connection/credit health (BUG-061 Part A4) -- lands
+    in `metrics.ws`, and from there in `rig_status` for free. Cheap: derived
+    from the two client collections already held in `state`, no I/O."""
+    clients = getattr(state, "clients", None) or set()
+    flows = list((getattr(state, "mesh_clients", None) or {}).values())
+    lags = [f.last_ack_lag_s for f in flows if f.last_ack_lag_s is not None]
+    latest = getattr(state, "latest_mesh", None)
+    return {
+        "clients": len(clients),
+        "mesh_clients": len(flows),
+        "mesh_in_flight": sum(1 for f in flows if f.in_flight),
+        "legacy_mesh_clients": sum(1 for f in flows if not f.acked_ever),
+        "mesh_superseded_total": sum(f.superseded for f in flows),
+        "mesh_ack_lag_s_max": max(lags) if lags else None,
+        "mesh_ack_timeouts_total": sum(f.ack_timeouts for f in flows),
+        "latest_mesh_bytes": 0 if latest is None else len(latest),
+    }
+
+
 async def _broadcast_session(state) -> None:
     """Push a fresh `session` immediately after a state-changing control so every
     tab updates now rather than waiting for the ~4 Hz broadcaster tick. Position
@@ -3606,10 +3774,18 @@ async def _handle_delete_captures(state, ctrl, msg: dict) -> dict:
 
 async def _reset_slam(state) -> None:
     """Drop the SLAM map (off the event loop) after a source-swap, so a new
-    capture / Go Live rebuilds a fresh map. No-op if SLAM was never armed."""
+    capture / Go Live rebuilds a fresh map. No-op if SLAM was never armed.
+
+    Also drops the cached `/ws-mesh` mesh (BUG-061) -- a stale big map must
+    not keep being resent once the map itself is gone. Existing flows keep
+    their `last_sent_obj` identity untouched: the fresh map's first mesh is a
+    brand new bytes object, so it reads as "new" automatically -- no seq
+    bookkeeping needed here."""
     slam = getattr(state, "slam_runner", None)
     if slam is not None:
         await asyncio.to_thread(slam.reset)
+    state.latest_mesh = None
+    state.latest_mesh_seq = 0
 
 
 # --- magnetometer sweep / calibration modal (owner ask, 2026-07-29) ---------
@@ -3938,17 +4114,21 @@ async def _broadcaster() -> None:
                 if last_pc_bytes is not None:
                     await _broadcast_bytes(clients, last_pc_bytes)
 
-            # SLAM mode (web Phase 4): ship the latest `slam` message +
-            # (throttled) MESH. The FEED is not here -- it runs on the reader
-            # thread (`make_slam_feed`) so reconstruction rate is independent
-            # of this loop's health (BUG-060). Poll only reads published slots.
+            # SLAM mode (web Phase 4): ship the latest `slam` message, then
+            # cache the (throttled) MESH for `/ws-mesh` to pump out. The FEED
+            # is not here -- it runs on the reader thread (`make_slam_feed`) so
+            # reconstruction rate is independent of this loop's health
+            # (BUG-060). Poll only reads published slots. Pose goes out FIRST
+            # (BUG-061 A2) and MESH no longer goes on `/ws` at all (A3) -- a
+            # multi-MB mesh must never sit ahead of pose in the same socket's
+            # send queue.
             slam = getattr(state, "slam_runner", None)
             if ui.display == "slam" and slam is not None:
                 smsg, mesh_bytes = slam.poll(ui.slam_walls)
-                if mesh_bytes is not None:
-                    await _broadcast_bytes(clients, mesh_bytes)
                 if smsg is not None:
                     await _broadcast_text(clients, json.dumps(smsg))
+                if mesh_bytes is not None:
+                    _cache_latest_mesh(state, mesh_bytes)
 
             # IR_IMAGE on its own slower cadence.
             if now - last_ir >= IR_INTERVAL:
@@ -3975,17 +4155,23 @@ async def _broadcaster() -> None:
                     _log_debounced(state, bus, "ir-miss",
                                    "reflectance unavailable this frame, holding IR pane")
 
-        # Detailed uses an offline worker, but publishes its progressive mesh
-        # through the same MESH channel.  It deliberately does not consume the
+        # Detailed uses an offline worker, but shares the same `/ws-mesh` MESH
+        # cache/pump (BUG-061 A3).  It deliberately does not consume the
         # replay reader's latest frame, and must keep reporting while replay is
         # paused (Detailed has no valid playback transport).
         detailed = getattr(state, "detailed_runner", None)
         if ui.display == "detailed" and detailed is not None:
             dmsg, mesh_bytes = detailed.poll(ui.slam_walls)
-            if mesh_bytes is not None:
-                await _broadcast_bytes(clients, mesh_bytes)
             if dmsg is not None:
                 await _broadcast_text(clients, json.dumps(dmsg))
+            if mesh_bytes is not None:
+                _cache_latest_mesh(state, mesh_bytes)
+
+        # Give every `/ws-mesh` flow its one credit if it's free and there is
+        # something newer cached than what it last got (BUG-061 A3). Every
+        # tick, regardless of display mode, so a flow doesn't wait on the next
+        # SLAM/Detailed poll to notice an ack.
+        await _pump_mesh(state, now)
 
         # Sensor (streams 9/10) on its own cadence; silent until 9/10 arrives.
         if now - last_sensor >= SENSOR_INTERVAL:
@@ -4053,6 +4239,7 @@ async def _broadcaster() -> None:
                 snap = replace(snap, drops=stats.dropped_flags, gaps=stats.seq_gaps)
             msg = build_metrics_message(snap)
             msg["transport"] = transport_counters(state)
+            msg["ws"] = ws_flow_counters(state)
             await _broadcast_text(clients, json.dumps(msg))
             ctrl = getattr(state, "controller", None)
             if ctrl is not None:
@@ -4103,6 +4290,72 @@ async def websocket_endpoint(websocket: WebSocket):
         clients.discard(websocket)
         _magcal_clients(state).discard(websocket)   # stop paying for a closed modal
         await _viewer_left(state)   # arm the debounced sensor idle if that was the last tab
+
+
+@app.websocket("/ws-mesh")
+async def websocket_mesh_endpoint(websocket: WebSocket):
+    """Credit-gated MESH delivery (BUG-061 Part A). Deliberately no pairing
+    with `/ws`: MESH is identical shared display state for every viewer, so
+    if this socket drops, the mesh just holds stale while pose keeps flowing
+    on `/ws` -- correct degradation, not an error.
+
+    Protocol: binary MESH (tag 3) pushed at most once per outstanding credit;
+    the client acks with `{"type": "mesh_ack"}` once its GPU upload finishes,
+    which both frees the credit and (if a newer mesh is cached) triggers an
+    immediate resend rather than waiting for the next broadcaster tick."""
+    await websocket.accept()
+    state = app.state
+    flows = _mesh_clients(state)
+    flow = MeshFlow()
+    flows[websocket] = flow
+
+    # Late joiner: push whatever is cached right now rather than waiting for
+    # the next SLAM/Detailed poll to produce something "new".
+    latest = getattr(state, "latest_mesh", None)
+    if latest is not None:
+        try:
+            await websocket.send_bytes(latest)
+        except Exception:
+            flows.pop(websocket, None)
+            return
+        now = time.monotonic()
+        flow.in_flight = True
+        flow.sent_at = now
+        flow.last_sent_obj = latest
+        flow.sent += 1
+        flow.last_legacy_send = now
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+            except Exception as exc:
+                log.warning("bad inbound ws-mesh message: %r (%s)", data[:200], exc)
+                continue
+            if msg.get("type") != "mesh_ack":
+                continue
+            now = time.monotonic()
+            flow.in_flight = False
+            flow.acked_ever = True
+            flow.acks += 1
+            flow.last_ack_lag_s = now - flow.sent_at
+            latest = getattr(state, "latest_mesh", None)
+            if latest is not None and latest is not flow.last_sent_obj:
+                try:
+                    await websocket.send_bytes(latest)
+                except Exception:
+                    break
+                flow.in_flight = True
+                flow.sent_at = now
+                flow.last_sent_obj = latest
+                flow.sent += 1
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        log.warning("ws-mesh receive loop error: %r", exc)
+    finally:
+        flows.pop(websocket, None)
 
 
 async def _start_slam_auto_record(state, ctrl) -> bool:
@@ -4881,6 +5134,12 @@ def main(argv=None) -> int:
         float(getattr(config, "longitude", -93.245526)),
         refresh_s=float(getattr(config, "msl_refresh_s", 1800.0) or 1800.0))
     app.state.clients = set()
+    # `/ws-mesh` credit-gated MESH transport (BUG-061 Part A): the per-flow
+    # map and the cached latest mesh the pump resends from -- see
+    # `_mesh_clients`/`_cache_latest_mesh`/`_pump_mesh`.
+    app.state.mesh_clients = {}
+    app.state.latest_mesh = None
+    app.state.latest_mesh_seq = 0
     app.state.command_labels = set()
     app.state.debounce = {}
     # Sensor auto-idle (SET_STANDBY): idle_enabled/idle_level live in ui_state

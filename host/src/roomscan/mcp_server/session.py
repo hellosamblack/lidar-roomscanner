@@ -46,45 +46,89 @@ class RigSession:
         self.latest: dict[str, dict] = {}
         self.binary_counts: dict[int, int] = {}
         self._events: dict[str, asyncio.Event] = {}
+        # BUG-061 A6: MESH (tag 3) moved off `/ws` onto a dedicated `/ws-mesh`
+        # socket with a one-in-flight ack contract. This is best-effort -- an
+        # older server without the route must never take down the main session.
+        self._ws_mesh = None
+        self._mesh_reader: asyncio.Task | None = None
+        self.mesh_connect_error: str | None = None
 
     @property
     def connected(self) -> bool:
         return self._ws is not None and self._reader is not None and not self._reader.done()
 
+    @property
+    def mesh_connected(self) -> bool:
+        return (self._ws_mesh is not None and self._mesh_reader is not None
+                and not self._mesh_reader.done())
+
     async def connect(self, timeout: float = 10.0) -> bool:
-        if self.connected:
-            return True
+        if not self.connected:
+            import websockets
+
+            try:
+                self._ws = await asyncio.wait_for(
+                    websockets.connect(self.url, max_size=None), timeout=timeout)
+            except Exception:
+                self._ws = None
+                return False
+            self.latest.clear()
+            self.binary_counts.clear()
+            self._reader = asyncio.create_task(self._pump())
+        if not self.mesh_connected:
+            await self._connect_mesh(timeout=timeout)
+        return True
+
+    async def _connect_mesh(self, timeout: float = 10.0) -> None:
+        """Best-effort `/ws-mesh` connect. Failure here is silent to callers --
+        `binary_counts` simply never gets tag-3 entries from this socket, and
+        `rig_status`'s `streaming` still sees tag 3 fine as long as it arrives
+        on `/ws` (older server) instead.
+        """
         import websockets
 
+        mesh_url = self.url.rsplit("/", 1)[0] + "/ws-mesh"
         try:
-            self._ws = await asyncio.wait_for(
-                websockets.connect(self.url, max_size=None), timeout=timeout)
-        except Exception:
-            self._ws = None
-            return False
-        self.latest.clear()
-        self.binary_counts.clear()
-        self._reader = asyncio.create_task(self._pump())
-        return True
+            self._ws_mesh = await asyncio.wait_for(
+                websockets.connect(mesh_url, max_size=None), timeout=timeout)
+        except Exception as exc:
+            self._ws_mesh = None
+            self.mesh_connect_error = f"{mesh_url}: {exc}"
+            return
+        self.mesh_connect_error = None
+        self._mesh_reader = asyncio.create_task(self._pump_mesh())
 
     async def close(self) -> None:
         if self._reader:
             self._reader.cancel()
             self._reader = None
+        if self._mesh_reader:
+            self._mesh_reader.cancel()
+            self._mesh_reader = None
         if self._ws:
             try:
                 await self._ws.close()
             finally:
                 self._ws = None
+        if self._ws_mesh:
+            try:
+                await self._ws_mesh.close()
+            finally:
+                self._ws_mesh = None
+
+    def _count_tag(self, msg: bytes) -> int | None:
+        import struct as _struct
+        if len(msg) < 4:
+            return None
+        tag = _struct.unpack_from("<I", msg)[0]
+        self.binary_counts[tag] = self.binary_counts.get(tag, 0) + 1
+        return tag
 
     async def _pump(self) -> None:
-        import struct as _struct
         try:
             async for msg in self._ws:
                 if isinstance(msg, (bytes, bytearray)):
-                    if len(msg) >= 4:
-                        tag = _struct.unpack_from("<I", msg)[0]
-                        self.binary_counts[tag] = self.binary_counts.get(tag, 0) + 1
+                    self._count_tag(msg)
                     continue
                 try:
                     d = json.loads(msg)
@@ -99,6 +143,31 @@ class RigSession:
                     ev.set()
         except Exception:
             pass  # connection dropped; `connected` goes False and callers reconnect
+
+    async def _pump_mesh(self) -> None:
+        """Count tag 3 the same way `_pump` does, and auto-ack every mesh.
+
+        Per the `/ws-mesh` credit contract (docs/web-protocol.md, BUG-061): at
+        most one mesh in flight per connection, cleared by an app-level
+        `mesh_ack` naming the `mesh_seq` at byte offset 4 of the packet. This
+        session has no rendering to wait on, so it acks immediately -- it exists
+        to keep `binary_counts`/`streaming` accurate, not to exercise backpressure.
+        """
+        import struct as _struct
+        try:
+            async for msg in self._ws_mesh:
+                if not isinstance(msg, (bytes, bytearray)):
+                    continue
+                tag = self._count_tag(msg)
+                if tag is None or len(msg) < 8:
+                    continue
+                seq = _struct.unpack_from("<I", msg, 4)[0]
+                try:
+                    await self._ws_mesh.send(json.dumps({"type": "mesh_ack", "seq": seq}))
+                except Exception:
+                    pass
+        except Exception:
+            pass  # mesh socket dropped; the main session is unaffected
 
     async def send(self, message: dict) -> None:
         if not await self.connect():

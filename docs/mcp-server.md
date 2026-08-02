@@ -13,7 +13,13 @@ clients without MCP.
    returns the dict directly.
 2. **One process can hold state across many tool calls.** Each Bash call is a fresh
    process, so UI checks relaunched Chrome and paid an ~8 s settle every time. The
-   server keeps one browser and one `/ws` connection warm.
+   server keeps one browser and its websockets warm — since BUG-061 that is **two**
+   sockets, `/ws` plus the credit-gated `/ws-mesh`, which `RigSession` opens
+   best-effort and **auto-acks**. The ack matters: an agent client that never acked
+   would hold its mesh credit and be throttled to the legacy 1 mesh / 5 s, and
+   `rig_status()`'s `binary_tags_seen` would stop reporting MESH (tag 3) entirely,
+   because tag 3 no longer travels on `/ws` at all. A server predating `/ws-mesh`
+   simply leaves `mesh_connect_error` set and everything else works.
 
 **Not a reason:** sandbox escape. An earlier draft of this work claimed the agent
 Bash sandbox kills network listeners (uvicorn → exit 144). Measured 2026-07-29:
