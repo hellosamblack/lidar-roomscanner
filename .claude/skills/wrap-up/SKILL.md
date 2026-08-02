@@ -141,6 +141,38 @@ uncommitted on purpose (someone else's WIP, a concurrently-edited feature),
 say so explicitly here** — name the files/feature and that they're
 untouched and undocumented, so the owner knows it's still theirs to land:
 
+## Phase 4: Next Steps & Handoff
+
+Provide the owner with a clear forward-looking summary covering three areas:
+
+**Next Development Steps:**
+- List the logical next tasks/features that follow from this session's work
+- Reference ROADMAP.md phase/milestone context where applicable
+- Estimate scope (small/medium/large) and any blockers or dependencies
+- Flag any architectural decisions that unlock or constrain future work
+
+**Recordings & Verifications Needed from Owner:**
+- Capture sessions or hardware tests that depend on physical actions (moving
+  devices, changing board settings, rescanning a space, etc.)
+- Validation runs needed to gate the next milestone or confirm a fix works
+  in production (e.g., "full-room sweep with the current firmware to verify
+  tracking doesn't lose frames in this layout")
+- UI/UX validation steps that require human eyes or a real handheld use case
+- Any data the session assumed but didn't verify (e.g., "assumes the mag cal
+  is valid — run `capture_magcheck` on the latest capture")
+
+**Risks & Opportunities (to be recorded in docs):**
+- **Risks** — Known edge cases, second-order failure modes, or performance
+  cliffs that the next session should watch for or test against
+- **Opportunities** — Nice-to-have optimizations, follow-up improvements, or
+  architectural cleanup that would pay off if time allows
+- For each item: suggest a documentation home (ROADMAP.md sub-section,
+  CLAUDE.md note, or a new memory file) so it persists across sessions
+
+All three sections can be brief if the session was a small bug fix or
+maintenance task with no forward-looking implications. If none apply, say
+"No forward-looking items" and proceed to the closing summary.
+
 Findings (applied):
 
 1. ✅ Skill gap: Cost estimates were wrong multiple times
@@ -154,3 +186,21 @@ No action needed:
 
 4. Knowledge: Discovered X works this way
    Already documented in CLAUDE.md
+
+---
+
+## Phase 4 Summary: Next Steps & Handoff
+
+**Next development steps:**
+1. Implement worker retry logic for 429/400 errors (medium scope, blocks Release 2.0)
+2. Refactor cost estimation module to use new token table (small scope, technical debt)
+
+**Owner recordings & verifications needed:**
+- Run a production load test under 10k concurrent requests to validate retry behavior
+- Benchmark cost accuracy on 3 representative workloads before next release
+
+**Risks & opportunities:**
+- **Risk**: Token counting off-by-one on edge cases (e.g., tool calls in system prompts)
+  → Document in [CLAUDE.md] "Known limitations" section, add test coverage
+- **Opportunity**: Cost estimation could feed a real-time budget dashboard
+  → Proposed as Phase 3 follow-up if UX validates demand
