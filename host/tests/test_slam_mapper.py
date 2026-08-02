@@ -456,3 +456,51 @@ def test_block_gauge_keeps_the_last_reading_when_the_probe_fails():
     clock["t"] = 10.0
     step = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
     assert step.blocks_used == good.blocks_used     # last reading, not 0 and not a crash
+
+
+# --- BUG-062: SlamConfig.mapper_kwargs() is the single source for Mapper knobs ---
+
+def test_mapper_kwargs_are_all_accepted_by_mapper():
+    """Every key the config hands out must be a real `Mapper.__init__` parameter.
+
+    The live path now splats this dict, so a typo or a renamed Mapper parameter
+    would raise TypeError at the moment SLAM arms -- on the reader thread, in
+    front of the owner -- rather than here.
+    """
+    import inspect
+    from roomscan.slam.config import SlamConfig
+    accepted = set(inspect.signature(Mapper.__init__).parameters) - {"self", "width", "height"}
+    assert set(SlamConfig().mapper_kwargs()) <= accepted
+
+
+def test_mapper_kwargs_defaults_match_mapper_signature():
+    """BUG-062's fix must be behaviour-neutral on a stock config.
+
+    Forwarding a field whose config default differs from Mapper's default would
+    silently change Live SLAM for every user who never touched `[slam]`. Only
+    `device` and the FOV pair are allowed to differ: the caller overrides those
+    deliberately (measured sensor FOV, resolved compute device).
+    """
+    import inspect
+    from roomscan.slam.config import SlamConfig
+    sig = inspect.signature(Mapper.__init__).parameters
+    deliberate = {"device", "fov_h", "fov_v"}
+    mismatched = {
+        k: (v, sig[k].default)
+        for k, v in SlamConfig().mapper_kwargs().items()
+        if k not in deliberate and sig[k].default != v
+    }
+    assert not mismatched, f"config default != Mapper default: {mismatched}"
+
+
+def test_mapper_kwargs_covers_every_shared_field():
+    """A `[slam]` key that Mapper accepts but the dict omits is exactly the
+    BUG-062 defect: honoured by the CLI/Detailed paths, ignored by Live SLAM."""
+    import inspect
+    from dataclasses import fields
+    from roomscan.slam.config import SlamConfig
+    accepted = set(inspect.signature(Mapper.__init__).parameters)
+    shared = {f.name for f in fields(SlamConfig)} & accepted
+    # `device` is shared by name but deliberately not sourced from the field.
+    missing = shared - set(SlamConfig().mapper_kwargs()) - {"device"}
+    assert not missing, f"[slam] keys Mapper accepts but Live SLAM ignores: {missing}"

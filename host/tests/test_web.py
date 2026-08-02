@@ -5159,3 +5159,63 @@ def test_device_gpu_util_returns_none_on_a_probe_exception(monkeypatch):
 
     monkeypatch.setattr(gpumem, "device_utilization", _boom)
     assert web._device_gpu_util() is None
+
+
+# --- BUG-062: every [slam] mapper knob must reach the LIVE worker -------------
+
+def test_live_slam_forwards_every_configured_mapper_knob(monkeypatch):
+    """BUG-062: `_construct` hand-picked five keys, so a user who set
+    `icp_mode`/`voxel_size`/`max_iter`/`max_dist`/the quality gates/the
+    stationarity knobs changed the CLI and Detailed paths but not Live SLAM --
+    silently. Set every shared field to a non-default value and prove each one
+    arrives at the constructed worker."""
+    import roomscan.slam.backend as backend
+    import roomscan.slam.meshprep as meshprep
+    from roomscan.slam.config import SlamConfig
+
+    overrides = dict(
+        icp_mode="6dof", voxel_size=0.02, max_dist=0.07, icp_retry_dist=0.19,
+        max_iter=11, min_fitness=0.44, max_rmse=0.066, min_confidence=33.0,
+        weight_threshold=4.5, baro_authority=0.11, baro_tau_frames=450,
+        stationary_hold=False, stationary_window=17, stationary_coherence=0.71,
+        stationary_step_ceiling=0.041, stationary_rot_ceiling=0.55,
+        release_cache_every=3, block_count=222_000,
+    )
+    cfg = SlamConfig(**overrides)
+    # every override must actually differ from the default, or the test proves nothing
+    stock = SlamConfig()
+    assert all(getattr(stock, k) != v for k, v in overrides.items())
+
+    monkeypatch.setattr(SlamConfig, "load", classmethod(lambda cls, *a, **k: cfg))
+    seen = {}
+    def _mk(w, h, **kw):
+        seen.update(kw); return _FakeWorker()
+    monkeypatch.setattr(backend, "make_slam_worker", _mk)
+    monkeypatch.setattr(meshprep, "MeshPrep", lambda *a, **k: _FakeMeshPrep())
+
+    web.SlamRunner(bus=LogBus())._construct(54, 42)
+
+    missing = {k: (v, seen.get(k)) for k, v in overrides.items() if seen.get(k) != v}
+    assert not missing, f"[slam] keys that never reached the live mapper: {missing}"
+
+
+def test_live_slam_fov_and_device_override_the_config(monkeypatch):
+    """The two live-specific overrides must win over `mapper_kwargs()`: the FOV
+    is the measured sensor geometry and the device is the resolved one, so a
+    `[slam]` key must not be able to shadow either."""
+    import roomscan.slam.backend as backend
+    import roomscan.slam.meshprep as meshprep
+    from roomscan.slam.config import SlamConfig
+
+    monkeypatch.setattr(SlamConfig, "load",
+                        classmethod(lambda cls, *a, **k: SlamConfig(fov_h=1.0, fov_v=2.0)))
+    seen = {}
+    def _mk(w, h, **kw):
+        seen.update(kw); return _FakeWorker()
+    monkeypatch.setattr(backend, "make_slam_worker", _mk)
+    monkeypatch.setattr(meshprep, "MeshPrep", lambda *a, **k: _FakeMeshPrep())
+
+    r = web.SlamRunner(bus=LogBus())
+    device = r._construct(54, 42)[2]
+    assert (seen["fov_h"], seen["fov_v"]) == (r._fov_h, r._fov_v) != (1.0, 2.0)
+    assert str(seen["device"]) == device

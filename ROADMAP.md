@@ -1004,6 +1004,35 @@ verification (7+ min on a 759-frame capture) — pre-existing, worth its own loo
 > client that can keep up; the owner's real browser was never instrumented, only its socket queues.
 > **The payload item above is unchanged** — `/ws-mesh` bounds the *backlog*, not the *peak*, and
 > delta/dirty-region transport is still the real answer. Full write-up in `BUGS.md` → BUG-061.
+>
+> **BUG-062 — the live path was ignoring most of `[slam]`, which gates the ICP study.** Checking a
+> claim in the owner's 2026-08-02 review notes (that `icp_mode`/`max_iter`/`max_dist`/the quality
+> gates are not forwarded to the live worker) found it true and **worse than stated**:
+> `SlamRunner._construct` hand-picked five mapper kwargs, so **thirteen** `[slam]` keys —
+> `icp_mode`, `voxel_size`, `max_dist`, `max_iter`, `min_fitness`, `max_rmse`, `min_confidence`,
+> `weight_threshold` and all five `stationary_*` — changed the CLI and Detailed reconstructions but
+> never reached Live SLAM, silently. `SlamConfig.mapper_kwargs()` is now the single source; the web
+> path overrides only the measured FOV and the resolved device, *after* the splat. Behaviour-neutral
+> at stock config and pinned by a test asserting every default matches `Mapper.__init__`'s.
+> **This is a prerequisite for the review's matched CUDA ICP study**, which compares `icp_mode`
+> `translation` against `6dof` on the live path — a path that ignored `icp_mode` would have measured
+> `translation` twice. `SlamConfig.device` remains deliberately unread by the live path (it defaults
+> to `CPU:0`; honouring it would move every stock install onto the CPU) — its own decision to make,
+> not a side effect. Full write-up in `BUGS.md` → BUG-062.
+
+**Open, non-blocking:** the narrow-viewport overlap probes (1280×800 / 1100×560 / 820×700) were not
+run — `ui_screenshot`'s width/height did not resize the viewport, so only 1600×1000 is measured
+(0 overlaps with browser + preview + Playback open). `MOUNT_ROTATION` and the merged mag-cal view
+both want an owner-in-hand confirmation. On-demand **Detailed** builds did not complete during
+verification (7+ min on a 759-frame capture) — pre-existing, worth its own look.
+
+### Phase 4 — Integrate X-NUCLEO-IKS4A1  ← **✅ Complete** *(swapped with Ethernet 2026-07-09, owner decision — sensors next)*
+
+> **Status 2026-07-10:** verified on hardware — the full stack (ToF depth + SFLP orientation +
+> environmental) streams together at **27.85 fps, 0 CRC failures, 0 seq gaps** (no measurable fps cost
+> vs the ToF-alone 27.76-28.6 band).
+>
+> - **Bus** (per the HUB1 design below, plus one fix the plan missed): PartID-keyed multi-device ENTDAA
 >   (ToF `0x0102`→`0x52`, LSM6DSV16X `0x0070`→`0x50`). Stacked, the IKS4A1's NXS0108 auto-direction
 >   translator can't pass 12.5 MHz I3C push-pull, so `rs_assign_dynamic_addresses()` slows the PP clock
 >   **for ENTDAA only** (ranging stays full-speed) — ToF enumeration went from intermittent to 100% stable (105/105 passes).

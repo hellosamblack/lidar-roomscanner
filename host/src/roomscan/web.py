@@ -2212,13 +2212,15 @@ class SlamRunner:
         from .slam.meshprep import MeshPrep
         cfg = SlamConfig.load()
         device = preferred_device()
-        worker = make_slam_worker(width, height, fov_h=self._fov_h,
-                                  fov_v=self._fov_v, device=device,
-                                  release_cache_every=cfg.release_cache_every,
-                                  block_count=cfg.block_count,
-                                  icp_retry_dist=cfg.icp_retry_dist,
-                                  baro_authority=cfg.baro_authority,
-                                  baro_tau_frames=cfg.baro_tau_frames)
+        # BUG-062: this used to hand-pick five `[slam]` keys, so icp_mode,
+        # voxel_size, max_iter, max_dist, the quality gates and the stationarity
+        # knobs were silently ignored by Live SLAM while the CLI and Detailed
+        # paths honoured them. `mapper_kwargs()` is the single source; the only
+        # live-specific overrides are the measured sensor FOV and the resolved
+        # device, applied after so a config key can never shadow them.
+        mapper_kwargs = cfg.mapper_kwargs()
+        mapper_kwargs.update(fov_h=self._fov_h, fov_v=self._fov_v, device=device)
+        worker = make_slam_worker(width, height, **mapper_kwargs)
         worker.start()
         # `packer`: serialising the packet is O(map) numpy work and used to
         # run on the broadcaster, i.e. on the event loop. It belongs to the

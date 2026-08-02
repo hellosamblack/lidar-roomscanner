@@ -69,6 +69,7 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-058 | fixed   | host/sensors  | Heading swung 154° while the device was rolled at a fixed bearing — `absolute_heading` stripped yaw with `yaw_twist_deg`, and world-Z twist absorbs roll about a horizontal boresight degree for degree. `YawFusion` compounded it: `heading - yaw` differenced a device bearing against a world-Z twist, so the fused quat came out **mirrored**, at −bearing |
 | BUG-059 | fixed   | host/sensors  | **Every heading ever displayed was 180° out** — aimed north, the instrument read south. The calibrated field vector is delivered ANTI-PARALLEL to Earth's: it sat 70–72° *above* the horizon on every capture, where the northern-hemisphere field is that far below it. `AXIS_CONVENTION` carried the mounting rotation but not the field-direction sign. Predates BUG-058 and was hidden by it |
 | BUG-060 | fixed   | host/web      | Live SLAM ran at 5 fps and updated the view once a second on an idle GPU — `uvicorn.run()` defaults `ws_per_message_deflate=True` and `_broadcast_bytes` awaits `send_bytes` **per client**, so each 3.2 MB MESH was zlib-deflated once per connected tab on the event loop. Worse than the UI symptom: `SlamRunner.submit()` ran only from that broadcaster, so **5 frames in 6 never reached the TSDF**, silently |
+| BUG-062 | fixed   | host/slam     | **Thirteen `[slam]` keys were silently ignored by Live SLAM** — `SlamRunner._construct` hand-picked five mapper kwargs, so `icp_mode`, `voxel_size`, `max_iter`, `max_dist`, the quality gates and every `stationary_*` knob changed the CLI and Detailed paths but never reached the live mapper. Editing `roomscan.toml` looked like it worked and did nothing |
 | BUG-061 | fixed   | host/web      | Ephemeral SLAM lagged **up to 15 s** behind the operator, in playback and far worse live. `/ws` has no write backpressure, so the 12 MB/s MESH governor was open-loop and the whole-map re-sends piled into an unbounded transport buffer — **37 MB in flight** on the owner's connection. The 30 Hz `slam` pose JSON was queued *behind* those megabytes on the same ordered stream, so the camera lagged with the geometry |
 
 ---
@@ -2783,3 +2784,51 @@ a multi-megabyte payload on one stream turns a bandwidth problem into a latency 
 symptom (stale *camera*) points nowhere near the cause (mesh size). (c) A credit/ack loop makes a
 slow consumer starve itself rather than the server — but then **the contract must be measured on a
 client that can keep up**, or you are measuring the renderer, not the transport.
+
+---
+
+## BUG-062 — thirteen `[slam]` keys were honoured by the CLI and ignored by Live SLAM
+
+**Status:** fixed 2026-08-02 · **Area:** host/slam (`slam/config.py`, `web.py`
+`SlamRunner._construct`) · **Found by:** the owner's concurrency/GPU review notes (2026-08-02),
+which flagged `icp_mode`, `max_iter`, `max_dist` and the quality gates as "not forwarded"; verifying
+the claim found **ten more**.
+
+`Mapper.__init__` takes eighteen knobs that `SlamConfig` also carries.
+`DetailedSlamPreset.mapper_kwargs()` forwards nearly all of them and `slam/cli.py` builds its
+`Mapper` directly — but **`web.SlamRunner._construct` hand-picked five**
+(`release_cache_every`, `block_count`, `icp_retry_dist`, `baro_authority`, `baro_tau_frames`).
+The other thirteen were dropped: `icp_mode`, `voxel_size`, `max_dist`, `max_iter`, `min_fitness`,
+`max_rmse`, `min_confidence`, `weight_threshold`, and all five `stationary_*` keys.
+
+**Why this is worse than a missing feature.** The failure is silent and it inverts trust in the
+config: a user edits `roomscan.toml`, the CLI and Detailed reconstructions change, Live SLAM does
+not, and nothing anywhere says so. It also **invalidates the study that was about to be run** — the
+review's own item #4 is a matched CPU/CUDA comparison of `icp_mode` `translation` vs `6dof` on the
+live path, and that path ignored `icp_mode`. The study would have measured `translation` twice and
+reported it as a result.
+
+**Fix.** `SlamConfig.mapper_kwargs()` is now the single source for the live mapper's knobs. The web
+path splats it and overrides only the two genuinely live-specific values — the measured sensor FOV
+and the resolved compute device — applied *after* the splat so a `[slam]` key cannot shadow either.
+
+**Behaviour-neutral at stock config, and pinned.** `test_mapper_kwargs_defaults_match_mapper_signature`
+asserts every default in the dict equals the corresponding `Mapper.__init__` default, so a user who
+never set a value gets bit-identical behaviour; forwarding a field whose defaults had drifted would
+otherwise have silently changed Live SLAM for everyone. Two further guards: every key must be a real
+`Mapper` parameter (a typo would now fail at the moment SLAM arms, on the reader thread, in front of
+the owner), and every field `SlamConfig` and `Mapper` share must appear — which is the drift that
+caused this.
+
+**Proved by reintroducing the defect.** Restoring the hand-picked call makes
+`test_live_slam_forwards_every_configured_mapper_knob` fail and name all thirteen keys.
+
+**`device` is deliberately still not read from `[slam]`.** `SlamConfig.device` defaults to
+`"CPU:0"` and the live path has always resolved `preferred_device()` instead. Making the field
+authoritative here would move every stock-config user's Live SLAM onto the CPU, so the helper keeps
+`preferred_device()` and that field's existing note stands. Worth revisiting as its own decision —
+not as a side effect of a plumbing fix.
+
+**Lesson.** A second construction site for the same object is where configuration quietly stops
+being configuration. The guard that matters is not "did I remember to forward this field" but
+"is there exactly one place that knows what the field list is".

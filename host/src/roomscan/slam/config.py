@@ -136,8 +136,12 @@ class SlamConfig:
     # Live MESH publish budget, bytes/second (BUG-060). The live map is sent
     # whole every update and grows without bound -- 3.2 MB at 63k verts, 31 MB
     # at 611k (1500 frames of roomSweepFull) -- so at the raw extraction cadence
-    # a grown map would push >100 MB/s at the browser and stall the broadcaster
-    # on socket backpressure. `SlamRunner` therefore spaces publishes by
+    # a grown map would push >100 MB/s at the browser. (This comment used to say
+    # that stalls the broadcaster "on socket backpressure"; BUG-061 proved there
+    # is NO backpressure -- uvicorn never blocks `send_bytes`, so the excess
+    # silently piles into an unbounded per-client buffer instead. That is why
+    # this budget alone was not enough and MESH now has its own credit-gated
+    # `/ws-mesh` channel.) `SlamRunner` therefore spaces publishes by
     # `last_payload_bytes / live_mesh_bytes_per_s`: a small map still updates at
     # the full extraction rate, a big one updates more slowly, and the wire rate
     # is flat. This bounds the payload by CADENCE rather than by decimating it,
@@ -174,6 +178,50 @@ class SlamConfig:
             return cls(**kwargs)
         except TypeError:
             return cls()
+
+    def mapper_kwargs(self) -> dict:
+        """Every `Mapper` knob this config owns, as constructor kwargs.
+
+        BUG-062: the live web path used to hand-pick five of these
+        (`release_cache_every`, `block_count`, `icp_retry_dist`,
+        `baro_authority`, `baro_tau_frames`), so setting `icp_mode`,
+        `voxel_size`, `max_iter`, `max_dist`, `min_fitness`, `max_rmse`,
+        `min_confidence`, `weight_threshold` or any `stationary_*` key in
+        `[slam]` changed the CLI and Detailed paths but **not Live SLAM** --
+        silently, with no warning and no way to tell from the UI. Anything
+        `Mapper.__init__` accepts and `SlamConfig` carries belongs here, so a
+        knob cannot be added to one path and forgotten on the other.
+
+        Behaviour-neutral at stock config: every default here equals the
+        corresponding `Mapper.__init__` default (pinned by
+        `test_mapper_kwargs_defaults_match_mapper_signature`), so this only
+        changes what a user who actually set a value gets.
+
+        `fov_h`/`fov_v` are included, but a caller with a measured sensor FOV
+        (`web.SlamRunner`) overrides them. `device` resolves via
+        `preferred_device()` rather than `self.device` -- see that field's note;
+        the live path has never read it and making it authoritative here would
+        silently move Live SLAM onto CPU for everyone on a stock config.
+        """
+        return {
+            "fov_h": self.fov_h, "fov_v": self.fov_v,
+            "icp_mode": self.icp_mode, "voxel_size": self.voxel_size,
+            "max_dist": self.max_dist, "icp_retry_dist": self.icp_retry_dist,
+            "max_iter": self.max_iter,
+            "min_fitness": self.min_fitness, "max_rmse": self.max_rmse,
+            "min_confidence": self.min_confidence,
+            "weight_threshold": self.weight_threshold,
+            "baro_authority": self.baro_authority,
+            "baro_tau_frames": self.baro_tau_frames,
+            "stationary_hold": self.stationary_hold,
+            "stationary_window": self.stationary_window,
+            "stationary_coherence": self.stationary_coherence,
+            "stationary_step_ceiling": self.stationary_step_ceiling,
+            "stationary_rot_ceiling": self.stationary_rot_ceiling,
+            "release_cache_every": self.release_cache_every,
+            "block_count": self.block_count,
+            "device": preferred_device(),
+        }
 
 
 @dataclass
