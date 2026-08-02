@@ -1019,6 +1019,15 @@ verification (7+ min on a 759-frame capture) — pre-existing, worth its own loo
 > `translation` twice. `SlamConfig.device` remains deliberately unread by the live path (it defaults
 > to `CPU:0`; honouring it would move every stock install onto the CPU) — its own decision to make,
 > not a side effect. Full write-up in `BUGS.md` → BUG-062.
+>
+> **The rest of that review is an active plan:**
+> `docs/superpowers/plans/2026-08-02-slam-compute-and-transport-followups.md`. Items 1 (BUG-061) and
+> 3 (BUG-062) are landed; still open are the **input-slot overwrite counter** (an overwritten frame
+> is not a tracking-lost frame and must not be counted as one), the **matched CUDA ICP/raycast
+> study** (now unblocked — `translation` is only partly GPU-accelerated, and the raycast makes two
+> avoidable host round-trips), remote-service output scheduling, and the low-priority saturation
+> polling cleanup. It needs an **Active** row in the plans/specs register once the concurrent
+> archive-move session lands that table.
 
 **Open, non-blocking:** the narrow-viewport overlap probes (1280×800 / 1100×560 / 820×700) were not
 run — `ui_screenshot`'s width/height did not resize the viewport, so only 1600×1000 is measured
