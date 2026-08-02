@@ -2,7 +2,7 @@
 
 GPU SLAM compute service (Phase 6). Windows captures + renders; this container
 runs Mapper on CUDA:0 behind SlamService. See
-docs/superpowers/specs/2026-07-13-slam-gpu-container-service-design.md.
+docs/superpowers/specs/deprecated/2026-07-13-slam-gpu-container-service-design.md.
 
 - `build.ps1`  — build image roomscan-slam:cuda
 - `start.ps1`  — launch detached on 127.0.0.1:5555 (idempotent)
