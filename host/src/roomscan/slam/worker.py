@@ -18,10 +18,12 @@ Threading contract (mirrors panel.py's, docs at the top of that file):
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
 from .mapper import Mapper
+from .tsdf import TsdfCapacityError
 
 _MESH_EVERY = 5           # mesh extraction is the expensive part of a step; throttle it
 _IDLE_SLEEP_S = 0.005     # poll interval when the submit slot is empty
@@ -52,6 +54,9 @@ class SlamWorker:
         self._frames_processed = 0
         self._frames_integrated = 0     # successful (non-tracking-lost) frames only
         self._last_mesh = None
+        # Set once if the map grows past what Open3D can extract; the live view
+        # then holds `_last_mesh`. See run_once.
+        self.extraction_blocked_reason: str | None = None
 
         self._in_lock = threading.Lock()
         self._in_slot = None    # (depth, quat, pressure, reflectance, confidence) | None
@@ -89,7 +94,20 @@ class SlamWorker:
             # for the belt-and-braces backstop.
             self._frames_integrated += 1
             if self._frames_integrated == 1 or self._frames_integrated % self._mesh_every == 0:
-                self._last_mesh = self._mapper.mesh()
+                try:
+                    self._last_mesh = self._mapper.mesh()
+                except TsdfCapacityError as exc:
+                    # The map has outgrown what Open3D can extract (tsdf.py's
+                    # `_MAX_SAFE_EXTRACT_BLOCKS`). Unlike the offline builder,
+                    # a LIVE scan must not stop: tracking and integration are
+                    # unaffected, and the operator is mid-sweep with an
+                    # unrepeatable capture. Hold the last good mesh so the view
+                    # freezes rather than the server dying, and say so once --
+                    # a silently-frozen map is exactly the BUG-035 failure.
+                    if self.extraction_blocked_reason is None:
+                        self.extraction_blocked_reason = str(exc)
+                        logging.getLogger(__name__).warning(
+                            "[slam] live map view frozen: %s", exc)
         trajectory = list(self._mapper.trajectory)   # copy: caller must not see it mutate later
         with self._out_lock:
             self._out_slot = (self._last_mesh, trajectory, step)

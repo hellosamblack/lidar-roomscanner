@@ -17,7 +17,7 @@
 //              sends set_mode / slam_opt / save.
 
 import { makeXrayMaterial } from './scene.js';
-import { BODY_TO_CV, createDeviceMesh } from './devicemodel.js';
+import { BODY_TO_CV, DEVICE_DIMS_M, createDeviceMesh } from './devicemodel.js';
 
 export function createSlam(hub, sceneApi) {
     const D = (m, l) => { try { window.__diag && window.__diag('slam.js: ' + m, l); } catch (e) {} };
@@ -45,7 +45,10 @@ export function createSlam(hub, sceneApi) {
     scanner.name = 'scanner-model';
     scanner.matrixAutoUpdate = false;
     let scannerHasPose = false;
-    scanner.add(createDeviceMesh(THREE, { fillOpacity: 0.92, edgeOpacity: 0.95 }));
+    // DEVICE_DIMS_M, not the shell-unit default: this scene is in metres, beside
+    // real walls, so the marker has to be the device's real 5.5x3x2.5 inches.
+    scanner.add(createDeviceMesh(THREE, {
+        dims: DEVICE_DIMS_M, fillOpacity: 0.92, edgeOpacity: 0.95 }));
     const bodyToCv = new THREE.Matrix4().set(
         BODY_TO_CV[0], BODY_TO_CV[1], BODY_TO_CV[2], 0,
         BODY_TO_CV[3], BODY_TO_CV[4], BODY_TO_CV[5], 0,

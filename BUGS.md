@@ -60,6 +60,11 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-047 | fixed   | host/web      | `id="btn-restart"` named **two** buttons — the top bar's "Restart Server" and the playback "Restart". `getElementById` takes the first, so playback Restart was dead and its transport handler landed on Restart Server, which therefore fired a transport restart *and* `POST /api/restart` |
 | BUG-050 | fixed   | host/web      | Recording `elapsed_s` was `time.time() - time.monotonic()` -- two clocks with no shared origin -- so a 90-second take reported 1784067285.5 s. Every caller passed the wall clock; the start stamp was monotonic |
 | BUG-051 | fixed   | host/sensors  | The yaw-fusion gimbal gate fired **permanently in the normal upright grip** and its message named the wrong axis: ZYX pitch is the elevation of body **X = Up**, so upright *is* ZYX gimbal lock (measured 2.7° from it against a 15° threshold) while the boresight sat 2.1° off horizontal. Same root cause gave `absolute_heading` an **18.4° systematic error** at the operating pose (26.57° reported for a true 45°, exact only on the cardinal four), and put World's Roll readout on the ±180 wrap at 178.30°. Closes BUG-048 |
+| BUG-052 | fixed   | host/slam     | Detailed build froze the whole web UI: `TsdfMap._extract_vbg()` copied the **entire preallocated** VoxelBlockGrid to the host on every extraction (`block_count`-sized, not map-sized), 1.11 s with the GIL held, once per 25 frames — starving roomscan-web's asyncio loop for **78–84% of wall clock**. Extracting in place on the device is 0.04 s |
+| BUG-053 | vendor  | host/slam     | Open3D 0.19's marching cubes **crashes the process** above ~260k active blocks — host segfaults, CUDA raises "illegal memory access" then `terminate()`s. Bisected: fine at 258,161 blocks, fatal at 273,521, on **both** devices. Driven by the absolute block count, not load factor or free memory (same count dies at 68.4% load in a 400k grid), so raising `block_count` does not help. Mitigated by refusing to extract above 250,000 |
+| BUG-054 | fixed   | host/slam     | The Detailed preset's `voxel_size = 0.005` could never build a room-sized capture — DebugCapB1 crosses BUG-053's ceiling at frame 2625 of 4808. Its own `benchmark_note` ("benchmark me on CUDA:0 with a full-room capture") had never been run; 5 mm was only exercised on captures small enough to fit. Default is now 0.01 |
+| BUG-055 | fixed   | host/web      | The SLAM/Detailed map's scanner pose marker was drawn **4.44x oversize** — a 62 cm slab in a metres-scale room. `slam.js` passed no `dims` to `createDeviceMesh`, taking `DEVICE_DIMS`, which is documented as magcal3d's unitless *shell* scale, not metres |
+| BUG-056 | fixed   | host/web      | A finished Detailed build's "Completed in" kept counting up — `DetailedRunner.status()` derives `elapsed_s` from `time.monotonic() - _started_at` with nothing stopping it at `done`. A ~3.5-minute build read **81:01** an hour later, and `elapsed_s` was observed climbing 4910.5 → 4914.5 in four seconds |
 
 ---
 
@@ -2289,3 +2294,171 @@ reach, which is how a permanently-tripping gate passed a suite for weeks.
 decomposition used as a *quantity* rather than a display. Any `quat_yaw_deg` consumer in a live path
 is suspect. And a test suite that exercises only the identity attitude cannot see a bug whose whole
 domain is the pose the device is actually held in.
+
+## BUG-052 — Detailed build starved the web server's event loop for 80% of wall clock
+
+**Status:** fixed 2026-08-01 · **Area:** host/slam (`slam/tsdf.py`) · **Found by:** owner — "the
+progress bar only made it to 325/4808 before the view and bar locked up".
+
+`TsdfMap._extract_vbg()` returned `self._vbg.cpu()` on every extraction: a device→host copy of the
+**whole preallocated block buffer**. Its cost is set by `block_count`, not by how much map exists, so
+it did not shrink for a small map — measured flat at 1.1 s from the very first extraction (17k
+verts) onward, at the Detailed preset's 320,000 blocks (3.05 GiB of buffer).
+
+Open3D holds the GIL for the duration. A background thread does not help: those 1.1 s are 1.1 s in
+which **no** Python thread runs, including the asyncio loop serving `/ws` and HTTP. At one
+extraction per 25 frames the loop got roughly 0.3 s of every 1.5 s.
+
+**Measured**, captures/DebugCapB1.bin, watchdog thread standing in for the event loop:
+
+| | `.cpu()` whole-grid (before) | extract in place (after) |
+|---|---|---|
+| worst single stall | 1.11 s | 0.08 s |
+| event loop starved | 78–84% of wall | 11.7% |
+| full 4808-frame build | ~6 min of extraction alone | 55.6 s total |
+| host RSS | 4.24 GB | 1.03 GB |
+| peak device memory | — | bounded, 2109 → 2461 MiB |
+
+Splitting the old path: `.cpu()` 1.11 s, then marching cubes on the host only 0.20 s. The copy was
+~85% of it, and it was pure overhead — the workaround cost far more than the failure it avoided.
+
+**Fix.** `_extract_vbg()` extracts on the compute device when `_cuda_extract_fits()` sees NVML
+headroom (measured 8.0–9.5 KiB/block including the mesh; the check requires 20 KiB, ~2x), and only
+the extracted geometry is downloaded — 0.10 s for a 4.09M-vertex mesh vs 1.11 s for the grid that
+produced it. `_extract()` keeps the return value host-resident, so no caller (MeshPrep,
+`DetailedRunner._commit`, the CLI writers) had to change. The whole-grid host copy remains the
+fallback for a map too large, a box without NVML, and — latched permanently by
+`_host_extract_reason` — a card that OOMs anyway. That latch is not paranoia: Open3D's own
+"Unable to allocate assistance mesh structure for Marching Cubes" surfaced at 219,932 blocks during
+this work, and it is exactly the error the original unconditional workaround was written for.
+
+**Lesson.** A mitigation's cost has to be measured against the failure it prevents. This one traded a
+rare OOM for a guaranteed 1.1 s process-wide freeze on *every* extraction, and the freeze was
+invisible in every unit test because nothing measured whether other threads could run.
+
+---
+
+## BUG-053 — Open3D's marching cubes crashes the process above ~260k active blocks
+
+**Status:** vendor 2026-08-01 · **Area:** host/slam (Open3D 0.19) · **Found by:** investigating
+BUG-052 — the Detailed build kept dying even after the lockup was fixed.
+
+Extracting a mesh from a VoxelBlockGrid with too many active blocks does not fail, it **kills the
+process**: the host path segfaults inside `extract_triangle_mesh`, and the CUDA path raises
+`CUDA runtime error: an illegal memory access was encountered` whose unwind then aborts in a
+destructor. Neither is catchable from Python.
+
+Bisected on captures/DebugCapB1.bin (voxel 0.005), one extraction per run:
+
+| blocks | load | host | CUDA |
+|---|---|---|---|
+| 240,061 | 75.0% | OK (4.10M verts) | — |
+| 258,161 | 80.7% | OK (4.39M verts) | — |
+| 273,521 | 85.5% | **segfault** | **illegal memory access → terminate** |
+| 285,411 | 89.2% | **segfault** | **illegal memory access → terminate** |
+| 298,173 | 93.2% | **segfault** | — |
+
+**The trigger is the absolute block count, not the load fraction and not free memory.** Re-running
+the 273,521-block case in a 400,000-block grid — 68.4% load, 3.7 GiB free — dies identically on both
+devices. So **raising `block_count` does not help**; only producing fewer blocks does, i.e. a
+coarser `voxel_size`. This is the natural wrong conclusion to draw, and BUG-035 primes it.
+
+**Mitigation.** `_MAX_SAFE_EXTRACT_BLOCKS = 250,000` (below the last measured-good 258,161).
+`TsdfMap.mesh()`/`point_cloud()` raise `TsdfCapacityError` above it rather than making the call.
+`PostProcessWorker` stops the build and publishes `phase="failed"` with the remedy in the message;
+`DetailedRunner._commit` refuses to write a sidecar for a stopped build, so a partial room is never
+marked current. `SlamWorker` instead holds its last good mesh and warns once — a live scan is
+unrepeatable, so freezing the view beats killing the server mid-sweep.
+
+The failure publish deliberately **reuses the last published mesh** instead of extracting a fresh
+one: a map past the wall cannot be extracted at all, and asking for one there swaps this crash for
+an identical one (verified — the guard fires at frame 3038 and `mapper.mesh()` immediately after
+segfaults).
+
+A separate, rarer failure is guarded alongside it: at 100% capacity Open3D's rehash allocates a new
+buffer of twice the capacity beside the live one, which OOMs an 8 GiB card at 320,000 blocks and
+also aborts rather than raising. `_check_rehash_headroom` raises `TsdfCapacityError` first.
+
+**Open opportunity (owner, 2026-08-01):** this is a limit of *this* library, not of the problem.
+Chunked extraction — segment the grid spatially, extract each piece under the ceiling, stitch —
+or a different meshing package would lift it and let 5 mm voxels work on room-sized captures. See
+ROADMAP Phase 6.
+
+---
+
+## BUG-054 — The Detailed preset's 5 mm voxel could never build a room-sized capture
+
+**Status:** fixed 2026-08-01 · **Area:** host/slam (`slam/config.py`) · **Found by:** the BUG-053
+bisection.
+
+`DetailedSlamPreset.voxel_size` shipped as 0.005. At 5 mm a room-sized capture generates far more
+blocks than BUG-053's ceiling allows: captures/DebugCapB1.bin (4808 frames) crosses 250,000 blocks
+at frame 2625 and can never produce a mesh, at any `block_count`. The preset's own
+`benchmark_note` — *"benchmark me on CUDA:0 with a full-room capture"* — had never been run, and
+5 mm had only ever been exercised on captures small enough to fit (DebugCapC, 2397 frames, builds
+fine at 5 mm and its sidecar exists).
+
+**Fix.** Default is now `voxel_size = 0.01`. Measured on the same capture: all 4808 frames,
+139,785 blocks (56% of the ceiling), 55.6 s, 4.1M vertices. This changes `preset.fingerprint()`, so
+sidecars built at 5 mm are correctly reported stale and want regenerating.
+
+**Lesson.** A default carrying a note that says it was never measured is an untested default. This
+one had been shipping as the headline quality setting of an entire display mode.
+
+---
+
+## BUG-055 — The map's scanner marker was drawn 4.44x oversize
+
+**Status:** fixed 2026-08-01 · **Area:** host/web (`static/slam.js`, `static/devicemodel.js`) ·
+**Found by:** owner — "the scanner object is far larger than it is in real life".
+
+`devicemodel.js` exports `DEVICE_DIMS = {x: 0.62, y: 0.338, z: 0.282}`, and its own comment says
+these are magcal3d's **shell units** — the block scaled to keep the coverage shell's existing 0.62
+framing constant, a scene with no metric ground truth in it. `slam.js` called
+`createDeviceMesh(THREE, {...})` with no `dims`, took that default, and dropped it into the SLAM /
+Detailed scene, which is in **metres**: a 62 cm slab of scanner in a room with 2 m doorways, 4.438x
+its real 5.5" x 3" x 2.5".
+
+Nothing catches this by eye where the constant is defined — inside a unitless shell, being 4.44x
+too big means nothing.
+
+**Fix.** New `DEVICE_DIMS_M` carries the physical truth (`5.5 * 0.0254` etc.); `slam.js` passes it.
+The aperture had the same latent problem — `APERTURE_R = 0.048` absolute is 7.7% of the shell block
+but 34% of the metric one, so the real-size device would have rendered as mostly lens — and is now
+`APERTURE_R_FRAC` of `dims.x`, with the two face offsets likewise fractions of `dims.z`.
+
+**Verified** in the live page: the `scanner-model` object in the scene measures 5.50 x 3.00 x 2.53
+inches (the 2.53 is the aperture disc standing proud of the face, as designed).
+
+**Regression tests.** `test_the_map_marker_is_drawn_at_the_devices_real_metric_size` pins the
+`dims: DEVICE_DIMS_M` argument; `test_device_dims_m_are_the_real_block_in_metres` also asserts the
+two dimension sets stay *proportional*, so a tweak to one cannot silently reshape the other.
+
+---
+## BUG-056 — A finished Detailed build's "Completed in" time never stopped counting
+
+**Status:** fixed 2026-08-01 · **Area:** host/web (`web.py`, `DetailedRunner.status`) ·
+**Found by:** verifying the BUG-052 fix — the completed build's toast read "Completed in 81:01" for
+a build that had demonstrably taken about three and a half minutes.
+
+`status()` computes `elapsed_s = max(0.0, time.monotonic() - started_at)` on every poll, and
+`_started_at` is never frozen when the worker finishes. `done=True` is reported at ~30 Hz forever
+after, each time with a larger elapsed. Measured live on the rig: `elapsed_s` went 4910.5 → 4914.5
+across four seconds of polling, on a build whose sidecar timestamp put it 4:35 after server start.
+
+The number is not cosmetic — it is the only report of how long a reconstruction takes, and the
+preset's `per_frame_ms` calibration (still `0.0`, "benchmark me") is supposed to be derived from it.
+A monotonically inflating duration would have poisoned that calibration too.
+
+**Fix.** `_elapsed_at_done` is stamped the first time `status()` sees `progress.done` and reused for
+every later poll. It is cleared only by `start()`, `begin_load_cached()` and `close()` — never by
+`status()` itself, so a completed build's time cannot drift.
+
+**Regression test.** `test_detailed_runner_freezes_elapsed_time_when_the_build_finishes` reads the
+elapsed at completion, advances `time.monotonic` by an hour, asserts it is unchanged, then starts a
+fresh build and asserts it does *not* inherit the previous one's time. Proved by reintroducing the
+unfrozen subtraction and confirming the failure.
+
+**Lesson.** Third clock/duration defect in this file after BUG-050 and the recording elapsed. A
+duration derived from `now - start` needs an explicit answer to "when does it stop?", and "when the
+thing finishes" has to be written down, not assumed.

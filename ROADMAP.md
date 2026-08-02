@@ -1496,9 +1496,12 @@ in `452b275`, all fixed, all now pinned by tests that were verified by reintrodu
 Also: the two top-bar switches were each stretching to the full 1175 px bar and stacking into
 banners (`#mode-switch-slot { flex: 1 }` was written for one control); they now size to their labels.
 
-Two things the review did **not** settle, both feeding item 2 above. The preset tracks *and* maps at
-`voxel_size = 0.005`, so 5 mm reaches the trajectory — and 5 mm tracking is the one setting this repo
-has measured going **backwards** (`docs/phase6-slam-validation.md`: gap 1.095 m at 10 mm vs 2.052 m
+Two things the review did **not** settle, both feeding item 2 above. ~~The preset tracks *and* maps at
+`voxel_size = 0.005`~~ **— settled 2026-08-01 (BUG-054): the Detailed default is now `voxel_size = 0.01`,
+because 5 mm could not build a room-sized capture at all (BUG-053's extraction ceiling; DebugCapB1
+crosses it at frame 2625 of 4808). The `benchmark_note` asking for a full-room benchmark had never been
+run.** The original concern stands and now points the same way — 5 mm tracking is the one setting this
+repo has measured going **backwards** (`docs/phase6-slam-validation.md`: gap 1.095 m at 10 mm vs 2.052 m
 at 5 mm, though that is CPU-era, pre-frustum-raycast, on a different capture). Decoupling the
 tracking voxel from the map voxel — track at 10 mm, reconstruct at 5 mm — would make the finding
 irrelevant by construction rather than requiring it to be re-litigated; worth measuring before the
@@ -1539,6 +1542,18 @@ whole-grid `self._vbg.cpu()` copy: its temporaries scale with the active-block c
 asks the caching allocator for a slightly **larger** block than the last and the previous one is cached,
 never reused. That is also why the fix is throttled on **extractions, not frames** — a frame-cadence
 release would fire mostly on frames that allocated nothing.
+
+> **Amended 2026-08-01 (BUG-052).** The analysis above stands, but ~~that whole-grid `.cpu()` copy is
+> what every CUDA extraction does~~ — **it is now the fallback, not the default path.** The copy was
+> measured at **1.11 s with the GIL held**, sized by `block_count` rather than by the map (flat from the
+> first extraction onward), against **0.04 s** to extract in place on the device. At the Detailed
+> cadence that starved `roomscan-web`'s asyncio loop for **78–84% of wall clock** — the UI froze solid.
+> `_extract_vbg()` now extracts on the device when `_cuda_extract_fits()` sees NVML headroom (measured
+> 8.0–9.5 KiB/block; the gate requires 20 KiB) and downloads only the extracted geometry. The host copy
+> remains for a map too large, a box without NVML, and — latched — a card that OOMs anyway.
+> `release_cache_every` is unchanged and still correct: the fallback still allocates the same way.
+> Full 4808-frame build after the fix: 55.6 s, 11.7% starvation, worst stall 0.08 s, peak device memory
+> bounded 2109 → 2461 MiB, host RSS 4.24 → 1.03 GB.
 
 **Fix (shipped):** `TsdfMap.release_cache_every` (`slam/tsdf.py`) calls `o3d.core.cuda.release_cache()`
 after every Nth extraction — **default 1**, `0` disables, no-op on a CPU grid. Plumbed through
@@ -1652,6 +1667,42 @@ baro-Z-is-Open3D-−Y mapping are all specified there.
   SLAM's clock domain (PTP-united with device timestamps). Needs: rigid mount + hand-eye/extrinsic
   calibration to the ToF (same calibration Phase 7 already requires for the phone camera — do it once,
   share it).
+
+#### Sub-phase 6.I — Lift the mesh-extraction ceiling (chunked extraction / alternative mesher)  ← **proposed (owner, 2026-08-01)**
+
+> **Owner's framing (2026-08-01):** *"this seems like a problem that another software package other
+> than Open3D may have solved. Alternatively, we could segment the processing and stitch them."*
+
+**The ceiling is BUG-053**, and it is a hard wall in the vendor library, not in the problem. Open3D
+0.19's marching cubes crashes the *process* above ~260k active blocks — host segfault, CUDA illegal
+memory access → `terminate()` — driven by the **absolute block count**, not the load factor or free
+memory (the same 273,521 blocks die at 68.4% load in a 400,000-block grid). So `block_count` cannot
+buy past it and we currently refuse to extract above 250,000.
+
+**What it costs today.** Detail is capped by what the mesher can swallow, not by what the sensor or
+the TSDF can represent. BUG-054 had to move the Detailed preset from 5 mm to 10 mm voxels for
+exactly this reason: at 5 mm, captures/DebugCapB1.bin crosses the ceiling at frame 2625 of 4808 and
+can never produce a mesh. A room-sized capture at the sensor's actual resolution is therefore
+unreachable — which is the whole point of the "Detailed" mode.
+
+**Two directions, both worth costing:**
+
+1. **Chunked extraction + stitch.** Partition the grid spatially (the VBG is block-addressed, so the
+   partition is natural), extract each partition well under the ceiling, and stitch. Seam handling is
+   the real work: marching cubes over a partition boundary needs the neighbouring block's voxels to
+   avoid a crack, so partitions must **overlap by one block** and duplicate vertices be welded.
+   Keeps Open3D, keeps every downstream consumer, and — a bonus worth having on its own — makes
+   extraction *incremental*, which would also cut the per-extraction cost BUG-052 measured.
+2. **A different mesher.** Anything taking a TSDF or a point cloud and returning a triangle mesh —
+   Open3D's own legacy (non-tensor) pipeline, `libigl`, VDBFusion/OpenVDB (whose sparse grid is
+   designed for exactly this scale), or a CUDA marching-cubes kernel of our own. Per CLAUDE.md's
+   dependency rule, **measure the real library rather than reasoning about it**, and report its
+   footprint and build burden as part of the recommendation.
+
+**Gate before building either:** confirm the ceiling is still there on a newer Open3D. It is pinned
+to the installed 0.19 build (`tsdf.py`'s `_MAX_SAFE_EXTRACT_BLOCKS` says so), and an upstream fix
+would make this sub-phase unnecessary. Re-bisect with the same method — extract once at a known
+block count, no other extractions in flight — before writing any stitching code.
 
 #### Sub-phase 6.H — Audible coverage feedback ("geiger counter" buzzer)  ← **proposed (owner, 2026-07-31)**
 

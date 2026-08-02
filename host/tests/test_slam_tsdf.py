@@ -1,3 +1,6 @@
+import pytest
+import types
+
 import numpy as np
 import open3d as o3d
 import roomscan.slam.tsdf as tsdf_mod
@@ -345,3 +348,220 @@ def test_empty_map_extraction_does_not_count_as_an_extraction():
     m.mesh()
     m.point_cloud()
     assert seen == []
+
+
+# ------------------------------------------- the Detailed-build lockup (2026-08-01)
+# `_extract_vbg()` used to take `self._vbg.cpu()` on EVERY extraction: a copy of
+# the whole PREALLOCATED grid, so its cost tracked `block_count` rather than how
+# much map there was. Measured at the Detailed preset (block_count 320,000) that
+# copy was 1.11 s against 0.04 s to extract in place, it did not shrink for a
+# small map, and Open3D holds the GIL throughout -- which starved roomscan-web's
+# asyncio loop for 78-84% of wall clock and froze the progress bar and the 3D
+# view. These pin the decision, not the timing: the fast path is taken when
+# there is measured NVML headroom, and every escape hatch still returns a
+# host-resident result.
+
+
+class _FakeNvml:
+    """Stands in for gpumem.Nvml with a settable free-byte reading."""
+
+    def __init__(self, ok=True, free=0):
+        self.ok, self._free = ok, free
+        self.queries = 0
+
+    def free_bytes(self):
+        self.queries += 1
+        return self._free
+
+
+def _cuda_map(monkeypatch, nvml, blocks=1000):
+    monkeypatch.setattr(tsdf_mod, "_is_cuda", lambda dev: True)
+    m = TsdfMap(voxel_size=0.02)
+    m._nvml = nvml
+    # The real hashmap lives behind a C++ call; only its size matters here.
+    m._vbg = types.SimpleNamespace(
+        hashmap=lambda: types.SimpleNamespace(size=lambda: blocks),
+        cpu=lambda: "HOST-GRID")
+    return m
+
+
+def test_extraction_stays_on_the_gpu_when_nvml_reports_headroom(monkeypatch):
+    nvml = _FakeNvml(free=1000 * tsdf_mod._CUDA_EXTRACT_BYTES_PER_BLOCK)
+    m = _cuda_map(monkeypatch, nvml, blocks=1000)
+    assert m._extract_vbg() is m._vbg, "the whole-grid host copy is the slow path"
+    assert nvml.queries == 1
+
+
+def test_extraction_falls_back_to_the_host_grid_when_vram_is_tight(monkeypatch):
+    # One byte short of the measured requirement is still short.
+    nvml = _FakeNvml(free=1000 * tsdf_mod._CUDA_EXTRACT_BYTES_PER_BLOCK - 1)
+    m = _cuda_map(monkeypatch, nvml, blocks=1000)
+    assert m._extract_vbg() == "HOST-GRID"
+
+
+def test_extraction_falls_back_when_nvml_is_unavailable(monkeypatch):
+    # No free-memory number => nothing authorizes the fast path. A box without
+    # libnvidia-ml must keep the slow-but-correct behaviour, not guess.
+    m = _cuda_map(monkeypatch, _FakeNvml(ok=False, free=1 << 60), blocks=1000)
+    assert m._extract_vbg() == "HOST-GRID"
+
+
+def test_cpu_grid_never_takes_a_copy_of_itself(monkeypatch):
+    monkeypatch.setattr(tsdf_mod, "_is_cuda", lambda dev: False)
+    m = TsdfMap(voxel_size=0.02)
+    assert m._extract_vbg() is m._vbg
+
+
+def test_gpu_extraction_returns_a_host_resident_result(monkeypatch):
+    """The host copy used to make this true by construction. Extracting on the
+    device does not, so `_extract` must download the geometry -- 0.10 s for a
+    4.09M-vertex mesh, against the 1.11 s grid copy it replaces. Callers
+    (MeshPrep, DetailedRunner._commit, the CLI writers) all assume host."""
+    monkeypatch.setattr(tsdf_mod, "_is_cuda", lambda dev: True)
+    m = TsdfMap(voxel_size=0.02)
+    m._nvml = _FakeNvml(free=1 << 60)
+    downloaded = []
+
+    class _Result:
+        def cpu(self):
+            downloaded.append(1)
+            return "HOST-MESH"
+
+    m._vbg = types.SimpleNamespace(
+        hashmap=lambda: types.SimpleNamespace(size=lambda: 10),
+        extract_triangle_mesh=lambda w: _Result(),
+        cpu=lambda: None)
+    assert m._extract("extract_triangle_mesh") == "HOST-MESH"
+    assert downloaded == [1]
+
+
+def test_a_gpu_extraction_oom_latches_the_host_path_for_good(monkeypatch):
+    """After a CUDA OOM Open3D's cached allocator can be left inconsistent
+    enough to terminate() the process later, so one failure retires the device
+    path for this map rather than being retried every 25 frames."""
+    monkeypatch.setattr(tsdf_mod, "_is_cuda", lambda dev: True)
+    monkeypatch.setattr(o3d.core.cuda, "release_cache", lambda: None)
+    m = TsdfMap(voxel_size=0.02)
+    m._nvml = _FakeNvml(free=1 << 60)          # headroom check says "go"
+    host_calls = []
+
+    def _boom(_w):
+        raise RuntimeError("CUDA runtime error: out of memory")
+
+    host_grid = types.SimpleNamespace(
+        extract_triangle_mesh=lambda w: host_calls.append(1) or "HOST-MESH")
+    m._vbg = types.SimpleNamespace(
+        hashmap=lambda: types.SimpleNamespace(size=lambda: 10),
+        extract_triangle_mesh=_boom,
+        cpu=lambda: host_grid)
+
+    assert m._extract("extract_triangle_mesh") == "HOST-MESH"
+    assert "out of memory" in m._host_extract_reason
+    # Latched: the second call must not touch the device extractor at all.
+    assert m._extract_vbg() is host_grid
+    assert m._extract("extract_triangle_mesh") == "HOST-MESH"
+    assert len(host_calls) == 2
+
+
+# ------------------------------------ rehash headroom / TsdfCapacityError (2026-08-01)
+# A saturated grid grows by allocating a NEW buffer of twice the capacity beside
+# the live one. When that will not fit, the failure is NOT survivable: Open3D
+# raises, but unwinding leaves its cached allocator inconsistent and the process
+# dies later in a destructor (`terminate called`). Measured on DebugCapB1 at the
+# Detailed preset: the map fills around frame 3100 of 4808 and takes the whole
+# roomscan-web server with it. So detect it just BEFORE, and raise something a
+# caller can actually catch.
+
+
+def _cuda_map_at_capacity(monkeypatch, nvml, used, capacity):
+    monkeypatch.setattr(tsdf_mod, "_is_cuda", lambda dev: True)
+    m = TsdfMap(voxel_size=0.02, block_count=capacity)
+    m._nvml = nvml
+    m.block_usage = lambda: (used, capacity)          # type: ignore[method-assign]
+    m._integrates_since_headroom_check = tsdf_mod._HEADROOM_CHECK_EVERY - 1
+    return m
+
+
+def test_capacity_error_when_a_full_map_cannot_afford_its_next_rehash(monkeypatch):
+    cap = 320000
+    m = _cuda_map_at_capacity(monkeypatch, _FakeNvml(free=1), used=cap, capacity=cap)
+    with pytest.raises(tsdf_mod.TsdfCapacityError) as exc:
+        m._check_rehash_headroom()
+    msg = str(exc.value)
+    # Actionable: the two things that actually fix it, and the dominant one first.
+    assert "voxel_size" in msg and "CPU:0" in msg
+    assert "320000" in msg
+
+
+def test_no_capacity_error_while_the_rehash_still_fits(monkeypatch):
+    cap = 320000
+    m = TsdfMap(voxel_size=0.02, block_count=cap)
+    need = 2 * m._block_buffer_bytes(cap)
+    m2 = _cuda_map_at_capacity(monkeypatch, _FakeNvml(free=need), used=cap, capacity=cap)
+    m2._check_rehash_headroom()          # exactly enough is enough
+
+
+def test_no_capacity_error_with_capacity_to_spare(monkeypatch):
+    cap = 320000
+    m = _cuda_map_at_capacity(monkeypatch, _FakeNvml(free=1),
+                              used=int(0.5 * cap), capacity=cap)
+    m._check_rehash_headroom()           # half full: nothing is about to rehash
+
+
+def test_capacity_check_is_a_noop_without_nvml_or_on_cpu(monkeypatch):
+    cap = 320000
+    m = _cuda_map_at_capacity(monkeypatch, _FakeNvml(ok=False, free=0),
+                              used=cap, capacity=cap)
+    m._check_rehash_headroom()           # no free-memory number => no verdict
+    monkeypatch.setattr(tsdf_mod, "_is_cuda", lambda dev: False)
+    cpu = TsdfMap(voxel_size=0.02, block_count=cap)
+    cpu._nvml = _FakeNvml(free=0)
+    cpu.block_usage = lambda: (cap, cap)  # type: ignore[method-assign]
+    cpu._check_rehash_headroom()         # system RAM, no CUDA allocator to wreck
+
+
+def test_block_buffer_bytes_matches_the_grids_declared_attributes():
+    """tsdf f32 + weight f32 + 3-channel color f32, over block_resolution**3
+    voxels. 320,000 blocks at the default resolution 8 is the 3.05 GiB that does
+    not leave room to double on an 8 GiB card."""
+    m = TsdfMap(voxel_size=0.02, block_resolution=8)
+    assert m._block_buffer_bytes(1) == 8 ** 3 * 20
+    assert m._block_buffer_bytes(320000) / 2 ** 30 == pytest.approx(3.05, abs=0.01)
+
+
+def test_extraction_is_refused_above_the_measured_crash_threshold(monkeypatch):
+    """Above ~250k active blocks Open3D's marching cubes does not fail, it kills
+    the process (host: segfault; CUDA: illegal memory access -> terminate), so
+    there is nothing to catch downstream and the call must not be made."""
+    m = TsdfMap(voxel_size=0.02)
+    m._empty = False
+    m._vbg = types.SimpleNamespace(
+        hashmap=lambda: types.SimpleNamespace(
+            size=lambda: tsdf_mod._MAX_SAFE_EXTRACT_BLOCKS + 1))
+    with pytest.raises(tsdf_mod.TsdfCapacityError) as exc:
+        m.mesh()
+    msg = str(exc.value)
+    assert "voxel_size" in msg
+    # Raising block_count is the intuitive move and it is WRONG -- the same
+    # block count crashed at 68.4% load in a 400k grid. Say so.
+    assert "does NOT help" in msg
+    with pytest.raises(tsdf_mod.TsdfCapacityError):
+        m.point_cloud()
+
+
+def test_extraction_is_allowed_right_up_to_the_threshold(monkeypatch):
+    monkeypatch.setattr(tsdf_mod, "_is_cuda", lambda dev: False)
+    m = TsdfMap(voxel_size=0.02)
+    m._empty = False
+    m._vbg = types.SimpleNamespace(
+        hashmap=lambda: types.SimpleNamespace(
+            size=lambda: tsdf_mod._MAX_SAFE_EXTRACT_BLOCKS),
+        extract_triangle_mesh=lambda w: "MESH")
+    assert m.mesh() == "MESH"
+
+
+def test_the_safe_threshold_sits_below_the_last_measured_good_extraction():
+    """258,161 blocks extracted cleanly; 273,521 crashed. The constant must stay
+    under the good one -- if someone re-bisects on a new Open3D, this is the
+    assertion that should make them think."""
+    assert tsdf_mod._MAX_SAFE_EXTRACT_BLOCKS <= 258161

@@ -226,6 +226,48 @@ def test_device_dims_carry_the_owners_5_5_by_3_by_2_5_block():
     assert d["z"] / d["x"] == pytest.approx(2.5 / 5.5, abs=1e-3)
 
 
+def test_device_dims_m_are_the_real_block_in_metres():
+    """The metric twin of DEVICE_DIMS: 5.5" x 3" x 2.5" at 0.0254 m/in."""
+    js = DEVICE_JS.read_text(encoding="utf-8")
+    m = re.search(r"export const DEVICE_DIMS_M\s*=\s*\{(.*?)\};", js, re.DOTALL)
+    assert m is not None, "could not find `export const DEVICE_DIMS_M = {...}`"
+    vals = {k: eval(v) for k, v in                      # noqa: S307 - literal arithmetic
+            re.findall(r"([xyz])\s*:\s*([-\d.*\s]+?)\s*[,}]", m.group(1) + "}")}
+    assert vals["x"] == pytest.approx(0.1397, abs=1e-4)
+    assert vals["y"] == pytest.approx(0.0762, abs=1e-4)
+    assert vals["z"] == pytest.approx(0.0635, abs=1e-4)
+    # Same block, two scales: the shell-unit set must stay proportional to it,
+    # so a future tweak to one cannot silently reshape the other.
+    d = _js_dims(js)
+    ratios = [d[k] / vals[k] for k in "xyz"]
+    assert max(ratios) - min(ratios) < 1e-2, f"DEVICE_DIMS/DEVICE_DIMS_M not uniform: {ratios}"
+
+
+def test_the_map_marker_is_drawn_at_the_devices_real_metric_size():
+    """slam.js's scene is in METRES, next to real walls, so the pose marker must
+    pass DEVICE_DIMS_M. It used to pass no `dims` at all and take the shell-unit
+    default, drawing a 62 cm slab of scanner in a room with 2 m doorways
+    (reported 2026-08-01). Nothing catches this in mag-cal, where the block sits
+    in a unitless shell and 4.44x means nothing."""
+    slam = (STATIC / "slam.js").read_text(encoding="utf-8")
+    assert "DEVICE_DIMS_M" in slam, "slam.js must ask for the metric block"
+    call = re.search(r"createDeviceMesh\(THREE,\s*\{(.*?)\}\)", slam, re.DOTALL)
+    assert call is not None
+    assert "dims: DEVICE_DIMS_M" in " ".join(call.group(1).split())
+
+
+def test_aperture_scales_with_the_block_it_is_drawn_on():
+    """The aperture is a FRACTION of the long axis, not an absolute. As an
+    absolute 0.048 it is 7.7% of the shell-unit block but 34% of the metric one,
+    so the real-size scanner would have rendered as mostly lens."""
+    js = DEVICE_JS.read_text(encoding="utf-8")
+    assert re.search(r"export const APERTURE_R_FRAC\s*=", js)
+    body = js[js.index("export function createDeviceMesh"):]
+    body = body[:body.index("\nexport function", 1)] if "\nexport function" in body[1:] else body
+    assert "APERTURE_R_FRAC * dims.x" in body
+    assert "CircleGeometry(APERTURE_R," not in body, "aperture still hard-coded to shell units"
+
+
 def test_device_bands_are_half_grey_quarter_white_quarter_blue():
     """Through the depth, from the face toward the user to the camera face."""
     js = DEVICE_JS.read_text(encoding="utf-8")

@@ -2283,6 +2283,11 @@ class DetailedRunner:
         self._mesh_seq = 0
         self._committed = False
         self._started_at = None
+        # Wall time the build took, frozen the first time it reports done.
+        # `_started_at` alone keeps ticking after completion, so a finished
+        # build's "Completed in" grew forever (a 3.5-minute build was reporting
+        # 81:01 an hour later).
+        self._elapsed_at_done = None
         self.preset = DetailedSlamPreset.load()
 
     def start(self, capture, *, force: bool = False) -> dict:
@@ -2316,6 +2321,7 @@ class DetailedRunner:
             self._load_error = None
             self._last_mesh, self._mesh_seq, self._committed = object(), 0, False
             self._started_at = time.monotonic()
+            self._elapsed_at_done = None
         self._bus.publish(f"[detailed] started {capture.name} ({self.preset.fingerprint()})")
         return {"started": True, "capture": capture.name, "phase": "frames",
                 "processed": 0, "total": len(worker.timestamps), "fraction": 0.0,
@@ -2341,6 +2347,7 @@ class DetailedRunner:
             self._cached_pose = None
             self._last_mesh, self._mesh_seq = object(), 0
             self._started_at = None
+            self._elapsed_at_done = None
             self._loading_capture = capture
             self._loading_started_at = time.monotonic()
             self._load_error = None
@@ -2386,6 +2393,7 @@ class DetailedRunner:
     def status(self) -> dict | None:
         with self._lock:
             worker, capture, started_at = self._worker, self._capture, self._started_at
+            elapsed_at_done = self._elapsed_at_done
             loading_capture, loading_started_at, load_error = (
                 self._loading_capture, self._loading_started_at, self._load_error)
         if loading_capture is not None:
@@ -2416,6 +2424,16 @@ class DetailedRunner:
             latest_pose = np.asarray(trajectory[-1], dtype=np.float64)
             if latest_pose.shape == (4, 4) and np.all(np.isfinite(latest_pose)):
                 pose = [round(float(v), 5) for v in latest_pose.reshape(-1)]
+        if progress.done:
+            # Freeze on the first done report; every later poll reuses it.
+            if elapsed_at_done is None:
+                with self._lock:
+                    if self._elapsed_at_done is None:
+                        self._elapsed_at_done = elapsed_s
+                    elapsed_at_done = self._elapsed_at_done
+            elapsed_s = elapsed_at_done
+            # DELIBERATELY not reset here -- only start()/begin_load_cached()/
+            # close() clear it, so a completed build's time cannot drift.
         processed = round(progress.fraction * total)
         eta_s = None
         if processed > 0 and not progress.done:
@@ -2471,6 +2489,16 @@ class DetailedRunner:
         if progress.mesh is None:
             self._bus.publish("[detailed] no mesh; sidecar not written")
             return
+        error = (progress.stats or {}).get("error")
+        if error:
+            # The build stopped early (e.g. the map outgrew the GPU -- see
+            # TsdfCapacityError). Writing a sidecar here would mark a partial
+            # reconstruction "current", and every later load would show two
+            # thirds of a room with nothing saying so.
+            self._bus.publish(f"[detailed] build stopped at frame "
+                              f"{(progress.stats or {}).get('frames', '?')}; "
+                              f"sidecar NOT written: {error}")
+            return
         import open3d as o3d
         paths = sidecar_paths(capture, self.results_dir)
         self.results_dir.mkdir(parents=True, exist_ok=True)
@@ -2499,6 +2527,7 @@ class DetailedRunner:
             self._loading_started_at = None
             self._load_error = None
             self._started_at = None
+            self._elapsed_at_done = None
         for obj in (worker, prep):
             if obj is not None:
                 try:

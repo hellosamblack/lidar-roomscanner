@@ -80,6 +80,17 @@ class Nvml:
         mem = self._mem()
         return int(mem.total) if mem is not None else 0
 
+    def free_bytes(self) -> int:
+        """Device-wide free memory from ONE NVML query.
+
+        Deliberately not `total_bytes() - used_bytes()`: those are two separate
+        queries, so a caller sizing an allocation against them can straddle an
+        update and act on a mismatched pair. Returns 0 when NVML is
+        unavailable, same as the other getters -- check `ok` before reading a 0
+        as "the card is full"."""
+        mem = self._mem()
+        return int(mem.free) if mem is not None else 0
+
     def close(self) -> None:
         if self.ok:
             self._lib.nvmlShutdown()

@@ -49,6 +49,21 @@
 // fill instead of drawing it solid (see `userData.fillMat` below).
 export const DEVICE_DIMS = { x: 0.62, y: 0.338, z: 0.282 };
 
+// The SAME block in METRES — 5.5" x 3" x 2.5" at 0.0254 m/in, i.e. the physical
+// truth rather than a drawing scale.
+//
+// Which of the two you want is decided by ONE question: does the scene it is
+// going into have a metric ground truth in it already?
+//   * mag-cal / the Sensors gizmo have none — the device is alone inside a
+//     coverage shell whose radius is itself a made-up 1.0 — so they use
+//     DEVICE_DIMS and the shell framing constants stay put;
+//   * the SLAM / Detailed map is in METRES, next to real walls, so it must use
+//     this one. It did not: slam.js passed no `dims`, took the shell-unit
+//     default, and drew the scanner 4.44x oversize — a 62 cm slab sitting in a
+//     room whose doorways are 2 m. (Reported 2026-08-01; nothing catches this
+//     by eye in mag-cal, where being 4.44x a unitless shell is meaningless.)
+export const DEVICE_DIMS_M = { x: 5.5 * 0.0254, y: 3.0 * 0.0254, z: 2.5 * 0.0254 };
+
 // --- the three slabs, ordered from -Z (facing the user) to +Z (boresight) ----
 // `frac` is the share of DEVICE_DIMS.z. `color` is a THREE-style hex int;
 // `edge` is the line colour that keeps the band boundary legible once the fill
@@ -71,7 +86,16 @@ export const DEVICE_BANDS = [
 // is where the boresight is: body +Z through the origin is the axis the cloud
 // comes out of, and an off-centre dot would quietly contradict every other mark
 // in the mag-cal view that is drawn about that axis.
-export const APERTURE_R = 0.048;
+// Expressed as a FRACTION of the block's long axis, not an absolute, so the
+// aperture stays in proportion whichever dimension set is drawn: an absolute
+// 0.048 is 7.7% of the shell-unit block but 34% of the metric one, which would
+// render the metric device as mostly lens. Same for the two face offsets, which
+// keep the disc and its rim proud of the blue face.
+export const APERTURE_R_FRAC = 0.048 / 0.62;
+const APERTURE_EYE_Z_FRAC = 0.002 / 0.282;
+const APERTURE_RIM_Z_FRAC = 0.001 / 0.282;
+// Retained for the shell-unit callers that import it directly.
+export const APERTURE_R = APERTURE_R_FRAC * 0.62;
 const APERTURE_FILL = 0x0f1115;
 const APERTURE_RING = 0xe2e8f0;
 
@@ -194,14 +218,15 @@ export function createDeviceMesh(THREE, opts = {}) {
 
     // Aperture: a dark disc with a bright rim, standing a hair proud of the
     // blue face so it survives the fill going translucent.
-    const zFace = dims.z / 2 + 0.002;
-    const eye = new THREE.Mesh(new THREE.CircleGeometry(APERTURE_R, 20),
+    const apertureR = APERTURE_R_FRAC * dims.x;
+    const zFace = dims.z / 2 + APERTURE_EYE_Z_FRAC * dims.z;
+    const eye = new THREE.Mesh(new THREE.CircleGeometry(apertureR, 20),
         new THREE.MeshBasicMaterial({ color: APERTURE_FILL, transparent: true, opacity: 0.95 }));
     eye.position.z = zFace;
     g.add(eye);
-    const rim = new THREE.Mesh(new THREE.RingGeometry(APERTURE_R, APERTURE_R * 1.22, 20),
+    const rim = new THREE.Mesh(new THREE.RingGeometry(apertureR, apertureR * 1.22, 20),
         new THREE.MeshBasicMaterial({ color: APERTURE_RING, transparent: true, opacity: 0.9 }));
-    rim.position.z = zFace + 0.001;
+    rim.position.z = zFace + APERTURE_RIM_Z_FRAC * dims.z;
     g.add(rim);
 
     g.applyMatrix4(mat4FromRowMajor(THREE, MOUNT_ROTATION));

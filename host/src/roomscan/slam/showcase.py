@@ -40,6 +40,7 @@ import open3d as o3d
 from . import metrics as _metrics
 from .cli import _load_frames
 from .mapper import Mapper
+from .tsdf import TsdfCapacityError
 
 _MESH_EVERY = 25
 _CPU = o3d.core.Device("CPU:0")
@@ -214,6 +215,34 @@ class PostProcessWorker:
                 phase="extracting_mesh",
             )
 
+    def _publish_capacity_failure(self, mapper: Mapper, frames_done: int,
+                                  total: int, exc: Exception) -> None:
+        """Terminal publish for a map that outgrew its device mid-build.
+
+        `done=True` because nothing more will happen, but `error` is set and
+        `frames` says how far it got -- the caller must be able to tell this
+        apart from a completed run, since committing a partial map as a current
+        sidecar would present two thirds of a room as the whole thing.
+
+        Reuses the LAST PUBLISHED mesh rather than extracting a fresh one, and
+        that is load-bearing: a map sitting against its capacity wall cannot be
+        safely extracted. Asking for one here segfaults inside Open3D's host
+        marching cubes (verified on DebugCapB1 at the Detailed preset: guard
+        fires at frame 3038, `mapper.mesh()` immediately after dies in
+        `_extract`), which would swap the un-catchable crash we just prevented
+        for a different un-catchable crash. The previous mesh is at most
+        `mesh_every` frames old and was extracted while the map was healthy."""
+        with self._lock:
+            previous_mesh = self._latest.mesh if self._latest is not None else None
+            self._latest = Progress(
+                fraction=(frames_done / total) if total else 1.0,
+                mesh=previous_mesh if previous_mesh is not None else _empty_mesh(),
+                trajectory=list(mapper.trajectory),
+                done=True,
+                stats={"frames": frames_done, "error": str(exc)},
+                phase="failed",
+            )
+
     def _publish_construction_failure(self) -> None:
         """Terminal, zero-progress publish for a failure so total there's no
         `Mapper` to even ask for stats -- e.g. width/height are None because
@@ -252,6 +281,14 @@ class PostProcessWorker:
                 return   # stopping mid-run: publish nothing further
             try:
                 mapper.step(depth, quat, pressure, reflectance=reflectance, confidence=confidence)
+            except TsdfCapacityError as exc:
+                # NOT a bad frame -- the map has outgrown the device and every
+                # remaining frame would raise the same thing. `continue` here
+                # would spin through the rest of the capture doing nothing and
+                # then present the partial map as a finished one, so stop and
+                # publish the reason instead.
+                self._publish_capacity_failure(mapper, i, total, exc)
+                return
             except Exception:
                 # Belt-and-braces (Mapper.step already degrades tracking-lost
                 # gracefully on its own): one bad frame must not kill this
@@ -260,7 +297,15 @@ class PostProcessWorker:
             is_last = i == total
             if is_last or i % self._mesh_every == 0:
                 self._publish_extracting_mesh(mapper, i, total)
-                self._publish(mapper, i, total, done=is_last)
+                try:
+                    self._publish(mapper, i, total, done=is_last)
+                except TsdfCapacityError as exc:
+                    # The map has grown past what Open3D can extract. Every
+                    # later publish would hit the same wall and the build's
+                    # whole product is that final mesh, so stop here rather
+                    # than integrate 1800 more frames toward nothing.
+                    self._publish_capacity_failure(mapper, i, total, exc)
+                    return
                 published_final = published_final or is_last
         if not published_final:
             # Every remaining frame (at least the last one) raised, so the

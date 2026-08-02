@@ -3125,6 +3125,46 @@ def test_detailed_runner_status_reports_real_elapsed_time_and_eta(tmp_path, monk
     assert (initial["processed"], initial["fraction"], initial["eta_s"]) == (0, 0.0, None)
 
 
+def test_detailed_runner_freezes_elapsed_time_when_the_build_finishes(tmp_path, monkeypatch):
+    """"Completed in 4:12" must mean the build took 4:12 -- forever.
+
+    `status()` derives elapsed from `time.monotonic() - _started_at`, which does
+    not stop when the worker does. Observed on the real rig: a finished build
+    reported `elapsed_s` climbing 4910.5 -> 4914.5 in four seconds, and the UI's
+    "Completed in" read 81:01 for a build that had taken about three and a half
+    minutes. Same family as BUG-050 -- a duration nobody thought to bound.
+    """
+    import types
+
+    class _Worker:
+        timestamps = [0.0, 1.0, 2.0, 3.0]
+
+        @staticmethod
+        def latest():
+            return types.SimpleNamespace(fraction=1.0, done=True, stats={"frames": 4},
+                                         trajectory=(), phase="offline_only")
+
+    runner = web.DetailedRunner(bus=LogBus(), results_dir=tmp_path / "results")
+    runner._worker = _Worker()
+    runner._capture = tmp_path / "take.bin"
+    runner._started_at = 100.0
+
+    monkeypatch.setattr(web.time, "monotonic", lambda: 352.0)
+    first = runner.status()
+    assert first["done"] is True
+    assert first["elapsed_s"] == 252.0
+
+    # An hour later, the same finished build still took 252 seconds.
+    monkeypatch.setattr(web.time, "monotonic", lambda: 3952.0)
+    assert runner.status()["elapsed_s"] == 252.0
+
+    # A fresh build clears it rather than inheriting the previous one's time.
+    runner._elapsed_at_done = None
+    runner._started_at = 4000.0
+    monkeypatch.setattr(web.time, "monotonic", lambda: 4010.0)
+    assert runner.status()["elapsed_s"] == 10.0
+
+
 def test_detailed_runner_reports_cached_mesh_loading_without_blocking(tmp_path, monkeypatch):
     """The websocket can acknowledge a large PLY load before Open3D finishes it."""
     runner = web.DetailedRunner(bus=LogBus(), results_dir=tmp_path / "results")

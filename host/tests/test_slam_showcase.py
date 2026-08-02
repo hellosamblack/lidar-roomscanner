@@ -7,8 +7,11 @@ import time
 import numpy as np
 import pytest
 
+import roomscan.slam.showcase as showcase
 from roomscan.slam.mapper import Mapper
-from roomscan.slam.showcase import PostProcessWorker, Progress, ShowcasePhase, next_phase
+from roomscan.slam.showcase import (
+    PostProcessWorker, Progress, ShowcasePhase, _empty_mesh, next_phase)
+from roomscan.slam.tsdf import TsdfCapacityError
 
 W, H = 54, 42
 _Q = (0.70710678, 0.0, 0.70710678, 0.0)   # forward = +Z, see test_slam_mapper.py
@@ -352,3 +355,68 @@ def test_start_is_idempotent_when_already_running():
         assert w._thread is t1
     finally:
         w.stop()
+
+
+# --------------------------------------------------- map outgrows Open3D (2026-08-01)
+
+
+class _CapacityMapper:
+    """A Mapper whose mesh() starts crashing once `fail_after` frames are in."""
+
+    def __init__(self, fail_after):
+        self.fail_after = fail_after
+        self.trajectory = []
+        self.tracking_lost_count = 0
+        self._n = 0
+
+    def step(self, *a, **kw):
+        self._n += 1
+        self.trajectory.append(np.eye(4))
+        return None
+
+    def mesh(self):
+        if self._n > self.fail_after:
+            raise TsdfCapacityError("map has 250224 active blocks; coarsen voxel_size")
+        return _empty_mesh()
+
+
+def _worker_over(n_frames, mesh_every=25):
+    frames = [(np.zeros((4, 4), np.float32), None, None, None, None, float(i))
+              for i in range(n_frames)]
+    return PostProcessWorker(frames, 4, 4, mesh_every=mesh_every)
+
+
+def test_a_map_that_outgrows_open3d_stops_the_build_and_says_why(monkeypatch):
+    w = _worker_over(200)
+    monkeypatch.setattr(showcase, "Mapper", lambda *a, **kw: _CapacityMapper(fail_after=50))
+    w.run()
+    p = w.latest()
+    assert p.done and p.phase == "failed"
+    assert "voxel_size" in p.stats["error"]
+    # Stopped at the wall, did not grind through the remaining 125 frames.
+    assert p.stats["frames"] == 75
+    assert p.fraction < 1.0, "a stopped build must not report as complete"
+
+
+def test_a_stopped_build_keeps_the_last_good_mesh_rather_than_extracting_again(monkeypatch):
+    """Re-extracting here would segfault: the map is past the wall. Verified on
+    DebugCapB1 -- the guard fires, and mapper.mesh() straight after dies."""
+    w = _worker_over(200)
+    mapper = _CapacityMapper(fail_after=50)
+    monkeypatch.setattr(showcase, "Mapper", lambda *a, **kw: mapper)
+    w.run()
+    calls_before = mapper._n
+    p = w.latest()
+    assert p.mesh is not None
+    # No further mesh() attempt was made after the failure.
+    assert mapper._n == calls_before
+
+
+def test_a_normal_build_is_unaffected(monkeypatch):
+    w = _worker_over(100)
+    monkeypatch.setattr(showcase, "Mapper", lambda *a, **kw: _CapacityMapper(fail_after=10**9))
+    w.run()
+    p = w.latest()
+    assert p.done and p.phase != "failed"
+    assert (p.stats or {}).get("error") is None
+    assert p.fraction == 1.0

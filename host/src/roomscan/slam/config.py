@@ -171,7 +171,15 @@ class DetailedSlamPreset:
     Loop closure is opt-in only after the two-circuit validation gate records an
     accepted decision.
     """
-    voxel_size: float = 0.005
+    # 0.01, not the 0.005 this shipped with (2026-08-01). At 5 mm a room-sized
+    # capture builds more blocks than Open3D's marching cubes can extract --
+    # captures/DebugCapB1.bin (4808 frames) crosses `_MAX_SAFE_EXTRACT_BLOCKS`
+    # at frame 2625 and can never produce a mesh, whatever block_count is set
+    # to (tsdf.py has the bisection). The same capture at 0.01 needs 139,785
+    # blocks, completes all 4808 frames in 56 s and yields 4.1M vertices. The
+    # `benchmark_note` below asked for exactly this measurement and had never
+    # been run; 5 mm was only ever exercised on captures small enough to fit.
+    voxel_size: float = 0.01
     block_count: int = 320000
     max_iter: int = 6
     max_dist: float = 0.05

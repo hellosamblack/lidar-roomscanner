@@ -134,10 +134,18 @@ frame instead turns a pan into an apparent 90° tilt sweep.
 
 `slam_rerender` is the offline high-detail pass. A capture stores raw ToF frames, not a
 map, so the live scan is only a preview and the pipeline can be re-run at any resolution
-afterwards — `voxel_size=0.005` roughly doubles detail over the 10 mm default. Two limits
+afterwards — `voxel_size=0.005` roughly doubles detail over the 10 mm default. Three limits
 worth knowing: the sensor samples ~36 mm between rays at 2 m, so below ~5 mm the extra
 detail comes only from multi-view fusion (dense back-and-forth sweeping), never from one
-view; and blocks scale as 1/voxel², so halving the voxel wants ~4× the `block_count`.
+view; blocks scale as 1/voxel², so halving the voxel produces ~4× the blocks; and — the
+one that bites — **Open3D cannot extract a mesh from more than ~260k active blocks at all**
+(BUG-053). ~~Halving the voxel wants ~4× the `block_count`~~: **raising `block_count` does
+not help**, because the ceiling is the absolute block count, not the load factor (the same
+273,521 blocks crash at 68.4% load in a 400k grid, on both CPU and CUDA, and they crash the
+*process* — host segfault, CUDA illegal memory access). A room-sized capture at 5 mm simply
+cannot be meshed on this Open3D build; that is why the Detailed preset default moved to
+0.01 (BUG-054). `TsdfMap` now refuses to extract above 250,000 blocks and raises
+`TsdfCapacityError` rather than making the call.
 **Always read `map.saturated`** — a scan that ran near its configured capacity is exactly
 where map growth stalled and tracking collapsed (BUG-035). Past ~6 GiB of grid use
 `device="CPU:0"`, where system RAM rather than VRAM is the limit.
