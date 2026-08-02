@@ -1,7 +1,7 @@
 """Mesh builders for the panel's opt-in surface-interpolation mode: cover
 adjacent depth-camera points with a triangle mesh instead of drawing them as
 dots, when they're close enough. Two adjacency strategies -- see
-docs/superpowers/plans/2026-07-09-surface-interpolation-design.md.
+docs/superpowers/plans/completed/2026-07-09-surface-interpolation-design.md.
 """
 from __future__ import annotations
 

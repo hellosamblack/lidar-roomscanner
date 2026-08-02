@@ -1,7 +1,7 @@
 """Live viewer metrics: per-sensor data rates, rendered FPS, system resources.
 
 Pure/testable core (no Open3D imports) consumed by the control panel's HUD
-overlay. See docs/superpowers/specs/2026-07-10-viewer-metrics-hud-design.md.
+overlay. See docs/superpowers/specs/completed/2026-07-10-viewer-metrics-hud-design.md.
 
 Rate model (owner-confirmed 2026-07-10): every wire frame carries an on-device
 microsecond timestamp ``t_us``. For each sensor stream we report two rates:

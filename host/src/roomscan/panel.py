@@ -549,7 +549,7 @@ class ControlPanel:
         # shading/decimation/wall-split/floor work off the GUI thread; the tick
         # only uploads its ready packet at `_mesh_upload_period` s, feeding the
         # measured upload wall-time back for adaptive decimation. See
-        # slam/meshprep.py + docs/superpowers/plans/2026-07-13-live-view-fps.md.
+        # slam/meshprep.py + docs/superpowers/plans/completed/2026-07-13-live-view-fps.md.
         from .slam.config import SlamConfig as _SlamCfg
         _view_cfg = _SlamCfg.load()
         self.mesh_prep = None

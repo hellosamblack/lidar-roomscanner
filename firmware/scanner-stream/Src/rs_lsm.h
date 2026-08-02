@@ -3,7 +3,7 @@
  * Reads the LSM's SFLP game-rotation-vector (orientation quaternion) and, once
  * enabled, its I2C sensor-hub environmental slaves (baro/mag/temp) over the shared
  * native-I3C bus at dynamic address 0x50. See
- * docs/superpowers/specs/2026-07-09-lsm6dsv16x-orientation-env-panel-design.md. */
+ * docs/superpowers/specs/completed/2026-07-09-lsm6dsv16x-orientation-env-panel-design.md. */
 #ifndef RS_LSM_H
 #define RS_LSM_H
 

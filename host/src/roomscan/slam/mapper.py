@@ -1,6 +1,6 @@
 """Frame-to-model SLAM orchestrator. Per-frame: deproject -> predict pose from the
 SFLP prior -> raycast model -> point-to-plane ICP -> baro soft-Z -> integrate.
-See docs/superpowers/specs/2026-07-10-phase6-slam-design.md sections 3, 5.
+See docs/superpowers/specs/completed/2026-07-10-phase6-slam-design.md sections 3, 5.
 
 `device` (str or o3d.core.Device, default "CPU:0") is resolved once in
 __init__ and forwarded to every Open3D piece it owns (TsdfMap, the pinhole

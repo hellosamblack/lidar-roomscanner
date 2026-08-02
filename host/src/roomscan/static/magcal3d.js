@@ -1,6 +1,6 @@
 // magcal3d.js — the "Shell & Steering" 3D renderer for the magnetometer
 // calibration modal (owner ask, 2026-07-29; design
-// docs/superpowers/specs/2026-07-29-magcal-3d-feedback-design.md, Phase 1).
+// docs/superpowers/specs/completed/2026-07-29-magcal-3d-feedback-design.md, Phase 1).
 //
 // THE PROBLEM THIS SOLVES
 // -----------------------
