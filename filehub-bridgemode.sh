@@ -54,6 +54,9 @@ expect "#"
 # 2. Bridge the interfaces and kill DHCP
 send "brctl addif br0 apcli0\r"
 expect "#"
+# Experimental: Retain connection to device after entering bridge mode
+send "ifconfig br0:1 $ROUTER_IP netmask 255.255.255.0 up\r"
+expect "#"
 send "killall udhcpd\r"
 expect "#"
 
