@@ -8,7 +8,7 @@
 
 **Architecture:** A new pure-numpy/Open3D module (`surface.py`) supplies two mesh builders — `grid_triangles` (raster-adjacency, runs every frame) and `alpha_shape_mesh` (3D-proximity via Open3D's alpha shape, throttled to ~4Hz). `panel.py` wires panel state → these builders → a second Open3D `TriangleMesh` scene geometry alongside the existing point-cloud dots, splitting each frame's valid points into "covered" (hidden, drawn by the mesh) and "lone" (still dots).
 
-**Tech Stack:** Python 3.11, numpy, Open3D 0.18+ (already a hard dependency — no new packages). Design doc: `docs/superpowers/plans/2026-07-09-surface-interpolation-design.md`.
+**Tech Stack:** Python 3.11, numpy, Open3D 0.18+ (already a hard dependency — no new packages). Design doc: `docs/superpowers/plans/completed/2026-07-09-surface-interpolation-design.md`.
 
 ## Global Constraints
 
@@ -181,7 +181,7 @@ Create `host/src/roomscan/surface.py`:
 """Mesh builders for the panel's opt-in surface-interpolation mode: cover
 adjacent depth-camera points with a triangle mesh instead of drawing them as
 dots, when they're close enough. Two adjacency strategies -- see
-docs/superpowers/plans/2026-07-09-surface-interpolation-design.md.
+docs/superpowers/plans/completed/2026-07-09-surface-interpolation-design.md.
 """
 from __future__ import annotations
 

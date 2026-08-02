@@ -15,7 +15,7 @@ This is the **app protocol** (host ↔ browser). It is unrelated to the **device
 transformed, and *re-encoded* into these `/ws` messages.
 
 **Governing design specs** (the `§N` refs in `web.py` docstrings point at Phase 1's):
-`docs/superpowers/specs/2026-07-15-web-phase1-core-instrument-design.md` (binary tags + metrics/state/cmd/log/event),
+`docs/superpowers/specs/completed/2026-07-15-web-phase1-core-instrument-design.md` (binary tags + metrics/state/cmd/log/event),
 `.../2026-07-16-web-phase2-sensors-design.md` (`sensor`),
 `.../2026-07-16-web-phase3-recording-playback-design.md` (`session`/`captures` + inbound transport).
 
@@ -430,7 +430,7 @@ open → pose-stream → close cycle. The live view keeps streaming while the mo
 overlay, not a mode).
 
 **3D feedback — the two-channel split (owner ask, 2026-07-29; design
-`docs/superpowers/specs/2026-07-29-magcal-3d-feedback-design.md`, Phase 1).** The modal's hero is now a
+`docs/superpowers/specs/completed/2026-07-29-magcal-3d-feedback-design.md`, Phase 1).** The modal's hero is now a
 WebGL "coverage shell" (`static/magcal3d.js`), with the 2D Lambert disc pair kept as the **fallback**
 renderer. Two things follow for this protocol:
 

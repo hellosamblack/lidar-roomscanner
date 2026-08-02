@@ -60,7 +60,7 @@ changing *which* IKS4A1 sensor is actually on the shared bus:
   requires the LSM6DSV16X's own I2C sensor-hub (mode 2) feature — a separate, not-yet-implemented
   driver task, out of this doc's scope.
 
-Full writeup: `docs/superpowers/plans/2026-07-09-iks4a1-hub1-multidevice-i3c.md`.
+Full writeup: `docs/superpowers/plans/completed/2026-07-09-iks4a1-hub1-multidevice-i3c.md`.
 
 ## Sensor hub (Mode 2) — RESOLVED & WORKING (2026-07-10)
 

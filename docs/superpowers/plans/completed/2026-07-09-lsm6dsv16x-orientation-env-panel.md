@@ -16,7 +16,7 @@ Firmware configures the LSM's SFLP + I2C sensor-hub (SHUB), demuxes the FIFO, an
 **Tech Stack:** Python 3.12 + Open3D `visualization.gui` + numpy (host); STM32H5 HAL + native-I3C +
 vendored `lsm6dsv16x_reg.c` (firmware); pytest; the `protocol-change` and `firmware-loop` project skills.
 
-**Spec:** `docs/superpowers/specs/2026-07-09-lsm6dsv16x-orientation-env-panel-design.md`.
+**Spec:** `docs/superpowers/specs/completed/2026-07-09-lsm6dsv16x-orientation-env-panel-design.md`.
 
 ## Global Constraints
 

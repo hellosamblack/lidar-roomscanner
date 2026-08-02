@@ -95,3 +95,18 @@ logs/
 # roomscan-slam CLI default outputs (regenerable; keep them out of blanket adds)
 slam_map.ply
 slam_traj.tum
+node_modules/.package-lock.json
+node_modules/@openai/codex/package.json
+node_modules/@openai/codex/README.md
+node_modules/@openai/codex/bin/codex.js
+node_modules/@openai/codex-linux-x64/package.json
+node_modules/@openai/codex-linux-x64/README.md
+node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-package.json
+node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
+node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host
+node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-path/rg
+node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap
+node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-resources/zsh/bin/zsh
+node_modules/@openai/codex-sdk/LICENSE
+node_modules/@openai/codex-sdk/package.json
+node_modules/@openai/codex-sdk/README.md

@@ -133,6 +133,20 @@ responding entirely** — no ping, no command ACK, `device_hz: None`, though SWD
 `ping` → `OK applied=1`, and 614 recorded frames with 0 CRC failures. Cause of the original hang not
 investigated — worth watching for a recurrence.
 
+## Plans and specifications register (audited 2026-08-02)
+
+This is the complete inventory of `docs/superpowers/plans/` and `docs/superpowers/specs/`.
+Active work stays at the directory root; historical records are retained under `completed/`, and
+superseded records under `deprecated/`. The archive status applies to the document's stated scope,
+not necessarily to every later phase of the product.
+
+| Status | Documents | Roadmap tracking |
+| --- | --- | --- |
+| **Active** | [orientation / eCompass resume](docs/superpowers/plans/2026-07-29-orientation-resume.md)<br>[high-frame-rate plan](docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md)<br>[Live/View + Detailed plan](docs/superpowers/plans/2026-07-31-web-live-view-detailed.md)<br>[high-frame-rate specification](docs/superpowers/specs/2026-07-31-high-framerate-and-manual-ranging-modes.md)<br>[Live/View + Detailed specification](docs/superpowers/specs/2026-07-31-web-live-view-detailed-design.md)<br>[Rerun observability sidecar](docs/superpowers/specs/2026-08-02-rerun-observability-sidecar-design.md) | Phase 3 high-rate/manual follow-up; Phase 6 orientation/DC-E, Detailed-SLAM follow-ups, and sub-phase 6.J. |
+| **Completed plans** | [Phase 1 binary protocol + visualizer](docs/superpowers/plans/completed/2026-07-07-phase1-binary-protocol-visualizer.md)<br>[Phase 2 raw streaming + PC transform](docs/superpowers/plans/completed/2026-07-08-phase2-raw-streaming-pc-transform.md)<br>[Phase 2.5 color/FoV/overlap](docs/superpowers/plans/completed/2026-07-08-phase2.5-color-fov-overlap.md)<br>[Phase 3 runtime configuration](docs/superpowers/plans/completed/2026-07-08-phase3-runtime-config-robustness.md)<br>[IKS4A1 HUB1 I3C](docs/superpowers/plans/completed/2026-07-09-iks4a1-hub1-multidevice-i3c.md)<br>[LSM orientation/env panel](docs/superpowers/plans/completed/2026-07-09-lsm6dsv16x-orientation-env-panel.md)<br>[Phase 3.5 GUI panel](docs/superpowers/plans/completed/2026-07-09-phase3.5-gui-panel.md)<br>[surface interpolation design](docs/superpowers/plans/completed/2026-07-09-surface-interpolation-design.md)<br>[surface interpolation implementation](docs/superpowers/plans/completed/2026-07-09-surface-interpolation-implementation.md)<br>[magnetometer yaw correction](docs/superpowers/plans/completed/2026-07-10-lsm6dsv16x-mag-yaw-correction.md)<br>[Phase 6 core SLAM](docs/superpowers/plans/completed/2026-07-10-phase6-slam.md)<br>[live-view FPS](docs/superpowers/plans/completed/2026-07-13-live-view-fps.md)<br>[panel UI redesign](docs/superpowers/plans/completed/2026-07-14-panel-ui-redesign.md) | Phases 1–4 and completed Phase 6 sub-work; desktop-panel work is historical because the web UI is primary. |
+| **Completed specifications** | [LSM orientation/env](docs/superpowers/specs/completed/2026-07-09-lsm6dsv16x-orientation-env-panel-design.md)<br>[magnetometer yaw correction](docs/superpowers/specs/completed/2026-07-10-lsm6dsv16x-mag-yaw-correction-design.md)<br>[Phase 6 core SLAM](docs/superpowers/specs/completed/2026-07-10-phase6-slam-design.md)<br>[viewer metrics HUD](docs/superpowers/specs/completed/2026-07-10-viewer-metrics-hud-design.md)<br>[live-view FPS](docs/superpowers/specs/completed/2026-07-13-live-view-fps-design.md)<br>[panel UI redesign](docs/superpowers/specs/completed/2026-07-13-panel-ui-redesign-design.md)<br>[vendored external dependencies](docs/superpowers/specs/completed/2026-07-15-vendor-external-deps-design.md)<br>[Web Phase 1 core instrument](docs/superpowers/specs/completed/2026-07-15-web-phase1-core-instrument-design.md)<br>[Web Phase 2 sensors](docs/superpowers/specs/completed/2026-07-16-web-phase2-sensors-design.md)<br>[Web Phase 3 recording/playback](docs/superpowers/specs/completed/2026-07-16-web-phase3-recording-playback-design.md)<br>[Web Phase 4 SLAM](docs/superpowers/specs/completed/2026-07-16-web-phase4-slam-design.md)<br>[3D mag-cal feedback](docs/superpowers/specs/completed/2026-07-29-magcal-3d-feedback-design.md) | Completed Phase 4 / Web / Phase 6 foundations and their measured outcomes are recorded in the corresponding phase sections below. |
+| **Deprecated** | [GPU container service plan](docs/superpowers/plans/deprecated/2026-07-13-slam-gpu-container-service.md)<br>[GPU container service design](docs/superpowers/specs/deprecated/2026-07-13-slam-gpu-container-service-design.md) | Superseded by in-process local CUDA:0; the optional remote backend remains documented only as legacy support. |
+
 ## Data-collection queue — owner-collected captures (2026-07-31)
 
 Everything on this roadmap and in `BUGS.md` that is blocked on **data only the owner can collect**.
@@ -238,7 +252,7 @@ not a capture.
 On-device transform pipeline + ASCII depth map over ST-Link VCOM.
 Enabled by `CONF_PRINT_FRAME = 1` in `Src/vl53l9_app.c:31`.
 
-### Phase 1 — Real-time 3D visualizer  ← **✅ Complete** (plan: `docs/superpowers/plans/2026-07-07-phase1-binary-protocol-visualizer.md`)
+### Phase 1 — Real-time 3D visualizer  ← **✅ Complete** (plan: `docs/superpowers/plans/completed/2026-07-07-phase1-binary-protocol-visualizer.md`)
 
 > **Status 2026-07-08:** both milestones verified on hardware.
 >
@@ -443,7 +457,7 @@ for free; multi-stream firmware plumbing is no longer needed.
 
 ### Phase 2.5 (interlude) — Multi-stream color, calibrated FoV, 30 fps overlap ← **✅ Complete**
 
-Plan: `docs/superpowers/plans/2026-07-08-phase2.5-color-fov-overlap.md`. Cleared the top three items
+Plan: `docs/superpowers/plans/completed/2026-07-08-phase2.5-color-fov-overlap.md`. Cleared the top three items
 from Phase 2's deferred list (all detailed above, inline, where each topic is discussed): datasheet +
 ZAPC-calibrated Deprojector FoV, host-side reflectance/confidence/ambient/ZAPC outputs with viewer
 `--color`, and a trigger-early restructure of the raw-only firmware loop (24.6 → 27.76 fps, target ≥28
@@ -475,7 +489,7 @@ averages out scene texture; a static capture is invalid: `verify_slam.bin` → 4
 map), then `build_flatfield` → set `flatfield_path` → verify the grid collapses. Prerequisite for the
 reflectance super-resolution / sensor-fusion-overlay work (both scoped, not yet built).
 
-### Phase 3 — UI & runtime configuration ← **✅ Complete** (plan: `docs/superpowers/plans/2026-07-08-phase3-runtime-config-robustness.md`)
+### Phase 3 — UI & runtime configuration ← **✅ Complete** (plan: `docs/superpowers/plans/completed/2026-07-08-phase3-runtime-config-robustness.md`)
 
 > **Status 2026-07-08:** verified end-to-end on hardware, branch `phase3-runtime-config`, 7 tasks.
 >
@@ -621,7 +635,7 @@ and config persistence host-side.
 
 ### Phase 3.5 (interlude) — GUI control panel + 2D IR monitor ← **✅ Complete**
 
-Plan: `docs/superpowers/plans/2026-07-09-phase3.5-gui-panel.md`, branch `phase3.5-gui-panel`. Owner
+Plan: `docs/superpowers/plans/completed/2026-07-09-phase3.5-gui-panel.md`, branch `phase3.5-gui-panel`. Owner
 elected this next (2026-07-09), deferring Phase 4 (IKS4A1). Replaces the classic keyboard-only Open3D
 window with an `open3d.visualization.gui` control panel — `roomscan-panel` (or `roomscan-view --panel`);
 the classic `roomscan-view` window stays the default. Presentation layer only: `TransformStage`,
@@ -704,7 +718,7 @@ is at most a small option inside SLAM mode, not a phase — fold it into Phase 5
 
 #### Web Phase 1 — Core Real-Time Web Instrument  ← **✅ Complete (2026-07-16)**
 
-Spec: `docs/superpowers/specs/2026-07-15-web-phase1-core-instrument-design.md`. Host-side only — no wire-protocol
+Spec: `docs/superpowers/specs/completed/2026-07-15-web-phase1-core-instrument-design.md`. Host-side only — no wire-protocol
 or firmware change. Confined to `host/src/roomscan/web.py` + `host/src/roomscan/static/` + `host/tests/test_web.py`.
 
 - **Frame-stealing bug fixed:** the old per-connection `slot.get_nowait()` loops (two tabs stole each other's
@@ -729,7 +743,7 @@ or firmware change. Confined to `host/src/roomscan/web.py` + `host/src/roomscan/
 
 #### Web Phase 2 — Sensors (IMU/env streams 9/10)  ← **✅ Complete (2026-07-16)**
 
-Spec: `docs/superpowers/specs/2026-07-16-web-phase2-sensors-design.md`. Host-side only — no wire-protocol
+Spec: `docs/superpowers/specs/completed/2026-07-16-web-phase2-sensors-design.md`. Host-side only — no wire-protocol
 or firmware change. Confined to `web.py` + `static/` (new `sensors.js`, extended `app.js`/`index.html`) +
 `test_web.py`.
 
@@ -756,7 +770,7 @@ or firmware change. Confined to `web.py` + `static/` (new `sensors.js`, extended
 
 #### Web Phase 3 — Recording & Playback (full-remote)  ← **✅ Complete (2026-07-16)**
 
-Spec: `docs/superpowers/specs/2026-07-16-web-phase3-recording-playback-design.md`. Host-side only — no
+Spec: `docs/superpowers/specs/completed/2026-07-16-web-phase3-recording-playback-design.md`. Host-side only — no
 wire-protocol or firmware change. Confined to `web.py` + `static/` (new `capture.js`) + one additive
 `FileSource(start=)` param in `sources.py` + `test_web.py`. Owner picked **Full remote** over
 desktop-parity: the app runs remotely on the headless box, so the operator browses and loads captures
@@ -804,7 +818,7 @@ desktop-parity: the app runs remotely on the headless box, so the operator brows
 
 #### Web Phase 4 — SLAM mode  ← **✅ Complete (2026-07-16)**
 
-Spec: `docs/superpowers/specs/2026-07-16-web-phase4-slam-design.md`. Host-side only — no wire-protocol or
+Spec: `docs/superpowers/specs/completed/2026-07-16-web-phase4-slam-design.md`. Host-side only — no wire-protocol or
 firmware change, **and no edits to `slam/`**. Confined to `web.py` + `static/` (new `slam.js`, extended
 `scene.js`/`app.js`/`index.html`) + `test_web.py`. Owner decisions: **GPU-accelerated** and **include a web
 Save button**.
@@ -967,20 +981,6 @@ because the tests asserted the value was a *float*).
 > **Still open:** that governor bounds the wire *rate*, not the *peak* — the map is re-sent whole
 > and grows without bound. Delta / dirty-region mesh transport is the real answer, and is the same
 > incremental-extraction idea 6.I already wants. Full write-up in `BUGS.md` → BUG-060.
-
-**Open, non-blocking:** the narrow-viewport overlap probes (1280×800 / 1100×560 / 820×700) were not
-run — `ui_screenshot`'s width/height did not resize the viewport, so only 1600×1000 is measured
-(0 overlaps with browser + preview + Playback open). `MOUNT_ROTATION` and the merged mag-cal view
-both want an owner-in-hand confirmation. On-demand **Detailed** builds did not complete during
-verification (7+ min on a 759-frame capture) — pre-existing, worth its own look.
-
-### Phase 4 — Integrate X-NUCLEO-IKS4A1  ← **✅ Complete** *(swapped with Ethernet 2026-07-09, owner decision — sensors next)*
-
-> **Status 2026-07-10:** verified on hardware — the full stack (ToF depth + SFLP orientation +
-> environmental) streams together at **27.85 fps, 0 CRC failures, 0 seq gaps** (no measurable fps cost
-> vs the ToF-alone 27.76-28.6 band).
->
-> - **Bus** (per the HUB1 design below, plus one fix the plan missed): PartID-keyed multi-device ENTDAA
 >
 > **BUG-061 — the sequel, and it corrects the sentence above.** Removing the freeze did not remove
 > the *queue*: the owner still saw ephemeral SLAM lag **up to 15 s**, in playback and worse live.
@@ -1073,7 +1073,7 @@ numbers; content is unchanged.)* The USB CDC link carries the added IMU/env traf
 top of 445 KB/s raw), so nothing here waits on Ethernet.
 
 - **Bus topology — resolved: HUB1-only native-I3C** (`docs/iks4a1-stacking.md` → "Resolved — HUB1
-  native-I3C"; plan `docs/superpowers/plans/2026-07-09-iks4a1-hub1-multidevice-i3c.md`). The naive
+  native-I3C"; plan `docs/superpowers/plans/completed/2026-07-09-iks4a1-hub1-multidevice-i3c.md`). The naive
   shared-I3C1 approach (IKS4A1's legacy-I2C sensors alongside the ToF) failed at the configured
   12.5 MHz push-pull speed once stacked (ENTDAA at ~1.85 MHz was fine; PP wasn't). The fix: jumper the
   IKS4A1 to **HUB1 only** (J4/J5 → `HUB1_SDx`/`HUB1_SCx`), so only the **LSM6DSV16X** — a genuine MIPI
@@ -1330,7 +1330,7 @@ channel, barometer as soft 1-DoF Z constraint.
 > The dip arc is a second, scale-immune error channel: for a correct calibration B∠g is a constant of
 > the location, so a wobbling arc reveals errors the |B| magnitude metrics structurally cannot.
 > Degrades to the 2D Lambert discs on no-WebGL / context-loss / `?magcal2d=1`. 914 tests.
-> Design: `docs/superpowers/specs/2026-07-29-magcal-3d-feedback-design.md`.
+> Design: `docs/superpowers/specs/completed/2026-07-29-magcal-3d-feedback-design.md`.
 >
 > **Amended 2026-07-30 (owner) — the hero camera is ~~body-fixed at a 3/4 offset~~ now
 > FIRST-PERSON.** *"During mag cal, we should render the view from the first person perspective of the
@@ -1380,7 +1380,7 @@ channel, barometer as soft 1-DoF Z constraint.
 
 > **Live-view rendering (2026-07-14)** — the "rendering-first for live view" step (live view ≥30 fps,
 > ideally 120+, flat as the map grows; the fps goal is architecture-bound, not compute-bound). Shipped
-> per `docs/superpowers/plans/2026-07-13-live-view-fps.md` (subagent-driven, 12 tasks + 2 review fixes,
+> per `docs/superpowers/plans/completed/2026-07-13-live-view-fps.md` (subagent-driven, 12 tasks + 2 review fixes,
 > `feature/phase6-slam`): **(A)** an off-GUI-thread `slam/meshprep.py` (`MeshPrep`) does all O(map-size)
 > mesh work (shade / decimate / wall-split / floor-grid → plain-data `MeshPacket`); the GUI tick only
 > uploads a ready packet at `mesh_upload_hz` (default 3.0) with an **adaptive, latched** decimation
@@ -1406,8 +1406,8 @@ channel, barometer as soft 1-DoF Z constraint.
 >
 > **Panel UI redesign (2026-07-14)** — the `roomscan-panel` GUI was restructured from a sidebar-driven,
 > multi-mode window into a **two-mode, first-person-by-default, HUD-driven** instrument, per
-> `docs/superpowers/specs/2026-07-13-panel-ui-redesign-design.md` +
-> `docs/superpowers/plans/2026-07-14-panel-ui-redesign.md` (subagent-driven, 13 tasks + 4 review fixes,
+> `docs/superpowers/specs/completed/2026-07-13-panel-ui-redesign-design.md` +
+> `docs/superpowers/plans/completed/2026-07-14-panel-ui-redesign.md` (subagent-driven, 13 tasks + 4 review fixes,
 > `feature/phase6-slam`, commits `d654f93..8e24f6b`). What shipped: two view modes **Real-Time / SLAM**
 > (SLAM absorbs the former Showcase record→process→reveal flow — no separate Showcase concept in the UI);
 > a **First-person/Orbit** camera toggle defaulting to first-person in both modes; the always-visible
@@ -1905,6 +1905,39 @@ click at a constant 30 Hz and mean nothing).
 
 **Latency budget:** 0.25 s block sampling + ~4 Hz update + link RTT. Adequate for a coverage cue; do not
 extend this path to anything needing tighter timing.
+
+#### Sub-phase 6.J — Rerun multimodal observability sidecar  ← **proposed (2026-08-02)**
+
+**Purpose:** make a scanner session inspectable as synchronized transformed ToF products, IMU/environment
+signals, host fusion state, SLAM health/poses, events, and rate-limited map snapshots. This is a
+*developer diagnostic* path for answering when a transform, orientation, or tracking decision went wrong;
+it is not a new primary operator UI.
+
+**Architecture is additive and deliberately asymmetric.** Raw `RSCN` `.bin` remains the authoritative
+recording — it alone contains exact `RAW_3DMD`/`CALIB` bytes and replays through the production decoder
+and transform. Open3D remains the ICP/TSDF engine; `roomscan-web` remains the live operator/control
+surface. Rerun receives a bounded, derived projection after `TransformStage` and sensor-state updates;
+it does not own USB/UDP/file input, invoke Open3D extraction, or alter the wire protocol/firmware.
+
+**Two modes:** an explicit, disabled-by-default live session writes a bounded latest-wins
+`results/rerun/live_<UTC>.rrd`; `roomscan-rerun-export CAPTURE.bin` derives a replayable `.rrd` from the
+normal `FileSource → StreamDecoder → TransformStage` route. Both carry a small manifest tying the
+artifact to source identity, protocol/transform/schema versions, device-time range, SDK/viewer versions,
+counts, bytes, and terminal reason. An `.rrd` is expendable and never silently substitutes for a `.bin`.
+
+**Non-negotiable performance rules:** Rerun work is one bounded worker queue, fail-open. A full queue,
+SDK failure, viewer disconnect, disk error, duration/byte limit, or Rerun regression may drop/stop only
+the sidecar and must report what happened; it must not block acquisition, raw recording, WebSocket
+broadcast, SLAM, or device commands. `FrameHeader.t_us` plus frame sequence are its timelines; no wall
+clock is mixed into device durations. Meshes use existing display-ready packets, are latest-only and
+rate/vertex/byte limited — no second deprojection or map extraction merely for logging.
+
+**Gate before adoption:** pin and prove the real SDK + matching viewer on the headless host; demonstrate
+offline timestamp/sequence/unit fidelity; A/B a representative live 30 Hz run with no additional
+decoder/recorder/tracking loss and measured CPU/RAM/disk/queue cost; deliberately exhaust the writer
+budget without disturbing production; then answer one real diagnostic question that current tools made
+slow. A pretty point cloud is not evidence. If any gate fails, remove the optional dependency and retain
+the findings. Full design: `docs/superpowers/specs/2026-08-02-rerun-observability-sidecar-design.md`.
 
 ### Phase 7 — Offline post-processing
 

@@ -1,6 +1,9 @@
 # LSM6DSV16X Magnetometer Yaw-Drift Correction — Implementation Plan
 
-> **Status: ✅ SHIPPED** — merged to `main` via PR #2 (`33b7796`); on-rig mag calibration + `AXIS_CONVENTION` verification completed 2026-07-10 (BUG-004: `mag_cal.json`, `AXIS_CONVENTION = diag(1,-1,-1)`).
+> **Status: ✅ SHIPPED** — merged to `main` via PR #2 (`33b7796`). The original 2026-07-10
+> `AXIS_CONVENTION` verification cited here was later invalidated by BUG-059: it checked `|B|`,
+> which cannot distinguish signed axis permutations. The current, dip-validated mapping is
+> `MAG_FIELD_SIGN * MAG_MOUNT_ROTATION = -1 * diag(1,-1,-1)`; see `ROADMAP.md` Phase 4.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

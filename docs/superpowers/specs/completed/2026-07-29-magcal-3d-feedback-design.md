@@ -1,6 +1,7 @@
 # Responsive 3D magnetometer-calibration feedback
 
-**Status:** design, not implemented. **Date:** 2026-07-29.
+**Status:** ✅ implemented 2026-07-29 (`cf3b243`), with follow-up corrections through 2026-07-31;
+see `ROADMAP.md` Phase 6, "3D calibration feedback (Shell & Steering)". **Date:** 2026-07-29.
 **Revised 2026-07-30 — the hero camera moved to first-person; see §4.1, which is amended in place.**
 **Revised 2026-07-31 — the hero and Steering views are MERGED into one canvas, and the device model is
 now the real instrument rather than a board silhouette; see §4.1, amended in place again.**

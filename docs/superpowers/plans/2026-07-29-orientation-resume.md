@@ -64,7 +64,7 @@ Error budget during a 100 °/s pan, measured:
   hero **camera is first-person** — behind the device on the boresight, `camera.up` tracking −g like
   the live view's FPV mode; the cells **behind the camera** are the translucent ones. Don't expect the
   old 3/4-offset framing in a screenshot.)* Design:
-  `docs/superpowers/specs/2026-07-29-magcal-3d-feedback-design.md`.
+  `docs/superpowers/specs/completed/2026-07-29-magcal-3d-feedback-design.md`.
 - `host/tools/orientation_probe.py` — the canonical measurement CLI (`jitter` / `health` / `frame`).
 
 ---

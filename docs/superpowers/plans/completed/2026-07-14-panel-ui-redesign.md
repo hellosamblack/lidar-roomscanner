@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-Copied verbatim from the spec (`docs/superpowers/specs/2026-07-13-panel-ui-redesign-design.md`); every task's requirements implicitly include these.
+Copied verbatim from the spec (`docs/superpowers/specs/completed/2026-07-13-panel-ui-redesign-design.md`); every task's requirements implicitly include these.
 
 - **No change to the SLAM/TSDF math, protocol, or firmware.** This is presentation-layer only.
 - **No change to the reveal card / wavefront / stage / mesh pipeline already shipped** — they are reused as-is (`cards.render_scan_complete_card`, `_upload_slam_mesh`, `_upload_mesh_packet`, `MeshPrep`, the Showcase `PostProcessWorker`).
@@ -153,7 +153,7 @@ If the agent cannot inject synthetic clicks and no display is available, this is
 Append the outcome to Task 9's "Probe gate" line in this plan file (edit the doc), then:
 
 ```bash
-git add host/tools/panel_hud_probe.py docs/superpowers/plans/2026-07-14-panel-ui-redesign.md
+git add host/tools/panel_hud_probe.py docs/superpowers/plans/completed/2026-07-14-panel-ui-redesign.md
 git commit -m "chore(panel): HUD mouse-fallthrough probe + recorded decision"
 ```
 

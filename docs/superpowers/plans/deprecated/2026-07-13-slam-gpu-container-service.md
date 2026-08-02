@@ -331,7 +331,7 @@ Expected: FAIL — `ImportError: cannot import name 'SlamService'`.
 """Container-side SLAM compute service. Owns one Mapper (via SlamWorker for its
 mesh throttle + publish logic) on a chosen Open3D device (CUDA:0 in the GPU
 container). One client at a time; localhost-only; no auth. See
-docs/superpowers/specs/2026-07-13-slam-gpu-container-service-design.md."""
+docs/superpowers/specs/deprecated/2026-07-13-slam-gpu-container-service-design.md."""
 from __future__ import annotations
 
 import argparse
@@ -934,7 +934,7 @@ Expected: `TcpTestSucceeded : True`. If False, WSL localhost forwarding is not m
 
 GPU SLAM compute service (Phase 6). Windows captures + renders; this container
 runs Mapper on CUDA:0 behind SlamService. See
-docs/superpowers/specs/2026-07-13-slam-gpu-container-service-design.md.
+docs/superpowers/specs/deprecated/2026-07-13-slam-gpu-container-service-design.md.
 
 - `build.ps1`  — build image roomscan-slam:cuda
 - `start.ps1`  — launch detached on 127.0.0.1:5555 (idempotent)

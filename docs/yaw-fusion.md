@@ -35,7 +35,7 @@ compass bearing referenced to magnetic north: two bearings read in the same fram
 the drifting datum cancels identically. It is `None` when the sensor is aimed within 10° of vertical,
 where no bearing exists.
 
-Design + rationale: `docs/superpowers/specs/2026-07-10-lsm6dsv16x-mag-yaw-correction-design.md`.
+Design + rationale: `docs/superpowers/specs/completed/2026-07-10-lsm6dsv16x-mag-yaw-correction-design.md`.
 
 ## 1. Calibrate the magnetometer (required)
 

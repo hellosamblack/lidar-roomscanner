@@ -786,7 +786,7 @@ In `host/src/roomscan/panel.py`, in the SLAM view state block (after `panel.py:5
         # shading/decimation/wall-split/floor work off the GUI thread; the tick
         # only uploads its ready packet at `_mesh_upload_period` s, feeding the
         # measured upload wall-time back for adaptive decimation. See
-        # slam/meshprep.py + docs/superpowers/plans/2026-07-13-live-view-fps.md.
+        # slam/meshprep.py + docs/superpowers/plans/completed/2026-07-13-live-view-fps.md.
         from .slam.config import SlamConfig as _SlamCfg
         _view_cfg = _SlamCfg.load()
         self.mesh_prep = None
@@ -1409,7 +1409,7 @@ Expected: `view fps` ≥ 30 throughout, and the late-third value ≈ the early-t
 
 - [ ] **Step 4: Remote backend — repeat with the GPU container service**
 
-Start the container SLAM service (per `docs/superpowers/specs/2026-07-13-slam-gpu-container-service-design.md`), set `[slam] backend = "remote"` (and `remote_addr` if non-default) in `roomscan.toml`, then repeat Step 3.
+Start the container SLAM service (per `docs/superpowers/specs/deprecated/2026-07-13-slam-gpu-container-service-design.md`), set `[slam] backend = "remote"` (and `remote_addr` if non-default) in `roomscan.toml`, then repeat Step 3.
 Expected: `view fps` ≥ 30 and flat, same as local. (If the service is unreachable the panel logs the local-fallback line from `backend.make_slam_worker` — in that case the run is really local; ensure the service is up before trusting the remote result.)
 
 - [ ] **Step 5: Record the before/after and commit the note**
@@ -1450,7 +1450,7 @@ git commit -m "test(slam): validate live-view render-fps flat >=30 on local + re
 
 ## Execution Handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-07-13-live-view-fps.md`. Two execution options:
+Plan complete and saved to `docs/superpowers/plans/completed/2026-07-13-live-view-fps.md`. Two execution options:
 
 **1. Subagent-Driven (recommended)** — I dispatch a fresh subagent per task, review between tasks, fast iteration.
 

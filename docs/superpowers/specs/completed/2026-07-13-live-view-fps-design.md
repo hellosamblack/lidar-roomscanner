@@ -3,7 +3,7 @@
 **Date:** 2026-07-13
 **Status:** ✅ shipped 2026-07-14 (code-complete + reviewed; runtime fps numbers unverified on-rig). Panel deprecated since Web Phase 5 — `MeshPrep` + the pose/mesh split live on in the web app.
 **Owner:** hellosamblack
-**Related:** `docs/superpowers/specs/2026-07-13-slam-gpu-container-service-design.md`, memory `cuda-at-scale-validation`
+**Related:** `docs/superpowers/specs/deprecated/2026-07-13-slam-gpu-container-service-design.md`, memory `cuda-at-scale-validation`
 
 ## Problem
 

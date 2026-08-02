@@ -249,7 +249,7 @@ In `firmware/scanner-stream/Src/vl53l9_app.c`, immediately before line 544
  *
  * TOF_MIPI_ID / IKS4A1_LSM6DSV16X_MIPI_ID are measured hardware constants, captured via
  * the iks4a1_i3c_probe() diagnostic above with both the ToF and the IKS4A1 (HUB1-only
- * jumper config) stacked -- see docs/superpowers/plans/2026-07-09-iks4a1-hub1-multidevice-i3c.md
+ * jumper config) stacked -- see docs/superpowers/plans/completed/2026-07-09-iks4a1-hub1-multidevice-i3c.md
  * Task 1. Do not guess these; a wrong value makes rs_assign_dynamic_addresses() bail with
  * -2 (unknown device) rather than silently misconfigure the bus. */
 #define TOF_MIPI_ID                (0x00 /* FILL IN: Task 1's non-BCR=0x07 MIPIID */)
