@@ -2832,3 +2832,43 @@ not as a side effect of a plumbing fix.
 **Lesson.** A second construction site for the same object is where configuration quietly stops
 being configuration. The guard that matters is not "did I remember to forward this field" but
 "is there exactly one place that knows what the field list is".
+
+## BUG-063 — the GIL-starvation metric under-reports precisely when starvation is total
+
+**Status:** open (measured, one instrument fixed, one not) · **Area:** host/tools
+(`slam_stall_profile.py`; `slam_icp_bench.py` already corrected) · **Found by:** the item 4 matched
+CUDA ICP study, 2026-08-02, when a variant that visibly froze the process reported a *better*
+starvation figure than stages that ran fine.
+
+**The defect.** Both watchdog-based instruments compute starvation as **summed tick lateness over
+wall time**. That construction is self-defeating: if the measured code holds the GIL continuously,
+the watchdog thread barely gets scheduled, so there are almost no lateness samples to sum, and the
+metric falls toward zero exactly as blocking approaches total.
+
+**Measured.** Over a 10.93 s `gpu_translation` stage the watchdog landed **1 tick where ~2186 were
+due**, and that single tick was 2998.9 ms late. The stage reported **"10.3% starvation"** — better
+than stages that were genuinely healthy. Its true behaviour: whole-process freezes of 598.7 /
+1626.8 / 2998.9 / 3981.6 ms, while **no single `register()` call exceeded 9 ms**.
+
+**The fix, where applied.** `slam_icp_bench.py` reports **`tick_share` = ticks landed / ticks due**,
+which degrades in the right direction:
+
+| Variant | `tick_share` | ticks / due | worst stall | (legacy) starved % |
+|---|---|---|---|---|
+| `translation` (shipped) | 0.953 | 1470 / 1542 | 2.0 ms | 4.7% |
+| `6dof` | 0.989 | 1334 / 1349 | 0.2 ms | 1.1% |
+| `gpu_translation` | **0.058** | 127 / 2209 | **3981.6 ms** | 66.7% |
+| `translation_cpu_nns` | 0.951 | 1553 / 1632 | 4.2 ms | 4.9% |
+
+**Still to do.** `host/tools/slam_stall_profile.py` computes starvation the same way and has the
+same blind spot. **Its published numbers are not in doubt** — BUG-060's 11.9% vs 94.3% comparison
+had ample ticks in both regimes, so the sum was well-sampled — but it should gain `tick_share`
+before it is next used to clear a change, because the one situation it cannot currently see is the
+one it exists to catch.
+
+**Why this matters beyond the metric.** A low starvation reading is used as evidence that a change
+is safe for `roomscan-web`, whose asyncio loop, reader thread and broadcaster all need the GIL. An
+instrument that reads *healthy* under total blocking would have waved through exactly the
+BUG-060/BUG-061 failure mode. Generalises the repo's standing lesson one level down: a native call's
+wall time is not its blocking cost — and here even the starvation *percentage* was not its blocking
+cost. Pair any "it didn't starve" claim with the number of samples the claim rests on.
