@@ -3221,3 +3221,31 @@ The cap stabilises the 0° case (spread 0.529 → 0.079) and does nothing for th
 itself: 45° is unchanged and 90° is still 4.5× the 0° result. So this is a **second, independent**
 defect, not a downstream symptom of BUG-068. Still not root-caused; recorded so a future session
 does not have to rediscover it, and so nobody assumes the conditioning fix covered it.
+
+---
+
+## BUG-071 — `resolve_command()` never wired up `"standby"`, so `rig_command`/generic `cmd` can't send it
+
+**Status:** open, not fixed (found incidentally, out of scope for the pass that found it) ·
+**Area:** host/web · **Found by:** trying to exercise `SET_STANDBY` via `rig_command(name="standby",
+...)` while verifying the 2026-08-03 auto-idle work, 2026-08-03.
+
+`resolve_command()` (`web.py`, backs the generic inbound `{"type": "cmd", "name": ...}` message) maps
+`ping`/`calib`/`reinit`/`usecase`/`period`/`exposure` to their `CommandCode`s and returns `None` —
+"unknown/invalid cmd request" — for anything else. `"standby"` was never added, even though the wire
+protocol fully supports it (`CommandCode.SET_STANDBY`, `RS_CMD_SET_STANDBY`) and the CLI tool
+(`roomscan-ctl standby <0|1|2>`, `host/src/roomscan/control.py`) already parses it correctly
+(`test_control_cli_parses_standby`). The web app's own `SET_STANDBY` traffic goes entirely through
+the dedicated `set_idle` message → `_dispatch_standby()`, which never routes through
+`resolve_command()`, so this gap was invisible until something tried to send `standby` as a generic
+`cmd` — which is exactly what the `rig_command` MCP tool's own docstring claims is supported
+(`"name is one of ping, calib, reinit, usecase, period, exposure, standby"`).
+
+**Not fixed**: found while validating an unrelated feature (auto-idle activity accounting), and
+`rig_set`/`set_idle`/the auto-idle machinery are all unaffected — this only blocks a *manual* generic
+`cmd` standby request over `/ws`, e.g. via `rig_command`. Fix is a one-line addition to
+`resolve_command()` (`if name == "standby": return CommandCode.SET_STANDBY, int(param), f"standby
+{int(param)}"`), but wasn't made without a clearer picture of why the app deliberately built a
+separate `set_idle` path instead of just using generic `cmd` here in the first place — worth checking
+that history before adding the case, in case there was a reason (e.g. wanting persisted
+enabled/level state that a bare `cmd` round-trip doesn't carry).

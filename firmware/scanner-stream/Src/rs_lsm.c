@@ -50,6 +50,29 @@ _Static_assert(sizeof(rs_lsm_raw_word_t) == RS_IMU_RAW_REC_SIZE, "IMU_RAW record
  * regardless of this flag. */
 #define RS_LSM_SFLP_BATCH_AUX (1)
 
+/* ---- Auto-idle wake-on-motion (2026-08-03) -------------------------------------------------
+ * The LSM's embedded Wake-Up function (WAKE_UP_SRC/THS/DUR, FUNCTIONS_ENABLE) is a hardware
+ * block SEPARATE from the SFLP engine above (SFLP lives under EMB_FUNC_EN_A; Wake-Up is a
+ * "basic interrupt" under FUNCTIONS_ENABLE) -- confirmed against the datasheet, no shared state,
+ * no coexistence restriction. It also does not need HAODR mode (which we don't use -- both XL and
+ * GY run LSM6DSV16X_*_HIGH_PERFORMANCE_MD above), so the one documented HAODR/activity caveat
+ * doesn't apply either way. Configured with act_mode = XL_AND_GY_NOT_AFFECTED (INACT_EN=00):
+ * "stationary/motion-only interrupts generated, accelerometer/gyroscope configuration does not
+ * change" -- this is a pure motion DETECTOR, it must never itself change the XL/GY power state
+ * SFLP depends on. Polled (rs_lsm_check_wake_up), not wired to the INTR pin: the IKS4A1 routes
+ * the LSM's own INT1/INT2 through a jumper-selectable selector that isn't populated on this rig
+ * (docs/iks4a1-stacking.md), and polling this one status byte over I3C is cheap enough that
+ * wiring a physical interrupt buys nothing here.
+ * Threshold: 500 mg (WU_INACT_THS_W=4 -> 125 mg/LSB, WK_THS=4) -- a deliberate "picked it up"
+ * level, well above handheld tremor/ambient vibration and the accelerometer's own noise floor,
+ * not a fine motion-jitter detector (that job belongs to the display-only SLAM stationarity gate,
+ * not this one). Duration = 3 (max, ~6.25 ms at 480 Hz) for a touch of debounce against a single
+ * transient sample; both are the firmware's own constants for now, not host-configurable -- see
+ * the auto-idle plan doc if on-rig testing shows they need tuning. */
+#define RS_LSM_WAKE_THS_WEIGHT (4u)   /* WU_INACT_THS_W: 125 mg/LSB */
+#define RS_LSM_WAKE_THS        (4u)   /* WK_THS: 4 * 125 mg = 500 mg */
+#define RS_LSM_WAKE_DUR        (3u)   /* WAKE_DUR: 3 / ODR_XL */
+
 /* ---- Raw FIFO pass-through (stream 11, 2026-07-28) ----------------------------------------
  * The SFLP game-rotation quaternion is encoded fp16 in the FIFO (~0.056 deg/step), which is now
  * the orientation noise FLOOR — averaging the batch (RS_LSM_SFLP_AVERAGE, below) already took us
@@ -483,7 +506,34 @@ int rs_lsm_init(void) {
     if (lsm6dsv16x_fifo_mode_set(&g_ctx, LSM6DSV16X_STREAM_MODE) != 0) {
         return -7;
     }
+
+    /* Wake-on-motion (see RS_LSM_WAKE_* above). Best-effort like the freq-fine read above: a
+     * failure here only means the device can never self-wake from an idled standby -- the
+     * existing host-commanded wake/idle path (SET_STANDBY) is completely unaffected, so it
+     * does not fail rs_lsm_init(). act_mode is set explicitly (not left at its POR default)
+     * for the same reason SFLP is above: this device's config persists across an MCU -rst. */
+    {
+        lsm6dsv16x_act_thresholds_t wk = { 0 };
+        wk.inactivity_cfg.wu_inact_ths_w = RS_LSM_WAKE_THS_WEIGHT;
+        wk.threshold = RS_LSM_WAKE_THS;
+        wk.duration = RS_LSM_WAKE_DUR;
+        lsm6dsv16x_act_thresholds_set(&g_ctx, &wk);
+        lsm6dsv16x_act_mode_set(&g_ctx, LSM6DSV16X_XL_AND_GY_NOT_AFFECTED);
+        lsm6dsv16x_interrupt_mode_t irq = { .enable = 1, .lir = 1 };
+        lsm6dsv16x_interrupt_enable_set(&g_ctx, irq);
+    }
     return 0;
+}
+
+int rs_lsm_check_wake_up(uint8_t *wake_up_src_out) {
+    uint8_t raw = 0;
+    if (lsm6dsv16x_read_reg(&g_ctx, LSM6DSV16X_WAKE_UP_SRC, &raw, 1) != 0) {
+        return -1;
+    }
+    if (wake_up_src_out != NULL) {
+        *wake_up_src_out = raw;
+    }
+    return (raw & 0x08u) ? 1 : 0;   /* bit3 = WU_IA, see docs/protocol.md AUTO_WAKE_MOTION */
 }
 
 int8_t  g_lsm_freq_fine = 0;          /* INTERNAL_FREQ_FINE (0x4F), latched in rs_lsm_init */

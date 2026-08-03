@@ -18,6 +18,7 @@ import { createCapture } from './capture.js';
 import { createBrowser } from './browser.js';
 import { createSlam } from './slam.js';
 import { createAdmin } from './admin.js';
+import { createIdle } from './idle.js';
 
 const D = (m, l) => { try { window.__diag && window.__diag('app.js: ' + m, l); } catch (e) {} };
 D('composition root loaded');
@@ -48,6 +49,11 @@ createSlam(hub, sceneApi);
 // scene handle only to PAUSE the main render while the modal occludes it — it
 // never draws into scene.js's context (it owns its own; see magcal3d.js §8.3).
 createMagcal(hub, sceneApi);
+// Parks the tab (stops rendering, tells the server this connection isn't
+// actively engaged) after a period of no activity. Takes the scene handle for
+// the same reason magcal.js does -- pausing render while occluded/unused is
+// pure waste -- see idle.js's own comment for the shared-flag interaction.
+window.__idle = createIdle(hub, sceneApi);   // diagnostics only, see scene.js's `controls` comment
 
 hub.connect();
 D('all modules instantiated; socket connecting');

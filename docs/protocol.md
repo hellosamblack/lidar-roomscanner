@@ -179,6 +179,7 @@ Event-code registry:
 | 3 | DMA_TIMEOUT        | retry count at exhaustion (currently always 1 — no internal retry loop precedes this timeout) |
 | 4 | SENSOR_ERROR_STATUS| vl53l9 status word from handle path |
 | 5 | TX_OVERFLOW        | frames dropped since last report    |
+| 6 | AUTO_WAKE_MOTION   | LSM6DSV16X `WAKE_UP_SRC` register byte (bit layout: `docs/protocol.md` links to the datasheet; `WU_IA` = wake-up detected, `X_WU`/`Y_WU`/`Z_WU` = triggering axis) |
 
 Firmware emission (Phase 3 Task 5, raw-only builds only — `CONF_TRANSFORM_ONBOARD=0`):
 `handle_error()` emits `SENSOR_ERROR_STATUS` (detail = packed status word: `fsm<<24 |
@@ -196,6 +197,14 @@ exhaustion points immediately before `handle_error()` runs. On-board-transform b
 (`CONF_TRANSFORM_ONBOARD=1`, the golden-pair regeneration path) are unchanged: no EVENT
 emission, `handle_error()` still spins forever on any fault — golden-path stability, not
 a wire-format distinction.
+
+`AUTO_WAKE_MOTION` (2026-08-03, laser-wear idle wake-on-motion): emitted from the idle-loop
+branch (`RS_CMD_SET_STANDBY` soft or hard) when a periodic poll of the LSM6DSV16X's `WAKE_UP_SRC`
+register finds `WU_IA` set — the device woke itself, not a host command. `seq` follows the
+same "last captured frame's counter" EVENT convention (idled means no new frame exists). The
+host does not need to react to this event to resume streaming — the firmware's own wake path
+already restarted ranging by the time it sends this — it exists purely so the log/UI can say
+*why* the sensor woke rather than reporting an unexplained resume.
 
 ## COMMAND frame payload (frame_type = 3)
 
@@ -324,3 +333,24 @@ specced with the Phase 4 transport work).
   on the LSM clock, the batch end was the only available proxy for it, and it is 23.1 ms out.
   New stream_id only; no version bump, no layout change, streams 7/9/10/11/12 byte-for-byte
   unchanged. Older captures never carry one — a host falls back to the stream-11 inference.
+- **v1 rev 2026-08-03**: additive — event-code registry gains `AUTO_WAKE_MOTION` (6): the idle
+  loop (`RS_CMD_SET_STANDBY` soft/hard) now polls the LSM6DSV16X's embedded Wake-Up function
+  (`WAKE_UP_SRC`, independent of the ToF's I3C frame cadence — confirmed on an independent
+  hardware block from SFLP, no conflict) and self-initiates a wake on motion instead of only
+  ever waking on a host command. New event value only, EVENT payload layout unchanged, no
+  version bump.
+- **v1 rev 2026-08-03 (b)**: semantics clarification (additive, no wire change) — owner
+  correction: `SET_STANDBY` idles the ToF LASER only, not the IMU/env. IMU_QUAT (9), ENV (10),
+  and IMU_RAW (11) now keep flowing while the ToF sits parked (soft or hard) — the LSM6DSV16X
+  is a separate chip on the shared I3C bus, unaffected by `vl53l9_stop()`/`platform_power_disable()`,
+  and was already sampling the whole time; only the MCU's periodic drain-and-send was previously
+  gated on a ToF frame existing. Targeted a ~34 ms tick (roughly the active-path rate); **on-rig
+  measured at 18.2 Hz (~55 ms/tick)** instead — the per-tick command-poll + I3C drain + 3 sends
+  cost more than the naive tick-count estimate assumed. Stable and clean at that rate (jitter
+  ~1.4–1.9 ms over a sustained on-rig check), just slower than the design guess; not re-tuned to
+  hit exactly 30 Hz since nothing depends on that specific number. `seq` for these frames is
+  `g_last_seq` (frozen — no new ToF frame exists, the same convention EVENT frames already use);
+  `t_us` is the live clock (no ToF FRAME_READY instant to stamp with), which is what
+  `device_hz`/`host_hz` are computed from in the first place, never from `seq`. IMU_SYNC (13) is
+  NOT sent during idle — its meaning ("where THIS ToF frame's edge sits on the LSM clock") has no
+  referent without a ToF frame. No layout change to any stream, no version bump.

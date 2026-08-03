@@ -394,6 +394,10 @@ class UiState:
     orbit_amplitude_deg: float = 45.0
     idle_enabled: bool = True
     idle_level: str = "soft"           # "soft" | "hard"
+    browser_idle_timeout_s: float = 300.0   # idle.js: how long without user
+                                            # activity before the client parks
+                                            # itself; server-configured so a
+                                            # single value governs every tab
     # View-page capture browser (§12). Presentation-only and persisted; see the
     # `[viewer] web_browser_*` comment in config.py for why sort is client-side.
     browser_sort: str = "recent"       # "recent" | "name" | "size" | "duration"
@@ -1676,6 +1680,7 @@ def _state_message(ui: UiState, controller=None, detailed=None) -> dict:
             "slam_trajectory": ui.slam_trajectory,
             "slam_walls": ui.slam_walls, "slam_follow": ui.slam_follow,
             "idle_enabled": ui.idle_enabled, "idle_level": ui.idle_level,
+            "browser_idle_timeout_s": ui.browser_idle_timeout_s,
             "browser_sort": ui.browser_sort, "browser_view": ui.browser_view,
             "browser_thumbs": ui.browser_thumbs,
             "orientation_mode": ui.orientation_mode,
@@ -1757,6 +1762,8 @@ def ui_from_config(cfg: ViewerConfig) -> UiState:
     ui.idle_enabled = bool(cfg.sensor_idle_enabled)
     if cfg.sensor_idle_level in _VALID_IDLE_LEVELS:
         ui.idle_level = cfg.sensor_idle_level
+    if float(cfg.browser_idle_timeout_s) > 0:
+        ui.browser_idle_timeout_s = float(cfg.browser_idle_timeout_s)
     # The Sensors card's decomposition picker is gone (owner ask, 2026-07-31:
     # the owner only used World) -- coerce ANY stored value to "world" so a
     # config written before this change (e.g. still "zyx") can't leave the UI
@@ -1826,6 +1833,7 @@ def apply_ui_to_config(ui: UiState, cfg: ViewerConfig) -> None:
     cfg.slam_follow = bool(ui.slam_follow)
     cfg.sensor_idle_enabled = bool(ui.idle_enabled)
     cfg.sensor_idle_level = ui.idle_level
+    cfg.browser_idle_timeout_s = float(ui.browser_idle_timeout_s)
     cfg.web_browser_sort = ui.browser_sort
     cfg.web_browser_view = ui.browser_view
     cfg.web_browser_thumbs = bool(ui.browser_thumbs)
@@ -3278,10 +3286,14 @@ async def _lifespan(app: FastAPI):
     # case where it isn't so a bare `import roomscan.web` never spins a task.
     if getattr(app.state, "ready", False):
         app.state.broadcast_task = asyncio.create_task(_broadcaster())
+        app.state.idle_reconcile_task = asyncio.create_task(_idle_reconcile_loop())
     yield
     task = getattr(app.state, "broadcast_task", None)
     if task is not None:
         task.cancel()
+    idle_task = getattr(app.state, "idle_reconcile_task", None)
+    if idle_task is not None:
+        idle_task.cancel()
     detailed = getattr(app.state, "detailed_runner", None)
     if detailed is not None:
         await asyncio.to_thread(detailed.close)
@@ -3538,13 +3550,92 @@ async def get_thumb(name: str) -> Response:
 #
 # The device streams continuously once a host attaches, firing the VCSEL every
 # frame even when nobody is looking. To spare the laser, the server idles it
-# whenever the viewer count hits zero and wakes it the instant a tab connects.
-# The idle is DEBOUNCED (sensor_idle_delay_s) so a tab reload doesn't thrash the
-# sensor FSM. It acts only on a live device we're actually streaming from -- not
-# during a replay excursion, where the command-ACK path is the capture file, not
-# the device (so a standby command would never be acknowledged). The device only
-# ever idles when commanded, so a headless capture.py session (no web server)
-# keeps streaming exactly as before.
+# whenever the ACTIVE viewer count hits zero and wakes it the instant one
+# reappears. The idle is DEBOUNCED (sensor_idle_delay_s) so a tab reload doesn't
+# thrash the sensor FSM. It acts only on a live device we're actually streaming
+# from -- not during a replay excursion, where the command-ACK path is the
+# capture file, not the device (so a standby command would never be
+# acknowledged). The device only ever idles when commanded, so a headless
+# capture.py session (no web server) keeps streaming exactly as before.
+#
+# "Active" deliberately means more than "a socket is open": a `/ws` connection
+# that never engages (an agent's one-shot probe, a tab left open unattended)
+# used to keep `state.clients` non-empty forever, so the sensor never idled --
+# the actual reported problem this section fixes. A client counts as active
+# only while it has sent something recently (Phase C's `idle_state` heartbeat,
+# or literally any other inbound message refreshes it -- see `_handle_inbound`),
+# tracked per `client_id` (query param on `/ws`/`/ws-mesh`, `_resolve_client_id`)
+# so both sockets of one tab share one activity clock. A brand-new connection is
+# active for one full `sensor_idle_activity_timeout_s` window by construction
+# (nothing needs a separate grace constant). A live recording always counts as
+# active regardless of viewer engagement -- a take must never be interrupted
+# mid-scan (same reasoning as Live SLAM's auto-record, see `_start_slam_auto_record`).
+
+
+def _resolve_client_id(websocket: WebSocket) -> str:
+    """The `client_id` query param correlates a tab's `/ws` and `/ws-mesh`
+    sockets under one activity clock (Phase A.5). A connection without one --
+    a raw MCP probe, an old cached client -- still gets tracked, just under its
+    own unshared identity, so it ages out on its own exactly like today's
+    per-socket behavior."""
+    cid = websocket.query_params.get("client_id")
+    return cid if cid else f"anon-{id(websocket)}"
+
+
+def _touch_client_active(state, client_id: str) -> None:
+    if not hasattr(state, "client_active"):
+        state.client_active = {}
+    state.client_active[client_id] = time.monotonic()
+
+
+def _mark_client_inactive(state, client_id: str) -> None:
+    """Force-stale: an explicit park (`idle_state: active=false`) must act
+    immediately, not wait out the activity timeout."""
+    if not hasattr(state, "client_active"):
+        state.client_active = {}
+    state.client_active[client_id] = 0.0
+
+
+def _client_is_active(state, client_id: str, now: float | None = None) -> bool:
+    if now is None:
+        now = time.monotonic()
+    timeout = float(getattr(state, "activity_timeout_s", 60.0) or 60.0)
+    ts = getattr(state, "client_active", {}).get(client_id, now)
+    return now - ts < timeout
+
+
+def _active_viewer_count(state) -> int:
+    """Number of `/ws` connections that count as an actively-engaged viewer
+    for auto-idle purposes -- see the module comment above for why this is
+    not simply `len(state.clients)`. A connection with no resolved
+    `client_id` (mid-handshake in the real endpoint, or a hand-built test
+    `state.clients` entry that never goes through it) counts as active by
+    default -- the same fail-open rule `_engaged_clients` uses -- so only a
+    connection that has actually been tracked and gone stale is excluded."""
+    ctrl = getattr(state, "controller", None)
+    if ctrl is not None and getattr(getattr(ctrl, "recorder", None), "active", False):
+        return 1
+    now = time.monotonic()
+    ids = getattr(state, "ws_client_id", {})
+    count = 0
+    for ws in state.clients:
+        cid = ids.get(ws)
+        if cid is None or _client_is_active(state, cid, now):
+            count += 1
+    return count
+
+
+def _engaged_clients(state, now: float | None = None) -> set:
+    """The subset of `state.clients` that isn't parked (Phase A.5) -- what the
+    broadcaster should actually spend `send_bytes` calls on for the heavy
+    binary payloads (POINT_CLOUD/IR_IMAGE). A client with no resolved
+    `client_id` yet (mid-connect) is treated as engaged so the very first
+    frame after a handshake isn't dropped."""
+    if now is None:
+        now = time.monotonic()
+    ids = getattr(state, "ws_client_id", {})
+    return {ws for ws in state.clients
+            if ws not in ids or _client_is_active(state, ids[ws], now)}
 
 
 def _auto_idle_active(state) -> bool:
@@ -3588,11 +3679,12 @@ async def _viewer_arrived(state) -> None:
 
 
 async def _viewer_left(state) -> None:
-    """A tab disconnected. If it was the last one, arm the debounced idle timer;
-    when it fires (and the viewer set is still empty), idle the sensor."""
+    """A tab disconnected, went idle, or a reconcile tick found nobody
+    actively watching. If no ACTIVE viewer remains, arm the debounced idle
+    timer; when it fires (and one still hasn't shown up), idle the sensor."""
     if not hasattr(state, "sensor_idled"):
         return
-    if state.clients:                       # other tabs still watching
+    if _active_viewer_count(state) > 0:     # someone is still actively watching
         return
     _cancel_idle_timer(state)
     if not _auto_idle_active(state):
@@ -3600,9 +3692,9 @@ async def _viewer_left(state) -> None:
 
     def _fire() -> None:
         state.idle_timer = None
-        # Re-check under the event loop at fire time: a tab may have reconnected
-        # during the debounce, or the source swapped to replay.
-        if state.clients or not _auto_idle_active(state):
+        # Re-check under the event loop at fire time: a viewer may have
+        # reappeared during the debounce, or the source swapped to replay.
+        if _active_viewer_count(state) > 0 or not _auto_idle_active(state):
             return
         level = idle_standby_level(state.ui_state.idle_level)
         _dispatch_standby(state, level, f"auto-idle ({state.ui_state.idle_level})")
@@ -3612,16 +3704,57 @@ async def _viewer_left(state) -> None:
     state.idle_timer = loop.call_later(float(getattr(state, "idle_delay_s", 5.0)), _fire)
 
 
+async def _reconcile_idle_once(state) -> None:
+    """Recurring safety net alongside the event-driven `_viewer_arrived`/
+    `_viewer_left` calls: ages out a client that went silent without ever
+    cleanly disconnecting -- the reported failure mode (an agent/probe
+    connection left open indefinitely) never trips a connect/disconnect event
+    at all, so nothing else would re-evaluate it. Guarded against redundant
+    re-dispatch: only acts when the idle/active state actually needs to change."""
+    if _active_viewer_count(state) > 0:
+        if getattr(state, "sensor_idled", False):
+            await _viewer_arrived(state)
+    else:
+        if not getattr(state, "sensor_idled", False) and getattr(state, "idle_timer", None) is None:
+            await _viewer_left(state)
+
+
+async def _idle_reconcile_loop() -> None:
+    """Background task (started from `_lifespan`, same pattern as
+    `_broadcaster`): the periodic half of the idle/wake decision. Cadence
+    matches `sensor_idle_activity_timeout_s` -- there is no point checking
+    more often than a client can possibly go stale."""
+    state = app.state
+    while True:
+        interval = float(getattr(state, "activity_timeout_s", 60.0) or 60.0)
+        await asyncio.sleep(interval)
+        try:
+            await _reconcile_idle_once(state)
+        except Exception as exc:
+            log.warning("idle reconcile tick failed: %r", exc)
+
+
 async def _drop_client(clients: set, ws: WebSocket) -> None:
     """Remove a client and best-effort close it; never raises. Also arms the
-    debounced sensor idle if that was the last viewer (covers tabs that die
-    without a clean disconnect, caught by a failed broadcast send)."""
+    debounced sensor idle if that was the last active viewer (covers tabs
+    that die without a clean disconnect, caught by a failed broadcast send).
+
+    `clients` is whatever set `_broadcast_bytes`/`_broadcast_text` were handed
+    for iteration -- since Phase A.5 that can be a filtered (parked-excluded)
+    *copy* of `app.state.clients`, not the canonical set itself, so removal
+    always also targets `app.state.clients` directly or a dead engaged tab
+    would never actually leave membership."""
     clients.discard(ws)
+    state = app.state
+    state.clients.discard(ws)
+    cid = getattr(state, "ws_client_id", {}).pop(ws, None)
+    if cid is not None:
+        getattr(state, "client_active", {}).pop(cid, None)
     try:
         await ws.close()
     except Exception:
         pass
-    await _viewer_left(app.state)
+    await _viewer_left(state)
 
 
 async def _broadcast_bytes(clients: set, data: bytes) -> None:
@@ -3709,6 +3842,7 @@ async def _drop_mesh_client(state, ws) -> None:
     `_viewer_left` idle coupling, since viewer-idle stays keyed to `/ws` (a
     dead mesh socket alone must not idle the sensor)."""
     _mesh_clients(state).pop(ws, None)
+    getattr(state, "ws_client_id", {}).pop(ws, None)
     try:
         await ws.close()
     except Exception:
@@ -3718,11 +3852,17 @@ async def _drop_mesh_client(state, ws) -> None:
 async def _pump_mesh(state, now: float) -> None:
     """Run every broadcaster tick: give each `/ws-mesh` flow its one credit
     if it is free (acked, or a legacy client whose throttle window is open)
-    and there is something newer than what it last got."""
+    and there is something newer than what it last got. A parked client (Phase
+    A.5, correlated via `client_id`) gets skipped entirely -- zero MESH
+    traffic while idled, not just BUG-061's already-bounded legacy trickle."""
     latest = getattr(state, "latest_mesh", None)
     if latest is None:
         return
+    ids = getattr(state, "ws_client_id", {})
     for ws, flow in list(_mesh_clients(state).items()):
+        cid = ids.get(ws)
+        if cid is not None and not _client_is_active(state, cid, now):
+            continue
         if flow.in_flight and now - flow.sent_at > MESH_ACK_TIMEOUT_S:
             flow.in_flight = False
             flow.ack_timeouts += 1
@@ -4250,7 +4390,7 @@ async def _broadcaster() -> None:
                                        f"color mode {ui.color_mode!r} unavailable this frame, showing depth")
                     last_pc_key = key
                 if last_pc_bytes is not None:
-                    await _broadcast_bytes(clients, last_pc_bytes)
+                    await _broadcast_bytes(_engaged_clients(state, now), last_pc_bytes)
 
             # SLAM mode (web Phase 4): ship the latest `slam` message, then
             # cache the (throttled) MESH for `/ws-mesh` to pump out. The FEED
@@ -4288,7 +4428,7 @@ async def _broadcaster() -> None:
                     steps = ir_gravity_rot(grav_quat) if grav_quat is not None else 0
                     if steps:
                         rgb = np.rot90(rgb, steps)
-                    await _broadcast_bytes(clients, pack_ir_image(rgb))
+                    await _broadcast_bytes(_engaged_clients(state, now), pack_ir_image(rgb))
                 else:
                     _log_debounced(state, bus, "ir-miss",
                                    "reflectance unavailable this frame, holding IR pane")
@@ -4395,6 +4535,11 @@ async def websocket_endpoint(websocket: WebSocket):
     state = app.state
     clients: set = state.clients
     clients.add(websocket)
+    if not hasattr(state, "ws_client_id"):
+        state.ws_client_id = {}
+    client_id = _resolve_client_id(websocket)
+    state.ws_client_id[websocket] = client_id
+    _touch_client_active(state, client_id)
     await _viewer_arrived(state)   # cancel any pending idle; wake the sensor if idled
 
     # Bring the new tab current immediately.
@@ -4427,7 +4572,10 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         clients.discard(websocket)
         _magcal_clients(state).discard(websocket)   # stop paying for a closed modal
-        await _viewer_left(state)   # arm the debounced sensor idle if that was the last tab
+        cid = state.ws_client_id.pop(websocket, None)
+        if cid is not None:
+            getattr(state, "client_active", {}).pop(cid, None)
+        await _viewer_left(state)   # arm the debounced sensor idle if that was the last active viewer
 
 
 @app.websocket("/ws-mesh")
@@ -4446,6 +4594,11 @@ async def websocket_mesh_endpoint(websocket: WebSocket):
     flows = _mesh_clients(state)
     flow = MeshFlow()
     flows[websocket] = flow
+    if not hasattr(state, "ws_client_id"):
+        state.ws_client_id = {}
+    state.ws_client_id[websocket] = _resolve_client_id(websocket)   # correlates
+    # with this tab's `/ws` connection for Phase A.5 parking; the shared
+    # `client_active` entry's lifecycle belongs to the `/ws` socket, not this one.
 
     # Late joiner: push whatever is cached right now rather than waiting for
     # the next SLAM/Detailed poll to produce something "new".
@@ -4455,6 +4608,7 @@ async def websocket_mesh_endpoint(websocket: WebSocket):
             await websocket.send_bytes(latest)
         except Exception:
             flows.pop(websocket, None)
+            state.ws_client_id.pop(websocket, None)
             return
         now = time.monotonic()
         flow.in_flight = True
@@ -4494,6 +4648,7 @@ async def websocket_mesh_endpoint(websocket: WebSocket):
         log.warning("ws-mesh receive loop error: %r", exc)
     finally:
         flows.pop(websocket, None)
+        state.ws_client_id.pop(websocket, None)
 
 
 async def _start_slam_auto_record(state, ctrl) -> bool:
@@ -4941,6 +5096,25 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
                 _cancel_idle_timer(state)   # a pending idle must not fire once disabled
             await _broadcast_state(state)
 
+    elif mtype == "idle_state":
+        # Client-side activity heartbeat/park signal (Phase C, `idle.js`).
+        # `active: true` -- sent on user activity and as a periodic heartbeat
+        # while a human is actually there -- refreshes this connection's
+        # activity clock and fast-paths a wake if it was the one bringing the
+        # active count back above zero. `active: false` parks immediately
+        # rather than waiting out `sensor_idle_activity_timeout_s`, and
+        # fast-paths the idle decision instead of waiting for the next
+        # `_idle_reconcile_loop` tick. No `_broadcast_state` -- this is
+        # per-connection bookkeeping, not shared UI state.
+        cid = getattr(state, "ws_client_id", {}).get(ws) if ws is not None else None
+        if cid is not None:
+            if bool(msg.get("active", True)):
+                _touch_client_active(state, cid)
+                await _viewer_arrived(state)
+            else:
+                _mark_client_inactive(state, cid)
+                await _viewer_left(state)
+
     elif mtype == "set_orientation":
         # Orientation decomposition mode + custom axis labels (owner ask,
         # 2026-07-28). Presentation-only -- see `orientation_view()`.
@@ -5295,6 +5469,13 @@ def main(argv=None) -> int:
     app.state.idle_delay_s = float(getattr(config, "sensor_idle_delay_s", 5.0) or 5.0)
     app.state.sensor_idled = False   # whether we've commanded the device into standby
     app.state.idle_timer = None      # asyncio TimerHandle for the debounced idle
+    # "Actively engaged" bookkeeping (Phase A/A.5): which `/ws` and `/ws-mesh`
+    # sockets belong to which `client_id`, and when each `client_id` was last
+    # seen doing something -- see the module comment above `_resolve_client_id`.
+    app.state.ws_client_id = {}
+    app.state.client_active = {}
+    app.state.activity_timeout_s = float(
+        getattr(config, "sensor_idle_activity_timeout_s", 60.0) or 60.0)
     app.state.ready = True
 
     # The controller owns the reader thread now (Web Phase 3): it runs the same

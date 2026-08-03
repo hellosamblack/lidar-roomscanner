@@ -53,6 +53,8 @@
 #define RS_EVT_DMA_TIMEOUT         (3u)
 #define RS_EVT_SENSOR_ERROR_STATUS (4u)
 #define RS_EVT_TX_OVERFLOW         (5u)
+#define RS_EVT_AUTO_WAKE_MOTION    (6u) /* idle-loop self-woke on LSM Wake-Up detection (not a
+                                          * host command); detail = WAKE_UP_SRC register byte */
 
 /* COMMAND (RS_FRAME_COMMAND) payload: u32 cmd, u32 param (LE). */
 #define RS_CMD_PING                (1u)

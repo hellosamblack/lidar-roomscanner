@@ -64,6 +64,16 @@ def test_parse_event_roundtrip():
     assert msg == "trigger retries exhausted"
 
 
+def test_parse_event_auto_wake_motion():
+    from roomscan.protocol import EventCode, parse_event
+    wake_up_src = 0b0000_1010   # WU_IA + Y_WU set
+    payload = struct.pack("<II", 6, wake_up_src)
+    code, detail, msg = parse_event(payload)
+    assert code == EventCode.AUTO_WAKE_MOTION
+    assert detail == wake_up_src
+    assert msg == ""
+
+
 def test_parse_event_rejects_short_payload():
     from roomscan.protocol import parse_event
     with pytest.raises(ProtocolError):

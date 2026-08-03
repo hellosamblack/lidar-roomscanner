@@ -824,6 +824,9 @@
         /* ---- record-name modal (post-recording naming prompt) ---- */
         #record-name-modal .modal { width: min(440px, 96vw); }
 
+        /* ---- connection-idled park notice ---- */
+        #idle-modal .modal { width: min(420px, 96vw); }
+
         /* ---- bridge-mode confirm ---- */
         #bridge-modal .modal { width: min(520px, 96vw); }
         .bridge-steps {
@@ -1776,6 +1779,27 @@ cover the whole sphere from this viewpoint, and a gap behind you still has to be
                 <div class="btn-row">
                     <button id="bridge-cancel" title="Close without running anything">Cancel</button>
                     <button id="bridge-run" class="primary" title="Run the bridge script on the FileHub. Only do this after steps 1 and 2 above.">Run step 3</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Connection-idled modal (idle.js). Deliberately no close (&times;) button
+         and no Escape/backdrop dismissal -- unlike every other modal here, being
+         parked is a state to leave via Resume (or just moving the mouse again),
+         not one to dismiss while staying parked. -->
+    <div id="idle-modal" class="modal-backdrop hidden">
+        <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="idle-title">
+            <div class="modal__header">
+                <h2 class="modal__title" id="idle-title">Connection idled</h2>
+            </div>
+            <div class="modal__body">
+                <p class="modal__intro">
+                    No activity for a while, so this tab stopped rendering and the
+                    server stopped counting it as an active viewer.
+                </p>
+                <div class="btn-row">
+                    <button id="idle-resume" class="primary" title="Resume rendering and mark this tab active again">Resume</button>
                 </div>
             </div>
         </div>

@@ -104,6 +104,16 @@ class ViewerConfig:
     sensor_idle_delay_s: float = 5.0        # debounce after the last viewer disconnects
                                             # before idling (so a tab reload doesn't thrash
                                             # the sensor FSM)
+    sensor_idle_activity_timeout_s: float = 60.0  # a connected client that hasn't sent
+                                            # anything (no idle_state heartbeat, no other
+                                            # message) in this long no longer counts as an
+                                            # active viewer for auto-idle purposes, even
+                                            # though its socket is still open -- catches a
+                                            # stale agent/probe connection, not just a clean
+                                            # disconnect
+    browser_idle_timeout_s: float = 300.0   # client-side: how long without user activity
+                                            # before the web UI parks itself ("Connection
+                                            # idled" modal) and stops rendering/consuming
     yaw_fusion: bool = True                 # graft mag heading onto SFLP yaw
     flatfield_path: Optional[str] = None    # path to a per-zone reflectance FPN
                                             # correction (.npz from tools/build_flatfield.py);

@@ -510,6 +510,34 @@ reflectance super-resolution / sensor-fusion-overlay work (both scoped, not yet 
 > take a byte-reader; `rs_poll_eth_commands` drains an `ETH_ReadCommands` buffer). Verified: soft+hard drop
 > RAW to 0 frames/3s, wake resumes ~90 fps, PING+all standby ACK'd over UDP, 0 CRC.
 >
+> **2026-08-03 addition — activity-based auto-idle + browser park + firmware wake-on-motion**
+> (on-rig verified): the viewer-count trigger above turned out to undercount correctly — a `/ws`
+> connection that never engages (an agent's stale probe, a tab left open unattended) counted as
+> "a viewer" forever, so the sensor never idled despite nobody actually watching. Host now tracks
+> per-connection activity (`client_id` shared across `/ws`+`/ws-mesh`,
+> `sensor_idle_activity_timeout_s`) and ages out a silently stale connection via a periodic
+> reconcile tick, not just on clean disconnect; a live recording always counts as active.
+> **Parking also releases server load, not just client rendering**: a parked `client_id` is
+> excluded from the broadcaster's POINT_CLOUD/IR_IMAGE sends and from `/ws-mesh`'s credit-gated
+> pump, not merely told to stop rendering locally (BUG-060/061 lesson: connection count is a
+> performance variable on this server). New web UI: `idle.js` parks an inactive tab
+> (mouse/keyboard/visibility, default 5 min) behind a "Connection idled" modal, resuming on any
+> activity or the button; `browser_idle_timeout_s` is server-configured so one value governs
+> every tab. **Firmware, two owner corrections mid-pass**: (1) the idle branch now polls the
+> LSM6DSV16X's own embedded Wake-Up function (`WAKE_UP_SRC` — an independent hardware block from
+> SFLP, confirmed no conflict, and moot anyway since this build runs High-Performance not HAODR
+> mode) and self-wakes on real motion (new event `RS_EVT_AUTO_WAKE_MOTION`), not only on a host
+> command; (2) **idling only parks the ToF laser, not the IMU/env** — IMU_QUAT/ENV/IMU_RAW keep
+> flowing (on-rig measured 18.2 Hz, `seq` frozen at `g_last_seq`, `t_us` = live clock) while the
+> ToF sits at 0 Hz, since the LSM is a separate chip on the shared I3C bus untouched by
+> `vl53l9_stop()`/`platform_power_disable()`. On-rig verified end-to-end: a parked-but-connected
+> client actually idles the device while its socket stays open, ToF drops to 0 Hz with
+> IMU/ENV/IMUraw steady at 18.2 Hz, and reconnect/resume both wake cleanly. **Found, not fixed
+> (pre-existing, unrelated to this pass)**: `resolve_command()` in `web.py` never wired up
+> `"standby"` as a generic `cmd` name (only the dedicated `set_idle` path handles it), so
+> `rig_command(name="standby", ...)` fails even though the wire protocol and `roomscan-ctl` both
+> support it.
+>
 > **Firmware command channel** (Tasks 2, 4): TinyUSB CDC RX + a bounded fixed-size frame parser
 > (magic/CRC-checked, malformed input dropped and counted, polled once per acquisition-loop iteration —
 > never blocks acquisition). PING/SEND_CALIB need no reconfig; usecase/exposure/period/REINIT

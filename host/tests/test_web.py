@@ -4978,6 +4978,24 @@ def test_mesh_pump_drops_a_client_whose_send_fails():
     assert ws.closed
 
 
+def test_pump_mesh_skips_a_parked_client_id():
+    """Phase A.5: a client_id parked via `idle_state` gets zero MESH traffic,
+    not just BUG-061's already-bounded legacy trickle -- releasing the load a
+    parked tab was still costing the server, not merely its own rendering."""
+    parked_ws, active_ws = _FakeMeshWs(), _FakeMeshWs()
+    state = _mesh_state(
+        ws_client_id={parked_ws: "parked-cid", active_ws: "active-cid"},
+        client_active={"parked-cid": 0.0, "active-cid": time.monotonic()},
+        activity_timeout_s=60.0,
+    )
+    state.mesh_clients[parked_ws] = web.MeshFlow()
+    state.mesh_clients[active_ws] = web.MeshFlow()
+    web._cache_latest_mesh(state, _mesh_bytes(1))
+    asyncio.run(web._pump_mesh(state, time.monotonic()))
+    assert parked_ws.sent == []
+    assert len(active_ws.sent) == 1
+
+
 def test_reset_slam_clears_the_cached_mesh_survives_flow_identity():
     """`_reset_slam` drops the cache so a torn-down map's mesh is never resent
     -- but flow bookkeeping is untouched, and a fresh map's first mesh (a new

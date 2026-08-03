@@ -47,6 +47,7 @@ class EventCode(IntEnum):
     DMA_TIMEOUT = 3
     SENSOR_ERROR_STATUS = 4
     TX_OVERFLOW = 5
+    AUTO_WAKE_MOTION = 6
 
 
 class CommandCode(IntEnum):

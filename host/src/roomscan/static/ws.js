@@ -43,8 +43,18 @@ const TAG_MAGPOSE = 5;
 
 const RECONNECT_MS = 2000;
 
+// One id per page load, sent as a query param on BOTH sockets below, so the
+// server can tell that a `/ws` connection and a `/ws-mesh` connection belong
+// to the same tab and share one activity clock for idle-parking (Phase A.5,
+// idle.js). Not a security token — just enough entropy to not collide across
+// tabs in one browser session.
+function makeClientId() {
+    return 'c' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
 export function createHub() {
     const handlers = new Map();   // type -> Set<fn>
+    const clientId = makeClientId();
     let socket = null;
     let meshSocket = null;
 
@@ -89,7 +99,7 @@ export function createHub() {
 
     function connectMesh() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const url = `${protocol}//${window.location.host}/ws-mesh`;
+        const url = `${protocol}//${window.location.host}/ws-mesh?client_id=${clientId}`;
         D('mesh: connecting -> ' + url);
         try {
             meshSocket = new WebSocket(url);
@@ -129,7 +139,7 @@ export function createHub() {
 
     function connect() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const url = `${protocol}//${window.location.host}/ws`;
+        const url = `${protocol}//${window.location.host}/ws?client_id=${clientId}`;
         D('connecting -> ' + url);
         emit('conn', { state: 'connecting' });
         try {

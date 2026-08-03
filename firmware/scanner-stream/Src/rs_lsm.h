@@ -76,4 +76,12 @@ int rs_lsm_read_timestamp(uint32_t *ticks);
 extern int8_t  g_lsm_freq_fine;
 extern uint8_t g_lsm_freq_fine_valid;
 
+/* Poll the LSM's embedded Wake-Up function (auto-idle motion wake, 2026-08-03 -- see the
+ * RS_LSM_WAKE_* tuning block in rs_lsm.c). One register read (WAKE_UP_SRC, 0x45), safe to call
+ * on any cadence including from the ToF idle loop while ranging is stopped: this hardware block
+ * is independent of SFLP and of the ToF's own I3C frame cadence. Returns 1 if WU_IA (bit3) is
+ * set (motion detected), 0 if not, <0 on a bus read failure. `*wake_up_src_out` (may be NULL)
+ * gets the raw register byte, exactly what ships as RS_EVT_AUTO_WAKE_MOTION's detail. */
+int rs_lsm_check_wake_up(uint8_t *wake_up_src_out);
+
 #endif /* RS_LSM_H */

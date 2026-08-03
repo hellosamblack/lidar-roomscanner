@@ -2071,6 +2071,75 @@ void vl53l9_app() {
         if (rs_standby_level != RS_STANDBY_ACTIVE) {
             rs_poll_commands(calib_data, out_width, out_height, g_last_seq);
             rs_poll_eth_commands(calib_data, out_width, out_height, g_last_seq); /* UDP wake path */
+
+            /* Idle-loop IMU/env service (2026-08-03). "Idle" only means the TOF LASER is
+             * parked -- the LSM6DSV16X is a separate chip on the shared I3C bus, unaffected by
+             * vl53l9_stop()/platform_power_disable(), and keeps sampling at its own ODR the
+             * whole time regardless of whether anything drains it. Two things ride this one
+             * tick, nominally every 17 idle-loop iterations (a ~34 ms guess at the ~30 Hz
+             * active-path rate off the 2 ms HAL_Delay below) -- ON-RIG MEASURED at 18.2 Hz
+             * (~55 ms/tick) instead, since the per-tick command-poll + I3C drain + 3 sends
+             * cost more than the naive tick-count math assumed. Still a clean, stable,
+             * genuinely useful cadence for "orientation/env while parked" -- not re-tuned to
+             * hit exactly 30 Hz, since nothing here requires that specific number:
+             *
+             *   1. Drain + stream IMU_QUAT/ENV/IMU_RAW exactly as the active path does, so a
+             *      host still gets orientation/env data while the sensor is parked (only the
+             *      laser is meant to idle, per owner: "we only want to idle the laser, not the
+             *      IMU/env"). seq = g_last_seq (frozen -- no new ToF frame exists, same
+             *      convention EVENT frames already use) and t_us = the live clock
+             *      (rs_stamp_us() falls back to it automatically since g_frame_stamp_us stays
+             *      disarmed here) -- both correct: device_hz/host_hz are computed from t_us
+             *      deltas and arrival timing, never from seq (see docs/protocol.md).
+             *      IMU_SYNC (stream 13) is skipped: its whole meaning is "where THIS ToF
+             *      frame's FRAME_READY edge sits on the LSM clock", which doesn't exist here.
+             *
+             *   2. Poll WAKE_UP_SRC (rs_lsm_check_wake_up) on the SAME tick -- it's one more
+             *      register in a transaction already happening, and the wake latency benefit
+             *      (up to ~55 ms instead of a separate slower poll) is free. Only arms the wake
+             *      if nothing else already claimed the single rs_pending slot this iteration (a
+             *      real host command already means the sensor is about to wake anyway).
+             *      token=0 is a fire-and-forget synthetic command: no host issued it, so no
+             *      host is awaiting its ACK -- an unmatched token is a silent no-op on the
+             *      receiving end (CommandClient.offer()), same as any other unsolicited frame. */
+            static uint16_t rs_idle_lsm_tick = 0;
+            if (g_lsm_ok && ++rs_idle_lsm_tick >= 17u) { /* ~34 ms at the 2 ms idle cadence below */
+                rs_idle_lsm_tick = 0;
+
+                rs_lsm_sample_t rs_idle_lsm = { 0 };
+                static rs_lsm_raw_word_t rs_idle_lsm_raw[RS_LSM_RAW_FIFO_MAX];
+                uint16_t rs_idle_lsm_raw_n = 0;
+                if (rs_lsm_read_latest_raw(&rs_idle_lsm, rs_idle_lsm_raw,
+                                           (uint16_t)RS_LSM_RAW_FIFO_MAX, &rs_idle_lsm_raw_n) == 0) {
+                    if (rs_idle_lsm.have_quat) {
+                        rs_send_frame_cdc(RS_STREAM_IMU_QUAT, g_last_seq, 0u,
+                                          (const uint8_t *)rs_idle_lsm.quat, RS_IMU_QUAT_SIZE, 0u, 0u);
+                    }
+                    if (rs_idle_lsm.have_env) {
+                        uint8_t rs_idle_env[RS_ENV_SIZE];
+                        memcpy(rs_idle_env + 0, &rs_idle_lsm.pressure_pa, 4);
+                        memcpy(rs_idle_env + 4, rs_idle_lsm.mag_ut, 12);
+                        memcpy(rs_idle_env + 16, &rs_idle_lsm.temp_c, 4);
+                        rs_send_frame_cdc(RS_STREAM_ENV, g_last_seq, 0u, rs_idle_env, RS_ENV_SIZE, 0u, 0u);
+                    }
+                    if (rs_idle_lsm_raw_n != 0) {
+                        rs_send_frame_cdc(RS_STREAM_IMU_RAW, g_last_seq, 0u,
+                                          (const uint8_t *)rs_idle_lsm_raw,
+                                          (uint32_t)rs_idle_lsm_raw_n * RS_IMU_RAW_REC_SIZE,
+                                          rs_idle_lsm_raw_n, 0u);
+                    }
+                }
+
+                if (!rs_pending.pending) {
+                    uint8_t rs_wake_src = 0;
+                    if (rs_lsm_check_wake_up(&rs_wake_src) > 0) {
+                        rs_send_event(RS_EVT_AUTO_WAKE_MOTION, (uint32_t)rs_wake_src, NULL);
+                        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = RS_CMD_SET_STANDBY,
+                                                         .param = RS_STANDBY_ACTIVE, .token = 0u };
+                    }
+                }
+            }
+
             if (rs_pending.pending) {
                 (void)rs_apply_pending_config(p_dev, calib_data, out_width, out_height, g_last_seq);
                 /* Return value ignored on purpose: a fault mid-wake already ran
