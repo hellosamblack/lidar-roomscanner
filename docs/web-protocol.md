@@ -459,6 +459,71 @@ The steering rotation likewise arrives as an explicit body `guidance_axis.axis` 
 downward") assumed northern-hemisphere dip *and* that the user knows where north is. It is replaced by the
 exact body-axis rotation above, plus a countdown of the cells left in the gap being steered at.
 
+## Ranging profiles & manual sensor control (Task 10, 2026-08-03)
+
+`docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md` Task 10. Two
+server-owned, device-authoritative state objects — `web.RangingState` (the ranging profile: Room
+Mapping / Precision / High Frame-Rate / Manual) and `web.ImuEnvRateState` (the independent
+streams-9/10/11 poll rate, cmd 11/12) — both broadcast together on **one** outbound `ranging`
+message, but with **two independent `pending` flags**: a manual-params edit and an IMU/env rate
+change are separate atomic commands and one must never block the other (plan item 8: "a second,
+independent pending command, not a fifth field bolted onto Manual ranging").
+
+*Applied state is committed only from a real device readback*, never assumed and never optimistic
+(`web._commit_ranging_ack`/`web._refresh_ranging_state`/`web._refresh_imu_env_state`). `SET_RANGING_PROFILE`
+(cmd 8) keeps the legacy 12-byte ACK, which carries only the applied `ProfileId` — no ranging_mode/
+fps/exposure/power — so a successful preset switch always chains exactly one `GET_RANGING_CONFIG`
+(cmd 10) round trip to learn what was actually applied. `SET_MANUAL_PARAMS` (cmd 9) needs no second
+trip: its own 16-byte ACK already *is* the readback. At startup (and on device reconnect), `_init_ranging_state`
+restores both halves from `GET_RANGING_CONFIG`/`GET_IMU_ENV_RATE` — never an assumed firmware default.
+
+*Which of the four buttons is "applied" is inferred, not stored on the wire.* A device readback
+carries only `ranging_mode`/`frame_period_us`/`exposure_ms`/`power_mode` — no profile id — so
+`web._match_profile_id` compares the readback against `roomscan.profiles.PRESETS` for an exact
+match; anything that doesn't match one of the three presets reads as `"manual"`, whether it was
+reached via `SET_MANUAL_PARAMS` or happens to be a configuration no preset describes.
+
+*Every number is `roomscan.profiles`'s, never a second copy.* `estimate` is
+`profiles.ProfileEstimate` serialized by `web._estimate_to_json` — range/power/I3C-bus-airtime
+figures and their warnings/errors are exactly what that pure model computes for the **applied**
+config; `web.py`/`controls.js` hardcode no threshold or formula beyond the documented **70%/85%**
+I3C-bar green/yellow/red cutoffs (the spec's own bar-coloring convention, matching the existing
+`.hud-bar__fill`/`is-warn`/`is-crit` pattern the Resources card and TSDF-blocks gauge already use).
+`transport` is one of `udp`/`cdc`/`replay`/`none` (`web._transport_kind`, mirroring
+`transport_counters`'s existing `_live_underlying` type check) — the CDC-above-60-fps warning is
+`estimate.transport_warning`, computed server-side from this field, never guessed client-side from
+URL/browser-location/link-rate. `measured_fps` reuses the *same* `MetricsRegistry.snapshot()` the
+`metrics` message's `streams[].device_hz` already reports for the ToF stream (`RAW_3DMD`/
+`DEPTH_ZF32`) — no second measurement.
+
+*Three distinct FPS numbers, never conflated.* `applied.fps` is what was requested and accepted;
+`estimate.expected_delivered_fps` (`profiles.expected_delivered_fps`, from the 2026-08-03 measured
+hardware ceiling investigation — see `profiles.py`'s module docstring) is the **honest** rate the
+sensor is expected to actually produce, which equals `applied.fps` only at/below that exposure's
+measured 1x delivery ceiling; above it, the sensor still accepts the request but delivers
+period-multiples, and `validate_manual_params` now folds a WARNING about exactly this into
+`estimate.warnings` (rendered separately from `estimate.transport_warning`, which keeps its own
+dedicated field/row). `measured_fps` is the actual observed device cadence, independent of both.
+The Manual FPS slider must never silently apply the request without this consequence being visible.
+
+*Honest with today's firmware.* Commands 11/12 (`SET_IMU_ENV_RATE`/`GET_IMU_ENV_RATE`) parse on the
+current firmware build but ACK `UNKNOWN_CMD` (Task 7 lands them later). `ImuEnvRateState` reports
+that as `error`, leaves `initialized: false`, and — critically — never adopts the requested rate
+into `applied_rate_hz` as if it had been confirmed; the UI shows the honest error and stays
+"coupled" (see `test_set_imu_env_rate_unknown_cmd_reports_error_and_stays_coupled` in
+`test_web.py`).
+
+*One-way flow, same rule as every other segmented control.* The four-way profile selector's active
+segment and the Coupled/Explicit toggle's `coupled` half are driven **entirely** by the `ranging`
+echo; clicking never sets them locally. The Manual panel's own ranging-mode/power-mode sub-segments
+and the IMU/env Explicit-Hz slider are the one deliberate exception — they are input widgets
+composing the *next* request, not read-outs of applied state, so they hold a local selection between
+edits (seeded from the applied config whenever nothing is pending), exactly like the View card's
+camera-framing sliders already do. `pending` gates its whole control group client-side (disabled,
+not queued) in addition to the server-side reject in `_set_profile`/`_set_manual_params`/
+`_set_imu_env_rate` (a second change while pending is rejected, never silently overwriting the
+in-flight request).
+
 ### JSON (`type` → shape)
 
 | type | key fields | built by | notes |
@@ -473,6 +538,7 @@ exact body-axis rotation above, plus a countdown of the cells left in the gap be
 | `saved` | `items[]{name,bytes,mtime}` (newest first) | `build_saved_message` (web Phase 4) | `results/*.ply`; on connect and after a Save completes |
 | `deleted` | `deleted[]{name,bytes,sidecars[]}`, `refused[]{name,reason}`, `bytes` | `_handle_delete_captures` (§12) | The result of one `delete_captures`. Reports what was **actually** deleted, not what was requested — every refusal carries a reason (`not found` / `currently recording` / `currently playing and there is no live source to switch to` / `delete failed`). Followed immediately by fresh `captures` + `saved` + `session` + `state`. |
 | `magcal` | `collecting`, `sample_count`, `elapsed_s`, `cells`(92), `cell_counts`[92], `cell_dev_pct`[92] (null = empty cell), `view`(current\|candidate), `live_cell`, `live_dir`[3], `gaps[]{size,fraction,centroid[3],face}`, `guidance`, `guidance_axis`{axis[3],angle_deg,text,target[3],target_cell,region_size,from_face,to_face}, `live_fit`{samples,used,field_ut,std_pct,bias_pct,residual_rms_ut,spread_verdict,bias_verdict,verdict,error}, `motion`{stationary,spread_deg,window_s,n}, `has_current`, `has_candidate`, `binning`(candidate\|current\|provisional\|raw), `fit_error`, `current`/`candidate`→{samples,samples_verdict,field{mean_ut,std_ut,std_pct,min_ut,max_ut,ratio,residual_rms_ut,expected_ut,bias_pct,spread_verdict,bias_verdict,verdict},coverage{cells,occupied,empty,fraction,verdict},verdict,limited_by,reason}, `current_field_ut`, `candidate_field_ut`, `saved_path`; **on `open` only**: `cell_dirs`[92][3], `t_world_to_cv`[9] (row-major) | `magsweep.build_report` via `web._magcal_report` | **Per-tab, not broadcast**: sent at `MAGCAL_INTERVAL` (**5 Hz**) only to sockets in `state.magcal_clients` (i.e. tabs that sent `magcal/open`), plus immediately on `open` and after every state-changing action. A session with the modal closed everywhere costs nothing. `cell_dirs`/`t_world_to_cv` are deterministic constants and ride the `open` report ONLY (4490 B → 1982 B per tick, a 56% cut); the client caches them. The 30 Hz render payload is the binary `MAGPOSE` channel, not this one. See "Magnetometer sweep" below |
+| `ranging` | `transport`(udp\|cdc\|replay\|none), `initialized`, `applied`{profile,ranging_mode,exposure_ms,fps,power_mode}\|null, `measured_fps`, `estimate`{profile,ranging_mode,fps,exposure_ms,power_mode,dss_enabled,frame_period_us,i3c_xfer_ms,i3c_bus_utilization_pct,i3c_airtime_left_pct,power_mw,max_range_m,min_distance_mm,transport_warning,imu_env_rate_hz,imu_env_coupled,expected_delivered_fps,warnings[],errors[],ok}\|null, `requested`{kind(profile\|manual\|null),profile,manual{ranging_mode,fps,exposure_ms,power_mode}}, `pending`, `error`, `imu_env`{initialized,applied_rate_hz,coupled,requested_rate_hz,pending,warning,error} | `web._ranging_message` | See "Ranging profiles & manual sensor control" above. Sent on connect (so a second/late-joining tab is current immediately, same as `state`/`session`/`saved`), after every `set_profile`/`set_manual_params`/`set_imu_env_rate`, and on the ~4 Hz metrics tick (to keep `measured_fps` live). `applied` is `null` until the first successful device readback (`initialized: false`) — never a guessed default. `estimate` is `null` until `applied` exists (nothing to estimate yet). `pending`/`imu_env.pending` are two INDEPENDENT flags — a manual-params edit and an IMU/env rate change never block each other |
 | `event` | `code`, `detail`, `msg` | `classify_bus_line` `web.py:142` | from a device EVENT bus line |
 | `cmd` | `label`, `status`(ok\|busy\|timeout\|error), `detail` | `classify_bus_line` `web.py:151` | command-result echo; `status` via `_cmd_status` `web.py:156` |
 | `log` | `line` | `classify_bus_line` `web.py:145,153` | catch-all bus line |
@@ -524,6 +590,9 @@ The rest of the table below is `/ws` only:
 | `magcal` | `action`(open\|close\|start\|stop\|reset\|save\|discard\|view), `cal?`(current\|candidate) | magnetometer sweep/calibration modal (`web._handle_magcal`): `open`/`close` subscribe this socket to `magcal` reports; `start`/`stop` bracket a collection (`stop` also runs `magcal.fit_ellipsoid` → a **candidate**, never saved); `save` writes the candidate to `ViewerConfig.mag_cal_path` and hot-reloads it (`web.install_mag_calibration`); `discard` drops the candidate but KEEPS the samples; `reset` clears the samples; `view` picks which calibration colours the map. Unknown actions are rejected+logged. Every action echoes a fresh `magcal` | `web._handle_magcal` |
 | `clear_yaw_offset` | — | reset `yaw_offset_deg` to 0.0 (back to raw SFLP yaw); persisted to `[viewer]` → echo `state` | `web.py` |
 | `set_elevation_datum` | `on` (**bool, strictly**) | capture the current **smoothed** elevation into `UiState.elevation_datum_ft` (`on: true`) so the Sensors card reads change-since instead of absolute height, or clear it (`on: false`); persisted to `[viewer] elevation_datum_ft` → echo `state`. A non-bool `on` is rejected+logged with **no mutation** (a truthy string must not set a datum, and a falsy one must not clear an existing one). With no barometer reading yet it refuses with a bus line rather than capturing a datum of 0 ft. Smoothed, not raw, on purpose: a datum taken from one sample would bake ~1.2 ft of noise in as a constant offset for the whole session — the same mistake BUG-037 found in the SLAM height datum | `web.py` |
+| `set_profile` | `profile`(room_mapping\|precision\|high_framerate\|manual) | one atomic `SET_RANGING_PROFILE` (cmd 8), off the event loop; on success chains one `GET_RANGING_CONFIG` readback (cmd 8's own ACK has no config fields) → echo `ranging`. Unknown profile name: rejected+logged, no device round-trip. `manual` reapplies the device's last accepted `SET_MANUAL_PARAMS` candidate — rejected `BAD_PARAM` by the device until one exists this session. Rejected client-**and**-server-side (no-op, logged) while another ranging command is already `pending` | `web._set_profile` |
+| `set_manual_params` | `ranging_mode`(ambient\|precision), `fps`(1-100), `exposure_ms`(1-16), `power_mode`(ulp\|lp\|regular) | validated through `roomscan.profiles.validate_manual_params` FIRST (a rejected request never touches the device); on success, the WHOLE candidate goes as **one** atomic `SET_MANUAL_PARAMS` (cmd 9) — never four independent operations — and commits `applied_*` straight from that ACK (already the readback) → echo `ranging`. Same pending-rejection rule as `set_profile` | `web._set_manual_params` |
+| `set_imu_env_rate` | `rate_hz`(0 = coupled, else 1-480) | independent pending command from ranging (own `ImuEnvRateState.pending`): validated through `profiles.validate_imu_env_rate` (reports, doesn't silently drop, a requested rate above the 60 Hz sensor-hub cycle — stream 10/env will sub-sample), then one `SET_IMU_ENV_RATE` (cmd 11) off the event loop → echo `ranging`. **Today's firmware ACKs `UNKNOWN_CMD`** (Task 7 not yet landed): reported as `imu_env.error`, `applied_rate_hz` is left untouched — never adopts the request as if confirmed | `web._set_imu_env_rate` |
 
 `view_colormap` is presentation state for every 3D display: Point cloud, SLAM,
 and Detailed. SLAM/Detailed re-map their already-shaded mesh scalar in the

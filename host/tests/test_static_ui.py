@@ -620,7 +620,7 @@ def test_every_fusion_status_has_a_label_and_a_remedy():
                 and (n.value in ("init", "active") or n.value.startswith("gated:"))}
     assert "gated:no-field" in statuses, "AST scan found no statuses -- the check is broken"
 
-    help_keys = set(re.findall(r"^\s*'?([a-z:-]+)'?\s*:", 
+    help_keys = set(re.findall(r"^\s*'?([a-z:-]+)'?\s*:",
                                re.search(r"const FUSION_HELP = \{(.*?)\n\};",
                                          (STATIC / "sensors.js").read_text(encoding="utf-8"),
                                          re.DOTALL).group(1), re.MULTILINE))
@@ -629,3 +629,171 @@ def test_every_fusion_status_has_a_label_and_a_remedy():
     missing_help = statuses - help_keys - {"active"}
     assert not missing_label, f"YawFusion statuses with no HUD label: {sorted(missing_label)}"
     assert not missing_help, f"YawFusion statuses with no remedy line: {sorted(missing_help)}"
+
+
+# ---------------------------------------------------------------------------
+# Ranging profiles / manual sensor control / IMU-env poll rate (Task 10,
+# docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md).
+# ---------------------------------------------------------------------------
+#
+# Numeric bounds are imported from `roomscan.profiles` (the single host-side
+# owner of every range/step) rather than copied, so a future coefficient or
+# range change in that module fails THIS test instead of silently desyncing
+# the markup from the model that validates the values it sends.
+
+from roomscan import profiles as _profiles  # noqa: E402
+
+
+def test_ranging_profile_selector_replaces_the_old_usecase_control():
+    """The old two-button Usecase segmented control is gone; the four-way
+    Room Mapping / Precision / High Frame-Rate / Manual selector replaces it
+    entirely (plan Task 10 item 4)."""
+    html = _index()
+    assert 'id="seg-usecase"' not in html
+    assert 'data-uc=' not in html
+    seg = re.search(r'<div class="segmented" id="seg-ranging-profile">(.*?)</div>', html, re.DOTALL)
+    assert seg is not None, "seg-ranging-profile not found"
+    profiles_present = set(re.findall(r'data-profile="([^"]+)"', seg.group(1)))
+    assert profiles_present == {"room_mapping", "precision", "high_framerate", "manual"}
+
+
+def test_every_new_ranging_input_has_a_tooltip():
+    """`test_every_button_has_a_tooltip` only scans `<button>`; the manual/IMU
+    panels add `<input type="range">`/`<input type="number">` controls that
+    need the same coverage (plan Task 10 item 9: "a `title` on EVERY new
+    control")."""
+    html = _index()
+    ids = ("sl-manual-fps", "num-manual-fps", "sl-manual-exposure", "num-manual-exposure",
+          "sl-imu-env-rate", "num-imu-env-rate")
+    missing = []
+    for element_id in ids:
+        m = re.search(r'<input\b[^>]*\bid="' + re.escape(element_id) + r'"[^>]*>', html)
+        assert m is not None, f"input id={element_id} not found"
+        if "title=" not in m.group(0):
+            missing.append(element_id)
+    assert not missing, f"ranging inputs without a title= tooltip: {missing}"
+
+
+def _input_attrs(html: str, element_id: str) -> dict:
+    m = re.search(r'<input\b[^>]*\bid="' + re.escape(element_id) + r'"[^>]*>', html)
+    assert m is not None, f"input id={element_id} not found"
+    tag = m.group(0)
+    attrs = {}
+    for name in ("min", "max", "step", "value"):
+        am = re.search(name + r'="([^"]*)"', tag)
+        if am:
+            attrs[name] = am.group(1)
+    return attrs
+
+
+@pytest.mark.parametrize("slider_id, number_id", [
+    ("sl-manual-fps", "num-manual-fps"),
+    ("sl-manual-exposure", "num-manual-exposure"),
+    ("sl-imu-env-rate", "num-imu-env-rate"),
+])
+def test_manual_paired_inputs_agree_with_each_other(slider_id, number_id):
+    """The range and number half of each paired input must share the same
+    min/max/step, or the two widgets would silently accept different values
+    for the identical field."""
+    html = _index()
+    s = _input_attrs(html, slider_id)
+    n = _input_attrs(html, number_id)
+    assert s["min"] == n["min"]
+    assert s["max"] == n["max"]
+    assert s["step"] == n["step"]
+
+
+def test_manual_fps_bounds_match_profiles_py():
+    html = _index()
+    a = _input_attrs(html, "sl-manual-fps")
+    assert int(a["min"]) == _profiles.FPS_MIN
+    assert int(a["max"]) == _profiles.FPS_MAX
+
+
+def test_manual_exposure_bounds_match_profiles_py():
+    html = _index()
+    a = _input_attrs(html, "sl-manual-exposure")
+    assert int(a["min"]) == _profiles.EXPOSURE_MS_MIN
+    assert int(a["max"]) == _profiles.EXPOSURE_MS_MAX
+    assert int(a["step"]) == _profiles.EXPOSURE_STEP_MS
+
+
+def test_imu_env_rate_bounds_match_profiles_py():
+    html = _index()
+    a = _input_attrs(html, "sl-imu-env-rate")
+    assert int(a["max"]) == _profiles.IMU_ENV_RATE_MAX_HZ
+
+
+def test_preset_button_tooltips_carry_no_hardcoded_consequence_numbers():
+    """The Room Mapping/Precision/High Frame-Rate tooltips are STATIC markup
+    that cannot track a live `profiles.py` coefficient/preset change -- a
+    concurrent hardware-investigation session amending
+    `PRESETS[ProfileId.HIGH_FRAMERATE]`'s fps mid-review is exactly the case
+    that silently staled a fps/range/% figure baked into this text before this
+    test existed. Consequence NUMBERS belong only in the live `ranging`-echo-
+    driven "Applied"/estimate readouts (`ranging-applied-val`/
+    `ranging-range-val`/`ranging-power-val`/`ranging-i3c-caption`), which are
+    always current because they come from the server on every change --
+    never in a preset button's own `title=`."""
+    html = _index()
+    for profile in ("room_mapping", "precision", "high_framerate"):
+        m = re.search(r'data-profile="' + profile + r'"[^>]*title="([^"]+)"', html)
+        assert m is not None, f"data-profile={profile!r} button not found"
+        tooltip = m.group(1)
+        assert not re.search(r"\d", tooltip), (
+            f"{profile} tooltip contains a digit (a hardcoded consequence number "
+            f"that WILL go stale): {tooltip!r}"
+        )
+
+
+def test_ranging_i3c_bar_uses_the_documented_thresholds():
+    """The spec's own thresholds (green <70%, yellow 70-85%, red >85%) --
+    controls.js must classify the bar with exactly these cutoffs, matching
+    the `.hud-bar__fill`/`is-warn`/`is-crit` convention every other bar in
+    this app already uses (Resources card, TSDF blocks gauge)."""
+    js = (STATIC / "controls.js").read_text(encoding="utf-8")
+    assert "ranging-i3c-fill" in js
+    assert re.search(r"frac\s*>=\s*0\.[67]0\s*&&\s*frac\s*<\s*0\.85", js), (
+        "expected an is-warn band gated on [0.70, 0.85)"
+    )
+    assert re.search(r"frac\s*>=\s*0\.85", js), "expected an is-crit cutoff at 0.85"
+
+
+def test_ranging_cdc_warning_element_exists_and_is_driven_by_server_estimate():
+    """The CDC warning must come from the server's `estimate.transport_warning`
+    field, never a client-side fps>60 comparison -- the global constraint is
+    "never guess from URL, browser location, or link rate"."""
+    html = _index()
+    assert 'id="ranging-cdc-warning"' in html
+    js = (STATIC / "controls.js").read_text(encoding="utf-8")
+    # Driven straight from the server's field -- no client-side fps>60 literal
+    # comparison anywhere near it (the global constraint: never guess from
+    # URL, browser location, or link rate).
+    assert "rangingCdcWarning.hidden = !est.transport_warning" in js
+    assert "> 60" not in js and ">= 60" not in js and "> 60.0" not in js
+
+
+def test_device_card_reachable_from_squircle_rail():
+    """Task 10 item 9's "Device card reachability": the card that now hosts
+    the ranging profile/manual/IMU-env controls must still resolve through
+    the squircle rail's permanent map of every panel (it starts collapsed,
+    same as before this change)."""
+    html = _index()
+    assert re.search(r'<div class="control-group card collapsed" data-card-id="device">', html), (
+        "the Device card must still exist, collapsed by default"
+    )
+    js = LAYOUT_JS.read_text(encoding="utf-8")
+    icon_keys = _js_object_keys(js, "CARD_ICONS")
+    title_keys = _js_object_keys(js, "CARD_TITLES")
+    assert "device" in icon_keys and "device" in title_keys
+
+
+def test_ranging_and_imu_env_pending_disable_their_own_controls_only():
+    """Task 10 item 8: IMU/env is "a second, independent pending command, not
+    a fifth field bolted onto Manual ranging" -- the two `pending` flags must
+    gate DISJOINT sets of controls in controls.js, not one shared flag."""
+    js = (STATIC / "controls.js").read_text(encoding="utf-8")
+    assert "rangingPending" in js and "imuEnvPending" in js
+    # The IMU/env controls must never be gated on the ranging pending flag.
+    imu_block = js[js.index("segImuEnvMode?.addEventListener"):js.index("hub.on('ranging'")]
+    assert "rangingPending" not in imu_block

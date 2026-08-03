@@ -44,7 +44,13 @@ from fastapi.staticfiles import StaticFiles
 
 from .colors import gray, turbo
 from .config import ViewerConfig
-from .control import CommandClient, CommandDispatcher
+from .control import (
+    CommandClient,
+    CommandDispatcher,
+    _manual_params_to_wire,
+    _POWER_MODE_TO_WIRE,
+    _RANGING_MODE_TO_WIRE,
+)
 from .decoder import StreamDecoder
 from .deproject import Deprojector
 from .ir_image import ir_range, reflectance_to_rgb
@@ -70,6 +76,8 @@ from .protocol import (
     FrameHeader,
     FrameType,
     ProtocolError,
+    RangingConfigAck,
+    ResultCode,
     StandbyLevel,
     StreamId,
 )
@@ -98,6 +106,7 @@ from .sensors import (
     triad_roll_deg,
     wrap180,
 )
+from . import profiles
 from . import thumbs as thumbs_mod
 from .motion import coherence
 from .sources import FileSource, Recorder, SerialSource, UdpSource, get_best_source
@@ -1651,6 +1660,480 @@ def resolve_command(name: str, param) -> tuple[CommandCode, int, str] | None:
     if name == "exposure":
         return CommandCode.SET_EXPOSURE_MS, int(param), f"exposure {int(param)}"
     return None
+
+
+# --- Ranging profiles & manual sensor control (Task 10, high-framerate plan) ------
+#
+# Server-owned, device-authoritative state for SET_RANGING_PROFILE/SET_MANUAL_PARAMS/
+# GET_RANGING_CONFIG (cmd 8/9/10, live+hardware-verified) and SET/GET_IMU_ENV_RATE
+# (cmd 11/12, Task 7 -- firmware parses them but currently ACKs UNKNOWN_CMD; this
+# layer reports that honestly instead of pretending a rate was ever confirmed).
+#
+# `roomscan.profiles` is the single pure owner of every number shown here (fps/
+# exposure ranges, DSS/context rules, power/range/I3C-bus estimates); nothing below
+# hardcodes a threshold or formula that module doesn't already own -- see its module
+# docstring for the derivations. This module only bridges wire <-> profiles enums,
+# drives the CommandClient off the event loop, and never commits `applied_*` state
+# from anything but a successful device readback (a SET_RANGING_PROFILE ACK carries
+# no config fields at all -- cmd 8 keeps the legacy 12-byte ACK shape -- so a
+# successful preset switch is always followed by one GET_RANGING_CONFIG round trip;
+# SET_MANUAL_PARAMS's own ACK already IS the readback, so manual needs no second
+# trip).
+#
+# Enum<->wire-string bridges: reuses `roomscan.control`'s tested
+# `_RANGING_MODE_TO_WIRE`/`_POWER_MODE_TO_WIRE` name-keyed tables (inverted here for
+# the read direction) rather than a second copy -- that module's own docstring warns
+# passing `.value` straight through silently sends the wrong ranging/power mode
+# because the wire and profiles enums use different numbering.
+_WIRE_TO_PROFILE_RANGING_MODE: dict[int, profiles.RangingMode] = {
+    int(wire): prof for prof, wire in _RANGING_MODE_TO_WIRE.items()
+}
+_WIRE_TO_PROFILE_POWER_MODE: dict[int, profiles.PowerMode] = {
+    int(wire): prof for prof, wire in _POWER_MODE_TO_WIRE.items()
+}
+
+# JSON vocabulary for the `ranging` message -- deliberately the same tokens
+# `roomscan-ctl`'s CLI already uses (ambient/precision, ulp/lp/regular), not
+# `IntEnum.name.lower()` (which would say "ultra_low" for power, disagreeing
+# with the CLI's "ulp" for the identical value).
+_PROFILE_ID_TO_STR: dict[profiles.ProfileId, str] = {
+    profiles.ProfileId.ROOM_MAPPING: "room_mapping",
+    profiles.ProfileId.PRECISION: "precision",
+    profiles.ProfileId.HIGH_FRAMERATE: "high_framerate",
+    profiles.ProfileId.MANUAL: "manual",
+}
+_STR_TO_PROFILE_ID: dict[str, profiles.ProfileId] = {v: k for k, v in _PROFILE_ID_TO_STR.items()}
+_RANGING_MODE_TO_STR: dict[profiles.RangingMode, str] = {
+    profiles.RangingMode.AMBIENT: "ambient",
+    profiles.RangingMode.PRECISION: "precision",
+}
+_STR_TO_RANGING_MODE: dict[str, profiles.RangingMode] = {v: k for k, v in _RANGING_MODE_TO_STR.items()}
+_POWER_MODE_TO_STR: dict[profiles.PowerMode, str] = {
+    profiles.PowerMode.ULTRA_LOW: "ulp",
+    profiles.PowerMode.LOW: "lp",
+    profiles.PowerMode.REGULAR: "regular",
+}
+_STR_TO_POWER_MODE: dict[str, profiles.PowerMode] = {v: k for k, v in _POWER_MODE_TO_STR.items()}
+
+
+@dataclass
+class RangingState:
+    """Server-owned authoritative ranging-profile state.
+
+    The device is the single source of truth for `applied_*` -- populated only
+    from a `GET_RANGING_CONFIG` readback or a successful `SET_RANGING_PROFILE`/
+    `SET_MANUAL_PARAMS` readback (see `_refresh_ranging_state`/`_commit_ranging_ack`),
+    never assumed from a firmware default and never set optimistically from a
+    click. `requested_*` is what the LAST command asked for -- shown while a
+    command is pending or after it fails -- and never feeds `estimate`/`applied_*`
+    on its own.
+    """
+    transport: str = "none"                # "udp" | "cdc" | "replay" | "none"
+    initialized: bool = False              # True once a real device readback has landed
+    applied_profile_id: int | None = None       # profiles.ProfileId
+    applied_ranging_mode: int | None = None      # profiles.RangingMode
+    applied_fps: int | None = None
+    applied_exposure_ms: int | None = None
+    applied_power_mode: int | None = None        # profiles.PowerMode
+    estimate: dict | None = None            # _estimate_to_json() of the applied config
+    measured_fps: float | None = None       # metrics device_hz for the ToF stream
+    requested_profile_id: int | None = None
+    requested_manual: dict | None = None     # {"ranging_mode","fps","exposure_ms","power_mode"}
+    pending: bool = False
+    pending_kind: str | None = None          # "profile" | "manual" | None
+    error: str | None = None                 # last command's failure; cleared on next success
+
+
+@dataclass
+class ImuEnvRateState:
+    """Independent pending-command state for SET/GET_IMU_ENV_RATE (cmd 11/12,
+    Task 7). Deliberately separate from `RangingState` -- plan Task 10 item 8:
+    "a second, independent pending command, not a fifth field bolted onto
+    Manual ranging". Firmware parses 11/12 but currently ACKs UNKNOWN_CMD
+    (Task 7 not yet landed); this state reports that honestly and stays
+    "coupled" rather than pretending a rate was ever confirmed."""
+    initialized: bool = False
+    applied_rate_hz: int | None = None       # None until a real readback; 0 = coupled
+    requested_rate_hz: int | None = None
+    pending: bool = False
+    warning: str | None = None
+    error: str | None = None
+
+
+def _transport_kind(ctrl) -> str:
+    """"udp" | "cdc" | "replay" | "none" -- authoritative, never guessed client-side
+    (global constraint: "the server knows its source ... surface it in state")."""
+    if ctrl is None:
+        return "none"
+    if getattr(ctrl, "mode", None) == "replay":
+        return "replay"
+    underlying = getattr(ctrl, "_live_underlying", None)
+    if isinstance(underlying, UdpSource):
+        return "udp"
+    if isinstance(underlying, SerialSource):
+        return "cdc"
+    return "none"
+
+
+def _match_profile_id(ranging_mode: profiles.RangingMode, fps: int, exposure_ms: int,
+                      power_mode: profiles.PowerMode) -> profiles.ProfileId:
+    """A device readback carries only ranging_mode/frame_period_us/exposure_ms/
+    power_mode -- no profile id -- so "which of the four buttons is this"
+    is inferred by exact match against `profiles.PRESETS`; anything that
+    doesn't match one is MANUAL, whether it was reached via SET_MANUAL_PARAMS
+    or is simply a configuration no preset happens to describe."""
+    for pid, cfg in profiles.PRESETS.items():
+        if (cfg.ranging_mode == ranging_mode and cfg.fps == fps
+                and cfg.exposure_ms == exposure_ms and cfg.power_mode == power_mode):
+            return pid
+    return profiles.ProfileId.MANUAL
+
+
+def _profile_config_from_ack(ack: RangingConfigAck, imu_env_rate_hz: int | None) -> profiles.ProfileConfig:
+    ranging_mode = _WIRE_TO_PROFILE_RANGING_MODE[ack.ranging_mode]
+    power_mode = _WIRE_TO_PROFILE_POWER_MODE[ack.power_mode]
+    fps = round(profiles.period_us_to_fps(ack.frame_period_us)) if ack.frame_period_us else 0
+    profile_id = _match_profile_id(ranging_mode, fps, ack.exposure_ms, power_mode)
+    return profiles.ProfileConfig(profile_id, ranging_mode, fps, ack.exposure_ms,
+                                  power_mode, imu_env_rate_hz)
+
+
+def _estimate_to_json(est: profiles.ProfileEstimate) -> dict:
+    return {
+        "profile": _PROFILE_ID_TO_STR.get(profiles.ProfileId(est.profile_id)),
+        "ranging_mode": _RANGING_MODE_TO_STR.get(profiles.RangingMode(est.ranging_mode)),
+        "fps": est.fps,
+        "exposure_ms": est.exposure_ms,
+        "power_mode": _POWER_MODE_TO_STR.get(profiles.PowerMode(est.power_mode)),
+        "dss_enabled": est.dss_enabled,
+        "frame_period_us": est.frame_period_us,
+        "i3c_xfer_ms": est.i3c_xfer_ms,
+        "i3c_bus_utilization_pct": est.i3c_bus_utilization_pct,
+        "i3c_airtime_left_pct": est.i3c_airtime_left_pct,
+        "power_mw": est.power_mw,
+        "max_range_m": est.max_range_m,
+        "min_distance_mm": est.min_distance_mm,
+        "transport_warning": est.transport_warning,
+        "imu_env_rate_hz": est.imu_env_rate_hz,
+        "imu_env_coupled": est.imu_env_coupled,
+        # Honest expected delivery rate (2026-08-03 measured hardware ceiling,
+        # `profiles.expected_delivered_fps`): equals `fps` exactly at/below the
+        # exposure's measured 1x ceiling; above it, the sensor still ACCEPTS the
+        # request but delivers period-multiples, and this is what it actually
+        # delivers -- callers must show THIS, never just echo the request.
+        "expected_delivered_fps": est.expected_delivered_fps,
+        "warnings": list(est.warnings),
+        "errors": list(est.errors),
+        "ok": est.ok,
+    }
+
+
+def _recompute_ranging_estimate(state) -> None:
+    """Rebuild `RangingState.estimate` from the currently-known applied fields
+    -- no device round trip. Called after either half (ranging or IMU/env)
+    changes, so the estimate's `imu_env_rate_hz`/`imu_env_coupled` never goes
+    stale relative to the OTHER card's last confirmed rate."""
+    rs: RangingState = state.ranging_state
+    if not rs.initialized or rs.applied_ranging_mode is None:
+        return
+    ie: ImuEnvRateState = state.imu_env_state
+    config = profiles.ProfileConfig(
+        profiles.ProfileId(rs.applied_profile_id), profiles.RangingMode(rs.applied_ranging_mode),
+        rs.applied_fps, rs.applied_exposure_ms, profiles.PowerMode(rs.applied_power_mode),
+        ie.applied_rate_hz)
+    estimate = profiles.estimate_profile(config, transport=rs.transport)
+    rs.estimate = _estimate_to_json(estimate)
+
+
+def _commit_ranging_ack(state, ack: RangingConfigAck) -> None:
+    """Commit `RangingState.applied_*` from a REAL device readback (either a
+    `GET_RANGING_CONFIG` ACK or a successful `SET_MANUAL_PARAMS` ACK, which
+    carries the identical config shape) -- the only path allowed to write
+    these fields (global constraint: "Profile state is server-authoritative
+    and changes only after a successful ACK containing device readback.
+    No optimistic client state.")."""
+    rs: RangingState = state.ranging_state
+    ie: ImuEnvRateState = state.imu_env_state
+    config = _profile_config_from_ack(ack, ie.applied_rate_hz)
+    rs.applied_profile_id = int(config.profile_id)
+    rs.applied_ranging_mode = int(config.ranging_mode)
+    rs.applied_fps = config.fps
+    rs.applied_exposure_ms = config.exposure_ms
+    rs.applied_power_mode = int(config.power_mode)
+    rs.initialized = True
+    rs.error = None
+    _recompute_ranging_estimate(state)
+
+
+def _ranging_message(state) -> dict:
+    rs: RangingState = state.ranging_state
+    ie: ImuEnvRateState = state.imu_env_state
+    applied = None
+    if rs.initialized:
+        applied = {
+            "profile": (_PROFILE_ID_TO_STR.get(profiles.ProfileId(rs.applied_profile_id))
+                       if rs.applied_profile_id is not None else None),
+            "ranging_mode": (_RANGING_MODE_TO_STR.get(profiles.RangingMode(rs.applied_ranging_mode))
+                             if rs.applied_ranging_mode is not None else None),
+            "fps": rs.applied_fps,
+            "exposure_ms": rs.applied_exposure_ms,
+            "power_mode": (_POWER_MODE_TO_STR.get(profiles.PowerMode(rs.applied_power_mode))
+                          if rs.applied_power_mode is not None else None),
+        }
+    return {
+        "type": "ranging",
+        "transport": rs.transport,
+        "initialized": rs.initialized,
+        "applied": applied,
+        "measured_fps": round(rs.measured_fps, 2) if rs.measured_fps is not None else None,
+        "estimate": rs.estimate,
+        "requested": {
+            "kind": rs.pending_kind,
+            "profile": (_PROFILE_ID_TO_STR.get(profiles.ProfileId(rs.requested_profile_id))
+                       if rs.requested_profile_id is not None else None),
+            "manual": rs.requested_manual,
+        },
+        "pending": rs.pending,
+        "error": rs.error,
+        "imu_env": {
+            "initialized": ie.initialized,
+            "applied_rate_hz": ie.applied_rate_hz,
+            "coupled": ie.applied_rate_hz in (None, 0),
+            "requested_rate_hz": ie.requested_rate_hz,
+            "pending": ie.pending,
+            "warning": ie.warning,
+            "error": ie.error,
+        },
+    }
+
+
+async def _broadcast_ranging(state) -> None:
+    await _broadcast_text(state.clients, json.dumps(_ranging_message(state)))
+
+
+async def _refresh_ranging_state(state) -> None:
+    """`GET_RANGING_CONFIG` (cmd 10): the authoritative restore path -- called
+    at startup/device-connect and after every successful preset switch (cmd 8's
+    own ACK carries no config fields to commit from directly)."""
+    rs: RangingState = state.ranging_state
+    ctrl = getattr(state, "controller", None)
+    client = getattr(state, "client", None)
+    rs.transport = _transport_kind(ctrl)
+    if client is None:
+        return
+    try:
+        result, ack = await asyncio.to_thread(client.get_ranging_config)
+    except TimeoutError as exc:
+        rs.error = f"GET_RANGING_CONFIG timeout: {exc}"
+        return
+    except ProtocolError as exc:
+        rs.error = f"GET_RANGING_CONFIG protocol error: {exc}"
+        return
+    if result != ResultCode.OK:
+        rs.error = f"GET_RANGING_CONFIG -> {result.name}"
+        return
+    _commit_ranging_ack(state, ack)
+
+
+async def _refresh_imu_env_state(state) -> None:
+    """`GET_IMU_ENV_RATE` (cmd 12). Honest with today's firmware: cmd 12 parses
+    but ACKs UNKNOWN_CMD (Task 7 not yet landed), so this reports that error and
+    leaves `initialized` False rather than adopting a guessed "coupled" state."""
+    ie: ImuEnvRateState = state.imu_env_state
+    client = getattr(state, "client", None)
+    if client is None:
+        return
+    try:
+        result, applied = await asyncio.to_thread(client.get_imu_env_rate)
+    except TimeoutError as exc:
+        ie.error = f"GET_IMU_ENV_RATE timeout: {exc}"
+        return
+    except ProtocolError as exc:
+        ie.error = f"GET_IMU_ENV_RATE protocol error: {exc}"
+        return
+    if result != ResultCode.OK:
+        ie.error = f"GET_IMU_ENV_RATE -> {result.name}"
+        return
+    ie.applied_rate_hz = int(applied)
+    ie.initialized = True
+    ie.error = None
+    _recompute_ranging_estimate(state)
+
+
+async def _init_ranging_state(state) -> None:
+    """One-shot startup restore (Task 10 item 1: "Initialize through
+    GET_RANGING_CONFIG ... NOT an assumed firmware default"). A no-op, not an
+    error, when there is no live device (replay-only launch)."""
+    ctrl = getattr(state, "controller", None)
+    rs: RangingState = state.ranging_state
+    rs.transport = _transport_kind(ctrl)
+    if getattr(state, "client", None) is None:
+        return
+    await _refresh_ranging_state(state)
+    await _refresh_imu_env_state(state)
+    await _broadcast_ranging(state)
+
+
+async def _set_profile(state, profile_id: int) -> None:
+    """Inbound `set_profile`. One atomic `SET_RANGING_PROFILE` (cmd 8), off the
+    event loop; on success, one `GET_RANGING_CONFIG` round trip to learn what
+    was actually applied (cmd 8's own ACK has no config fields)."""
+    rs: RangingState = state.ranging_state
+    ctrl = getattr(state, "controller", None)
+    client = getattr(state, "client", None)
+    rs.transport = _transport_kind(ctrl)
+    if client is None or rs.transport == "replay":
+        rs.error = "ranging control unavailable in replay"
+        await _broadcast_ranging(state)
+        return
+    if rs.pending:
+        log.warning("set_profile: rejected -- a ranging command is already pending")
+        return
+    rs.requested_profile_id = int(profile_id)
+    rs.requested_manual = None
+    rs.pending_kind = "profile"
+    rs.pending = True
+    rs.error = None
+    await _broadcast_ranging(state)
+    try:
+        result, _applied = await asyncio.to_thread(client.send_profile, int(profile_id))
+    except TimeoutError as exc:
+        rs.error = f"SET_RANGING_PROFILE timeout: {exc}"
+        rs.pending, rs.pending_kind = False, None
+        await _broadcast_ranging(state)
+        return
+    except ProtocolError as exc:
+        rs.error = f"SET_RANGING_PROFILE protocol error: {exc}"
+        rs.pending, rs.pending_kind = False, None
+        await _broadcast_ranging(state)
+        return
+    if result != ResultCode.OK:
+        rs.error = f"SET_RANGING_PROFILE -> {result.name}"
+        rs.pending, rs.pending_kind = False, None
+        await _broadcast_ranging(state)
+        return
+    await _refresh_ranging_state(state)
+    rs.pending, rs.pending_kind = False, None
+    await _broadcast_ranging(state)
+
+
+async def _set_manual_params(state, *, ranging_mode, fps, exposure_ms, power_mode) -> None:
+    """Inbound `set_manual_params`. Validates through `roomscan.profiles`
+    first (so a rejected request never touches the device), then sends the
+    WHOLE candidate as one atomic `SET_MANUAL_PARAMS` (cmd 9) -- never four
+    independent operations. Commits `applied_*` straight from cmd 9's own
+    ACK, which already IS the device readback."""
+    rs: RangingState = state.ranging_state
+    ctrl = getattr(state, "controller", None)
+    client = getattr(state, "client", None)
+    rs.transport = _transport_kind(ctrl)
+    if client is None or rs.transport == "replay":
+        rs.error = "ranging control unavailable in replay"
+        await _broadcast_ranging(state)
+        return
+    if rs.pending:
+        log.warning("set_manual_params: rejected -- a ranging command is already pending")
+        return
+
+    rm = _STR_TO_RANGING_MODE.get(ranging_mode)
+    pm = _STR_TO_POWER_MODE.get(power_mode)
+    if rm is None or pm is None or not isinstance(fps, int) or not isinstance(exposure_ms, int):
+        log.warning("set_manual_params: invalid request ranging_mode=%r fps=%r exposure_ms=%r "
+                   "power_mode=%r", ranging_mode, fps, exposure_ms, power_mode)
+        rs.error = "invalid manual params request"
+        await _broadcast_ranging(state)
+        return
+
+    rs.requested_profile_id = int(profiles.ProfileId.MANUAL)
+    rs.requested_manual = {"ranging_mode": ranging_mode, "fps": fps,
+                          "exposure_ms": exposure_ms, "power_mode": power_mode}
+    rs.pending_kind = "manual"
+
+    params = profiles.ManualParams(rm, fps, exposure_ms, pm)
+    validation = profiles.validate_manual_params(params)
+    if not validation.ok:
+        rs.error = "; ".join(validation.errors)
+        await _broadcast_ranging(state)
+        return
+
+    rs.pending = True
+    rs.error = None
+    await _broadcast_ranging(state)
+
+    wire_params = _manual_params_to_wire(params)
+    try:
+        result, ack = await asyncio.to_thread(client.send_manual_params, wire_params)
+    except TimeoutError as exc:
+        rs.error = f"SET_MANUAL_PARAMS timeout: {exc}"
+        rs.pending, rs.pending_kind = False, None
+        await _broadcast_ranging(state)
+        return
+    except ProtocolError as exc:
+        rs.error = f"SET_MANUAL_PARAMS protocol error: {exc}"
+        rs.pending, rs.pending_kind = False, None
+        await _broadcast_ranging(state)
+        return
+    if result != ResultCode.OK:
+        rs.error = f"SET_MANUAL_PARAMS -> {result.name}"
+        rs.pending, rs.pending_kind = False, None
+        await _broadcast_ranging(state)
+        return
+    _commit_ranging_ack(state, ack)
+    rs.pending, rs.pending_kind = False, None
+    await _broadcast_ranging(state)
+
+
+async def _set_imu_env_rate(state, rate_hz: int) -> None:
+    """Inbound `set_imu_env_rate`. Independent pending command from ranging
+    (Task 10 item 8) -- `SET_IMU_ENV_RATE` (cmd 11), off the event loop.
+    `rate_hz=0` means coupled. Honest with today's firmware: an UNKNOWN_CMD
+    result is reported as an error and `applied_rate_hz` is left untouched
+    (never adopts the request as if it had been confirmed)."""
+    ie: ImuEnvRateState = state.imu_env_state
+    ctrl = getattr(state, "controller", None)
+    client = getattr(state, "client", None)
+    if client is None or _transport_kind(ctrl) == "replay":
+        ie.error = "IMU/env rate control unavailable in replay"
+        await _broadcast_ranging(state)
+        return
+    if ie.pending:
+        log.warning("set_imu_env_rate: rejected -- a rate command is already pending")
+        return
+
+    ie.requested_rate_hz = int(rate_hz)
+    validation = profiles.validate_imu_env_rate(rate_hz or None)
+    if not validation.ok:
+        ie.error = "; ".join(validation.errors)
+        await _broadcast_ranging(state)
+        return
+    ie.warning = "; ".join(validation.warnings) if validation.warnings else None
+    ie.pending = True
+    ie.error = None
+    await _broadcast_ranging(state)
+
+    try:
+        result, applied = await asyncio.to_thread(client.send_imu_env_rate, int(rate_hz))
+    except TimeoutError as exc:
+        ie.error = f"SET_IMU_ENV_RATE timeout: {exc}"
+        ie.pending = False
+        await _broadcast_ranging(state)
+        return
+    except ProtocolError as exc:
+        ie.error = f"SET_IMU_ENV_RATE protocol error: {exc}"
+        ie.pending = False
+        await _broadcast_ranging(state)
+        return
+    if result != ResultCode.OK:
+        ie.error = f"SET_IMU_ENV_RATE -> {result.name}"
+        ie.pending = False
+        await _broadcast_ranging(state)
+        return
+    ie.applied_rate_hz = int(applied)
+    ie.initialized = True
+    ie.error = None
+    ie.pending = False
+    _recompute_ranging_estimate(state)
+    await _broadcast_ranging(state)
 
 
 def _state_message(ui: UiState, controller=None, detailed=None) -> dict:
@@ -3295,6 +3778,11 @@ async def _lifespan(app: FastAPI):
     if getattr(app.state, "ready", False):
         app.state.broadcast_task = asyncio.create_task(_broadcaster())
         app.state.idle_reconcile_task = asyncio.create_task(_idle_reconcile_loop())
+        # Task 10 item 1: restore ranging/IMU-env state from the device's own
+        # GET_RANGING_CONFIG/GET_IMU_ENV_RATE readback, never an assumed firmware
+        # default. One-shot; runs concurrently with the broadcaster so server
+        # startup isn't gated on the device's ACK latency.
+        app.state.ranging_init_task = asyncio.create_task(_init_ranging_state(app.state))
     yield
     task = getattr(app.state, "broadcast_task", None)
     if task is not None:
@@ -3302,6 +3790,9 @@ async def _lifespan(app: FastAPI):
     idle_task = getattr(app.state, "idle_reconcile_task", None)
     if idle_task is not None:
         idle_task.cancel()
+    ranging_task = getattr(app.state, "ranging_init_task", None)
+    if ranging_task is not None:
+        ranging_task.cancel()
     detailed = getattr(app.state, "detailed_runner", None)
     if detailed is not None:
         await asyncio.to_thread(detailed.close)
@@ -4540,6 +5031,19 @@ async def _broadcaster() -> None:
                 if msg is not None:
                     await _broadcast_text(clients, json.dumps(msg))
 
+            # Ranging profile / IMU-env poll rate (Task 10): measured_fps reuses
+            # THIS same metrics snapshot's device_hz for the ToF stream -- "reuse
+            # the existing metrics (device rate) rather than inventing a new
+            # measurement" -- and the `ranging` message rides the same slow
+            # cadence as `metrics`/`session` above.
+            rs = getattr(state, "ranging_state", None)
+            if rs is not None:
+                tof_stream = next((s for s in snap.streams
+                                   if s.stream_id in (StreamId.RAW_3DMD, StreamId.DEPTH_ZF32)), None)
+                rs.measured_fps = tof_stream.device_hz if tof_stream is not None else None
+                rs.transport = _transport_kind(ctrl)
+                await _broadcast_ranging(state)
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -4566,6 +5070,11 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_text(json.dumps(caps))
         saved = await asyncio.to_thread(build_saved_message, RESULTS_DIR)
         await websocket.send_text(json.dumps(saved))
+        # Ranging profile/IMU-env state (Task 10): a second/late-joining tab must
+        # see the SAME server-authoritative state immediately, not wait for the
+        # next tick or an unrelated control's echo.
+        if getattr(state, "ranging_state", None) is not None:
+            await websocket.send_text(json.dumps(_ranging_message(state)))
     except Exception:
         await _drop_client(clients, websocket)
         return
@@ -5230,6 +5739,29 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         state.sensor_state.reset_fusion()
         state.bus.publish("heading fusion reset")
 
+    elif mtype == "set_profile":
+        pid = _STR_TO_PROFILE_ID.get(msg.get("profile"))
+        if pid is None:
+            log.warning("set_profile: unknown profile %r", msg.get("profile"))
+            return
+        await _set_profile(state, int(pid))
+
+    elif mtype == "set_manual_params":
+        await _set_manual_params(
+            state,
+            ranging_mode=msg.get("ranging_mode"),
+            fps=msg.get("fps"),
+            exposure_ms=msg.get("exposure_ms"),
+            power_mode=msg.get("power_mode"),
+        )
+
+    elif mtype == "set_imu_env_rate":
+        rate = msg.get("rate_hz", 0)
+        if not isinstance(rate, int) or isinstance(rate, bool):
+            log.warning("set_imu_env_rate: non-integer rate_hz %r", rate)
+            return
+        await _set_imu_env_rate(state, int(rate))
+
     elif mtype == "magcal":
         await _handle_magcal(state, msg, ws)
 
@@ -5476,6 +6008,12 @@ def main(argv=None) -> int:
     app.state.latest_mesh_seq = 0
     app.state.command_labels = set()
     app.state.debounce = {}
+    # Ranging profiles & manual sensor control (Task 10). Populated for real by
+    # `_init_ranging_state` (GET_RANGING_CONFIG/GET_IMU_ENV_RATE) once the
+    # broadcaster starts -- these are the "not yet initialized" defaults, not
+    # an assumed firmware default.
+    app.state.ranging_state = RangingState()
+    app.state.imu_env_state = ImuEnvRateState()
     # Sensor auto-idle (SET_STANDBY): idle_enabled/idle_level live in ui_state
     # (persisted); the debounce delay and the runtime bookkeeping live here.
     app.state.idle_delay_s = float(getattr(config, "sensor_idle_delay_s", 5.0) or 5.0)

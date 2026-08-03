@@ -5542,3 +5542,595 @@ def test_live_slam_fov_and_device_override_the_config(monkeypatch):
     device = r._construct(54, 42)[2]
     assert (seen["fov_h"], seen["fov_v"]) == (r._fov_h, r._fov_v) != (1.0, 2.0)
     assert str(seen["device"]) == device
+
+
+# --- Task 10: ranging profiles, manual sensor control, IMU/env poll rate -----
+#
+# `RangingState`/`ImuEnvRateState` are server-owned and device-authoritative:
+# `applied_*` is committed ONLY from a real device readback (a successful
+# GET_RANGING_CONFIG, or a SET_MANUAL_PARAMS ACK, which carries the identical
+# shape). Every numeric expectation below is computed FROM `roomscan.profiles`
+# (imported, never copied) so a future coefficient change in that module can't
+# silently desync these tests from the UI it feeds.
+
+from roomscan import profiles as _profiles  # noqa: E402
+
+
+class _FakeRangingClient:
+    """Stand-in for `CommandClient`'s ranging-profile surface. Each method is a
+    plain callable so tests can swap in a canned return, a `TimeoutError`, or a
+    `ProtocolError` per call; `calls` records what was actually invoked so a
+    rejected/validation-failed request can be proven to have never touched the
+    device."""
+    def __init__(self):
+        self.calls: list[tuple] = []
+        self.profile_result = (web.ResultCode.OK, int(_profiles.ProfileId.ROOM_MAPPING))
+        self.ranging_config_result = (web.ResultCode.OK, _ack_for(_profiles.PRESETS[_profiles.ProfileId.ROOM_MAPPING]))
+        self.manual_result = (web.ResultCode.OK, _ack_for(_profiles.PRESETS[_profiles.ProfileId.ROOM_MAPPING]))
+        self.imu_rate_result = (web.ResultCode.OK, 30)
+        self.imu_rate_status_result = (web.ResultCode.OK, 0)
+        self.raise_on: str | None = None   # method name -> raise self.exc instead of returning
+        self.exc: Exception = TimeoutError("no ACK")
+
+    def _maybe_raise(self, name):
+        if self.raise_on == name:
+            raise self.exc
+
+    def send_profile(self, profile_id, timeout=2.0):
+        self.calls.append(("send_profile", profile_id))
+        self._maybe_raise("send_profile")
+        return self.profile_result
+
+    def get_ranging_config(self, timeout=2.0):
+        self.calls.append(("get_ranging_config",))
+        self._maybe_raise("get_ranging_config")
+        return self.ranging_config_result
+
+    def send_manual_params(self, params, timeout=2.0):
+        self.calls.append(("send_manual_params", params))
+        self._maybe_raise("send_manual_params")
+        return self.manual_result
+
+    def send_imu_env_rate(self, rate_hz, timeout=2.0):
+        self.calls.append(("send_imu_env_rate", rate_hz))
+        self._maybe_raise("send_imu_env_rate")
+        return self.imu_rate_result
+
+    def get_imu_env_rate(self, timeout=2.0):
+        self.calls.append(("get_imu_env_rate",))
+        self._maybe_raise("get_imu_env_rate")
+        return self.imu_rate_status_result
+
+
+def _ack_for(cfg: "_profiles.ProfileConfig", result=None):
+    """Build a `RangingConfigAck` matching a `profiles.ProfileConfig` -- the
+    wire ints a real device readback would carry."""
+    from roomscan.control import _POWER_MODE_TO_WIRE, _RANGING_MODE_TO_WIRE
+    return web.RangingConfigAck(
+        cmd=int(web.CommandCode.GET_RANGING_CONFIG), result=int(result or web.ResultCode.OK),
+        ranging_mode=int(_RANGING_MODE_TO_WIRE[cfg.ranging_mode]),
+        frame_period_us=_profiles.fps_to_period_us(cfg.fps),
+        exposure_ms=cfg.exposure_ms,
+        power_mode=int(_POWER_MODE_TO_WIRE[cfg.power_mode]),
+    )
+
+
+class _FakeRangingCtrl:
+    def __init__(self, mode="live", underlying=None):
+        self.mode = mode
+        self._live_underlying = underlying
+
+
+def _ranging_state(*, client=None, ctrl=None, clients=None):
+    import types
+    sent: list[dict] = []
+
+    async def _capture_text(cl, text):
+        sent.append(json.loads(text))
+
+    state = types.SimpleNamespace(
+        client=client, controller=ctrl, clients=(clients if clients is not None else set()),
+        ranging_state=web.RangingState(), imu_env_state=web.ImuEnvRateState())
+    return state, sent, _capture_text
+
+
+# --- transport detection ------------------------------------------------------
+
+def test_transport_kind_udp_cdc_replay_none():
+    assert web._transport_kind(None) == "none"
+    assert web._transport_kind(_FakeRangingCtrl(mode="replay")) == "replay"
+    assert web._transport_kind(_FakeRangingCtrl(mode="live", underlying=object())) == "none"
+
+    class _Udp(web.UdpSource):
+        def __init__(self):
+            pass
+    class _Ser(web.SerialSource):
+        def __init__(self):
+            pass
+
+    assert web._transport_kind(_FakeRangingCtrl(mode="live", underlying=_Udp())) == "udp"
+    assert web._transport_kind(_FakeRangingCtrl(mode="live", underlying=_Ser())) == "cdc"
+
+
+# --- profile matching -----------------------------------------------------
+
+def test_match_profile_id_recognizes_every_preset_exactly():
+    for pid, cfg in _profiles.PRESETS.items():
+        got = web._match_profile_id(cfg.ranging_mode, cfg.fps, cfg.exposure_ms, cfg.power_mode)
+        assert got == pid
+
+
+def test_match_profile_id_falls_back_to_manual_for_a_non_preset_combination():
+    got = web._match_profile_id(_profiles.RangingMode.AMBIENT, 45, 8, _profiles.PowerMode.LOW)
+    assert got == _profiles.ProfileId.MANUAL
+
+
+# --- estimate serialization against KNOWN profiles.py anchors ----------------
+#
+# These deliberately do NOT pin a preset's fps/exposure/range/power/I3C% as a
+# literal: a concurrent hardware-investigation session amending
+# `PRESETS[ProfileId.HIGH_FRAMERATE]` (90 -> 46 fps, mid-review) proved that
+# pinning a preset's OWN current numbers is exactly the kind of hardcoded
+# number CLAUDE.md's "New dependencies are allowed" era rule and the plan's
+# "derive EVERY number ... from roomscan.profiles" constraint warn against --
+# it goes stale the moment the model is amended, for a reason that has
+# nothing to do with a bug in `_estimate_to_json`. Instead these recompute
+# the expectation from profiles.py's own PER-FIELD functions independently
+# of `estimate_profile`/`estimate_preset` (which `_estimate_to_json` already
+# wraps), so they stay a real cross-check of the JSON serialization under
+# ANY current preset table, and pin the one number that genuinely cannot
+# drift with a preset retune: the I3C transfer time, a physical constant of
+# the frame size and bus clock.
+
+def test_estimate_to_json_matches_profiles_own_per_field_functions_for_every_preset():
+    """`estimate_profile` rounds `i3c_bus_utilization_pct`/`i3c_xfer_ms`/
+    `expected_delivered_fps` before returning them (1/3/2 decimal places
+    respectively) -- tolerances below are sized to that rounding, not
+    loosened arbitrarily."""
+    for pid, cfg in _profiles.PRESETS.items():
+        est = _profiles.estimate_preset(pid, transport="udp")
+        out = web._estimate_to_json(est)
+        assert out["profile"] == web._PROFILE_ID_TO_STR[pid]
+        assert out["fps"] == cfg.fps
+        assert out["exposure_ms"] == cfg.exposure_ms
+        dss = _profiles.dss_enabled_for_fps(cfg.fps)
+        assert out["dss_enabled"] == dss
+        assert out["i3c_bus_utilization_pct"] == pytest.approx(
+            _profiles.i3c_bus_utilization_pct(cfg.fps), abs=0.05)
+        assert out["power_mw"] == pytest.approx(
+            _profiles.estimate_power_mw(cfg.ranging_mode, cfg.power_mode, cfg.exposure_ms, cfg.fps), abs=1e-6)
+        assert out["max_range_m"] == pytest.approx(
+            _profiles.estimate_max_range_m(cfg.ranging_mode, dss), abs=1e-6)
+        assert out["min_distance_mm"] == pytest.approx(
+            _profiles.estimate_min_distance_mm(cfg.ranging_mode), abs=1e-6)
+        assert out["expected_delivered_fps"] == pytest.approx(
+            _profiles.expected_delivered_fps(cfg.fps, cfg.exposure_ms), abs=0.005)
+        assert out["ok"] is True
+
+
+def test_estimate_i3c_xfer_ms_matches_the_fixed_hardware_constant():
+    """Unlike fps/power/range (which the preset table can retune), the I3C
+    transfer time is a physical constant of the RAW_3DMD frame size and the
+    I3C clock (9.49888 ms) -- independent of which profile is applied, and
+    the one number in this whole card that a fps-ceiling investigation
+    cannot legitimately change."""
+    assert _profiles.I3C_XFER_MS == pytest.approx(9.49888, abs=1e-4)
+    for pid in _profiles.PRESETS:
+        est = _profiles.estimate_preset(pid, transport="udp")
+        out = web._estimate_to_json(est)
+        assert out["i3c_xfer_ms"] == pytest.approx(_profiles.I3C_XFER_MS, abs=0.0005)
+
+
+def test_estimate_manual_over_cdc_above_the_ceiling_carries_the_transport_warning():
+    """Constructed at `TRANSPORT_CDC_FPS_CEILING + 1` directly, not off a
+    preset's fps -- immune to a preset being retuned across that boundary."""
+    fps = _profiles.TRANSPORT_CDC_FPS_CEILING + 1
+    params = _profiles.ManualParams(_profiles.RangingMode.PRECISION, fps, 4, _profiles.PowerMode.REGULAR)
+    est = _profiles.estimate_manual(params, transport="cdc")
+    out = web._estimate_to_json(est)
+    assert out["transport_warning"] is not None
+    assert str(fps) in out["transport_warning"]
+    assert "ethernet" in out["transport_warning"].lower()
+
+
+def test_estimate_delivery_ceiling_warning_is_distinct_from_transport_warning():
+    """A manual request above the exposure's measured 1x delivery ceiling
+    (`profiles.ceiling_fps_for_exposure`) carries its OWN warning in
+    `estimate.warnings`, separate from `estimate.transport_warning` -- the
+    UI renders these in two different places (a dedicated CDC-warning row vs
+    a general estimate-warnings note) and must not conflate them."""
+    exposure_ms = 4
+    ceiling = _profiles.ceiling_fps_for_exposure(exposure_ms)
+    fps = min(_profiles.FPS_MAX, int(ceiling) + 5)   # comfortably above the 1x ceiling
+    assert fps > ceiling, "test fixture must actually exceed the ceiling"
+    params = _profiles.ManualParams(_profiles.RangingMode.PRECISION, fps, exposure_ms,
+                                    _profiles.PowerMode.REGULAR)
+    est = _profiles.estimate_manual(params, transport="udp")   # ethernet -- no transport warning
+    out = web._estimate_to_json(est)
+
+    assert out["transport_warning"] is None   # udp never warns
+    assert out["expected_delivered_fps"] < fps   # honest -- not an echo of the request
+    assert any("delivery" in w.lower() or "period-multiple" in w.lower() or "quantiz" in w.lower()
+              or "1x" in w for w in out["warnings"]), out["warnings"]
+
+
+def test_ranging_expected_fps_ui_wiring_exists_and_is_distinct_from_transport_warning():
+    """Static wiring check: the new Expected Delivered FPS row and the general
+    estimate-warnings note both exist and are populated from `est.*`, not a
+    client-side computation (nothing here is a formula -- see the module
+    docstring's "derive EVERY number ... from roomscan.profiles" rule)."""
+    html = (Path(__file__).parent.parent / "src" / "roomscan" / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="ranging-expected-fps-val"' in html
+    assert 'id="ranging-estimate-warnings"' in html
+    js = (Path(__file__).parent.parent / "src" / "roomscan" / "static" / "controls.js").read_text(encoding="utf-8")
+    assert "est.expected_delivered_fps" in js
+    assert "w !== est.transport_warning" in js
+
+
+# --- _init_ranging_state / _refresh_ranging_state: startup restore ----------
+
+def test_init_ranging_state_populates_applied_from_get_ranging_config():
+    client = _FakeRangingClient()
+    ctrl = _FakeRangingCtrl(mode="live")
+    state, sent, capture = _ranging_state(client=client, ctrl=ctrl)
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._init_ranging_state(state))
+    finally:
+        web._broadcast_text = orig
+
+    rs = state.ranging_state
+    room_cfg = _profiles.PRESETS[_profiles.ProfileId.ROOM_MAPPING]
+    assert rs.initialized is True
+    assert rs.applied_profile_id == int(_profiles.ProfileId.ROOM_MAPPING)
+    assert rs.applied_fps == room_cfg.fps
+    assert rs.estimate["i3c_bus_utilization_pct"] == pytest.approx(
+        _profiles.i3c_bus_utilization_pct(room_cfg.fps), abs=0.05)
+    assert rs.error is None
+    # `_FakeRangingClient`'s default `imu_rate_status_result` is (OK, 0) --
+    # the IMU/env half also restores, independently, in the same one-shot init.
+    ie = state.imu_env_state
+    assert ie.initialized is True
+    assert ie.applied_rate_hz == 0
+
+
+def test_init_ranging_state_is_a_noop_in_replay_launch():
+    """No live source at all (`--replay` launch, `state.client is None`):
+    must not raise, and must leave the state uninitialized rather than
+    guessing a firmware default."""
+    state, sent, capture = _ranging_state(client=None, ctrl=None)
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._init_ranging_state(state))
+    finally:
+        web._broadcast_text = orig
+    assert state.ranging_state.initialized is False
+    assert state.ranging_state.transport == "none"
+    assert sent == []   # nothing broadcast -- there was nothing to report
+
+
+# --- set_profile ---------------------------------------------------------
+
+def test_set_profile_success_commits_from_the_followup_readback():
+    """cmd 8's own ACK carries no config fields, so a successful preset switch
+    must chain exactly one GET_RANGING_CONFIG to learn what was applied."""
+    client = _FakeRangingClient()
+    client.profile_result = (web.ResultCode.OK, int(_profiles.ProfileId.HIGH_FRAMERATE))
+    client.ranging_config_result = (web.ResultCode.OK,
+                                    _ack_for(_profiles.PRESETS[_profiles.ProfileId.HIGH_FRAMERATE]))
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._set_profile(state, int(_profiles.ProfileId.HIGH_FRAMERATE)))
+    finally:
+        web._broadcast_text = orig
+
+    assert [c[0] for c in client.calls] == ["send_profile", "get_ranging_config"]
+    rs = state.ranging_state
+    assert rs.pending is False and rs.pending_kind is None
+    assert rs.applied_profile_id == int(_profiles.ProfileId.HIGH_FRAMERATE)
+    assert rs.applied_fps == _profiles.PRESETS[_profiles.ProfileId.HIGH_FRAMERATE].fps
+    assert rs.error is None
+    assert len(sent) >= 2   # at least the "pending" and the final broadcasts
+
+
+def test_set_profile_device_rejection_reports_error_and_leaves_no_applied_state():
+    client = _FakeRangingClient()
+    client.profile_result = (web.ResultCode.BUSY, 0)
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._set_profile(state, int(_profiles.ProfileId.PRECISION)))
+    finally:
+        web._broadcast_text = orig
+
+    rs = state.ranging_state
+    assert rs.pending is False
+    assert rs.initialized is False          # never committed -- no readback happened
+    assert "BUSY" in rs.error
+    # BUSY must not even attempt a readback -- there is nothing new to read.
+    assert [c[0] for c in client.calls] == ["send_profile"]
+
+
+def test_set_profile_rejected_client_side_when_already_pending():
+    """"only ONE pending device command; a second change while pending is
+    rejected" -- server-side too, not just the client's disabled controls."""
+    client = _FakeRangingClient()
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    state.ranging_state.pending = True
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._set_profile(state, int(_profiles.ProfileId.PRECISION)))
+    finally:
+        web._broadcast_text = orig
+    assert client.calls == []     # never touched the device
+    assert sent == []             # rejected silently server-side (log only)
+
+
+def test_set_profile_unavailable_in_replay():
+    state, sent, capture = _ranging_state(client=None, ctrl=_FakeRangingCtrl(mode="replay"))
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._set_profile(state, int(_profiles.ProfileId.PRECISION)))
+    finally:
+        web._broadcast_text = orig
+    assert "replay" in state.ranging_state.error
+
+
+# --- set_manual_params -----------------------------------------------------
+
+def test_set_manual_params_validation_failure_never_touches_the_device():
+    """fps=150 is outside 1-100 -- `profiles.validate_manual_params` must
+    reject it before any command is sent."""
+    client = _FakeRangingClient()
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._set_manual_params(
+            state, ranging_mode="ambient", fps=150, exposure_ms=6, power_mode="ulp"))
+    finally:
+        web._broadcast_text = orig
+
+    assert client.calls == []
+    rs = state.ranging_state
+    assert rs.pending is False
+    assert rs.error is not None and "fps" in rs.error
+
+
+def test_set_manual_params_one_atomic_command_not_four():
+    """Selecting Manual must send exactly ONE `send_manual_params` call, never
+    a profile + period + exposure + power sequence."""
+    client = _FakeRangingClient()
+    manual_cfg = _profiles.ProfileConfig(_profiles.ProfileId.MANUAL, _profiles.RangingMode.AMBIENT,
+                                         45, 8, _profiles.PowerMode.LOW)
+    client.manual_result = (web.ResultCode.OK, _ack_for(manual_cfg))
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._set_manual_params(
+            state, ranging_mode="ambient", fps=45, exposure_ms=8, power_mode="lp"))
+    finally:
+        web._broadcast_text = orig
+
+    assert [c[0] for c in client.calls] == ["send_manual_params"]   # exactly one call
+    rs = state.ranging_state
+    assert rs.pending is False
+    assert rs.applied_profile_id == int(_profiles.ProfileId.MANUAL)
+    assert rs.applied_fps == 45
+    assert rs.applied_exposure_ms == 8
+    assert rs.error is None
+
+
+def test_set_manual_params_rejected_client_side_when_already_pending():
+    client = _FakeRangingClient()
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    state.ranging_state.pending = True
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._set_manual_params(
+            state, ranging_mode="ambient", fps=30, exposure_ms=6, power_mode="ulp"))
+    finally:
+        web._broadcast_text = orig
+    assert client.calls == []
+
+
+def test_set_manual_params_timeout_leaves_previous_applied_state_visible():
+    """A failed/timed-out command must leave the PREVIOUS applied state
+    visible (§ one-way flow) -- not clear it, not adopt the request."""
+    client = _FakeRangingClient()
+    client.raise_on = "send_manual_params"
+    client.exc = TimeoutError("no ACK within 2.0s")
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    state.ranging_state.applied_profile_id = int(_profiles.ProfileId.ROOM_MAPPING)
+    state.ranging_state.applied_fps = 30
+    state.ranging_state.initialized = True
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._set_manual_params(
+            state, ranging_mode="precision", fps=90, exposure_ms=4, power_mode="regular"))
+    finally:
+        web._broadcast_text = orig
+
+    rs = state.ranging_state
+    assert rs.pending is False
+    assert "timeout" in rs.error.lower()
+    # Unchanged -- the request was never committed.
+    assert rs.applied_profile_id == int(_profiles.ProfileId.ROOM_MAPPING)
+    assert rs.applied_fps == 30
+
+
+# --- set_imu_env_rate: the honest UNKNOWN_CMD path (today's firmware) -------
+
+def test_set_imu_env_rate_unknown_cmd_reports_error_and_stays_coupled():
+    """Task 7's cmd 11/12 parse on today's firmware but ACK UNKNOWN_CMD. The
+    UI must show the honest error and NEVER adopt the request as if it had
+    been confirmed -- `applied_rate_hz` stays untouched."""
+    client = _FakeRangingClient()
+    client.imu_rate_result = (web.ResultCode.UNKNOWN_CMD, 0)
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._set_imu_env_rate(state, 30))
+    finally:
+        web._broadcast_text = orig
+
+    ie = state.imu_env_state
+    assert ie.pending is False
+    assert ie.initialized is False           # never confirmed
+    assert ie.applied_rate_hz is None        # NOT adopted from the request
+    assert "UNKNOWN_CMD" in ie.error
+    assert [c[0] for c in client.calls] == ["send_imu_env_rate"]
+
+
+def test_get_imu_env_rate_unknown_cmd_at_startup_reports_error_not_coupled_success():
+    client = _FakeRangingClient()
+    client.imu_rate_status_result = (web.ResultCode.UNKNOWN_CMD, 0)
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    asyncio.run(web._refresh_imu_env_state(state))
+    ie = state.imu_env_state
+    assert ie.initialized is False
+    assert "UNKNOWN_CMD" in ie.error
+
+
+def test_set_imu_env_rate_success_updates_ranging_estimate_imu_fields():
+    """A confirmed IMU/env rate must be reflected in the RANGING estimate's
+    `imu_env_rate_hz`/`imu_env_coupled` too (recomputed, no device round trip)
+    -- otherwise the two cards would disagree about the same applied rate."""
+    client = _FakeRangingClient()
+    client.imu_rate_result = (web.ResultCode.OK, 30)
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    web._commit_ranging_ack(state, _ack_for(_profiles.PRESETS[_profiles.ProfileId.ROOM_MAPPING]))
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._set_imu_env_rate(state, 30))
+    finally:
+        web._broadcast_text = orig
+
+    ie = state.imu_env_state
+    assert ie.applied_rate_hz == 30 and ie.initialized is True
+    rs = state.ranging_state
+    assert rs.estimate["imu_env_rate_hz"] == 30
+    assert rs.estimate["imu_env_coupled"] is False
+
+
+def test_set_imu_env_rate_rejects_above_480hz():
+    client = _FakeRangingClient()
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._set_imu_env_rate(state, 481))
+    finally:
+        web._broadcast_text = orig
+    assert client.calls == []   # rejected host-side before touching the device
+    assert state.imu_env_state.error is not None
+
+
+def test_set_imu_env_rate_above_60hz_warns_about_stream_10_subsampling():
+    client = _FakeRangingClient()
+    client.imu_rate_result = (web.ResultCode.OK, 90)
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._set_imu_env_rate(state, 90))
+    finally:
+        web._broadcast_text = orig
+    assert state.imu_env_state.warning is not None
+    assert "stream 10" in state.imu_env_state.warning
+
+
+# --- ranging message schema --------------------------------------------------
+
+def test_ranging_message_uninitialized_shape():
+    state, _sent, _capture = _ranging_state()
+    msg = web._ranging_message(state)
+    assert msg["type"] == "ranging"
+    assert msg["applied"] is None
+    assert msg["initialized"] is False
+    assert msg["pending"] is False
+    assert msg["imu_env"]["coupled"] is True   # None/0 reads as coupled
+
+
+def test_ranging_message_reflects_committed_applied_state():
+    cfg = _profiles.PRESETS[_profiles.ProfileId.PRECISION]
+    state, _sent, _capture = _ranging_state(ctrl=_FakeRangingCtrl(mode="live"))
+    web._commit_ranging_ack(state, _ack_for(cfg))
+    msg = web._ranging_message(state)
+    assert msg["applied"] == {
+        "profile": "precision", "ranging_mode": "precision",
+        "fps": cfg.fps, "exposure_ms": cfg.exposure_ms, "power_mode": "ulp",
+    }
+    assert msg["estimate"]["max_range_m"] == pytest.approx(
+        _profiles.estimate_max_range_m(cfg.ranging_mode, _profiles.dss_enabled_for_fps(cfg.fps)))
+
+
+# --- inbound message routing -------------------------------------------------
+
+def test_handle_inbound_set_profile_dispatches_by_name():
+    client = _FakeRangingClient()
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    state.ui_state = web.UiState()
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._handle_inbound(state, {"type": "set_profile", "profile": "precision"}))
+    finally:
+        web._broadcast_text = orig
+    assert [c[0] for c in client.calls] == ["send_profile", "get_ranging_config"]
+
+
+def test_handle_inbound_set_profile_unknown_name_is_a_noop():
+    client = _FakeRangingClient()
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    state.ui_state = web.UiState()
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._handle_inbound(state, {"type": "set_profile", "profile": "bogus"}))
+    finally:
+        web._broadcast_text = orig
+    assert client.calls == []
+
+
+def test_handle_inbound_set_manual_params_dispatches():
+    client = _FakeRangingClient()
+    manual_cfg = _profiles.ProfileConfig(_profiles.ProfileId.MANUAL, _profiles.RangingMode.PRECISION,
+                                         90, 4, _profiles.PowerMode.REGULAR)
+    client.manual_result = (web.ResultCode.OK, _ack_for(manual_cfg))
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    state.ui_state = web.UiState()
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._handle_inbound(state, {
+            "type": "set_manual_params", "ranging_mode": "precision", "fps": 90,
+            "exposure_ms": 4, "power_mode": "regular"}))
+    finally:
+        web._broadcast_text = orig
+    assert [c[0] for c in client.calls] == ["send_manual_params"]
+
+
+def test_handle_inbound_set_imu_env_rate_dispatches():
+    client = _FakeRangingClient()
+    state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
+    state.ui_state = web.UiState()
+    orig = web._broadcast_text
+    web._broadcast_text = capture
+    try:
+        asyncio.run(web._handle_inbound(state, {"type": "set_imu_env_rate", "rate_hz": 30}))
+    finally:
+        web._broadcast_text = orig
+    assert [c[0] for c in client.calls] == ["send_imu_env_rate"]

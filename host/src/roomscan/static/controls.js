@@ -3,16 +3,21 @@
 // Turns DOM events into hub.send(...) messages and nothing else. Active state for
 // anything the server tracks (color mode, IR colormap/freeze) is driven FROM the
 // server's `state` echo, never from local click state — one-way state flow (§8.3),
-// so a change in one tab reflects in every open tab for free. Usecase and the
-// device buttons are one-shot actions (not persistent server state) so they just
-// fire a `cmd`; their result surfaces as a toast/log line via log.js.
+// so a change in one tab reflects in every open tab for free. The device buttons
+// are one-shot actions (not persistent server state) so they just fire a `cmd`;
+// their result surfaces as a toast/log line via log.js.
+//
+// Ranging profiles / manual sensor control / IMU-env poll rate (Task 10) are
+// driven by their own `ranging` echo, a server-owned state independent of
+// `state` (two independent pending commands, see the section below).
 //
 // Also owns generic control-group collapse (delegated header clicks) and the IR
 // card show/hide toggle (a local presentation signal relayed over the hub).
 //
 // Public surface:  createControls(hub) -> {}
-// Hub events:  subscribes "state", "ir_shown";  emits "reset_camera", "ir_show";
-//              sends cmd / set_color / set_ir via hub.send
+// Hub events:  subscribes "state", "ranging", "ir_shown";  emits "reset_camera", "ir_show";
+//              sends cmd / set_profile / set_manual_params / set_imu_env_rate /
+//              set_color / set_ir via hub.send
 
 export function createControls(hub) {
     const $ = (id) => document.getElementById(id);
@@ -23,11 +28,296 @@ export function createControls(hub) {
     $('btn-calib')?.addEventListener('click', () => cmd('calib'));
     $('btn-reinit')?.addEventListener('click', () => cmd('reinit'));
 
-    // --- Usecase segmented control (action, not persistent state) ---
-    const segUsecase = $('seg-usecase');
-    segUsecase?.addEventListener('click', (e) => {
-        const btn = e.target.closest('button[data-uc]');
-        if (btn) cmd('usecase', parseInt(btn.dataset.uc, 10));
+    // --- Ranging profile / manual sensor control / IMU-env poll rate (Task 10) ---
+    //
+    // Two independent server-owned pending commands (RangingState / ImuEnvRateState
+    // in web.py), each with its own `pending` flag -- a change while one is in
+    // flight is REJECTED here (disabled controls), never queued. Every "active
+    // segment" that mirrors applied DEVICE state (the profile selector, and the
+    // Coupled/Explicit toggle's `coupled` half) is driven purely by the `ranging`
+    // echo, one-way flow, same rule as every other segmented control in this file.
+    //
+    // The Manual panel's own ranging-mode/power-mode segments and the IMU/env
+    // Explicit-Hz slider are the one deliberate exception: they are INPUT widgets
+    // composing the next `set_manual_params`/`set_imu_env_rate` request, not
+    // read-outs of applied state, so they hold a local selection between edits --
+    // seeded from the server's applied config whenever nothing is pending, exactly
+    // like the View card's camera-framing sliders already do.
+    const PROFILE_LABELS = {
+        room_mapping: 'Room Mapping', precision: 'Precision',
+        high_framerate: 'High Frame-Rate', manual: 'Manual',
+    };
+    const MANUAL_DEBOUNCE_MS = 300;
+
+    const segRangingProfile = $('seg-ranging-profile');
+    const rangingManualPanel = $('ranging-manual-panel');
+    const rangingAppliedVal = $('ranging-applied-val');
+    const rangingRequestedStatus = $('ranging-requested-status');
+    const rangingErrorEl = $('ranging-error');
+    const rangingRangeVal = $('ranging-range-val');
+    const rangingPowerVal = $('ranging-power-val');
+    const rangingExpectedFpsVal = $('ranging-expected-fps-val');
+    const rangingMeasuredVal = $('ranging-measured-val');
+    const rangingI3cFill = $('ranging-i3c-fill');
+    const rangingI3cCaption = $('ranging-i3c-caption');
+    const rangingCdcWarning = $('ranging-cdc-warning');
+    const rangingEstimateWarnings = $('ranging-estimate-warnings');
+
+    const segManualRangingMode = $('seg-manual-ranging-mode');
+    const segManualPower = $('seg-manual-power');
+    const slManualFps = $('sl-manual-fps');
+    const numManualFps = $('num-manual-fps');
+    const manualFpsVal = $('manual-fps-val');
+    const slManualExposure = $('sl-manual-exposure');
+    const numManualExposure = $('num-manual-exposure');
+    const manualExposureVal = $('manual-exposure-val');
+
+    const segImuEnvMode = $('seg-imu-env-mode');
+    const slImuEnvRate = $('sl-imu-env-rate');
+    const numImuEnvRate = $('num-imu-env-rate');
+    const imuEnvAppliedVal = $('imu-env-applied-val');
+    const imuEnvSubsampleWarning = $('imu-env-subsample-warning');
+    const imuEnvError = $('imu-env-error');
+
+    let rangingPending = false;
+    let imuEnvPending = false;
+    let manualRangingMode = 'ambient';
+    let manualPowerMode = 'ulp';
+    let imuEnvMode = 'coupled';
+    let manualDebounce = null;
+    let imuEnvDebounce = null;
+
+    function setSegActive(seg, attr, value) {
+        if (!seg) return;
+        for (const b of seg.querySelectorAll('button')) {
+            b.classList.toggle('active', b.dataset[attr] === value);
+        }
+    }
+
+    function sendManualParamsDebounced() {
+        if (manualDebounce) clearTimeout(manualDebounce);
+        manualDebounce = setTimeout(() => {
+            manualDebounce = null;
+            if (rangingPending) return;   // landed while a command was already in flight
+            hub.send({
+                type: 'set_manual_params',
+                ranging_mode: manualRangingMode,
+                fps: parseInt(numManualFps.value, 10),
+                exposure_ms: parseInt(numManualExposure.value, 10),
+                power_mode: manualPowerMode,
+            });
+        }, MANUAL_DEBOUNCE_MS);
+    }
+
+    segRangingProfile?.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-profile]');
+        if (!btn || rangingPending) return;
+        const profile = btn.dataset.profile;
+        if (profile === 'manual') {
+            // Progressive disclosure only -- opening the panel sends nothing.
+            if (rangingManualPanel) rangingManualPanel.open = true;
+            return;
+        }
+        hub.send({ type: 'set_profile', profile });
+    });
+
+    segManualRangingMode?.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-ranging-mode]');
+        if (!btn || rangingPending) return;
+        manualRangingMode = btn.dataset.rangingMode;
+        setSegActive(segManualRangingMode, 'rangingMode', manualRangingMode);
+        sendManualParamsDebounced();
+    });
+
+    segManualPower?.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-power-mode]');
+        if (!btn || rangingPending) return;
+        manualPowerMode = btn.dataset.powerMode;
+        setSegActive(segManualPower, 'powerMode', manualPowerMode);
+        sendManualParamsDebounced();
+    });
+
+    slManualFps?.addEventListener('input', () => {
+        if (rangingPending) return;
+        if (numManualFps) numManualFps.value = slManualFps.value;
+        if (manualFpsVal) manualFpsVal.textContent = slManualFps.value;
+        sendManualParamsDebounced();
+    });
+    numManualFps?.addEventListener('change', () => {
+        if (rangingPending) return;
+        if (slManualFps) slManualFps.value = numManualFps.value;
+        if (manualFpsVal) manualFpsVal.textContent = numManualFps.value;
+        sendManualParamsDebounced();
+    });
+    slManualExposure?.addEventListener('input', () => {
+        if (rangingPending) return;
+        if (numManualExposure) numManualExposure.value = slManualExposure.value;
+        if (manualExposureVal) manualExposureVal.textContent = slManualExposure.value + ' ms';
+        sendManualParamsDebounced();
+    });
+    numManualExposure?.addEventListener('change', () => {
+        if (rangingPending) return;
+        if (slManualExposure) slManualExposure.value = numManualExposure.value;
+        if (manualExposureVal) manualExposureVal.textContent = numManualExposure.value + ' ms';
+        sendManualParamsDebounced();
+    });
+
+    function sendImuEnvRateDebounced() {
+        if (imuEnvDebounce) clearTimeout(imuEnvDebounce);
+        imuEnvDebounce = setTimeout(() => {
+            imuEnvDebounce = null;
+            if (imuEnvPending) return;
+            const rate = imuEnvMode === 'coupled' ? 0 : parseInt(numImuEnvRate.value, 10);
+            hub.send({ type: 'set_imu_env_rate', rate_hz: rate });
+        }, MANUAL_DEBOUNCE_MS);
+    }
+
+    segImuEnvMode?.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-imu-env-mode]');
+        if (!btn || imuEnvPending) return;
+        imuEnvMode = btn.dataset.imuEnvMode;
+        setSegActive(segImuEnvMode, 'imuEnvMode', imuEnvMode);
+        if (slImuEnvRate) slImuEnvRate.disabled = imuEnvMode === 'coupled';
+        if (numImuEnvRate) numImuEnvRate.disabled = imuEnvMode === 'coupled';
+        sendImuEnvRateDebounced();
+    });
+    slImuEnvRate?.addEventListener('input', () => {
+        if (imuEnvPending) return;
+        if (numImuEnvRate) numImuEnvRate.value = slImuEnvRate.value;
+        sendImuEnvRateDebounced();
+    });
+    numImuEnvRate?.addEventListener('change', () => {
+        if (imuEnvPending) return;
+        if (slImuEnvRate) slImuEnvRate.value = numImuEnvRate.value;
+        sendImuEnvRateDebounced();
+    });
+
+    hub.on('ranging', (msg) => {
+        rangingPending = !!msg.pending;
+        setSegActive(segRangingProfile, 'profile', msg.applied ? msg.applied.profile : null);
+        for (const b of (segRangingProfile ? segRangingProfile.querySelectorAll('button') : [])) {
+            b.disabled = rangingPending;
+        }
+        for (const b of (segManualRangingMode ? segManualRangingMode.querySelectorAll('button') : [])) {
+            b.disabled = rangingPending;
+        }
+        for (const b of (segManualPower ? segManualPower.querySelectorAll('button') : [])) {
+            b.disabled = rangingPending;
+        }
+        if (slManualFps) slManualFps.disabled = rangingPending;
+        if (numManualFps) numManualFps.disabled = rangingPending;
+        if (slManualExposure) slManualExposure.disabled = rangingPending;
+        if (numManualExposure) numManualExposure.disabled = rangingPending;
+
+        if (rangingAppliedVal) {
+            if (msg.applied) {
+                const a = msg.applied;
+                rangingAppliedVal.textContent =
+                    `${PROFILE_LABELS[a.profile] || a.profile} (${a.ranging_mode}, ${a.fps} fps, ` +
+                    `${a.exposure_ms} ms, ${a.power_mode})`;
+                if (!rangingPending) {
+                    manualRangingMode = a.ranging_mode;
+                    manualPowerMode = a.power_mode;
+                    setSegActive(segManualRangingMode, 'rangingMode', manualRangingMode);
+                    setSegActive(segManualPower, 'powerMode', manualPowerMode);
+                    if (slManualFps) slManualFps.value = a.fps;
+                    if (numManualFps) numManualFps.value = a.fps;
+                    if (manualFpsVal) manualFpsVal.textContent = a.fps;
+                    if (slManualExposure) slManualExposure.value = a.exposure_ms;
+                    if (numManualExposure) numManualExposure.value = a.exposure_ms;
+                    if (manualExposureVal) manualExposureVal.textContent = a.exposure_ms + ' ms';
+                }
+            } else {
+                rangingAppliedVal.textContent = msg.initialized ? '—' : 'not yet read back';
+            }
+        }
+
+        if (rangingRequestedStatus) {
+            if (msg.pending && msg.requested) {
+                const r = msg.requested;
+                const desc = (r.kind === 'manual' && r.manual)
+                    ? `manual ${r.manual.ranging_mode}, ${r.manual.fps} fps, ` +
+                      `${r.manual.exposure_ms} ms, ${r.manual.power_mode}`
+                    : (PROFILE_LABELS[r.profile] || r.profile || '');
+                rangingRequestedStatus.textContent = `Requested: ${desc} …`;
+                rangingRequestedStatus.hidden = false;
+            } else {
+                rangingRequestedStatus.hidden = true;
+            }
+        }
+        if (rangingErrorEl) {
+            rangingErrorEl.hidden = !msg.error;
+            rangingErrorEl.textContent = msg.error ? `Error: ${msg.error}` : '';
+        }
+
+        const est = msg.estimate;
+        if (est) {
+            if (rangingRangeVal) rangingRangeVal.textContent = `${est.max_range_m.toFixed(1)} m`;
+            if (rangingPowerVal) rangingPowerVal.textContent = `${Math.round(est.power_mw)} mW`;
+            const frac = est.i3c_bus_utilization_pct / 100;
+            if (rangingI3cFill) {
+                rangingI3cFill.style.width = Math.min(100, est.i3c_bus_utilization_pct) + '%';
+                rangingI3cFill.classList.toggle('is-warn', frac >= 0.70 && frac < 0.85);
+                rangingI3cFill.classList.toggle('is-crit', frac >= 0.85);
+            }
+            if (rangingI3cCaption) {
+                rangingI3cCaption.textContent =
+                    `I3C Bus: ${est.i3c_bus_utilization_pct.toFixed(1)}% used ` +
+                    `(${est.i3c_xfer_ms.toFixed(1)}ms ToF / ${(est.frame_period_us / 1000).toFixed(1)}ms frame) ` +
+                    `• ${est.i3c_airtime_left_pct.toFixed(1)}% airtime left for IMU`;
+            }
+            if (rangingCdcWarning) {
+                rangingCdcWarning.hidden = !est.transport_warning;
+                rangingCdcWarning.textContent = est.transport_warning || '';
+            }
+            if (rangingExpectedFpsVal) {
+                rangingExpectedFpsVal.textContent = `${est.expected_delivered_fps.toFixed(1)} fps`;
+            }
+            // Every OTHER estimate warning (e.g. the delivery-rate quantization
+            // notice, or an IMU/env sub-sample notice folded into this same
+            // profile's estimate) -- excludes transport_warning, which already
+            // has its own dedicated row above.
+            if (rangingEstimateWarnings) {
+                const rest = (est.warnings || []).filter((w) => w !== est.transport_warning);
+                rangingEstimateWarnings.hidden = rest.length === 0;
+                rangingEstimateWarnings.textContent = rest.join(' ');
+            }
+        } else {
+            if (rangingRangeVal) rangingRangeVal.textContent = '—';
+            if (rangingPowerVal) rangingPowerVal.textContent = '—';
+            if (rangingExpectedFpsVal) rangingExpectedFpsVal.textContent = '—';
+            if (rangingI3cFill) rangingI3cFill.style.width = '0%';
+            if (rangingI3cCaption) rangingI3cCaption.textContent = '';
+            if (rangingCdcWarning) rangingCdcWarning.hidden = true;
+            if (rangingEstimateWarnings) rangingEstimateWarnings.hidden = true;
+        }
+
+        if (rangingMeasuredVal) {
+            rangingMeasuredVal.textContent = (msg.measured_fps !== null && msg.measured_fps !== undefined)
+                ? `${msg.measured_fps.toFixed(1)} fps` : '—';
+        }
+
+        const ie = msg.imu_env || {};
+        imuEnvPending = !!ie.pending;
+        setSegActive(segImuEnvMode, 'imuEnvMode', ie.coupled ? 'coupled' : 'explicit');
+        for (const b of (segImuEnvMode ? segImuEnvMode.querySelectorAll('button') : [])) {
+            b.disabled = imuEnvPending;
+        }
+        if (slImuEnvRate) slImuEnvRate.disabled = imuEnvPending || !!ie.coupled;
+        if (numImuEnvRate) numImuEnvRate.disabled = imuEnvPending || !!ie.coupled;
+        if (imuEnvAppliedVal) {
+            imuEnvAppliedVal.textContent = !ie.initialized
+                ? 'not confirmed by firmware'
+                : (ie.coupled ? 'coupled' : `${ie.applied_rate_hz} Hz`);
+        }
+        if (imuEnvSubsampleWarning) {
+            imuEnvSubsampleWarning.hidden = !ie.warning;
+            imuEnvSubsampleWarning.textContent = ie.warning || '';
+        }
+        if (imuEnvError) {
+            imuEnvError.hidden = !ie.error;
+            imuEnvError.textContent = ie.error ? `Error: ${ie.error}` : '';
+        }
     });
 
     // --- View group: color mode segmented control (server-driven active) ---
