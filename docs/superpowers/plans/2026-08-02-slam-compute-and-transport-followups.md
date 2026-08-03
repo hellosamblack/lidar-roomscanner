@@ -289,6 +289,44 @@ decimation on the GIL: `prepare_packet` 178 → **2440 ms p50**, starvation
 11.9% → **94.3% of wall**. **Do not reactivate it merely because a GPU
 utilization gauge reads low.**
 
+## Post-item-5 live verification (2026-08-02, on the rig)
+
+The one gate item 5 left open — **BUG-061's contract after a compute change** —
+was closed by restarting `roomscan-web` onto the new code and running Live SLAM
+against the live device for ~5 minutes.
+
+| Measurement | Result | Gate |
+|---|---|---|
+| Mapper throughput | **30.27 frames/s processed** of 30.40 submitted, over a 60 s window (1800 `slam` messages) | ~28 Hz sensor rate ✅ |
+| Input-slot overwrites | **0.44%** of submitted (8 in 1823); accounting exact: `processed + overwritten == submitted` | dropped frames counted and visible ✅ |
+| Worker-reported device | `CUDA:0` / backend `local`, read from the worker | ✅ |
+| Pose age (client-side `slamAgeS`, n=299) | **p50 0.001 s, p95 0.004 s, max 0.018 s** | ≤ 0.15 s ✅ |
+| Mesh backlog | server send-Q transients of 4–8 KB, one 281 KB peak, draining within a sample | bounded (was 37 MB) ✅ |
+| Credit gate | `mesh_in_flight` 0, `mesh_superseded_total` 0, `mesh_ack_timeouts_total` 0, `mesh_ack_lag_s_max` **8.5 ms**, `legacy_mesh_clients` 0 | ✅ |
+| Stage timing (server, p50) | `slam_ms` 7.35, `icp_ms` 4.74, `raycast_ms` 1.13, `integrate_ms` 0.95 | — |
+
+**Caveats, so this is not read as more than it is.** The map stayed small (642
+blocks, ~0.8 MB mesh) because the device was stationary — this is *not* a
+re-test of BUG-061's 3.2 MB payload, only of the mechanism that bounds it. The
+client rendered at 8 fps, better than the 2 fps llvmpipe case the plan records
+but still not a real browser, and `slamAgeS` measures pose age at **message
+receipt**, not at photon time. GPU utilization read `n/a` (no per-process NVML)
+and the UI said so rather than fabricating a number — device-wide VRAM
+(2.0/8.0 GB) was the only GPU figure available.
+
+**Operational note for anyone measuring on this box:** the headless Chrome used
+for UI checks renders the WebGL app through **software rasterization** and sits
+at **~11 of 26 cores** while merely displaying the live view. `ps %CPU` hides
+this (it reports a lifetime average); `top -bn1` shows it. It is the tenant that
+cost item 4 a discarded run and taxed every one of item 5's absolute numbers.
+`ui_reset(relaunch=True)` does **not** help — it reopens the same app page.
+Navigate to `about:blank` or kill the browser tree before timing anything.
+
+An auto-record fired on entering Live SLAM (by design — a live scan is
+unrepeatable, BUG-043's reasoning), leaving `captures/web_20260802_200947.bin`
+(129.8 MB). It is a stationary-device verification take, not a scan; delete it
+if it is not wanted.
+
 ## Acceptance gates before claiming "GPU/multithreading fixed"
 
 Required evidence, not assumptions:
