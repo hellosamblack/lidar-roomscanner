@@ -92,6 +92,7 @@ function*, not a state object -- read what it logged via `ui_screenshot`'s tail.
 **data** — `capture_list()` (includes `has_stream_9`, which SLAM and orientation work
 ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, compare?)`,
 `capture_skew(path, window_s?)`, `capture_motion(path)`, `capture_heading(path, cal_path?)`,
+`capture_profile_probe(path, requested_fps?, udp_stats?)`,
 `slam_rerender(capture, voxel_size?, block_count?, device?, max_frames?)`,
 `slam_ensemble(capture, n?, device?, voxel_size?, block_count?)`,
 `slam_stall_profile(capture, frames?, device?, decimate?)`,
@@ -242,6 +243,17 @@ wander over seconds, and treating that as white noise reported a real circuit's 
 Most captures certify one axis and leave the other `inconclusive`. It cannot see absolute
 direction — both estimates share the quaternion and the calibration, so a rotated fit
 (DT0103) moves them together; that is still ROADMAP DC-E's braced sweep.
+
+`capture_profile_probe` is the measurement half of the ranging-profile contract in
+`docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md` —
+`roomscan.profiles` says what a requested configuration should do, this says what a
+recorded capture actually did. `fps_within_tolerance` applies the plan's own +/-2%
+acceptance gate to the measured vs. requested rate; `stream_pairing` assumes today's
+coupled 1:1 emission and is a lower bound once Task 7 ships decoupled IMU/env
+draining. **UDP fragment health cannot be recovered from the capture file** — a
+datagram that lost a fragment is dropped before the recorder ever sees it — so pass
+`udp_stats` from `rig_status()`'s own metrics if that field matters; omitted, it
+reports `None` rather than a guess.
 
 **build** — `fw_build()`, `fw_flash()`, `run_tests()`. These encode the host facts
 that bite every session: Ninja comes from the venv, the packaged stlink 1.8.0 cannot

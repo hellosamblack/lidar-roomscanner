@@ -383,6 +383,39 @@ def capture_motion(path: str, hold_deg_s: float = 0.0, fast_deg_s: float = 0.0,
 
 
 @mcp.tool()
+def capture_profile_probe(path: str, requested_fps: float = 0.0,
+                          udp_stats: dict | None = None) -> dict:
+    """Grade a capture against the ranging profile it was supposed to run at.
+
+    `roomscan.profiles` says what a requested configuration is EXPECTED to do;
+    this is the other half — what a recorded capture ACTUALLY did. Reports
+    measured median/p05/p95 RAW_3DMD inter-frame interval and the resulting fps
+    against `requested_fps` at the plan's own +/-2% acceptance tolerance
+    (`fps_within_tolerance`), RAW seq gaps, CRC failures, per-stream pairing of
+    IMU_QUAT/ENV/IMU_SYNC/IMU_RAW against RAW_3DMD's seq (today's coupled 1:1
+    assumption — a lower bound once Task 7 ships decoupled N:1 draining), and
+    stream-11's effective sample rate against the 480 Hz ODR ceiling.
+
+    `udp_stats` is NOT recoverable from the capture file itself — a datagram
+    that lost a fragment is dropped before it ever reaches the recording, so
+    the file alone cannot see it. Pass the live `UdpSource` counters from
+    `rig_status()`'s metrics (never bind the stream to get them yourself) to
+    merge `frames_incomplete`/`frags_lost`/`frags_reordered` into the report;
+    omit it and the field reports `None` rather than a guess.
+
+    Wraps `host/tools/profile_probe.py::probe()`.
+    """
+    from tools.profile_probe import probe
+
+    p = (REPO / path) if not Path(path).is_absolute() else Path(path)
+    if not p.is_file():
+        return {"error": f"no such capture: {rel(p)}"}
+    rep = probe(p, requested_fps=requested_fps or None, udp_stats=udp_stats)
+    rep["path"] = rel(p)
+    return rep
+
+
+@mcp.tool()
 def doctor(build: bool = False, net: bool = True) -> dict:
     """Run the headless-host bring-up checks and return each verdict.
 
