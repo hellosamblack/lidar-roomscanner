@@ -21,6 +21,23 @@ Specification for implementation. Builds upon Phase 3 runtime configuration (`do
 > margin between exposure and frame period (Task 5). Protocol/codec work (Task 2) is not
 > blocked by either. The measurement baseline (§8, new) is a 117 s live Ethernet capture
 > at the current (pre-feature) firmware's fixed 30 fps profile.
+>
+> **Measured-ceiling amendment, 2026-08-03 (Task 5's stop point, plan §"Global
+> constraints": *"do not label a lower measured rate as 90 FPS; fix the bottleneck or
+> amend the specification with the measured ceiling"*):** Task 5's on-target sweep found
+> the sensor has an intrinsic per-frame floor DS14879 does not document, and that any
+> requested period shorter than it is silently delivered as an integer MULTIPLE of the
+> request rather than rejected or clamped — a 90 Hz request measured 44.85 fps (a clean
+> 2×), 100 Hz measured 33.2 fps (a clean 3×). Every "90 FPS" claim below is retired: the
+> **High Frame-Rate preset is amended to 46 Hz** (Precision, 4 ms exposure, Regular
+> power, DSS **on** — 46 ≤ the 60 Hz DSS ceiling), the measured 1× ceiling at this
+> preset's own exposure. See §2.1/§3.2/§3.3 for the updated numbers and §8 for a summary
+> of the measurement; the full sweep data lives in the implementation plan's Task 11/12
+> and `ROADMAP.md`. **Manual mode is not re-capped** — a request above its exposure's 1×
+> ceiling remains accepted by the sensor (1–100 fps, unchanged) — but the model
+> (`roomscan.profiles`) now warns rather than silently mispredicting, and reports the
+> honest **expected delivered rate**, not the request, once a candidate crosses that
+> ceiling (§3.2 note, new `expected_delivered_fps`).
 
 ---
 
@@ -30,7 +47,7 @@ This feature expands the scanner's operating profiles from the existing two pres
 
 1. **Room Mapping (Default / Preset 1):** `AR_RANGE` — Ambient mode with DSS, 30 FPS, 6 ms exposure, ULP power mode (8m max range, ~200 mW est., 28.5% I3C bus duty cycle).
 2. **Precision Ranging (Preset 2):** `AR_PRECISION` — Precision mode, 30 FPS, 10 ms exposure, ULP power mode (8.8m max range, 5cm min distance, ~267 mW est., 28.5% I3C bus duty cycle).
-3. **High Frame-Rate / Gaming (Preset 3):** `HIGH_FRAMERATE` — Precision mode (no DSS), 90 FPS, 4 ms exposure, Regular power mode (5m max range, ~415 mW est., 85.5% I3C bus duty cycle). Optimized for low-latency SLAM tracking. (Power figures amended 2026-08-03 — see §3.2/§8.)
+3. **High Frame-Rate / Gaming (Preset 3):** `HIGH_FRAMERATE` — Precision mode, DSS **on**, **46 FPS**, 4 ms exposure, Regular power mode (8.8 m max range, ~283 mW est., 43.7% I3C bus duty cycle). Optimized for low-latency SLAM tracking within the sensor's measured 1× delivery ceiling. **Amended 2026-08-03** from an original 90 FPS/DSS-off design that does not exist on real hardware — see §2.1/§3.2/§8 and the "Measured-ceiling amendment" note above.
 4. **Manual / Custom Mode (Mode 4):** Live interactive controls letting operators set ranging mode, frame rate (1–100 FPS), exposure time (1–16 ms), and power mode, while displaying live computed consequences (Max Range, Power Consumption, and I3C Bus Utilization).
 
 Additionally, a visual **I3C Bus Bandwidth Bar** is integrated directly into the Web UI control card beneath the mode selector, rendering real-time bus duty cycle and warning when airtime approaches bus saturation or USB transport ceilings.
@@ -48,11 +65,21 @@ values a first draft asserted without deriving. Room Mapping's is unchanged beca
 1 ms, not 0.5 ms (§7.1's exposure-granularity verdict — the current driver has no proven
 sub-millisecond path).
 
+**Amended again 2026-08-03** (Task 5, measured-ceiling): High Frame-Rate's FPS, DSS,
+Max Range, Power, and I3C Bus Utilization cells all changed. Task 5's on-target sweep
+found the sensor cannot actually deliver 90 FPS — that request is silently delivered as
+44.85 fps, a clean 2× period-multiple, not a rate this UI may ever claim as "90 FPS" per
+the plan's own gate. The preset now runs at **46 FPS**, the measured 1× delivery ceiling
+at 4 ms exposure (see §8), with DSS **on** (46 ≤ the 60 Hz ceiling — the existing DSS
+rule is unchanged, just now applicable because the FPS moved under it), which also
+raises Max Range from the DSS-off 5.0 m to the DSS-on 8.8 m figure (same cell Precision
+uses — §3.3).
+
 | Mode Name | Key / Identifier | Ranging Mode | DSS | FPS (Target) | Exposure | Power Mode | Max Range (Est) | Min Distance | Typical Power (Est) | I3C Bus Utilization |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Room Mapping** | `room_mapping` | Ambient | Yes | 30 FPS | 6 ms | ULP | 8.0 m | 450 mm | 200 mW | 28.5% |
 | **Precision** | `precision` | Precision | Yes | 30 FPS | 10 ms | ULP | 8.8 m | 50 mm | ~267 mW | 28.5% |
-| **High Frame-Rate** | `high_framerate` | Precision | No | 90 FPS | 4 ms | Regular | 5.0 m | 50 mm | ~415 mW | 85.5% |
+| **High Frame-Rate** | `high_framerate` | Precision | **Yes** | **46 FPS** | 4 ms | Regular | **8.8 m** | 50 mm | **~283 mW** | **43.7%** |
 | **Manual** | `manual` | *Custom* | *Custom* | 1–100 FPS | 1–16 ms (1 ms step) | *Custom* | *Dynamic* | 50 mm / 450 mm | *Dynamic* | *Dynamic* |
 
 Every cell above except "Typical Power" and "Max Range" was already correct in the
@@ -60,10 +87,20 @@ first draft; only those two columns' *equations* were wrong (§3.2/§3.3 explain
 the datasheet citations). Precision's power rose from an unfounded 220 mW guess to
 ~267 mW because no anchor at all previously existed for that exact (ranging mode, power
 mode, resolution) combination — see §3.2's derivation for where the ~267 mW figure comes
-from and how confident to be in it. High Frame-Rate's power moved from 420 mW (silently
-borrowed from DS14879's own *100 fps* Gaming example) to ~415 mW, computed at the fps
-this profile actually runs (90, not 100) — the two differ by only 1.2%, which is the
-external check that the reconciled model is doing something reasonable.
+from and how confident to be in it. High Frame-Rate's power figure went through two
+revisions: first from 420 mW (silently borrowed from DS14879's own *100 fps* Gaming
+example) to ~415 mW, computed at the fps that draft's preset claimed to run (90, not
+100) — the two differed by only 1.2%, an external check that the reconciled *model* was
+doing something reasonable. That model is unchanged, but its input isn't: at the
+amended 46 FPS/4 ms/Precision/Regular operating point the same model gives duty
+0.184 → **~283 mW**, distinctly lower than 415 mW because the preset now runs at roughly
+half the duty cycle. The 415 mW / 420 mW comparison remains valid as a model-validation
+data point (§3.2) — it is no longer this preset's own number.
+
+Manual requests above a given exposure's measured 1× ceiling remain **accepted** by the
+sensor (unchanged — this was never a rejectable condition, and the sensor does not
+reject it either), but now come with a **warning** and an honest **expected delivered
+fps** distinct from the requested fps — see §3.2's new subsection and §8.
 
 ---
 
@@ -95,9 +132,16 @@ only ("ToF bus airtime" — Task 10's UI label), never the Ethernet/USB transpor
 paces.
 
 * **At 30 FPS:** \(9.5\text{ ms} / 33.3\text{ ms} = 28.5\%\) duty cycle (\(71.5\%\) idle airtime for IMU).
+* **At 46 FPS (the amended High Frame-Rate preset):** \(9.5\text{ ms} / 21.7\text{ ms} = 43.7\%\) duty cycle (\(56.3\%\) idle airtime for IMU).
 * **At 60 FPS:** \(9.5\text{ ms} / 16.7\text{ ms} = 57.0\%\) duty cycle (\(43.0\%\) idle airtime for IMU).
 * **At 90 FPS:** \(9.5\text{ ms} / 11.1\text{ ms} = 85.5\%\) duty cycle (\(14.5\%\) idle airtime for IMU).
 * **At 100 FPS:** \(9.5\text{ ms} / 10.0\text{ ms} = 95.0\%\) duty cycle (\(5.0\%\) idle airtime for IMU).
+
+The 90/100 FPS rows above describe the *configured period* the bus schedule is asked to
+hit — they are unchanged and still correct as a bus-airtime model — but per §8, a request
+in that range does not actually get delivered at that rate (§3.2's new quantization
+model); no preset uses them any more, and a Manual request there will carry the §3.2
+delivery-ceiling warning alongside this bus-airtime figure.
 
 Implementation: `roomscan.profiles.i3c_bus_utilization_pct`.
 
@@ -154,16 +198,58 @@ in the public datasheet.
   the **weakest-grounded numbers in this model**, and flagged as such in
   `profiles.POWER_COEFFICIENTS`.
 
-**External validation** (a point this fit was *not* built from): High Frame-Rate
-(Precision/Regular/DSS-off, our 90 fps preset — not DS14879's 100 fps Gaming example) at
-duty 0.36 predicts \(145.0 + 750.0 \times 0.36 = 415.0\text{ mW}\), against Table 9's
-Gaming anchor of 420 mW at duty 0.40 (100 fps) — **1.2% off**, despite running at a
-different fps and with DSS forced off (the fitted Precision slope came from DSS-on rows).
-That is the strongest external check available and it passes.
+**External validation** (a point this fit was *not* built from): Precision/Regular/
+DSS-off at 90 fps/4 ms (the shape of DS14879's own 100 fps Gaming example, **not** the
+High Frame-Rate preset — amended 2026-08-03, see below) at duty 0.36 predicts
+\(145.0 + 750.0 \times 0.36 = 415.0\text{ mW}\), against Table 9's Gaming anchor of
+420 mW at duty 0.40 (100 fps) — **1.2% off**, despite running at a different fps and
+with DSS forced off (the fitted Precision slope came from DSS-on rows). That is the
+strongest external check available and it passes; it validates the *model*, not any
+one preset.
 
 Implementation: `roomscan.profiles.estimate_power_mw` / `POWER_COEFFICIENTS`. Values
 remain labelled **estimated** everywhere they surface — no measured claim without a power
 meter (Global constraint, unchanged).
+
+#### 3.2.1 Measured hardware ceiling & delivery quantization (amended 2026-08-03)
+
+Task 5's on-target sweep (readback-exact `frame_period_us`, 54×42/binning 2, Precision
+context, Regular power) found the sensor has an intrinsic per-frame floor DS14879 does
+not document. A requested period shorter than the floor is **accepted**, not rejected or
+clamped, and is delivered as an **integer multiple** of the request: a 90 Hz request
+measured 44.85 fps (a clean 2×), 100 Hz measured 33.2 fps (a clean 3×). The floor
+brackets by exposure (bracket upper bound — the conservative, under-promising side,
+since the true floor lies somewhere inside it):
+
+| Exposure | Measured floor bracket | Model uses (conservative) |
+| :--- | :--- | ---: |
+| 1–2 ms | (16.667, 20.0] ms | 20.0 ms |
+| 4 ms | (20.833, 21.739] ms | 21.739 ms |
+| 8 ms | (22.222, 23.529] ms | 23.529 ms |
+
+Sub-linear in exposure (~0.5–0.7 ms of floor per ms of exposure), with a fixed
+~16–17 ms component dominating. DSS on vs off made no measurable difference to the
+floor — DSS is free, and the existing ≤60 Hz-on/>60 Hz-off rule is unchanged. DS14879's
+own Table 9 "Gaming" anchor (54×42/Precision/100 fps/4 ms/Regular) does **not** reproduce
+at its own stated configuration (2.2× shortfall), and Table 21's characterization matrix
+only ever exercises 30 fps — nothing in the public datasheet actually validates a request
+above ~46 fps at this resolution. The highest rate actually delivered anywhere in the
+investigation was ~49.3 fps (from a 99 Hz request); the 90–100 Hz request band also
+showed a reconfig-instability anomaly (BUG-073), a second reason not to park a preset
+there.
+
+Model (`roomscan.profiles`, measured-2026-08-03):
+
+$$\text{expected\_delivered\_fps} = \frac{\text{requested\_fps}}{\left\lceil \dfrac{\text{floor\_ms}(\text{exposure})}{\text{period\_ms}} \right\rceil}$$
+
+`validate_manual_params` now emits a **warning** (never a rejection — the sensor accepts
+these requests) whenever a manual candidate's fps exceeds its exposure's measured 1×
+ceiling, and `ProfileEstimate.expected_delivered_fps` reports the honest expected rate.
+UI/MCP consequence readouts must display `expected_delivered_fps`, not echo the raw fps
+request, for any configuration past this ceiling. Exposure above 8 ms is unmeasured; the
+model extrapolates by holding the 8 ms bracket's floor, which is **not** verified to be
+conservative there (the trend suggests the true floor keeps rising with exposure, so
+predictions above 8 ms exposure may be optimistic rather than conservative).
 
 ### 3.3 Max Range Model
 
@@ -200,18 +286,25 @@ Implementation: `roomscan.profiles.estimate_max_range_m` / `MAX_RANGE_M`,
 ## 4. Hardware, Transport, and SLAM Safety Guards
 
 1. **Transport Throughput Ceiling Guard (USB vs Ethernet):**
-   * Raw payload bandwidth at \(\text{FPS}\) is \(14,842 \times \text{FPS}\) bytes/sec.
+   * Raw payload bandwidth at \(\text{FPS}\) is \(14,842 \times \text{FPS}\) bytes/sec — this is the
+     *requested* rate; per §3.2.1/§8, a request above its exposure's measured 1× ceiling is not
+     actually delivered at that rate, so real bytes/sec for such a request is lower by the same
+     integer multiple that quantizes the fps. The warning below fires on the *request*
+     regardless — a >60 FPS request is still an unsupported ask over CDC even though its real
+     traffic may be smaller than the naive bandwidth figure suggests.
    * At \(\text{FPS} > 60\), bandwidth exceeds USB CDC Full-Speed's \(\sim 1.0\text{ MB/s}\) throughput cap.
-   * The UI detects active transport (`CDC` vs `UDP`). If `CDC` is active and FPS is set \(> 60\), the control card displays a prominent warning: *"High frame rate (> 60 FPS) requires Ethernet UDP transport to prevent frame drops."*
+   * The UI detects active transport (`CDC` vs `UDP`). If `CDC` is active and FPS is set \(> 60\), the control card displays a prominent warning: *"High frame rate (> 60 FPS) requires Ethernet UDP transport to prevent frame drops."* This rule is unchanged by the measured-ceiling amendment — Manual can still request up to 100 FPS, and the CDC warning still applies to the request.
 
 2. **Host SLAM Parameter Auto-Scaling:**
    * **Barometer Drift Window (`baro_tau_frames`):** Scaled automatically with target frame rate:
      $$\text{baro\_tau\_frames} = \text{round}(30.0 \times \text{target\_fps})$$
-     (e.g., 900 frames @ 30 FPS, 2700 frames @ 90 FPS).
+     (e.g., 900 frames @ 30 FPS, 1380 frames @ the amended 46 FPS High Frame-Rate preset —
+     the formula takes whatever `target_fps` actually is, including a Manual request above
+     46; it is not specific to the retired 90 FPS design point).
    * **Host IMU Crossover Rate (`QUAT_REF_RATE_HZ`):** Dynamically set to match active ToF frame rate in `ImuFusion`.
 
 3. **Web UI Pacing (`POINT_INTERVAL`):**
-   * Broadcaster WebSocket pacing in `web.py` auto-adapts to incoming frame rate or decouples UI viewport rendering from frame ingest, ensuring 90 FPS stream processing while maintaining smooth browser rendering.
+   * Broadcaster WebSocket pacing in `web.py` auto-adapts to incoming frame rate or decouples UI viewport rendering from frame ingest, ensuring smooth browser rendering up to the sensor's actual measured delivery rate (≤~49 fps at this resolution, per §8.1 — not the originally-assumed 90 FPS).
 
 ---
 
@@ -273,15 +366,26 @@ WebSocket `/ws` JSON messages:
    * Plumb WebSocket commands for `set_profile` and `set_manual_params`.
    * Implement 4-way Mode Selector card, Manual Parameter controls, and real-time I3C Bus Bandwidth Bar in `static/components/controls.js` and CSS.
 4. **Validation & Verification:**
-   * Hardware test over Ethernet UDP @ 90 FPS (verify 0 frame drops, 0 CRC errors, clean IMU sync).
+   * Hardware test over Ethernet UDP @ **46 FPS** (the amended High Frame-Rate preset — verify
+     0 frame drops, 0 CRC errors, clean IMU sync, and that the applied period readback matches
+     21,739 µs and the measured delivered rate is ≈46 fps, not merely that the ACK echoed the
+     request). A 90 FPS hardware test is retired — see §8 for why the request itself was never
+     deliverable at 1×.
    * Verify transport ceiling warning when switching to >60 FPS over CDC.
 
 ---
 
 ## 7. Notes & Key Discoveries for Plan Writer
 
+> **Read alongside §3.2.1/§8 (2026-08-03).** The 90/100 FPS figures throughout §7.1–7.3
+> below describe what the driver API *accepts* and what a *requested* configured period
+> implies for bus/transport load — both still literally true. What they do **not** mean,
+> as the original draft implied, is that the sensor *delivers* frames at that rate:
+> Task 5 measured 90/100 Hz requests being silently quantized to ~44.85/~33.2 fps. Treat
+> every "90 FPS"/"100 FPS" mention below as a *request*, not an achieved rate.
+
 ### 7.1 Hardware & Driver Constraints (ST VL53L9CX Datasheet DS14879)
-* **Driver API Flexibility:** `vl53l9_set_frame_period()` accepts any frame period from \(10,000\ \mu\text{s}\) (100 FPS) to \(1,000,000\ \mu\text{s}\) (1 FPS). You do NOT have to choose only discrete values (30 or 100); 60 FPS or 90 FPS are fully valid continuous settings.
+* **Driver API Flexibility:** `vl53l9_set_frame_period()` accepts any frame period from \(10,000\ \mu\text{s}\) (100 FPS) to \(1,000,000\ \mu\text{s}\) (1 FPS). You do NOT have to choose only discrete values (30 or 100); 60 FPS or 90 FPS are fully valid continuous *settings to request* — but per §3.2.1/§8, "valid" here means "accepted without error," not "delivered 1:1." Above ~46 FPS (exposure-dependent) the sensor delivers an integer-multiple-quantized rate instead.
 * **Precision vs. Ambient Minimum Distance:** 
   * **Precision Mode** allows ranging down to **50 mm (5 cm)**.
   * **Ambient Mode** enforces a minimum distance floor of **450 mm (45 cm)**.
@@ -389,3 +493,39 @@ data:
   100 fps request — correctly flagged out of tolerance (**-69.74%**) rather than trusting
   the filename/assumption; this capture's stream 13 is entirely absent (0 IMU_SYNC
   frames), and pairing correctly reports `0.0%` for it without crashing.
+
+### 8.1 Measured ceiling investigation (Task 5, 2026-08-03) — summary
+
+Full sweep data lives in the implementation plan's Task 11/12 records and
+`ROADMAP.md`; this is the brief citation the amended §2.1/§3.2.1 numbers trace to, per
+the plan's own gate ("do not label a lower measured rate as 90 FPS; fix the bottleneck
+or amend the specification with the measured ceiling").
+
+* **Method:** on-target sweep of `frame_period_us` (readback-exact — the applied value
+  read back from the sensor, not merely the ACK'd request), 54×42/binning 2, Precision
+  context, Regular power, at fixed exposures of 1, 2, 4, and 8 ms.
+* **Finding:** any requested period shorter than an intrinsic per-frame floor is
+  **accepted**, not rejected, and delivers an **integer multiple** of the requested
+  period instead of the request: 90 Hz → 44.85 fps measured (clean 2×); 100 Hz →
+  33.2 fps measured (clean 3×).
+* **Floor brackets by exposure** (measured, bracket upper bound is what the model
+  uses — conservative/under-promising): 1–2 ms → floor ∈ (16.667, 20.0] ms (50 Hz
+  clean 1×, 60 Hz fell to 2×); 4 ms → floor ∈ (20.833, 21.739] ms (46 Hz clean 1× at
+  45.84 fps, 48 Hz fell to 2×); 8 ms → floor ∈ (22.222, 23.529] ms. Sub-linear in
+  exposure (~0.5–0.7 ms of floor per ms of exposure); a fixed ~16–17 ms component
+  dominates.
+* **DSS on vs off:** statistically indistinguishable floors — DSS is free; the
+  existing ≤60 Hz-on/>60 Hz-off rule is unchanged by this finding.
+* **DS14879 does not validate this:** Table 9's "Gaming" anchor (54×42/Precision/
+  100 fps/4 ms/Regular) does not reproduce at its own stated configuration (2.2×
+  shortfall), and Table 21's characterization matrix only ever exercises 30 fps —
+  nothing in the public datasheet actually validates a request above ~46 fps at this
+  resolution.
+* **Highest rate ever delivered:** ~49.3 fps, from a 99 Hz request. The 90–100 Hz
+  request band also showed a reconfig-instability anomaly (BUG-073) — a second,
+  independent reason not to park a preset there.
+* **Consequence:** the High Frame-Rate preset is amended 90 → **46 Hz** (§2.1), the
+  measured 1× ceiling at its own 4 ms exposure, with DSS now on (46 ≤ 60). Manual mode
+  is not re-capped — 1–100 fps requests remain accepted — but `roomscan.profiles` now
+  warns and reports `expected_delivered_fps` (§3.2.1) instead of silently mispredicting
+  a rate the sensor will not actually deliver.

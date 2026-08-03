@@ -16,12 +16,13 @@ from roomscan.profiles import (BLANKING_MARGIN_US_PENDING_HW, DSS_FPS_CEILING,
                                MAX_RANGE_M, MIN_DISTANCE_MM, PRESETS,
                                TRANSPORT_CDC_FPS_CEILING, ManualParams,
                                PowerMode, ProfileConfig, ProfileId, RangingMode,
-                               dss_enabled_for_fps, duty_cycle, estimate_manual,
-                               estimate_power_mw, estimate_preset,
-                               estimate_profile, fps_to_period_us,
-                               manual_profile_config, period_us_to_fps,
-                               transport_warning_message, validate_imu_env_rate,
-                               validate_manual_params)
+                               ceiling_fps_for_exposure, dss_enabled_for_fps,
+                               duty_cycle, estimate_manual, estimate_power_mw,
+                               estimate_preset, estimate_profile,
+                               expected_delivered_fps, fps_to_period_us,
+                               manual_profile_config, measured_floor_ms,
+                               period_us_to_fps, transport_warning_message,
+                               validate_imu_env_rate, validate_manual_params)
 
 # ---------------------------------------------------------------------------
 # Enum wire values — these are the SET_RANGING_PROFILE / SET_MANUAL_PARAMS /
@@ -56,10 +57,11 @@ def test_power_mode_matches_vl53l9_power_mode_t():
 
 # (profile_id, ranging_mode, fps, exposure_ms, power_mode) exactly as amended
 # in docs/superpowers/specs/2026-07-31-high-framerate-and-manual-ranging-modes.md
+# (High Frame-Rate amended 90 -> 46 fps 2026-08-03, measured hardware ceiling).
 PRESET_TABLE = [
     (ProfileId.ROOM_MAPPING, RangingMode.AMBIENT, 30, 6, PowerMode.ULTRA_LOW),
     (ProfileId.PRECISION, RangingMode.PRECISION, 30, 10, PowerMode.ULTRA_LOW),
-    (ProfileId.HIGH_FRAMERATE, RangingMode.PRECISION, 90, 4, PowerMode.REGULAR),
+    (ProfileId.HIGH_FRAMERATE, RangingMode.PRECISION, 46, 4, PowerMode.REGULAR),
 ]
 
 
@@ -85,9 +87,11 @@ def test_precision_preset_dss_enabled():
     assert PRESETS[ProfileId.PRECISION].dss_enabled is True
 
 
-def test_high_framerate_preset_dss_disabled():
-    # 90 fps > DSS_FPS_CEILING (60) -> DSS forced off, per the global constraint.
-    assert PRESETS[ProfileId.HIGH_FRAMERATE].dss_enabled is False
+def test_high_framerate_preset_dss_enabled():
+    # Amended 2026-08-03 (measured hardware ceiling): 46 fps <= DSS_FPS_CEILING
+    # (60) -> DSS on, per the global constraint. Was DSS-off at the old 90 fps
+    # design point.
+    assert PRESETS[ProfileId.HIGH_FRAMERATE].dss_enabled is True
 
 
 @pytest.mark.parametrize("profile_id", list(PRESETS))
@@ -123,21 +127,65 @@ def test_precision_preset_range_matches_datasheet_ceiling():
     assert est.max_range_m == pytest.approx(8.8)
 
 
-def test_high_framerate_range_matches_table9_gaming_anchor_exactly():
+def test_precision_dss_off_range_matches_table9_gaming_anchor_exactly():
     # Table 9 Gaming: Precision (no DSS), 100 fps, 4 ms, Regular -> 5 m max range.
-    # Range does not depend on fps in this model, so our 90 fps preset still hits
-    # the exact Table 9 figure.
-    est = estimate_preset(ProfileId.HIGH_FRAMERATE)
-    assert est.max_range_m == pytest.approx(5.0)
+    # This is a MAX_RANGE_M lookup check, not the High Frame-Rate preset (amended
+    # 2026-08-03 to 46 fps/DSS-on, which no longer hits this lookup cell).
+    assert MAX_RANGE_M[(RangingMode.PRECISION, False)] == pytest.approx(5.0)
 
 
-def test_high_framerate_power_close_to_table9_gaming_anchor():
-    # Table 9 Gaming anchor is 420 mW @ 100 fps; our preset deliberately runs at
-    # 90 fps (see module docstring), so this is a proximity check, not an exact
-    # reproduction: predicted 415.0 mW, 1.2% off the nearby real anchor.
+def test_precision_dss_off_power_close_to_table9_gaming_anchor():
+    # Table 9 Gaming anchor is 420 mW @ 100 fps; the MODEL is validated at 90 fps
+    # (Precision/Regular/DSS-off/4 ms -- the shape of the Gaming example), not the
+    # High Frame-Rate preset, which no longer runs this configuration. Predicted
+    # 415.0 mW, 1.2% off the nearby real anchor.
+    power_mw = estimate_power_mw(RangingMode.PRECISION, PowerMode.REGULAR, 4, 90)
+    assert power_mw == pytest.approx(415.0, abs=0.5)
+    assert abs(power_mw - 420.0) / 420.0 < 0.02
+
+
+# --- High Frame-Rate preset, amended 2026-08-03: measured hardware ceiling ---------
+# (Task 5's on-target sweep found 90 fps requests deliver only ~44.85 fps -- a clean
+# 2x period multiple, not 1:1 -- so the preset moved to 46 fps, the measured 1x
+# ceiling at 4 ms exposure. See profiles.py module docstring "Measured hardware
+# ceiling" and docs/superpowers/specs/2026-07-31-high-framerate-and-manual-ranging-
+# modes.md Sec 2.1/8.)
+
+
+def test_high_framerate_preset_is_46fps_not_90fps():
+    cfg = PRESETS[ProfileId.HIGH_FRAMERATE]
+    assert cfg.fps == 46
+    assert cfg.exposure_ms == 4
+    assert cfg.ranging_mode is RangingMode.PRECISION
+    assert cfg.power_mode is PowerMode.REGULAR
+
+
+def test_high_framerate_preset_range_is_precision_dss_on_now():
+    # DSS is now ON at 46 fps, so the preset gets the Precision/DSS-on 8.8 m
+    # figure (same lookup cell as the Precision preset), not the old 5.0 m
+    # DSS-off figure.
     est = estimate_preset(ProfileId.HIGH_FRAMERATE)
-    assert est.power_mw == pytest.approx(415.0, abs=0.5)
-    assert abs(est.power_mw - 420.0) / 420.0 < 0.02
+    assert est.max_range_m == pytest.approx(8.8)
+
+
+def test_high_framerate_preset_power_recomputes_at_46fps():
+    # duty = 4 ms * 46 fps / 1000 = 0.184; Precision/Regular intercept 145.0,
+    # slope 750.0 -> 145.0 + 750.0*0.184 = 283.0 mW. Distinct from the old 90 fps
+    # figure (415.0 mW) -- the power estimate must actually move with the preset,
+    # not stay pinned to the retired design point.
+    est = estimate_preset(ProfileId.HIGH_FRAMERATE)
+    assert est.power_mw == pytest.approx(283.0, abs=0.1)
+    assert est.power_mw != pytest.approx(415.0, abs=0.1)
+
+
+def test_high_framerate_preset_delivers_1x_no_quantization():
+    # The whole point of the amendment: the preset itself must sit AT or below
+    # its own exposure's measured 1x ceiling, so it is delivered 1:1 with no
+    # warning and no quantization.
+    est = estimate_preset(ProfileId.HIGH_FRAMERATE)
+    assert est.expected_delivered_fps == pytest.approx(46.0, abs=0.05)
+    assert est.warnings == ()
+    assert est.ok
 
 
 def test_min_distance_ambient_vs_precision():
@@ -451,6 +499,116 @@ def test_i3c_bus_utilization_matches_spec_percentages(fps, expected_pct):
 def test_i3c_airtime_left_complements_utilization():
     est = estimate_preset(ProfileId.HIGH_FRAMERATE)
     assert est.i3c_bus_utilization_pct + est.i3c_airtime_left_pct == pytest.approx(100.0)
+
+
+# ---------------------------------------------------------------------------
+# Measured hardware ceiling (2026-08-03): integer-multiple quantization below
+# the sensor's per-frame floor, and the manual-request warning it produces.
+# See profiles.py module docstring "Measured hardware ceiling" -- floor
+# brackets are (exposure<=2ms -> 20.0ms, <=4ms -> 21.739ms, <=8ms -> 23.529ms),
+# each the bracket's own conservative (under-promising) upper bound.
+# ---------------------------------------------------------------------------
+
+FLOOR_BRACKET_TABLE = [
+    (1, 20.0),
+    (2, 20.0),
+    (3, 21.739),  # falls into the <=4ms bracket, no direct 3ms measurement
+    (4, 21.739),
+    (5, 23.529),  # falls into the <=8ms bracket, no direct 5ms measurement
+    (8, 23.529),
+]
+
+
+@pytest.mark.parametrize("exposure_ms,expected_floor_ms", FLOOR_BRACKET_TABLE)
+def test_measured_floor_ms_brackets(exposure_ms, expected_floor_ms):
+    assert measured_floor_ms(exposure_ms) == pytest.approx(expected_floor_ms)
+
+
+def test_measured_floor_ms_extrapolates_beyond_8ms_by_holding_last_bracket():
+    # Unmeasured (>8 ms exposure); holds the 8 ms bracket's floor rather than
+    # inventing a number -- see the docstring's "UNVERIFIED" caveat.
+    assert measured_floor_ms(16) == pytest.approx(23.529)
+
+
+# (requested_fps, exposure_ms, expected_delivered_fps) -- pins the measured
+# hardware points (90/100 fps @ 4 ms) and the boundary cases the amended
+# preset and its neighbors sit on.
+QUANTIZATION_TABLE = [
+    (90, 4, 45.0),          # measured 44.85 fps on hardware, clean 2x
+    (100, 4, 100.0 / 3.0),  # measured 33.2 fps on hardware, clean 3x
+    (46, 4, 46.0),          # High Frame-Rate preset: exactly 1x, no quantization
+    (48, 4, 24.0),          # just above the 4ms ceiling (~46.0) -> 2x
+    (50, 2, 50.0),          # exactly the 2ms ceiling -> 1x
+    (60, 2, 30.0),          # above the 2ms ceiling (50.0) -> 2x
+]
+
+
+@pytest.mark.parametrize("requested_fps,exposure_ms,expected_fps", QUANTIZATION_TABLE)
+def test_expected_delivered_fps_quantization(requested_fps, exposure_ms, expected_fps):
+    assert expected_delivered_fps(requested_fps, exposure_ms) == pytest.approx(
+        expected_fps, abs=0.05)
+
+
+def test_expected_delivered_fps_never_exceeds_requested():
+    # A period-multiple quantized rate is always requested_fps / N for integer
+    # N >= 1 -- it can equal the request but never exceed it.
+    for fps, exposure_ms in [(90, 4), (100, 4), (100, 16), (46, 4)]:
+        assert expected_delivered_fps(fps, exposure_ms) <= fps + 1e-9
+
+
+# (exposure_ms, ceiling_fps) -- the fps just at/below the ceiling must not warn;
+# just above it must.
+WARNING_BOUNDARY_TABLE = [
+    (2, 50),   # ceiling exactly 50.0 fps
+    (4, 46),   # ceiling ~46.0003 fps -- 46 fits, 47 doesn't
+    (8, 42),   # ceiling ~42.5 fps -- 42 fits, 43 doesn't
+]
+
+
+@pytest.mark.parametrize("exposure_ms,at_ceiling_fps", WARNING_BOUNDARY_TABLE)
+def test_manual_warning_boundary_per_exposure(exposure_ms, at_ceiling_fps):
+    ranging = (RangingMode.PRECISION if at_ceiling_fps > DSS_FPS_CEILING
+              else RangingMode.AMBIENT)
+    at_params = ManualParams(ranging, at_ceiling_fps, exposure_ms, PowerMode.REGULAR)
+    at_result = validate_manual_params(at_params)
+    assert at_result.ok
+    assert at_result.warnings == ()
+
+    over_params = ManualParams(ranging, at_ceiling_fps + 1, exposure_ms, PowerMode.REGULAR)
+    over_result = validate_manual_params(over_params)
+    assert over_result.ok  # warning, not rejection
+    assert over_result.warnings
+    assert "1x delivery ceiling" in over_result.warnings[0]
+    assert "ACCEPTS" in over_result.warnings[0]
+
+
+def test_manual_warning_reports_expected_delivered_not_requested():
+    params = ManualParams(RangingMode.PRECISION, 90, 4, PowerMode.REGULAR)
+    result = validate_manual_params(params)
+    assert result.ok
+    assert any("~45.0" in w or "~45" in w for w in result.warnings)
+
+
+def test_ceiling_fps_for_exposure_matches_measured_floor():
+    assert ceiling_fps_for_exposure(4) == pytest.approx(1000.0 / 21.739)
+    assert ceiling_fps_for_exposure(2) == pytest.approx(50.0)
+
+
+def test_estimate_manual_reports_expected_delivered_fps_field():
+    # ProfileEstimate.expected_delivered_fps must report what the sensor will
+    # actually deliver, not echo the request, once past the 1x ceiling.
+    params = ManualParams(RangingMode.PRECISION, 90, 4, PowerMode.REGULAR)
+    est = estimate_manual(params)
+    assert est.ok
+    assert est.fps == 90  # the request is preserved...
+    assert est.expected_delivered_fps == pytest.approx(45.0, abs=0.05)  # ...but not echoed here
+    assert est.expected_delivered_fps != est.fps
+
+
+def test_estimate_preset_expected_delivered_fps_matches_request_when_under_ceiling():
+    for profile_id in PRESETS:
+        est = estimate_preset(profile_id)
+        assert est.expected_delivered_fps == pytest.approx(est.fps, abs=0.05)
 
 
 # ---------------------------------------------------------------------------

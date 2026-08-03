@@ -70,7 +70,19 @@ uint32_t rs_ranging_frame_timeout_ms(uint32_t frame_period_us) {
  * default (vl53l9_utils.c) that this scanner-owned table used to diverge from.
  * `.id` is the vendor vl53l9_profile_t's own (unused anywhere in the vendor tree)
  * usecase-id field -- left 0, since our host-facing identity is `profile_id`
- * below, not this vendor field. */
+ * below, not this vendor field.
+ *
+ * RS_PROFILE_HIGH_FRAMERATE amended 2026-08-03 (measured hardware ceiling, Task 5):
+ * an on-target sweep found the sensor has an intrinsic per-frame floor DS14879 does
+ * not document -- a requested period shorter than it is accepted, not rejected, and
+ * silently delivered as an integer MULTIPLE of the request (90 Hz measured 44.85 fps,
+ * a clean 2x; 100 Hz measured 33.2 fps, a clean 3x). The preset moves 90 -> 46 fps,
+ * the measured 1x delivery ceiling at this preset's own 4 ms exposure, with DSS now
+ * ON (46 <= the 60 fps DSS ceiling -- see rs_ranging_dss_enabled_for_period()).
+ * Mirrors host/src/roomscan/profiles.py's PRESETS[ProfileId.HIGH_FRAMERATE] exactly;
+ * see that module's docstring "Measured hardware ceiling" and
+ * docs/superpowers/specs/2026-07-31-high-framerate-and-manual-ranging-modes.md
+ * Sec 2.1/3.2.1/8.1 for the full investigation. */
 static const rs_ranging_profile_t rs_ranging_presets[3] = {
     { /* RS_PROFILE_ROOM_MAPPING: Ambient, DSS on, 30 fps, 6 ms, ULP */
         .vendor = { .id = 0u, .sync = VL53L9_SYNC_AUTONOMOUS, .power = VL53L9_POWER_ULTRA_LOW,
@@ -86,12 +98,14 @@ static const rs_ranging_profile_t rs_ranging_presets[3] = {
         .profile_id = RS_PROFILE_PRECISION,
         .dss_enabled = 1u,
     },
-    { /* RS_PROFILE_HIGH_FRAMERATE: Precision, DSS off (forced, >60fps), 90 fps, 4 ms, Regular */
+    { /* RS_PROFILE_HIGH_FRAMERATE: Precision, DSS on (46fps <= 60fps ceiling), 46 fps,
+       * 4 ms, Regular -- amended 2026-08-03, measured hardware ceiling (was 90 fps /
+       * DSS off / 11111 us, which the sensor never actually delivered 1:1). */
         .vendor = { .id = 0u, .sync = VL53L9_SYNC_AUTONOMOUS, .power = VL53L9_POWER_REGULAR,
-                    .context = VL53L9_CONTEXT_SHORT, .frame_period_us = 11111u, .binning = 2u,
+                    .context = VL53L9_CONTEXT_SHORT, .frame_period_us = 21739u, .binning = 2u,
                     .exposure_ms = 4u },
         .profile_id = RS_PROFILE_HIGH_FRAMERATE,
-        .dss_enabled = 0u,
+        .dss_enabled = 1u,
     },
 };
 

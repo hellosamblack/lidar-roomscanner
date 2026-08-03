@@ -68,12 +68,15 @@ ULP/LOW power-mode intercepts are not directly measured at 54x42 in Table 36
                   intercepts for each ranging mode — the WEAKEST-grounded
                   numbers in this model, flagged as such in `POWER_COEFFICIENTS`.
 
-Validation against real anchors this fit was NOT built from: High Frame-Rate
-(Precision/Regular/DSS-off, OUR 90 fps preset, not Table 9's 100 fps Gaming
-example) predicts 415.0 mW at duty 0.36, against Table 9's 420 mW at duty 0.40
-(100 fps) — 1.2% off, despite running at a different fps and with DSS off
-(the fitted precision slope came from DSS-ON rows). That is the strongest
-external check this model has, and it passes.
+Validation against real anchors this fit was NOT built from: Precision/
+Regular/DSS-off at 90 fps/4 ms (the shape of Table 9's 100 fps "Gaming"
+example, NOT the High Frame-Rate preset, which was amended 2026-08-03 to
+46 fps/DSS-on after a hardware ceiling measurement found 90 fps and 100 fps
+requests are both delivered as period-multiples rather than 1:1 — see
+"Measured hardware ceiling" below) predicts 415.0 mW at duty 0.36, against
+Table 9's 420 mW at duty 0.40 (100 fps) — 1.2% off, despite running at a
+different fps and with DSS off (the fitted precision slope came from DSS-ON
+rows). That is the strongest external check this model has, and it passes.
 
 **Max range.** The original continuous `sqrt(exposure)` formula is dropped
 entirely: DS14879 Tables 23/24 vary exposure and ambient light TOGETHER in
@@ -142,9 +145,52 @@ an empirical quantity, not derivable from the public register math, and is
 below is a clearly-labelled conservative placeholder — reject only the
 mathematically impossible case (exposure that cannot fit inside the period at
 all, plus a small safety pad) — not a measured value; do not read it as one.
+
+**Measured hardware ceiling (2026-08-03) — the sensor's real per-frame floor.**
+Task 5's on-target sweep (readback-exact `frame_period_us`, 54x42/binning 2,
+Precision context, Regular power) closed the question the placeholder above
+left open, and found something the datasheet does not document at all: the
+sensor has an intrinsic per-frame floor, and a REQUESTED period shorter than
+that floor is not rejected and not clamped — it is silently delivered as an
+INTEGER MULTIPLE of the requested period. A 90 Hz request measured 44.85 fps
+(a clean 2x), a 100 Hz request measured 33.2 fps (a clean 3x). The floor
+brackets by exposure (upper bound of each bracket, the conservative/
+under-promising side, since the true floor is somewhere inside the bracket):
+1-2 ms exposure -> floor in (16.667, 20.0] ms; 4 ms exposure -> floor in
+(20.833, 21.739] ms; 8 ms exposure -> floor in (22.222, 23.529] ms. It is
+sub-linear in exposure (~0.5-0.7 ms of floor per ms of exposure) with a fixed
+~16-17 ms component dominating. DSS on vs off made no measurable difference
+to the floor (DSS is "free"; the existing <=60 Hz-on/>60 Hz-off rule is
+unchanged by this finding). DS14879's own Table 9 "Gaming" anchor (54x42/
+Precision/100 fps/4 ms/Regular) does NOT reproduce at its own stated config
+(2.2x shortfall) — its Table 21 characterization matrix only ever exercises
+30 fps, so nothing in the datasheet actually validates a >~46 fps request at
+this resolution. The highest rate ever actually delivered in the
+investigation was ~49.3 fps (from a 99 Hz request); the 90-100 Hz band also
+showed a reconfig-instability anomaly (BUG-073), another reason not to park a
+preset there.
+
+Consequence: **the High Frame-Rate preset is amended from 90 fps to 46 fps**
+(still Precision/Regular, still 4 ms exposure, DSS now ON because 46 <= the
+60 Hz DSS ceiling) — the highest fps this exposure delivers 1:1 with no
+quantization, measured 2026-08-03. See the amended spec's Sec 2.1/8 and the
+plan's Task 11/12 for the full sweep data; `measured_floor_ms` /
+`expected_delivered_fps` / `ceiling_fps_for_exposure` below are the model
+this finding produced, and `PRESETS[ProfileId.HIGH_FRAMERATE]` is the
+amended preset. Manual mode is NOT re-capped to 46/60/100 fps by this
+finding — a request above a given exposure's 1x ceiling remains ACCEPTED by
+the sensor (this was never a validation-rejectable condition; the sensor
+does not reject it either) — but `validate_manual_params` now WARNS when a
+request will be delivered as a period-multiple rather than 1:1, and
+`ProfileEstimate.expected_delivered_fps` reports the honest expected rate
+instead of echoing the request. The extrapolation above 8 ms exposure (holds
+the 8 ms bracket's floor for 9-16 ms) is UNVERIFIED — the trend suggests the
+true floor keeps rising with exposure, so predictions above 8 ms exposure may
+be optimistic, not conservative.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -217,6 +263,64 @@ def dss_enabled_for_fps(fps: int) -> bool:
     """Global constraint: "DSS is enabled at 60 Hz and below and forced off above
     60 Hz". Not a user-settable field — fully determined by fps."""
     return fps <= DSS_FPS_CEILING
+
+
+# --- Measured hardware ceiling (2026-08-03) -- integer-multiple quantization below
+# the sensor's own per-frame floor. See module docstring "Measured hardware ceiling"
+# for the full investigation; these are its brackets, unchanged. -------------------
+
+# (exposure_ms upper bound of the bracket, floor_ms -- the bracket's OWN upper bound,
+# i.e. the conservative/under-promising side). Measured at 54x42/binning 2, Precision
+# context, Regular power; DSS on vs off made no measurable difference. Exposure above
+# 8 ms is UNMEASURED -- `measured_floor_ms` extrapolates by holding the 8 ms bracket's
+# floor, which is NOT verified to be conservative there (the trend suggests the true
+# floor keeps rising with exposure).
+_FLOOR_MS_BRACKETS: tuple[tuple[float, float], ...] = (
+    (2.0, 20.0),
+    (4.0, 21.739),
+    (8.0, 23.529),
+)
+
+
+def measured_floor_ms(exposure_ms: float) -> float:
+    """Conservative (upper-bound-of-bracket) measured per-frame floor, ms, for a
+    given exposure — measured 2026-08-03 (see module docstring). Any requested
+    frame period shorter than this floor is still ACCEPTED by the sensor but
+    delivered as an integer multiple of the requested period, not 1:1."""
+    for bracket_exposure_ms, floor_ms in _FLOOR_MS_BRACKETS:
+        if exposure_ms <= bracket_exposure_ms:
+            return floor_ms
+    return _FLOOR_MS_BRACKETS[-1][1]  # extrapolated beyond 8 ms -- see docstring
+
+
+def ceiling_fps_for_exposure(exposure_ms: float) -> float:
+    """Highest fps delivered 1:1 (multiplier 1) at this exposure, i.e.
+    `1000 / measured_floor_ms(exposure_ms)`. Requests above this are still
+    accepted by the sensor but quantized — see `expected_delivered_fps`."""
+    floor_ms = measured_floor_ms(exposure_ms)
+    if floor_ms <= 0:
+        return float("inf")
+    return 1000.0 / floor_ms
+
+
+def expected_delivered_fps(requested_fps: int, exposure_ms: float) -> float:
+    """Honest expected delivered rate for a requested fps at a given exposure:
+    `requested_fps / ceil(floor_ms / period_ms)` — the measured integer-multiple
+    quantization (measured 2026-08-03). At/below the exposure's 1x ceiling this
+    equals `requested_fps` exactly (multiplier 1); above it, this is what the
+    sensor actually delivers, not what was asked for — callers must report THIS
+    value, not echo the request, once a manual candidate exceeds its ceiling."""
+    if requested_fps <= 0:
+        return 0.0
+    period_us = fps_to_period_us(requested_fps)
+    floor_us = measured_floor_ms(exposure_ms) * 1000.0
+    if period_us <= 0:
+        return 0.0
+    # Tiny epsilon guards the exact-boundary case (e.g. 46 fps @ 4 ms, where
+    # floor_us and period_us are equal up to float representation) from spuriously
+    # rounding up to a 2x multiplier.
+    multiplier = max(1, math.ceil(floor_us / period_us - 1e-9))
+    return requested_fps / multiplier
 
 
 def duty_cycle(exposure_ms: float, fps: int) -> float:
@@ -432,6 +536,19 @@ def validate_manual_params(params: ManualParams) -> ValidationResult:
                 f"period ({period_us} us) with the {BLANKING_MARGIN_US_PENDING_HW} us "
                 "blanking-margin placeholder (PENDING hardware measurement, Task 5)")
 
+    if (FPS_MIN <= params.fps <= FPS_MAX
+            and EXPOSURE_MS_MIN <= params.exposure_ms <= EXPOSURE_MS_MAX):
+        ceiling_fps = ceiling_fps_for_exposure(params.exposure_ms)
+        if params.fps > ceiling_fps:
+            delivered = expected_delivered_fps(params.fps, params.exposure_ms)
+            warnings.append(
+                f"fps={params.fps} at exposure_ms={params.exposure_ms} exceeds the "
+                f"measured ~{ceiling_fps:.1f} fps 1x delivery ceiling (measured "
+                "2026-08-03, 54x42/binning 2, Precision context/Regular power — see "
+                "module docstring 'Measured hardware ceiling'); the sensor ACCEPTS "
+                f"this request but delivers period-multiples, expected ~{delivered:.1f} "
+                f"fps, not {params.fps} fps.")
+
     rate_result = validate_imu_env_rate(params.imu_env_rate_hz)
     errors.extend(rate_result.errors)
     warnings.extend(rate_result.warnings)
@@ -460,16 +577,23 @@ class ProfileConfig:
 
 
 # Table 9 "Profile examples" anchors, exactly (Room Mapping, and the Precision
-# preset's own min-distance/power-mode choice) or by construction (High Frame-Rate
-# deliberately runs at 90 fps, not Table 9's 100 fps Gaming example -- see module
-# docstring for why that is still validated against the datasheet).
+# preset's own min-distance/power-mode choice) or, for High Frame-Rate, the
+# MEASURED hardware ceiling (2026-08-03, see module docstring): the original
+# design ran this preset at 90 fps by construction, matching Table 9's 100 fps
+# "Gaming" example's shape, but an on-target sweep found that config does not
+# reproduce -- 90 fps and 100 fps requests are both accepted and both silently
+# delivered as period-multiples (44.85 fps and 33.2 fps respectively), not the
+# requested rate. High Frame-Rate is amended to 46 fps -- the measured 1x
+# delivery ceiling at this preset's own 4 ms exposure -- keeping Precision
+# context and Regular power; DSS is now ON (46 <= the 60 Hz DSS ceiling), which
+# also raises this preset's max range from 5.0 m to 8.8 m (see MAX_RANGE_M).
 PRESETS: dict[ProfileId, ProfileConfig] = {
     ProfileId.ROOM_MAPPING: ProfileConfig(
         ProfileId.ROOM_MAPPING, RangingMode.AMBIENT, 30, 6, PowerMode.ULTRA_LOW),
     ProfileId.PRECISION: ProfileConfig(
         ProfileId.PRECISION, RangingMode.PRECISION, 30, 10, PowerMode.ULTRA_LOW),
     ProfileId.HIGH_FRAMERATE: ProfileConfig(
-        ProfileId.HIGH_FRAMERATE, RangingMode.PRECISION, 90, 4, PowerMode.REGULAR),
+        ProfileId.HIGH_FRAMERATE, RangingMode.PRECISION, 46, 4, PowerMode.REGULAR),
 }
 
 
@@ -501,6 +625,7 @@ class ProfileEstimate:
     transport_warning: str | None
     imu_env_rate_hz: int | None
     imu_env_coupled: bool
+    expected_delivered_fps: float
     warnings: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
 
@@ -531,6 +656,8 @@ def estimate_profile(config: ProfileConfig, transport: str = "ethernet") -> Prof
     max_range = MAX_RANGE_M.get((config.ranging_mode, dss), float("nan"))
     min_dist = estimate_min_distance_mm(config.ranging_mode)
     tw = transport_warning_message(transport, config.fps)
+    delivered_fps = (expected_delivered_fps(config.fps, config.exposure_ms)
+                     if FPS_MIN <= config.fps <= FPS_MAX else 0.0)
 
     warnings = list(validation.warnings)
     if tw:
@@ -545,6 +672,7 @@ def estimate_profile(config: ProfileConfig, transport: str = "ethernet") -> Prof
         power_mw=power_mw, max_range_m=max_range, min_distance_mm=min_dist,
         transport_warning=tw, imu_env_rate_hz=config.imu_env_rate_hz,
         imu_env_coupled=config.imu_env_rate_hz in (None, 0),
+        expected_delivered_fps=round(delivered_fps, 2),
         warnings=tuple(warnings), errors=validation.errors)
 
 
