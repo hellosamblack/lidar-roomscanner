@@ -485,6 +485,119 @@ def test_slam_hud_shows_the_compute_device():
     assert "slam-device" in slam and "m.device" in slam
 
 
+# ---------------------------------------------------------------------------
+# SLAM HUD counters and stage timing (plan item 2, 2026-08-02:
+# docs/superpowers/plans/2026-08-02-slam-compute-and-transport-followups.md).
+# ---------------------------------------------------------------------------
+
+_SLAM_STAGE_TIMING_IDS = (
+    "slam-backend", "slam-throughput", "slam-overwritten",
+    "slam-gpu-util", "slam-gpu-vram",
+    "slam-raycast-ms", "slam-icp-ms", "slam-integrate-ms",
+    "slam-mesh-extract-ms", "slam-mesh-prep-ms", "slam-mesh-pack-ms",
+    "slam-mesh-bytes",
+)
+
+
+def _row_title(html: str, element_id: str) -> str:
+    """The `title=` on the `.hud-row` that contains `id="<element_id>"`, or
+    None. Keyed on id, not label -- several of these ids share a label
+    ("VRAM", "Backend") with an unrelated row elsewhere on the page."""
+    m = re.search(
+        r'<div class="hud-row" title="([^"]+)"[^>]*>\s*<span>[^<]*</span>'
+        r'<span class="hud-val" id="' + re.escape(element_id) + r'"', html)
+    return m.group(1) if m else None
+
+
+def test_slam_hud_new_counters_and_stage_timing_have_tooltips():
+    """Every new plan-item-2 readout carries a `title=`, same convention as
+    the rest of the SLAM HUD (`slam-device`) and the per-stream tooltip rule
+    in hud.js. None of these are `<button>`/toggle `<label>` elements, so
+    `test_every_button_has_a_tooltip` cannot see them -- this is the
+    equivalent check for the SLAM HUD's plain `.hud-row`s."""
+    html = _index()
+    missing = [i for i in _SLAM_STAGE_TIMING_IDS if not _row_title(html, i)]
+    assert not missing, f"SLAM HUD rows with no title= tooltip: {missing}"
+
+    # The collapsed diagnostics drawer's own affordance needs one too.
+    assert re.search(r'<summary title="[^"]+"[^>]*>Stage timing</summary>', html), (
+        "the 'Stage timing' <details><summary> must carry a title tooltip"
+    )
+
+
+def test_slam_hud_new_ids_are_unique_and_present_in_slam_js():
+    """Sanity companion to `test_no_duplicate_element_ids`: every id this
+    change introduces actually exists (once) and is wired up client-side."""
+    html = _index()
+    slam = (STATIC / "slam.js").read_text(encoding="utf-8")
+    for element_id in _SLAM_STAGE_TIMING_IDS:
+        assert html.count(f'id="{element_id}"') == 1, f"{element_id} missing or duplicated"
+        assert element_id in slam, f"{element_id} is not referenced from slam.js"
+
+
+def test_overwritten_frame_readout_is_distinct_from_tracking_lost():
+    """Plan item 2 is explicit: an overwritten frame (never reached
+    `Mapper.step`) and a tracking-lost frame (reached the mapper, failed to
+    register) are different failures and must not share a label, a tile, or
+    a colour. Checked three ways: distinct element ids (so distinct DOM
+    tiles), distinct CSS classes driving colour (`lost` vs `warn`, styled
+    differently in index.html's `<style>`), and the Overwritten tooltip must
+    itself name the contrast rather than presenting as a plain counter.
+    """
+    html = _index()
+    assert 'id="slam-track"' in html and 'id="slam-overwritten"' in html
+    assert "slam-track" != "slam-overwritten"   # trivially true; documents the intent
+
+    over_title = _row_title(html, "slam-overwritten")
+    assert over_title is not None
+    assert "never reached the mapper" in over_title.lower()
+    assert "tracking" in over_title.lower() and "lost" in over_title.lower()
+
+    slam = (STATIC / "slam.js").read_text(encoding="utf-8")
+    assert "classList.toggle('lost'" in slam, "Tracking row must still drive the 'lost' class"
+    assert "classList.toggle('warn'" in slam, "Overwritten row must drive its own 'warn' class"
+
+    # The two classes must resolve to different colours, not just different names.
+    lost_rule = re.search(r"\.hud-val\.lost\s*\{([^}]*)\}", html)
+    warn_rule = re.search(r"\.hud-val\.warn\s*\{([^}]*)\}", html)
+    assert lost_rule is not None and warn_rule is not None
+    assert lost_rule.group(1).strip() != warn_rule.group(1).strip()
+
+
+def test_integrate_ms_tooltip_warns_it_is_a_dispatch_time_lower_bound():
+    """`integrate_ms` is, on CUDA, usually a dispatch-time lower bound (no
+    forced `cuda.synchronize()`), unlike `raycast_ms`/`icp_ms` which already
+    sync internally. Presenting it as GPU work time would be misleading, so
+    the tooltip must say so -- this pins the exact caveat, not just presence
+    of a title."""
+    html = _index()
+    title = _row_title(html, "slam-integrate-ms")
+    assert title is not None
+    assert "DISPATCH" in title
+    assert "not kernel-completion time" in title
+    assert "cuda.synchronize()" in title.lower() or "sync" in title.lower()
+
+
+def test_gpu_scope_is_never_presented_as_plain_device_wide_decoration():
+    """`gpu_util_scope`/`vram_scope` are not decoration (plan item 2): a
+    device-wide reading proves *some* CUDA kernel ran, not that SLAM's did.
+    The tooltip must carry that caveat, and the scope must be visible in the
+    label (not just the tooltip) per the task's "prefer visible in the label
+    when device-wide" instruction."""
+    html = _index()
+    util_title = _row_title(html, "slam-gpu-util")
+    assert util_title is not None
+    assert "device" in util_title.lower() and "process" in util_title.lower()
+    assert "not necessarily slam" in util_title.lower()
+
+    vram_title = _row_title(html, "slam-gpu-vram")
+    assert vram_title is not None
+    assert "device-wide" in vram_title.lower()
+
+    slam = (STATIC / "slam.js").read_text(encoding="utf-8")
+    assert "scopeLabel" in slam, "the scope must be rendered into the visible label, not just the tooltip"
+
+
 def test_every_fusion_status_has_a_label_and_a_remedy():
     """Every `YawFusion.status` string the server can emit must have a HUD label
     (`web._FUSION_LABELS`) and a remedy line (`sensors.js` `FUSION_HELP`).

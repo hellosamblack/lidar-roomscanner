@@ -95,10 +95,18 @@ MESH = "mesh"
 
 
 def pose_message(fid, pose, fitness, rmse, tracking_lost, slam_ms,
-                 tracking_lost_count) -> dict:
+                 tracking_lost_count, device: str | None = None) -> dict:
     """A per-frame `pose` message: tiny + fixed-size, sent every frame so it is
-    never delayed behind a growing mesh (Component B)."""
-    return {
+    never delayed behind a growing mesh (Component B).
+
+    `device` (added plan item 2, 2026-08-02) is the SERVICE's own resolved
+    Open3D compute device (e.g. "CUDA:0") -- optional and defaulted to None so
+    an older client talking to a newer service, or vice versa, still decodes
+    this message; RemoteSlamWorker treats an absent field as "unknown", not as
+    a device string. This is what lets a remote worker report its OWN device
+    rather than the host guessing at `preferred_device()` for a process it
+    isn't even running compute in."""
+    msg = {
         "type": POSE,
         "fid": int(fid),
         "pose": np.asarray(pose, np.float32),
@@ -108,6 +116,9 @@ def pose_message(fid, pose, fitness, rmse, tracking_lost, slam_ms,
         "slam_ms": float(slam_ms),
         "tracking_lost_count": int(tracking_lost_count),
     }
+    if device is not None:
+        msg["device"] = device
+    return msg
 
 
 def mesh_message(mesh_seq, mesh) -> dict:

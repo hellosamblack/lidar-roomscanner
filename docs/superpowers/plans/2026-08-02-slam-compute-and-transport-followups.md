@@ -74,7 +74,42 @@ now the single source. See `BUGS.md` → BUG-062.
 
 ---
 
-## Item 2 — Counters and stage timing (OPEN)
+## Item 2 — Counters and stage timing ✅ DONE (2026-08-02)
+
+**Landed.** `SlamWorker`/`RemoteSlamWorker` gained `frames_submitted` /
+`frames_processed` / `frames_overwritten` on the size-one latest-wins slot, with
+the invariant stated in code: at any instant `submitted == processed +
+overwritten + (1 if a frame is in the slot)`. An overwritten frame is **kept
+strictly separate from `tracking_lost_count`** — it never reached `Mapper.step`
+at all, where a tracking-lost frame reached the mapper and failed to register.
+The distinction is carried through to the UI as a separate row, id, CSS class and
+colour, and a test asserts the two readouts cannot collide.
+
+`SlamRunner` now re-reads `worker.device` / `worker.backend` **every poll tick**
+rather than trusting the host's one-shot `preferred_device()` guess — this is the
+acceptance gate's "the worker reports its own device" clause, and it also
+propagates the remote service's real device over the wire (`pose_message` gained
+an optional `device` field), which the host previously had no way to know.
+
+Stage timings are labelled by what they actually are, not uniformly:
+`raycast_ms` and `icp_ms` are real elapsed time (both stages already force a
+device→host sync internally, so timing them costs nothing new); **`integrate_ms`
+is a dispatch-time lower bound on CUDA**, not kernel-completion time — no
+`cuda.synchronize()` was added to the hot path, and both the docstring and the UI
+tooltip say to read it as "at least this long", never as "this many ms of GPU
+work". `mesh_extract_ms` / `mesh_prep_ms` / `mesh_pack_ms` / `mesh_payload_bytes`
+are true wall clock, since `TsdfMap._extract()` always returns host-resident
+results.
+
+GPU fields reuse the **already-running** `ResourceSampler` snapshot, so the 30 Hz
+SLAM poll adds no NVML call and no device sync of its own. `gpu_util_scope`
+carries `pynvml` (per-process) vs `nvml-device` vs `n/a` straight through instead
+of assuming, and the UI prints the scope **inline in the label** (`38.2%
+(device)`) so a device-wide reading cannot be misread as SLAM's own.
+
+The original brief follows, for the record.
+
+### Original brief (OPEN)
 
 Instrument before optimizing; preserve a no-instrument baseline where possible
 because timing itself perturbs CUDA. Note `slam_stall_profile` already covers
@@ -131,12 +166,53 @@ documented — do not "optimize" that by guessing. The available win is after
 return valid-count metadata so the mapper does not transfer twice. Needs a CUDA
 microbenchmark — a nominally device-side op can still force a sync.
 
-## Item 5 — Implement the winning GPU-residency changes (OPEN, gated on item 4)
+## Item 5 — Implement the winning GPU-residency changes ✅ DONE
 
-Add focused tensor/API tests, then rerun long-scan memory and extraction-ceiling
-guards.
+Landed exactly the two changes item 4 recommended and nothing else:
 
-## Item 6 — Remote service output scheduling (OPEN, only if remote is active)
+1. **`Mapper.icp_device`** (default `"CPU:0"`, `None` = follow `device`) —
+   the ICP nearest-neighbour index runs on the host while the TSDF
+   integrate/raycast stay on CUDA. `odometry.register` is unchanged.
+   `[slam] icp_device` → `SlamConfig.mapper_kwargs()` → CLI (`--icp-device`) →
+   `SlamRunner` → `DetailedSlamPreset`. Ignored by `icp_mode = "6dof"`, whose
+   ICP is Open3D's own and must run where its point clouds live.
+2. **The redundant recount** at `mapper.py:285` is gone: `TsdfMap.raycast(...,
+   with_count=True)` returns the valid-point count it already computed.
+
+Per BUG-062, the field list now lives in **one** place and three re-listings
+were removed on the way: `slam/cli.py::_run`, `DetailedSlamPreset.mapper_kwargs`
+(now overrides `SlamConfig.mapper_kwargs()`), and the two measurement rigs
+(`slam_gpu_memory.py`, `slam_stall_profile.py`) that existed to profile the
+*shipped* pipeline and had quietly stopped doing so.
+
+**Measured result — the win did not fully reproduce, and that is the finding.**
+New pass `slam_icp_bench --what ab` (interleaved, paired, whole-pipeline).
+Output is **bit-identical** on both captures (0.0 m over 7 pairs, identical
+block counts, 0 lost, 0 escalations) on genuinely partial-match data. Speed:
+**−0.23 ± 0.13 ms (−1.9%)** on `coffeeRoomCircuitNoMnt` but **+0.04 ± 0.10 ms
+(+0.3%), i.e. nothing**, on `roomSweepFull` — `register` is reliably ~0.28–0.53
+ms faster in both, and raycast + integrate give it all back on the larger map.
+Every measurement was taken under a steady 12-core external load; a quiet box
+was never available. Full numbers and caveats: the "Item 5 outcome" section of
+`2026-08-02-cuda-icp-study.md`.
+
+## Item 6 — Remote service output scheduling ⏸ DEFERRED (condition checked 2026-08-02)
+
+**Remote is not the active deployment, so this item's own gate is not met.**
+Verified: `SlamConfig.backend` defaults to `"local"`, the live config at
+`/home/sam/roomscan/roomscan.toml` has **no `[slam]` table at all** (so nothing
+overrides that default), and the GPU-container service that motivated the remote
+backend is already carried in the register's **Deprecated** row, superseded by
+in-process local CUDA:0. The analysis below stands and should be acted on **if**
+remote SLAM is ever deployed — it was not re-examined, and nothing here is a
+claim that `serve_client()` is fine.
+
+One thing did change in remote's favour under item 2: `pose_message()` now
+carries the service's own `device`, so a remote worker reports its real device
+instead of the host guessing. That is the acceptance gate's clause, not this
+item's scheduling problem.
+
+### Original brief (OPEN, only if remote is active)
 
 `serve_client()` is synchronous: receive a frame, run the worker, send pose,
 maybe encode and send a whole mesh, then receive the next (`service.py:37-72`,

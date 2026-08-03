@@ -504,3 +504,233 @@ def test_mapper_kwargs_covers_every_shared_field():
     # `device` is shared by name but deliberately not sourced from the field.
     missing = shared - set(SlamConfig().mapper_kwargs()) - {"device"}
     assert not missing, f"[slam] keys Mapper accepts but Live SLAM ignores: {missing}"
+
+
+# ---- stage timing (plan item 2, 2026-08-02) --------------------------------
+
+def test_bootstrap_frame_has_no_raycast_or_icp_but_does_integrate():
+    """Frame 1 accepts the prior directly (no raycast/ICP branch), then
+    integrates -- so raycast_ms/icp_ms must stay exactly 0.0 while
+    integrate_ms is measured. A test that only checked ">= 0" could not catch
+    a wiring bug that always reports 0 for everything."""
+    m = Mapper(W, H, voxel_size=0.02)
+    step = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert not step.tracking_lost
+    assert step.raycast_ms == 0.0
+    assert step.icp_ms == 0.0
+    assert step.integrate_ms >= 0.0
+
+
+def test_lost_frame_has_all_stage_timings_zero():
+    m = Mapper(W, H, voxel_size=0.02)
+    step = m.step(np.zeros((H, W), dtype=np.float32), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert step.tracking_lost
+    assert step.raycast_ms == 0.0
+    assert step.icp_ms == 0.0
+    assert step.integrate_ms == 0.0     # lost frames skip integrate entirely
+
+
+def test_tracked_frame_measures_raycast_and_icp(monkeypatch):
+    """Strong version: patch the raycast/ICP entry points to sleep a known
+    amount and assert the reported stage time is at least that long --
+    discriminates against a counter that always reads back a stale 0."""
+    import time as _time
+    from roomscan.slam import mapper as mapper_mod
+
+    m = Mapper(W, H, voxel_size=0.02)
+    m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)   # bootstrap frame
+
+    real_raycast = m._tsdf.raycast
+    def _slow_raycast(*a, **kw):
+        _time.sleep(0.03)
+        return real_raycast(*a, **kw)
+    monkeypatch.setattr(m._tsdf, "raycast", _slow_raycast)
+
+    real_register = mapper_mod.register_escalating
+    def _slow_register(*a, **kw):
+        _time.sleep(0.03)
+        return real_register(*a, **kw)
+    monkeypatch.setattr(mapper_mod, "register_escalating", _slow_register)
+
+    step = m.step(_textured_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert step.raycast_ms >= 25.0
+    assert step.icp_ms >= 25.0
+
+
+def test_mapper_device_property_matches_resolved_device():
+    m_cpu = Mapper(W, H, voxel_size=0.02, device="CPU:0")
+    assert m_cpu.device == "CPU:0"
+    assert m_cpu.device == str(m_cpu._device)
+
+
+# ---- item 5 (2026-08-02): ICP nearest-neighbour index on the host ----------
+#
+# `icp_device` is a device SELECTOR, and the whole failure mode this guards
+# against is that a selector which silently fails to apply produces exactly the
+# same output as one that applied correctly -- because the change is
+# bit-identical by design. So every test below asserts the *plumbing* (what
+# device object `register` was handed), never the numbers.
+
+def test_icp_device_defaults_to_the_host_and_is_separate_from_compute_device():
+    """The default splits the two devices: TSDF/intrinsic/source cloud on the
+    compute device, the NN index on the host."""
+    m = Mapper(W, H, voxel_size=0.02, device="CPU:0")
+    assert m.icp_device == "CPU:0"
+    # Constructed on a *named* CUDA device without touching CUDA: only the
+    # o3d.core.Device object is built here, nothing is allocated on it.
+    assert str(o3d.core.Device("CUDA:0")) == "CUDA:0"
+
+
+def test_icp_device_none_follows_the_compute_device():
+    """`None` restores the pre-item-5 behaviour exactly (one device for
+    everything), which is what makes the change reversible without editing
+    code."""
+    m = Mapper(W, H, voxel_size=0.02, device="CPU:0", icp_device=None)
+    assert m.icp_device == m.device == "CPU:0"
+    assert m._register_device is m._device
+
+
+def test_icp_device_accepts_a_device_object_as_well_as_a_string():
+    m = Mapper(W, H, voxel_size=0.02, icp_device=o3d.core.Device("CPU:0"))
+    assert m.icp_device == "CPU:0"
+
+
+def test_icp_device_is_what_step_hands_to_register(monkeypatch):
+    """The knob must reach `odometry.register`, not merely be stored.
+
+    Proved by intercepting `register_escalating` and reading the `device` it
+    was called with -- a `Mapper` that kept the field and passed `self._device`
+    anyway would produce identical poses and pass every numeric test.
+    """
+    from roomscan.slam import mapper as mapper_mod
+
+    seen = {}
+    real = mapper_mod.register_escalating
+
+    def _tap(*a, **kw):
+        seen["device"] = kw.get("device")
+        return real(*a, **kw)
+    monkeypatch.setattr(mapper_mod, "register_escalating", _tap)
+
+    m = Mapper(W, H, voxel_size=0.02, device="CPU:0",
+               icp_device=o3d.core.Device("CPU:0"))
+    m.step(_textured_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)   # bootstrap
+    m.step(_textured_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert seen["device"] is m._icp_device
+    assert seen["device"] is not m._device      # the two are distinct objects
+
+
+def test_icp_device_is_ignored_for_6dof(monkeypatch):
+    """`6dof` is Open3D's own tensor ICP and runs where its point clouds live;
+    handing it a different device is a mismatch, not an optimization. A single
+    `[slam] icp_device` must therefore not follow a user who also switches
+    `icp_mode` -- so this asserts the compute device is used instead."""
+    from roomscan.slam import mapper as mapper_mod
+
+    seen = {}
+    real = mapper_mod.register_escalating
+
+    def _tap(*a, **kw):
+        seen["device"] = kw.get("device")
+        return real(*a, **kw)
+    monkeypatch.setattr(mapper_mod, "register_escalating", _tap)
+
+    m = Mapper(W, H, voxel_size=0.02, device="CPU:0", icp_mode="6dof",
+               icp_device=o3d.core.Device("CPU:0"))
+    m.step(_textured_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    m.step(_textured_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert seen["device"] is m._device
+    assert seen["device"] is not m._icp_device
+
+
+def test_step_does_not_re_download_positions_to_count_them():
+    """Item 5: `Mapper.step` used to call `positions.cpu().numpy()` a second
+    time purely to read `.shape[0]`, a whole device->host transfer for one
+    integer that `TsdfMap.raycast` already knew.
+
+    Asserted on the source rather than by timing, because 0.016 ms/frame is
+    far below this box's timing noise -- a stopwatch test here would be a
+    coin flip, and the thing that must not come back is the *call*.
+    """
+    import inspect
+    src = inspect.getsource(Mapper.step)
+    assert "positions.cpu().numpy()" not in src
+    assert "with_count=True" in src
+
+
+def test_raycast_count_matches_the_cloud_it_returns():
+    """The metadata must be the number of points actually in the cloud, on the
+    real geometry -- an off-by-one or a pre-mask count would sail through the
+    `< _MIN_VALID_POINTS` gate it feeds and only show up as odd tracking."""
+    from roomscan.slam.tsdf import TsdfMap
+    m = TsdfMap(voxel_size=0.02)
+    K = pinhole(W, H)
+    m.integrate(_wall(1.0), K, np.eye(4))
+    pc, n = m.raycast(K, np.eye(4), W, H, with_count=True)
+    assert pc is not None
+    assert n == pc.point.positions.cpu().numpy().shape[0] > 0
+    # ...and the no-count call still returns a bare cloud (every other caller).
+    assert isinstance(m.raycast(K, np.eye(4), W, H), type(pc))
+
+
+def test_raycast_count_is_zero_on_every_empty_path():
+    """All four early returns must answer `(None, 0)`, not `None` -- `Mapper`
+    unpacks the tuple unconditionally, so a missed branch is a TypeError on a
+    real frame, on the mapper thread."""
+    from roomscan.slam.tsdf import TsdfMap
+    m = TsdfMap(voxel_size=0.02)
+    K = pinhole(W, H)
+    assert m.raycast(K, np.eye(4), W, H, with_count=True) == (None, 0)   # empty map
+    m.integrate(_wall(1.0), K, np.eye(4))
+    # a view pointed away from everything integrated: rays hit nothing
+    away = np.eye(4)
+    away[2, 3] = -50.0
+    pc, n = m.raycast(K, away, W, H, with_count=True)
+    assert (pc, n) == (None, 0)
+    # an explicitly empty block-coord set
+    empty = o3d.core.Tensor(np.zeros((0, 3), np.int32))
+    assert m.raycast(K, np.eye(4), W, H, block_coords=empty, with_count=True) == (None, 0)
+
+
+def test_detailed_mapper_kwargs_covers_every_shared_field():
+    """The Detailed preset was the THIRD place that knew the `Mapper` field
+    list (item 5, 2026-08-02). BUG-062 is what a second one costs; this pins
+    that Detailed cannot silently drop a `[slam]` knob the other two honour."""
+    import inspect
+    from roomscan.slam.config import DetailedSlamPreset, SlamConfig
+    accepted = set(inspect.signature(Mapper.__init__).parameters)
+    kw = DetailedSlamPreset().mapper_kwargs(SlamConfig())
+    assert set(kw) <= accepted - {"self", "width", "height"}
+    missing = set(SlamConfig().mapper_kwargs()) - set(kw)
+    assert not missing, f"[slam] keys Detailed reconstruction ignores: {missing}"
+
+
+def test_detailed_preset_overrides_win_over_the_base_config():
+    """...and building on the base dict must not let a `[slam]` key shadow the
+    preset's own reconstruction settings, which are what the sidecar's
+    fingerprint promises were used."""
+    from roomscan.slam.config import DetailedSlamPreset, SlamConfig
+    base = SlamConfig(voxel_size=0.99, block_count=1, max_dist=0.99,
+                      icp_retry_dist=0.99, max_iter=99, stationary_hold=True,
+                      icp_device="CUDA:3")
+    p = DetailedSlamPreset()
+    kw = p.mapper_kwargs(base)
+    assert kw["voxel_size"] == p.voxel_size
+    assert kw["block_count"] == p.block_count
+    assert kw["max_dist"] == p.max_dist
+    assert kw["icp_retry_dist"] == p.retry_dist
+    assert kw["max_iter"] == p.max_iter
+    assert kw["stationary_hold"] is False
+    # ...while a genuinely shared knob still comes from the config.
+    assert kw["icp_device"] == "CUDA:3"
+
+
+def test_the_four_stationary_knobs_are_inert_when_the_hold_is_off():
+    """Detailed newly forwards `stationary_window`/`coherence`/`step_ceiling`/
+    `rot_ceiling` (they come from the base dict now). That is only
+    behaviour-neutral because `Mapper` builds no gate when `stationary_hold`
+    is False -- assert that rather than assuming it."""
+    m = Mapper(W, H, voxel_size=0.02, stationary_hold=False,
+               stationary_window=3, stationary_coherence=0.01,
+               stationary_step_ceiling=99.0, stationary_rot_ceiling=99.0)
+    assert m._stationary_gate is None

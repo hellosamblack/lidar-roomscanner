@@ -29,6 +29,32 @@
 import { makeXrayMaterial } from './scene.js';
 import { BODY_TO_CV, DEVICE_DIMS_M, createDeviceMesh } from './devicemodel.js';
 
+// --- SLAM HUD formatting helpers (plan item 2, 2026-08-02) -----------------
+
+function fmtMs(v) {
+    return (v === null || v === undefined) ? '—' : Number(v).toFixed(1) + ' ms';
+}
+
+function fmtBytesShort(n) {
+    if (n === null || n === undefined) return '—';
+    let x = Number(n);
+    for (const unit of ['B', 'KB', 'MB', 'GB']) {
+        if (x < 1024 || unit === 'GB') return `${x.toFixed(1)} ${unit}`;
+        x /= 1024;
+    }
+    return `${x.toFixed(1)} GB`;
+}
+
+// `gpu_util_scope`/`vram_scope` off the wire ("pynvml" | "nvml-device" | "n/a" |
+// null) -> a short bracketed label. Never presented without this: a device-wide
+// reading proves *some* CUDA kernel ran, not that SLAM's did (see the `gpu`
+// tooltips in index.html and `web._slam_gpu_fields`'s docstring).
+function scopeLabel(scope) {
+    if (scope === 'pynvml') return 'process';
+    if (scope === 'nvml-device') return 'device';
+    return 'n/a';
+}
+
 export function createSlam(hub, sceneApi) {
     const D = (m, l) => { try { window.__diag && window.__diag('slam.js: ' + m, l); } catch (e) {} };
     if (!sceneApi || !sceneApi.THREE) { D('no sceneApi — SLAM disabled', 'error'); return {}; }
@@ -142,6 +168,14 @@ export function createSlam(hub, sceneApi) {
         view_colormap: 'turbo', selected_capture: null, view_mode: 'world' };
     let lastVerts = 0;
     let lastMeshes = null;
+    // Processed-frame throughput (plan item 2, 2026-08-02): `frames_processed`
+    // on the wire is a cumulative, all-session counter, not a rate — smoothed
+    // here client-side from consecutive `slam` messages (EMA, alpha 0.3) so
+    // the gate ("throughput at the ~28 Hz sensor rate") has a legible number.
+    // Reset whenever the counter goes backwards (a fresh worker after
+    // Restart/re-arm) so the EMA doesn't drag a stale rate across sessions.
+    let procRatePrev = null;    // { count, ts } | null
+    let procRateEma = null;     // frames/s | null
     // Server-owned job state. Keeping it here (rather than deriving a timer on
     // each tab) makes a reconnect or a second browser show the same elapsed
     // time and ETA as the tab that started the build.
@@ -367,6 +401,70 @@ export function createSlam(hub, sceneApi) {
         // server sends one. `device` may be absent/null on an older server or
         // a container-backed remote worker that doesn't report it.
         set('slam-device', m.device || '—');
+        set('slam-backend', m.backend || '—');
+
+        // Processed-frame throughput + input-slot overwrites (plan item 2).
+        // `frames_processed`/`frames_overwritten`/`frames_submitted` are
+        // cumulative counters, all optional/null on an older worker.
+        const processed = m.frames_processed;
+        if (processed === null || processed === undefined) {
+            procRatePrev = null;
+            procRateEma = null;
+            set('slam-throughput', '—');
+        } else {
+            const now = (typeof m.ts === 'number') ? m.ts : Date.now() / 1000;
+            if (procRatePrev && processed >= procRatePrev.count && now > procRatePrev.ts) {
+                const inst = (processed - procRatePrev.count) / (now - procRatePrev.ts);
+                procRateEma = (procRateEma === null) ? inst : (procRateEma * 0.7 + inst * 0.3);
+            } else if (!procRatePrev || processed < procRatePrev.count) {
+                // First sample, or the counter went backwards (a fresh worker
+                // after Restart/re-arm) -- don't drag a stale rate forward.
+                procRateEma = null;
+            }
+            procRatePrev = { count: processed, ts: now };
+            set('slam-throughput', (procRateEma === null ? '— Hz' : procRateEma.toFixed(1) + ' Hz')
+                + ' (' + processed.toLocaleString() + ' total)');
+        }
+
+        const overwritten = m.frames_overwritten;
+        const overwrittenEl = $('slam-overwritten');
+        if (overwrittenEl) {
+            if (overwritten === null || overwritten === undefined) {
+                overwrittenEl.textContent = '—';
+                overwrittenEl.classList.remove('warn');
+            } else {
+                const submitted = m.frames_submitted;
+                const pct = (submitted ? ` (${(overwritten / submitted * 100).toFixed(1)}%)` : '');
+                overwrittenEl.textContent = overwritten.toLocaleString() + pct;
+                overwrittenEl.classList.toggle('warn', overwritten > 0);
+            }
+        }
+
+        // GPU utilization/VRAM -- both optional, and the scope label is never
+        // dropped (a device-wide reading proves *some* CUDA kernel ran, not
+        // that SLAM's did -- see the tooltip in index.html).
+        const gpu = m.gpu || {};
+        const util = gpu.gpu_util_pct;
+        set('slam-gpu-util', (util === null || util === undefined ? '—' : util.toFixed(1) + '%')
+            + ' (' + scopeLabel(gpu.gpu_util_scope) + ')');
+        // `vram_scope` is always "device-wide" on the wire (see
+        // `web._slam_gpu_fields`'s docstring) -- shown as "device" for the
+        // same reason `gpu_util_scope` is, not because it can vary.
+        const vUsed = gpu.vram_used_bytes, vTotal = gpu.vram_total_bytes;
+        set('slam-gpu-vram', (vUsed === null || vUsed === undefined
+                ? '— (n/a)'
+                : fmtBytesShort(vUsed) + ' / ' + fmtBytesShort(vTotal) + ' (device)'));
+
+        // Stage timing (collapsed diagnostics drawer) -- full precision, just
+        // out of the way; see the drawer's tooltips for sync-vs-dispatch caveats.
+        set('slam-raycast-ms', fmtMs(m.raycast_ms));
+        set('slam-icp-ms', fmtMs(m.icp_ms));
+        set('slam-integrate-ms', fmtMs(m.integrate_ms));
+        set('slam-mesh-extract-ms', fmtMs(m.mesh_extract_ms));
+        set('slam-mesh-prep-ms', fmtMs(m.mesh_prep_ms));
+        set('slam-mesh-pack-ms', fmtMs(m.mesh_pack_ms));
+        set('slam-mesh-bytes', fmtBytesShort(m.mesh_payload_bytes));
+
         updateBlockGauge(m);
     }
 

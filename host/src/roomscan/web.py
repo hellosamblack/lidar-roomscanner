@@ -1158,7 +1158,16 @@ def _packed_or_pack(packet) -> bytes | None:
 
 
 def build_slam_message(step, trajectory, *, frames_integrated: int, mesh_seq: int,
-                       source_vertex_count: int, device: str | None = None) -> dict:
+                       source_vertex_count: int, device: str | None = None,
+                       backend: str | None = None,
+                       frames_submitted: int | None = None,
+                       frames_processed: int | None = None,
+                       frames_overwritten: int | None = None,
+                       mesh_extract_ms: float | None = None,
+                       mesh_prep_ms: float | None = None,
+                       mesh_pack_ms: float | None = None,
+                       mesh_payload_bytes: int | None = None,
+                       gpu: dict | None = None) -> dict:
     """FrameStep + trajectory -> `slam` JSON (web Phase 4). Follow-camera
     eye/center/up are computed server-side (reader.follow_camera_target) per the
     web-protocol "server-side math stays server-side" rule -- the browser just
@@ -1169,7 +1178,34 @@ def build_slam_message(step, trajectory, *, frames_integrated: int, mesh_seq: in
     (`slamAgeS`, BUG-061) without trusting frame arrival timing. `device` is
     the resolved SLAM compute device (e.g. "CUDA:0", BUG-061 Part B -- GPU use
     was previously visible only in a log line); null/omitted when no worker
-    has been built yet."""
+    has been built yet.
+
+    Plan item 2 (2026-08-02, "Counters and stage timing"), all optional/None
+    when the caller doesn't have them (an older worker, or nothing built yet):
+      - `backend`: "local" (in-process Mapper) or "remote" (SlamService).
+      - `frames_submitted`/`frames_processed`/`frames_overwritten`: the
+        worker's latest-wins input-slot counters. An overwritten frame NEVER
+        reached `Mapper.step` -- do not confuse it with `tracking_lost`,
+        which is a frame that DID reach the mapper and failed to register
+        (see SlamWorker.frames_overwritten's docstring).
+      - `raycast_ms`/`icp_ms`/`integrate_ms` (from `step`, not a param here):
+        per-stage timing. `raycast_ms`/`icp_ms` are real elapsed time on any
+        device (both stages already force a device->host sync internally);
+        `integrate_ms` is usually a DISPATCH-time lower bound on CUDA, not
+        kernel-completion time -- see FrameStep's docstring, and do not read
+        it as "this many ms of GPU work" without checking whether a sync
+        happened to coincide (BLOCK_USAGE_INTERVAL/rehash-headroom checks).
+      - `mesh_extract_ms`/`mesh_prep_ms`/`mesh_pack_ms`/`mesh_payload_bytes`:
+        the throttled mesh pipeline's own stage costs. Extraction time IS a
+        real sync on any device (TsdfMap._extract always returns host-
+        resident). These only change on ticks where a fresh mesh was
+        actually produced; the JSON still repeats the last-known values on
+        every other tick, same pattern as `blocks_used`.
+      - `gpu`: optional dict with `gpu_util_pct`/`gpu_util_scope`/
+        `vram_used_bytes`/`vram_total_bytes`/`vram_scope` -- see
+        `_slam_gpu_fields`. All device-wide (this box has no per-process
+        `pynvml`); device-wide utilization proves *some* CUDA kernel ran on
+        the card, not that SLAM's kernel did."""
     pose = np.asarray(step.pose, dtype=np.float64)
     eye, center, up = follow_camera_target(pose)
     n = len(trajectory)
@@ -1204,6 +1240,21 @@ def build_slam_message(step, trajectory, *, frames_integrated: int, mesh_seq: in
         "blocks_capacity": _opt_int(getattr(step, "blocks_capacity", None)),
         "blocks_configured": _opt_int(getattr(step, "blocks_configured", None)),
         "device": device,
+        "backend": backend,
+        # Stage timing straight off `step` -- see the docstring above for
+        # which of these are sync-forced (real) vs. dispatch-only on CUDA.
+        "raycast_ms": round(float(getattr(step, "raycast_ms", 0.0)), 3),
+        "icp_ms": round(float(getattr(step, "icp_ms", 0.0)), 3),
+        "integrate_ms": round(float(getattr(step, "integrate_ms", 0.0)), 3),
+        "frames_submitted": _opt_int(frames_submitted),
+        "frames_processed": _opt_int(frames_processed),
+        "frames_overwritten": _opt_int(frames_overwritten),
+        "mesh_extract_ms": (None if mesh_extract_ms is None
+                            else round(float(mesh_extract_ms), 2)),
+        "mesh_prep_ms": None if mesh_prep_ms is None else round(float(mesh_prep_ms), 2),
+        "mesh_pack_ms": None if mesh_pack_ms is None else round(float(mesh_pack_ms), 2),
+        "mesh_payload_bytes": _opt_int(mesh_payload_bytes),
+        "gpu": gpu,
     }
 
 
@@ -1261,6 +1312,39 @@ def _device_gpu_util() -> dict | None:
         return device_utilization()
     except Exception:
         return None
+
+
+def _slam_gpu_fields(res) -> dict:
+    """GPU/VRAM fields for the `slam` message (plan item 2, 2026-08-02),
+    sourced from the SAME cached `ResourceSnapshot` the `metrics` message
+    uses (`res`, a `ResourceSnapshot | None`) -- no extra NVML query is made
+    on the SLAM poll path, which runs at the broadcaster's ~30 Hz tick and
+    must not add its own device-sync cost (see `TsdfMap.block_usage`'s
+    docstring on why that gauge is throttled).
+
+    `vram_used_bytes`/`vram_total_bytes` come from `res.device_vram_*`, which
+    `ResourceSnapshot`'s own docstring guarantees is DEVICE-wide (every
+    process on the card, not just this one) -- `vram_scope` says so
+    explicitly rather than leaving it to be inferred from the field name.
+    `gpu_util_pct` mirrors `res.gpu_util`, whose scope is NOT fixed: it is
+    `res.gpu_source` ("pynvml" = per-process, when that optional dependency
+    is installed; "nvml-device" = the ctypes NVML device-wide fallback used
+    on this box, which has no pynvml; "n/a" = no NVML at all) --
+    `gpu_util_scope` carries that straight through so a caller never assumes
+    "device-wide" when it might actually be per-process. Either way: a
+    device-wide reading proves *some* CUDA kernel ran on the card, never
+    that SLAM's did (a second CUDA process moves this number too)."""
+    if res is None:
+        return {"gpu_util_pct": None, "gpu_util_scope": None,
+                "vram_used_bytes": None, "vram_total_bytes": None,
+                "vram_scope": "device-wide"}
+    return {
+        "gpu_util_pct": None if res.gpu_util is None else round(float(res.gpu_util), 1),
+        "gpu_util_scope": res.gpu_source,
+        "vram_used_bytes": res.device_vram_used,
+        "vram_total_bytes": res.device_vram_total,
+        "vram_scope": "device-wide",
+    }
 
 
 def resources_to_dict(res) -> dict | None:
@@ -2142,10 +2226,17 @@ class SlamRunner:
     `reset()` tear the pipeline down; `reset()` is called on a source-swap so a
     new capture / Go Live starts a fresh map."""
 
-    def __init__(self, *, bus: LogBus, fov_h: float = 55.0, fov_v: float = 42.0):
+    def __init__(self, *, bus: LogBus, fov_h: float = 55.0, fov_v: float = 42.0,
+                 resource_sampler=None):
         self._bus = bus
         self._fov_h = float(fov_h)
         self._fov_v = float(fov_v)
+        # Optional `ResourceSampler` (metrics.py), already running at its own
+        # ~0.7 s cadence for the `metrics` message -- reused here (plan item
+        # 2) so the `slam` message's GPU/VRAM fields cost nothing extra on
+        # this loop; see `_slam_gpu_fields`. None in tests / a hand-built
+        # runner, same as everywhere else this pattern appears.
+        self._resource_sampler = resource_sampler
         self._lock = threading.Lock()
         self._active = False
         self._worker = None
@@ -2157,7 +2248,16 @@ class SlamRunner:
         # Resolved compute device string (e.g. "CUDA:0"), for the `slam`
         # message / HUD (BUG-061 Part B -- SLAM's device was invisible: the
         # owner had to trust a log line). None until a worker exists.
+        #
+        # Plan item 2 (2026-08-02): this is refreshed from `worker.device`
+        # on every `poll()`, not set once at construction time -- see that
+        # property's docstring on Mapper/SlamWorker/RemoteSlamWorker. A
+        # remote worker's device is unknown until its first POSE response,
+        # so re-reading it here (cheap: a property read, no NVML/socket
+        # call) is what lets it become known partway through a scan instead
+        # of staying stuck at whatever the host guessed at construction time.
         self._device: str | None = None
+        self._backend: str | None = None
         # Construction now happens on its own thread (BUG-060): `submit` is
         # called from the READER thread, and building the Open3D/CUDA pipeline
         # inline there would stall the reader long enough to overflow the UDP
@@ -2200,6 +2300,7 @@ class SlamRunner:
         self._last_mesh = object()
         self._last_source_verts = 0
         self._device = None
+        self._backend = None
         self._next_mesh_at = 0.0     # a fresh map publishes its first mesh at once
         self._generation += 1        # orphan any build still in flight
 
@@ -2229,16 +2330,32 @@ class SlamRunner:
                             fps_budget_ms=cfg.fps_budget_ms, packer=pack_mesh)
         self._mesh_bytes_per_s = float(cfg.live_mesh_bytes_per_s)
         meshprep.start()
-        self._bus.publish(f"[slam] worker started on {device} ({width}x{height})")
-        return worker, meshprep, str(device)
+        # `worker.device`/`worker.backend`: ask the object that was actually
+        # built, not the `preferred_device()` guess used to select it (plan
+        # item 2 -- see Mapper.device's docstring). For a local worker these
+        # agree by construction; for a remote one `worker.device` is None
+        # until the first POSE response, which is the honest state to log --
+        # `poll()` re-reads it every tick and updates once it's known.
+        reported_device = getattr(worker, "device", None) or str(device)
+        backend = getattr(worker, "backend", "local")
+        # `icp_device` is logged from the built worker, not from `cfg`: item 5
+        # made it a `[slam]` knob, and the whole point of BUG-062's lesson is
+        # that "what was configured" and "what was constructed" are different
+        # claims. None for a remote worker, which owns its own.
+        icp_device = getattr(worker, "icp_device", None)
+        self._bus.publish(
+            f"[slam] worker started, backend={backend} device={reported_device} "
+            f"{'icp_device=' + icp_device + ' ' if icp_device else ''}"
+            f"({width}x{height})")
+        return worker, meshprep, reported_device, backend
 
     def _build_async(self, width: int, height: int, generation: int) -> None:
         """Construct off the caller's thread, then install under the lock --
         unless a teardown/swap happened meanwhile, in which case the freshly
         built pipeline is stopped rather than adopted."""
-        worker = meshprep = device = None
+        worker = meshprep = device = backend = None
         try:
-            worker, meshprep, device = self._construct(width, height)
+            worker, meshprep, device, backend = self._construct(width, height)
         except Exception as exc:
             self._bus.publish(f"[slam] worker construction failed: {exc!r}")
         with self._lock:
@@ -2247,6 +2364,7 @@ class SlamRunner:
             if not stale:
                 self._worker, self._meshprep, self._wh = worker, meshprep, (width, height)
                 self._device = device
+                self._backend = backend
         if stale:
             for obj in (worker, meshprep):
                 if obj is not None:
@@ -2295,6 +2413,14 @@ class SlamRunner:
         res = worker.latest()
         if res is None:
             return None, None
+        # Refresh device/backend from the worker itself, every tick (plan item
+        # 2) -- cheap property reads, not an NVML/socket call, and this is
+        # what lets a remote worker's device go from "unknown" to "CUDA:0"
+        # once its first POSE response arrives (see `_construct`'s comment).
+        dev = getattr(worker, "device", None)
+        if dev is not None:
+            self._device = dev
+        self._backend = getattr(worker, "backend", self._backend)
         mesh, trajectory, step = res
         # Byte-rate governor (BUG-060). The map is re-sent WHOLE every update
         # and grows without bound, so at a fixed cadence a big map saturates
@@ -2318,10 +2444,20 @@ class SlamRunner:
             rate = self._mesh_bytes_per_s
             self._next_mesh_at = now + (len(mesh_bytes) / rate if rate > 0 else 0.0)
         frames_integrated = max(0, len(trajectory) - worker.tracking_lost_count)
+        resources = (self._resource_sampler.latest()
+                     if self._resource_sampler is not None else None)
         msg = build_slam_message(
             step, trajectory, frames_integrated=frames_integrated,
             mesh_seq=self._mesh_seq, source_vertex_count=self._last_source_verts,
-            device=self._device)
+            device=self._device, backend=self._backend,
+            frames_submitted=getattr(worker, "frames_submitted", None),
+            frames_processed=getattr(worker, "frames_processed", None),
+            frames_overwritten=getattr(worker, "frames_overwritten", None),
+            mesh_extract_ms=getattr(worker, "mesh_extract_ms", None),
+            mesh_prep_ms=getattr(meshprep, "prep_ms", None),
+            mesh_pack_ms=getattr(meshprep, "pack_ms", None),
+            mesh_payload_bytes=getattr(meshprep, "payload_bytes", None),
+            gpu=_slam_gpu_fields(resources))
         return msg, mesh_bytes
 
     @property
@@ -5084,7 +5220,11 @@ def main(argv=None) -> int:
 
     # SLAM mode (web Phase 4): armed lazily on the first `set_mode slam`; builds
     # no Open3D/GPU state until then, so real-time launches are unaffected.
-    slam_runner = SlamRunner(bus=bus, fov_h=args.fov_h, fov_v=args.fov_v)
+    # `resource_sampler` is already running above for the `metrics` message;
+    # reusing it here (plan item 2) means the `slam` message's GPU/VRAM fields
+    # cost nothing extra on the broadcaster's tick -- see `_slam_gpu_fields`.
+    slam_runner = SlamRunner(bus=bus, fov_h=args.fov_h, fov_v=args.fov_v,
+                             resource_sampler=resource_sampler)
 
     # Shared app state, built once (§5.1).
     app.state.args = args

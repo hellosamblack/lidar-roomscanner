@@ -97,6 +97,26 @@ class SlamConfig:
     # paths (slam/cli.py) and DetailedSlamPreset.mapper_kwargs, which also
     # overrides it with `preferred_device()`.
     device: str = "CPU:0"
+    # Device for ICP's nearest-neighbour index ONLY -- everything else (TSDF
+    # integrate, raycast, the source cloud) stays on `device` above. Unlike
+    # `device` this IS read by every path including Live SLAM.
+    #
+    # "CPU:0" because the shipped `translation` solve already downloads source
+    # positions, target positions and target normals and does all its
+    # arithmetic in numpy: the compute device only picks which hybrid index
+    # runs the search, so running it on the host removes a device round-trip
+    # instead of adding one. Output is bit-identical (3177 ICP calls across two
+    # captures, plus a 1979-frame x 10-perturbation ensemble that matched the
+    # baseline to the last digit) and it measured -0.2 to -0.55 ms/frame, i.e.
+    # -1.5% to -10% of a SLAM step, depending on how loaded the box's CPU is.
+    # See docs/superpowers/plans/2026-08-02-cuda-icp-study.md SS B/C/E.
+    #
+    # It is a KNOB, not a constant, because it converts GPU wait into CPU work
+    # and roomscan-web's asyncio loop, reader thread and broadcaster share that
+    # CPU: set "CUDA:0" to restore the pre-2026-08-02 behaviour. Ignored by the
+    # `6dof` icp_mode, whose ICP is Open3D's own and must run where its point
+    # clouds live (see Mapper._register_device).
+    icp_device: str = "CPU:0"
     # Sub-phase 6.G (long-scan OOM): on CUDA, release Open3D's cached-but-unused
     # device blocks every N mesh/point-cloud EXTRACTIONS. The per-frame
     # integrate/raycast/ICP path is byte-flat; the throttled extraction's
@@ -220,6 +240,7 @@ class SlamConfig:
             "stationary_rot_ceiling": self.stationary_rot_ceiling,
             "release_cache_every": self.release_cache_every,
             "block_count": self.block_count,
+            "icp_device": self.icp_device,
             "device": preferred_device(),
         }
 
@@ -284,17 +305,31 @@ class DetailedSlamPreset:
                                          separators=(",", ":")).encode()).hexdigest()[:16]
 
     def mapper_kwargs(self, base: SlamConfig | None = None) -> dict:
+        """`SlamConfig`'s knobs, with the preset's reconstruction settings on top.
+
+        Built by overriding `base.mapper_kwargs()` rather than by re-listing the
+        fields (item 5, 2026-08-02). This was the third place that knew the
+        `Mapper` field list, and BUG-062 is exactly what a second place costs:
+        a knob added to `SlamConfig` and forgotten here is honoured by the CLI
+        and Live SLAM and silently ignored by every Detailed reconstruction.
+
+        Behaviour-neutral at the time of the change: the only keys this newly
+        forwards are the four `stationary_*` tuning values, which `Mapper` reads
+        only when building a `StationarityGate` -- and `stationary_hold` is
+        pinned False below, so no gate is built (pinned by
+        `test_detailed_mapper_kwargs_covers_every_shared_field`).
+        """
         base = base or SlamConfig.load()
         # Detailed always has the wider retry available.  More than six ICP
         # iterations is used only after the benchmark establishes it helps.
-        return {
-            "fov_h": base.fov_h, "fov_v": base.fov_v, "icp_mode": base.icp_mode,
-            "voxel_size": self.voxel_size, "block_count": self.block_count,
-            "max_dist": self.max_dist, "icp_retry_dist": self.retry_dist,
-            "max_iter": self.max_iter, "min_fitness": base.min_fitness,
-            "max_rmse": base.max_rmse, "min_confidence": base.min_confidence,
-            "weight_threshold": base.weight_threshold,
-            "baro_authority": base.baro_authority, "baro_tau_frames": base.baro_tau_frames,
-            "stationary_hold": False, "release_cache_every": base.release_cache_every,
-            "device": preferred_device(),
-        }
+        kw = base.mapper_kwargs()
+        kw.update(
+            voxel_size=self.voxel_size, block_count=self.block_count,
+            max_dist=self.max_dist, icp_retry_dist=self.retry_dist,
+            max_iter=self.max_iter,
+            # An offline rebuild is not a live preview: nothing is being watched
+            # while it runs, so the display-only de-jitter has nothing to
+            # de-jitter and only costs accuracy-neutral work.
+            stationary_hold=False,
+        )
+        return kw

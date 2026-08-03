@@ -158,20 +158,21 @@ def main(argv=None) -> int:
         source = Path(args.capture).name
         walk = None
 
-    mapper = Mapper(width, height, cfg.fov_h, cfg.fov_v, icp_mode=cfg.icp_mode,
-                    voxel_size=voxel, baro_authority=cfg.baro_authority,
-                    baro_tau_frames=cfg.baro_tau_frames,
-                    max_dist=cfg.max_dist, min_fitness=cfg.min_fitness,
-                    max_rmse=cfg.max_rmse, min_confidence=cfg.min_confidence,
-                    weight_threshold=cfg.weight_threshold,
-                    stationary_hold=cfg.stationary_hold,
-                    release_cache_every=release_every,
-                    block_count=(args.block_count if args.block_count is not None
-                                 else cfg.block_count),
-                    device=args.device)
+    # `cfg.mapper_kwargs()` rather than a hand-listed set (item 5, 2026-08-02):
+    # this rig existed to measure the SHIPPED configuration, and a re-listed
+    # field set silently stops being the shipped one the moment a knob is added
+    # -- which is BUG-062, one directory over. The three overrides below are the
+    # tool's own flags.
+    mapper_kwargs = cfg.mapper_kwargs()
+    mapper_kwargs.update(
+        voxel_size=voxel, release_cache_every=release_every, device=args.device,
+        block_count=(args.block_count if args.block_count is not None
+                     else cfg.block_count))
+    mapper = Mapper(width, height, **mapper_kwargs)
     vbg = mapper._tsdf._vbg
 
     print(f"[6.G] source={source} frames={n_frames} device={args.device} "
+          f"icp_device={mapper.icp_device} "
           f"voxel={voxel} mesh_every={args.mesh_every} release_cache_every={release_every}")
     print(f"[6.G] GPU baseline {baseline / 2**20:.0f} MiB of {nvml.total_bytes() / 2**20:.0f} MiB")
 

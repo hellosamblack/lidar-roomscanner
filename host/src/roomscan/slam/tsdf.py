@@ -381,14 +381,25 @@ class TsdfMap:
     def raycast(self, intrinsic: o3d.core.Tensor, extrinsic: np.ndarray,
                 width: int, height: int,
                 block_coords: o3d.core.Tensor | None = None,
-                depth_hint: np.ndarray | None = None) -> o3d.t.geometry.PointCloud | None:
+                depth_hint: np.ndarray | None = None,
+                with_count: bool = False):
         """block_coords/depth_hint are optional and bound raycast cost to a
         subset of blocks (e.g. the current view frustum) instead of every
         active block in the map. Pass `block_coords` directly (from
         `frustum_block_coords`) or a `depth_hint` to have it computed here;
-        omit both to fall back to the original all-active-blocks behavior."""
+        omit both to fall back to the original all-active-blocks behavior.
+
+        Returns the model point cloud (or None). With `with_count=True` it
+        returns `(cloud, n_points)` instead -- the number of rays that survived
+        the `depth > 0` validity mask, which this method already computes.
+        `Mapper.step` used to re-derive it with a second
+        `positions.cpu().numpy().shape[0]`, i.e. it downloaded the whole array
+        off the compute device again purely to read its length (0.016 ms/frame
+        on CUDA, measured by `slam_icp_bench --what raycast`; item 5,
+        2026-08-02). The count is 0 whenever the cloud is None, so a caller can
+        gate on the number alone."""
         if self._empty:
-            return None
+            return (None, 0) if with_count else None
         ext = o3d.core.Tensor(np.asarray(extrinsic, dtype=np.float64), device=_CPU)
         intr = intrinsic.to(_CPU)
         if block_coords is not None:
@@ -399,10 +410,10 @@ class TsdfMap:
             hashmap = self._vbg.hashmap()
             active_idx = hashmap.active_buf_indices()
             if active_idx.shape[0] == 0:
-                return None
+                return (None, 0) if with_count else None
             coords = hashmap.key_tensor()[active_idx]
         if coords.shape[0] == 0:
-            return None
+            return (None, 0) if with_count else None
         result = self._vbg.ray_cast(
             coords, intr, ext, width, height,
             render_attributes=["vertex", "normal", "depth"],
@@ -416,12 +427,13 @@ class TsdfMap:
         normal = -result["normal"].cpu().numpy().reshape(-1, 3)
         depth = result["depth"].cpu().numpy().reshape(-1)
         keep = depth > 0.0
-        if not keep.any():
-            return None
+        n_keep = int(keep.sum())          # `.sum()` over the same mask `.any()` reads
+        if n_keep == 0:
+            return (None, 0) if with_count else None
         pc = o3d.t.geometry.PointCloud(self._device)
         pc.point.positions = o3d.core.Tensor(vertex[keep].astype(np.float32), device=self._device)
         pc.point.normals = o3d.core.Tensor(normal[keep].astype(np.float32), device=self._device)
-        return pc
+        return (pc, n_keep) if with_count else pc
 
     def _cuda_extract_fits(self) -> bool:
         """Whether a GPU-side extraction has room, by measured NVML headroom.

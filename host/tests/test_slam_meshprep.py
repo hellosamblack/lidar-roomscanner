@@ -230,3 +230,58 @@ def test_meshprep_packed_is_none_without_a_packer():
     prep.submit(m, mesh_seq=1, glow_origin=None, wall_mode="solid")
     prep.run_once()
     assert prep.latest().packed is None
+
+
+# ---- stage timing / payload-bytes instrumentation (plan item 2, 2026-08-02) -
+
+def test_meshprep_timings_and_payload_bytes_start_at_zero():
+    prep = MeshPrep(vertex_budget=10_000, packer=lambda pkt: b"x" * 42)
+    assert prep.prep_ms == 0.0
+    assert prep.pack_ms == 0.0
+    assert prep.payload_bytes == 0
+
+
+def test_meshprep_payload_bytes_matches_the_packed_length():
+    m = _corner_tensor_mesh()
+    prep = MeshPrep(vertex_budget=10_000, packer=lambda pkt: b"y" * 123)
+    prep.submit(m, mesh_seq=1, glow_origin=None, wall_mode="solid")
+    prep.run_once()
+    assert prep.payload_bytes == 123
+
+
+def test_meshprep_payload_bytes_zero_without_a_packer():
+    """No packer -> nothing was serialized HERE (the caller does it), so this
+    object must not report a stale/fabricated byte count."""
+    m = _corner_tensor_mesh()
+    prep = MeshPrep(vertex_budget=10_000)
+    prep.submit(m, mesh_seq=1, glow_origin=None, wall_mode="solid")
+    prep.run_once()
+    assert prep.payload_bytes == 0
+
+
+def test_meshprep_prep_and_pack_ms_reflect_slow_calls(monkeypatch):
+    """Strong version: patch prepare_packet and the packer to sleep a known
+    amount, and assert the reported timings are at least that long --
+    discriminates against fields that never get assigned."""
+    import time as _time
+    from roomscan.slam import meshprep as meshprep_mod
+
+    real_prepare = meshprep_mod.prepare_packet
+
+    def _slow_prepare(*a, **kw):
+        _time.sleep(0.03)
+        return real_prepare(*a, **kw)
+
+    monkeypatch.setattr(meshprep_mod, "prepare_packet", _slow_prepare)
+
+    def _slow_pack(pkt):
+        _time.sleep(0.03)
+        return b"packed"
+
+    m = _corner_tensor_mesh()
+    prep = MeshPrep(vertex_budget=10_000, packer=_slow_pack)
+    prep.submit(m, mesh_seq=1, glow_origin=None, wall_mode="solid")
+    prep.run_once()
+    assert prep.prep_ms >= 25.0
+    assert prep.pack_ms >= 25.0
+    assert prep.payload_bytes == len(b"packed")

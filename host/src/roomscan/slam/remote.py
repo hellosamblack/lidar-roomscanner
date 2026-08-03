@@ -46,6 +46,23 @@ class RemoteSlamWorker:
         self._trajectory = []          # accumulated from pose deltas (no full-traj resend)
         self._warned_legacy = False    # one-time warn on a pre-split (untagged) service
 
+        # Plan item 2 (2026-08-02): the same submit/overwrite/processed shape
+        # as SlamWorker, but measured on THIS side of the socket -- i.e. the
+        # transport slot, not the container's own mapper. `frames_submitted`/
+        # `frames_overwritten` count `submit()` calls into `_in_slot` exactly
+        # like SlamWorker's; `frames_processed` counts POSE messages received
+        # back (each one frame the service actually ran through its Mapper).
+        # `_device` is populated from the service's own report on that same
+        # POSE message (an optional field -- see wire.pose_message/service.py)
+        # and stays None until the first one arrives, rather than assuming
+        # whatever the LOCAL host would infer for itself (the whole point of
+        # this counter set: the remote compute device lives in a different
+        # process and must report itself).
+        self._frames_submitted = 0
+        self._frames_overwritten = 0
+        self._frames_processed = 0
+        self._device: str | None = None
+
         self._threads = []
         self._stop_evt = threading.Event()
 
@@ -73,6 +90,9 @@ class RemoteSlamWorker:
                 msg["reflectance"] = np.asarray(reflectance, np.float32)
             if confidence is not None:
                 msg["confidence"] = np.asarray(confidence, np.float32)
+            self._frames_submitted += 1
+            if self._in_slot is not None:
+                self._frames_overwritten += 1
             self._in_slot = msg
 
     def latest(self):
@@ -82,6 +102,42 @@ class RemoteSlamWorker:
     @property
     def tracking_lost_count(self) -> int:
         return self._tracking_lost_count
+
+    # ---- instrumentation (plan item 2, 2026-08-02) ---------------------------
+    @property
+    def frames_submitted(self) -> int:
+        """Total `submit()` calls into this client's send slot."""
+        return self._frames_submitted
+
+    @property
+    def frames_processed(self) -> int:
+        """POSE responses received -- one per frame the SERVICE actually ran
+        through its Mapper. NOTE this is transport-confirmed, not the
+        service's own processed count (which is not on the wire); a frame
+        that was sent but whose response hasn't arrived yet is neither
+        processed nor overwritten here."""
+        return self._frames_processed
+
+    @property
+    def frames_overwritten(self) -> int:
+        """Submits that replaced a still-pending, not-yet-SENT message in
+        this client's own transport slot (measured on the CLIENT side of the
+        socket -- see SlamWorker.frames_overwritten's docstring for the
+        general shape). Does not see drops or overwrites inside the service
+        itself, since the service processes one frame per received message."""
+        return self._frames_overwritten
+
+    @property
+    def device(self) -> str | None:
+        """The remote SlamService's own resolved compute device, from the
+        most recent POSE response's optional "device" field. None until the
+        first response arrives, or when talking to a service built before
+        this field existed."""
+        return self._device
+
+    @property
+    def backend(self) -> str:
+        return "remote"
 
     def start(self) -> None:
         if self._threads:
@@ -146,6 +202,16 @@ class RemoteSlamWorker:
                              blocks_capacity=res.get("blocks_capacity"),
                              blocks_configured=res.get("blocks_configured"))
             self._tracking_lost_count = res["tracking_lost_count"]
+            self._frames_processed += 1
+            # The service's own resolved device (optional -- older services
+            # simply omit it, and this stays None until the first response).
+            # See Mapper.device's docstring: this is what makes device
+            # reporting for a remote backend correct rather than the host
+            # guessing its own preferred_device() for a process it isn't
+            # running compute in.
+            dev = res.get("device")
+            if dev is not None:
+                self._device = dev
             self._trajectory.append(np.asarray(res["pose"], np.float64))
             with self._out_lock:
                 self._out_slot = (self._last_mesh, list(self._trajectory), step)

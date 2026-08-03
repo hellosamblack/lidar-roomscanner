@@ -133,11 +133,13 @@ def profile_capture(path, *, frames: int = _DEFAULT_FRAMES,
     if not used:
         return {"error": f"no depth frames decoded from {path}"}
 
-    mapper = Mapper(width, height, device=device, block_count=block_count,
-                    release_cache_every=cfg.release_cache_every,
-                    icp_retry_dist=cfg.icp_retry_dist,
-                    baro_authority=cfg.baro_authority,
-                    baro_tau_frames=cfg.baro_tau_frames)
+    # Hand-picking four `[slam]` keys here is exactly BUG-062's shape: this rig
+    # exists to profile the SHIPPED pipeline, so it must be built from the same
+    # single source the shipped paths use (item 5, 2026-08-02). `device` and
+    # `block_count` stay as this function's own arguments.
+    mapper_kwargs = cfg.mapper_kwargs()
+    mapper_kwargs.update(device=device, block_count=block_count)
+    mapper = Mapper(width, height, **mapper_kwargs)
 
     wd = GilWatchdog()
     wd.start()
@@ -205,6 +207,10 @@ def profile_capture(path, *, frames: int = _DEFAULT_FRAMES,
     return {
         "capture": str(path),
         "device": device,
+        # Read off the built Mapper, not off `cfg`: "what was configured" and
+        # "what was constructed" are different claims (BUG-062's lesson), and a
+        # profile taken with a different ICP index device is not comparable.
+        "icp_device": mapper.icp_device,
         "block_count": block_count,
         "decimate": bool(decimate),
         "mesh_every": int(mesh_every),

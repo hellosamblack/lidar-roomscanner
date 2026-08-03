@@ -66,20 +66,20 @@ def _load_frames(path, max_frames=None):
 
 
 def _run(frames, width, height, cfg, mode, device=None):
-    mapper = Mapper(width, height, cfg.fov_h, cfg.fov_v, icp_mode=mode,
-                    voxel_size=cfg.voxel_size, baro_authority=cfg.baro_authority,
-                    baro_tau_frames=cfg.baro_tau_frames,
-                    max_dist=cfg.max_dist, icp_retry_dist=cfg.icp_retry_dist,
-                    max_iter=getattr(cfg, "max_iter", 6),
-                    min_fitness=cfg.min_fitness, max_rmse=cfg.max_rmse,
-                    min_confidence=cfg.min_confidence, weight_threshold=cfg.weight_threshold,
-                    release_cache_every=cfg.release_cache_every,
-                    block_count=cfg.block_count,
-                    stationary_hold=cfg.stationary_hold, stationary_window=cfg.stationary_window,
-                    stationary_coherence=cfg.stationary_coherence,
-                    stationary_step_ceiling=cfg.stationary_step_ceiling,
-                    stationary_rot_ceiling=cfg.stationary_rot_ceiling,
-                    device=device if device is not None else cfg.device)
+    # `cfg.mapper_kwargs()` is the single source for the Mapper field list
+    # (BUG-062). This used to re-list all eighteen knobs by hand, which is the
+    # second-construction-site shape that bug is about -- item 5 (2026-08-02)
+    # added `icp_device` and it would have had to be remembered here too.
+    #
+    # Two deliberate overrides, both pre-existing CLI semantics:
+    #   `icp_mode`: this function is called once per mode by --compare-modes.
+    #   `device`:   --device, else `[slam] device` -- NOT `preferred_device()`.
+    #               The offline CLI honours the configured device (default
+    #               CPU:0); only the live/Detailed paths auto-select CUDA.
+    kwargs = cfg.mapper_kwargs()
+    kwargs.update(icp_mode=mode,
+                  device=device if device is not None else cfg.device)
+    mapper = Mapper(width, height, **kwargs)
     timings, ts = [], []
     for depth, reflectance, confidence, quat, pa, t_s in frames:
         step = mapper.step(depth, quat, pa, reflectance=reflectance, confidence=confidence)
@@ -97,6 +97,14 @@ def main(argv=None) -> int:
                          "(default: [slam].device in roomscan.toml, else CPU:0). "
                          "Only CPU:0 is testable until a CUDA-enabled Open3D build "
                          "is installed.")
+    ap.add_argument("--icp-device", default=None,
+                    help='Open3D device for ICP\'s nearest-neighbour index only, overriding '
+                         '[slam] icp_device (default "CPU:0"). Everything else -- TSDF '
+                         "integrate, raycast, the source cloud -- stays on --device. The "
+                         "translation solve is already all-numpy, so a host index removes a "
+                         "device round-trip rather than adding one, and is bit-identical: pass "
+                         '"CUDA:0" here to restore the pre-2026-08-02 behaviour. Ignored by '
+                         "--icp-mode 6dof, whose ICP must run where its point clouds live.")
     ap.add_argument("--compare-modes", action="store_true")
     ap.add_argument("--benchmark", action="store_true")
     ap.add_argument("--out-mesh", default="slam_map.ply")
@@ -143,6 +151,8 @@ def main(argv=None) -> int:
         cfg.block_count = args.block_count
     if args.max_iter is not None:
         cfg.max_iter = max(1, int(args.max_iter))
+    if args.icp_device is not None:
+        cfg.icp_device = args.icp_device
     frames, width, height = _load_frames(args.capture, args.max_frames)
     if not frames:
         print("[slam] no depth frames decoded from capture", file=sys.stderr)
@@ -155,7 +165,11 @@ def main(argv=None) -> int:
     report = {"capture": args.capture, "frames": len(frames),
               "width": width, "height": height,
               "voxel_size": cfg.voxel_size, "block_count": cfg.block_count,
-              "device": args.device or cfg.device, "modes": {}}
+              "device": args.device or cfg.device,
+              # Reported, not just applied: a run that used a different ICP
+              # index device is not comparable with one that did not, and the
+              # JSON is what `slam_rerender` and any later A/B reads.
+              "icp_device": cfg.icp_device, "modes": {}}
     for mode in modes:
         mapper, timings, ts = _run(frames, width, height, cfg, mode, device=args.device)
         tstats = metrics.trajectory_stats(mapper.trajectory)

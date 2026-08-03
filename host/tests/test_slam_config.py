@@ -169,3 +169,18 @@ def test_icp_retry_dist_is_wider_than_max_dist():
     """A retry no wider than the first attempt could never rescue anything."""
     c = SlamConfig()
     assert c.icp_retry_dist > c.max_dist
+
+
+# ---- item 5 (2026-08-02): [slam] icp_device --------------------------------
+
+def test_icp_device_default_and_load(tmp_path):
+    """The default is the host, and -- unlike `device` -- the field IS read by
+    every path, including Live SLAM. That is the point: the study's caveat is
+    that this trades GPU wait for CPU work, and `roomscan-web` shares that CPU,
+    so an operator must be able to put it back without editing code."""
+    assert SlamConfig().icp_device == "CPU:0"
+    p = tmp_path / "roomscan.toml"
+    p.write_text('[slam]\nicp_device = "CUDA:0"\n', encoding="utf-8")
+    cfg = SlamConfig.load(p)
+    assert cfg.icp_device == "CUDA:0"
+    assert cfg.mapper_kwargs()["icp_device"] == "CUDA:0"

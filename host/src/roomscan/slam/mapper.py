@@ -4,10 +4,15 @@ See docs/superpowers/specs/completed/2026-07-10-phase6-slam-design.md sections 3
 
 `device` (str or o3d.core.Device, default "CPU:0") is resolved once in
 __init__ and forwarded to every Open3D piece it owns (TsdfMap, the pinhole
-intrinsic, source_cloud, register) so the whole per-frame pipeline runs on a
+intrinsic, source_cloud) so the whole per-frame pipeline runs on a
 single compute device -- CPU today, and unchanged "CUDA:0" once a CUDA build
 of Open3D is installed. Any tensor pulled off that device (e.g. the raycast
-model's `positions` here) is moved home with `.cpu()` before `.numpy()`."""
+model's `positions` here) is moved home with `.cpu()` before `.numpy()`.
+
+The ONE deliberate exception is `icp_device` (default "CPU:0"), which selects
+the device for ICP's nearest-neighbour index only -- see `__init__`. Measured:
+the shipped translation solve is already all-numpy, so a host index is
+bit-identical output for less wall time (2026-08-02 CUDA ICP study)."""
 from __future__ import annotations
 
 import time
@@ -65,6 +70,36 @@ class FrameStep:
     blocks_used: int | None = None
     blocks_capacity: int | None = None
     blocks_configured: int | None = None
+    # Stage timing (plan item 2, 2026-08-02 SLAM compute/transport follow-ups).
+    # Wall-clock milliseconds around each stage's Python call, via the same
+    # `self._clock` as `slam_ms` -- NOT a CUDA `synchronize()`, per that plan's
+    # explicit instruction not to add sync calls to the hot path just to time
+    # it. Whether a given number is therefore a real kernel-completion time or
+    # only an async-dispatch time depends on whether that stage's OWN code
+    # already forces a device->host copy before returning:
+    #   - raycast_ms: TsdfMap.raycast() always ends in `.cpu().numpy()` on
+    #     vertex/normal/depth (tsdf.py), so this already includes a sync on
+    #     CUDA -- real elapsed time, not dispatch-only.
+    #   - icp_ms: odometry.register()'s 'translation' path pulls source/target
+    #     positions to `.cpu().numpy()` before iterating, and the '6dof' path
+    #     ends in `result.transformation.cpu().numpy()` -- also sync-forced,
+    #     also real elapsed time.
+    #   - integrate_ms: TsdfMap.integrate() calls `_vbg.integrate(...)` and
+    #     returns with NO device->host copy of its own. `_check_saturation()`
+    #     forces one hashmap-size sync per call ONLY until the 90% warning has
+    #     fired once (then it early-outs without reading), and
+    #     `_check_rehash_headroom()` only reads every 25th call and only on
+    #     CUDA. So on CUDA, integrate_ms is a DISPATCH-TIME LOWER BOUND most
+    #     frames, not a measurement of when the integrate kernel actually
+    #     finished -- do not read it as "integrate cost this many ms of GPU
+    #     time" without also checking whether a sync happened to coincide.
+    #     On CPU it is always the true synchronous cost (there is no device
+    #     queue to be async against).
+    # 0.0 when the stage did not run this frame (e.g. bootstrap/lost frames
+    # skip raycast+ICP; a lost frame also skips integrate).
+    raycast_ms: float = 0.0
+    icp_ms: float = 0.0
+    integrate_ms: float = 0.0
 
 
 class Mapper:
@@ -78,6 +113,7 @@ class Mapper:
                  min_confidence: float | None = _DEFAULT_MIN_CONFIDENCE,
                  weight_threshold: float = 3.0,
                  device: str | o3d.core.Device = "CPU:0",
+                 icp_device: str | o3d.core.Device | None = "CPU:0",
                  release_cache_every: int = 1,
                  block_count: int = DEFAULT_BLOCK_COUNT,
                  stationary_hold: bool = True,
@@ -92,6 +128,30 @@ class Mapper:
         self.baro_tau_frames = baro_tau_frames
         self.min_confidence = min_confidence
         self._device = device if isinstance(device, o3d.core.Device) else o3d.core.Device(device)
+        # Item 5 (2026-08-02): the device that runs ICP's nearest-neighbour
+        # index, SEPARATE from the compute device above. Default "CPU:0" --
+        # i.e. on a CUDA rig the TSDF integrate/raycast stay on the GPU and only
+        # the hybrid NN search comes home. `None` means "follow `device`",
+        # which restores the old behaviour exactly.
+        #
+        # Why this is not a semantic change: `odometry.register`'s translation
+        # path ALREADY downloads source positions, target positions and target
+        # normals and does every bit of its arithmetic (residual, condition
+        # check, 3x3 solve) in numpy. The only thing `device` selects there is
+        # which hybrid index runs the search, so moving it removes a device
+        # round-trip rather than adding one. Measured bit-identical over 3177
+        # ICP calls across two captures and a full 1979-frame x 10-perturbation
+        # ensemble (docs/superpowers/plans/2026-08-02-cuda-icp-study.md SS B/C).
+        #
+        # Overridable rather than hard-coded on purpose: it converts GPU wait
+        # into CPU work, and `roomscan-web` runs its asyncio loop, reader thread
+        # and broadcaster on the same CPU. On a CPU-starved box the win shrinks
+        # (measured -10.1% of a SLAM step on a quiet box, -1.5% under 12.7 cores
+        # of external load); set `[slam] icp_device = "CUDA:0"` to put it back.
+        self._icp_device = (
+            self._device if icp_device is None
+            else (icp_device if isinstance(icp_device, o3d.core.Device)
+                  else o3d.core.Device(icp_device)))
         self._deproj = Deprojector(width, height, fov_h, fov_v)
         self._intr = pinhole(width, height, fov_h, fov_v, device=self._device)
         self._tsdf = TsdfMap(voxel_size=voxel_size, weight_threshold=weight_threshold,
@@ -142,12 +202,52 @@ class Mapper:
         self._blocks_capacity: int | None = None
         self.trajectory: list[np.ndarray] = []
         self.tracking_lost_count = 0
+        # Frames submitted vs. frames actually stepped are a WORKER-level
+        # concept (the latest-wins input slot lives in SlamWorker/
+        # RemoteSlamWorker, not here) -- see those classes for
+        # frames_submitted/frames_overwritten. This Mapper only ever sees
+        # frames that already made it through that slot.
         # Per-frame lost flag. Kept because the COUNT alone hides the failure
         # that matters: a run that ends in an unbroken lost streak is
         # dead-reckoning a frozen pose (predict_pose holds t_prev), so its
         # trajectory tail is fabricated, not measured. See metrics.tracking_stats.
         self.lost_flags: list[bool] = []
         self._bootstrapped = False
+
+    @property
+    def device(self) -> str:
+        """The Open3D compute device this Mapper actually resolved and built
+        its TSDF/pipeline on (e.g. "CUDA:0", "CPU:0") -- read from `self._device`
+        (an `o3d.core.Device`, set once in `__init__` from whatever `device`
+        was requested), never re-derived. Plan item 2 (2026-08-02): the SLAM
+        message used to report the HOST's `preferred_device()` guess rather
+        than asking the object that was actually built; that is a real
+        discrepancy for a remote worker, whose compute device lives in a
+        different process (the GPU container) than whatever the host would
+        infer for itself. Callers (SlamWorker.device, the `slam` message)
+        should read this rather than re-inferring."""
+        return str(self._device)
+
+    @property
+    def icp_device(self) -> str:
+        """The device this Mapper resolved for ICP's nearest-neighbour index
+        (item 5, 2026-08-02). Usually "CPU:0" even when `device` is "CUDA:0" --
+        see `__init__`. Read it to confirm the knob actually took effect: a
+        dataclass/kwarg that silently failed to apply reports "no difference",
+        which is also what a correctly-equivalent change reports."""
+        return str(self._icp_device)
+
+    @property
+    def _register_device(self) -> o3d.core.Device:
+        """Device passed to `odometry.register`.
+
+        `icp_device` applies to the **translation** mode only. The `6dof` path
+        is Open3D's own tensor ICP, which runs on the device its point clouds
+        live on and takes `device` only to build the init tensor; handing it a
+        host device while `source`/`target` sit on CUDA is a device mismatch,
+        not an optimization. `icp_mode` is a public attribute, so this is
+        resolved per call rather than frozen in `__init__`."""
+        return self._icp_device if self.icp_mode == "translation" else self._device
 
     def _apply_baro_z(self, pose: np.ndarray, pressure_pa: float | None) -> np.ndarray:
         """Barometric height as a bounded, low-passed complementary correction
@@ -263,6 +363,7 @@ class Mapper:
         lost = False
         held = False
         fitness = rmse = 0.0
+        raycast_ms = icp_ms = 0.0
 
         if n_valid < _MIN_VALID_POINTS:
             lost = True
@@ -280,9 +381,17 @@ class Mapper:
             # frustum coords from the hint, so this is safe even if the map
             # has never been integrated into yet (e.g. an earlier bootstrap
             # frame was lost).
-            model = self._tsdf.raycast(self._intr, np.linalg.inv(T_pred),
-                                       self.width, self.height, depth_hint=depth_mm)
-            if model is None or model.point.positions.cpu().numpy().shape[0] < _MIN_VALID_POINTS:
+            t_raycast0 = self._clock()
+            # `with_count`: raycast already knows how many points survived its
+            # own validity mask, so ask for the number instead of downloading
+            # the whole position array a SECOND time just to read `.shape[0]`
+            # (item 5, 2026-08-02 -- 0.016 ms/frame and one fewer device->host
+            # transfer, measured by `slam_icp_bench --what raycast`).
+            model, n_model = self._tsdf.raycast(self._intr, np.linalg.inv(T_pred),
+                                                self.width, self.height,
+                                                depth_hint=depth_mm, with_count=True)
+            raycast_ms = (self._clock() - t_raycast0) * 1000.0
+            if model is None or n_model < _MIN_VALID_POINTS:
                 lost = True
                 pose = T_pred
             else:
@@ -297,9 +406,11 @@ class Mapper:
                 # local frame -- so ICP's initial guess is identity (not T_pred), and
                 # the resulting correction must be composed onto T_pred afterward to
                 # get a world pose: pose_world = T_pred @ correction.
+                t_icp0 = self._clock()
                 res, escalated = register_escalating(
                     src, model, np.eye(4), retry_dist=self._retry_dist,
-                    mode=self.icp_mode, device=self._device, **self._gate)
+                    mode=self.icp_mode, device=self._register_device, **self._gate)
+                icp_ms = (self._clock() - t_icp0) * 1000.0
                 if escalated:
                     self.icp_escalations += 1
                 fitness, rmse = res.fitness, res.rmse
@@ -324,10 +435,18 @@ class Mapper:
                     lost = True
                     pose = T_pred
 
+        integrate_ms = 0.0
         if not lost:
             # Map + tracking prior use the TRUE ICP pose -- accuracy is
             # unaffected by the stationarity gate (see the `held` comment).
+            # Timed, but see FrameStep.integrate_ms's docstring: on CUDA this
+            # is usually a DISPATCH-time lower bound, not the kernel's actual
+            # completion time, because `integrate()` doesn't always force a
+            # device->host sync (only `_check_saturation`'s pre-warning reads
+            # and `_check_rehash_headroom`'s every-25th-call read do).
+            t_integrate0 = self._clock()
             self._tsdf.integrate(depth_mm, self._intr, np.linalg.inv(pose), color=color)
+            integrate_ms = (self._clock() - t_integrate0) * 1000.0
             self._t_prev = pose[:3, 3].copy()
             self._bootstrapped = True
         else:
@@ -353,7 +472,8 @@ class Mapper:
                          tracking_lost=lost, slam_ms=slam_ms,
                          blocks_used=self._blocks_used,
                          blocks_capacity=self._blocks_capacity,
-                         blocks_configured=self._tsdf.block_count or None)
+                         blocks_configured=self._tsdf.block_count or None,
+                         raycast_ms=raycast_ms, icp_ms=icp_ms, integrate_ms=integrate_ms)
 
     def _sample_block_usage(self) -> None:
         """Refresh the cached TSDF occupancy, at most every

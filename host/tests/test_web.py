@@ -5111,6 +5111,157 @@ def test_build_slam_message_carries_ts_and_device():
 
 
 # ---------------------------------------------------------------------------
+# Plan item 2 (2026-08-02) -- counters, stage timing, GPU/VRAM scope labeling
+# ---------------------------------------------------------------------------
+
+def test_build_slam_message_carries_stage_timing_from_the_step():
+    step = _FrameStep(pose=np.eye(4), fitness=0.9, rmse=0.01, tracking_lost=False,
+                      slam_ms=12.0, raycast_ms=3.5, icp_ms=4.25, integrate_ms=1.0)
+    msg = web.build_slam_message(step, [np.eye(4)], frames_integrated=1, mesh_seq=1,
+                                 source_vertex_count=10)
+    assert msg["raycast_ms"] == pytest.approx(3.5)
+    assert msg["icp_ms"] == pytest.approx(4.25)
+    assert msg["integrate_ms"] == pytest.approx(1.0)
+
+
+def test_build_slam_message_omitted_instrumentation_fields_are_null():
+    """Every new field is optional -- a caller that doesn't pass them (an
+    older code path, or a worker lacking the attribute) must get None, not a
+    fabricated 0 that would read as a real measurement."""
+    step = _FrameStep(pose=np.eye(4), fitness=0.9, rmse=0.01,
+                      tracking_lost=False, slam_ms=1.0)
+    msg = web.build_slam_message(step, [np.eye(4)], frames_integrated=1, mesh_seq=1,
+                                 source_vertex_count=10)
+    assert msg["backend"] is None
+    assert msg["frames_submitted"] is None
+    assert msg["frames_processed"] is None
+    assert msg["frames_overwritten"] is None
+    assert msg["mesh_extract_ms"] is None
+    assert msg["mesh_prep_ms"] is None
+    assert msg["mesh_pack_ms"] is None
+    assert msg["mesh_payload_bytes"] is None
+    assert msg["gpu"] is None
+    # stage timings fall back to FrameStep's own 0.0 defaults, not None --
+    # they came off `step` itself, which always has SOME value.
+    assert msg["raycast_ms"] == 0.0
+    assert msg["icp_ms"] == 0.0
+    assert msg["integrate_ms"] == 0.0
+
+
+def test_build_slam_message_carries_counters_and_backend():
+    step = _FrameStep(pose=np.eye(4), fitness=0.9, rmse=0.01,
+                      tracking_lost=False, slam_ms=1.0)
+    msg = web.build_slam_message(
+        step, [np.eye(4)], frames_integrated=1, mesh_seq=1, source_vertex_count=10,
+        backend="remote", frames_submitted=30, frames_processed=25,
+        frames_overwritten=5, mesh_extract_ms=12.3, mesh_prep_ms=4.5,
+        mesh_pack_ms=1.2, mesh_payload_bytes=3_200_000)
+    assert msg["backend"] == "remote"
+    assert msg["frames_submitted"] == 30
+    assert msg["frames_processed"] == 25
+    assert msg["frames_overwritten"] == 5
+    # the accounting invariant the worker-level tests pin directly
+    assert msg["frames_processed"] + msg["frames_overwritten"] == msg["frames_submitted"]
+    assert msg["mesh_extract_ms"] == pytest.approx(12.3)
+    assert msg["mesh_prep_ms"] == pytest.approx(4.5)
+    assert msg["mesh_pack_ms"] == pytest.approx(1.2)
+    assert msg["mesh_payload_bytes"] == 3_200_000
+
+
+def test_slam_gpu_fields_labels_vram_as_device_wide_always():
+    res = _resource_snapshot(gpu_util=None, gpu_source="n/a")
+    out = web._slam_gpu_fields(res)
+    assert out["vram_scope"] == "device-wide"
+    assert out["vram_used_bytes"] == res.device_vram_used
+    assert out["vram_total_bytes"] == res.device_vram_total
+
+
+def test_slam_gpu_fields_carries_the_real_gpu_source_as_scope():
+    """gpu_util's scope is NOT fixed (per-process if pynvml is ever installed,
+    device-wide otherwise) -- the field must say which, not assume."""
+    res = _resource_snapshot(gpu_util=55.0, gpu_source="nvml-device")
+    out = web._slam_gpu_fields(res)
+    assert out["gpu_util_pct"] == 55.0
+    assert out["gpu_util_scope"] == "nvml-device"
+
+    res2 = _resource_snapshot(gpu_util=12.0, gpu_source="pynvml")
+    out2 = web._slam_gpu_fields(res2)
+    assert out2["gpu_util_scope"] == "pynvml"
+
+
+def test_slam_gpu_fields_all_null_with_no_resources():
+    out = web._slam_gpu_fields(None)
+    assert out["gpu_util_pct"] is None
+    assert out["vram_used_bytes"] is None
+    assert out["vram_total_bytes"] is None
+    assert out["vram_scope"] == "device-wide"     # the scope claim is always honest, even when null
+
+
+class _InstrumentedFakeWorker(_FakeWorker):
+    """`_FakeWorker` plus the plan-item-2 instrumentation surface, so
+    `SlamRunner.poll()` can be tested against a worker that actually reports
+    it (mirrors the real SlamWorker's property names exactly)."""
+    device = "CUDA:0"
+    backend = "local"
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.frames_submitted = 40
+        self.frames_processed = 33
+        self.frames_overwritten = 7
+        self.mesh_extract_ms = 9.5
+
+
+class _InstrumentedFakeMeshPrep(_FakeMeshPrep):
+    prep_ms = 3.0
+    pack_ms = 0.7
+    payload_bytes = 65536
+
+
+def test_slamrunner_poll_surfaces_worker_instrumentation():
+    r = web.SlamRunner(bus=LogBus())
+    with r._lock:
+        r._active = True
+        r._worker = _InstrumentedFakeWorker()
+        r._meshprep = _InstrumentedFakeMeshPrep()
+    msg, _mesh_bytes = r.poll("split")
+    assert msg["device"] == "CUDA:0"          # read from worker.device, not host inference
+    assert msg["backend"] == "local"
+    assert msg["frames_submitted"] == 40
+    assert msg["frames_processed"] == 33
+    assert msg["frames_overwritten"] == 7
+    assert msg["mesh_extract_ms"] == pytest.approx(9.5)
+    assert msg["mesh_prep_ms"] == pytest.approx(3.0)
+    assert msg["mesh_pack_ms"] == pytest.approx(0.7)
+    assert msg["mesh_payload_bytes"] == 65536
+
+
+def test_slamrunner_poll_refreshes_device_as_it_becomes_known():
+    """A remote worker's device is None until its first response -- poll()
+    must pick it up on a LATER tick rather than staying stuck at whatever was
+    true when the pipeline was first built."""
+    class _SlowDeviceWorker(_FakeWorker):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.device = None
+            self.backend = "remote"
+
+    w = _SlowDeviceWorker()
+    r = web.SlamRunner(bus=LogBus())
+    with r._lock:
+        r._active = True
+        r._worker = w
+        r._meshprep = _FakeMeshPrep()
+    msg, _ = r.poll("split")
+    assert msg["device"] is None
+    assert msg["backend"] == "remote"
+
+    w.device = "CUDA:0"      # the "first response arrived" moment
+    msg2, _ = r.poll("split")
+    assert msg2["device"] == "CUDA:0"
+
+
+# ---------------------------------------------------------------------------
 # BUG-061 Part B -- device-wide GPU utilization fallback
 # ---------------------------------------------------------------------------
 
@@ -5180,6 +5331,11 @@ def test_live_slam_forwards_every_configured_mapper_knob(monkeypatch):
         stationary_hold=False, stationary_window=17, stationary_coherence=0.71,
         stationary_step_ceiling=0.041, stationary_rot_ceiling=0.55,
         release_cache_every=3, block_count=222_000,
+        # item 5 (2026-08-02): plumbed like block_count, so it is pinned here
+        # like block_count. A device selector that silently fails to apply is
+        # indistinguishable from one that applied, because the change it makes
+        # is bit-identical by design -- this is the only thing that can tell.
+        icp_device="CUDA:3",
     )
     cfg = SlamConfig(**overrides)
     # every override must actually differ from the default, or the test proves nothing

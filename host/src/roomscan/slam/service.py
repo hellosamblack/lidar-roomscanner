@@ -60,10 +60,13 @@ class SlamService:
             mesh, _traj, step = worker.latest()
 
             # Pose first: tiny, sent immediately, never delayed behind a mesh
-            # transfer or the (no-longer-sent) full trajectory.
+            # transfer or the (no-longer-sent) full trajectory. `worker.device`
+            # is this SERVICE's own resolved compute device (plan item 2) --
+            # send it so the client reports what actually ran, not a host guess.
             wire.send_message(conn, wire.pose_message(
                 msg["fid"], step.pose, step.fitness, step.rmse,
-                step.tracking_lost, step.slam_ms, worker.tracking_lost_count))
+                step.tracking_lost, step.slam_ms, worker.tracking_lost_count,
+                device=worker.device))
 
             # Mesh only when the worker published a new one (identity check).
             if mesh is not None and mesh is not last_mesh:

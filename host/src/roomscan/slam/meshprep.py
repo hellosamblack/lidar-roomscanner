@@ -147,6 +147,18 @@ class MeshPrep:
         self._packer = packer
         self._last_upload_ms = 0.0
         self._decimating = False
+        # Plan item 2 (2026-08-02): stage timing for the mesh-prep half of the
+        # live pipeline, mirroring SlamWorker.mesh_extract_ms. `prep_ms` is
+        # `prepare_packet` (decimation/shading/wall-split, all host-side numpy
+        # + Open3D legacy-mesh work -- no device queue involved, so this is a
+        # true wall-clock cost on any device); `pack_ms` is the optional
+        # `packer` call (BUG-060's off-thread wire serialization);
+        # `payload_bytes` is `len(pkt.packed)` when a packer is set, else 0
+        # (nothing was serialized here -- the caller does it, and does not
+        # report back through this object).
+        self._last_prep_ms = 0.0
+        self._last_pack_ms = 0.0
+        self._last_payload_bytes = 0
 
         self._in_lock = threading.Lock()
         self._in_slot = None            # (mesh, mesh_seq, glow_origin, wall_mode) | None
@@ -176,14 +188,41 @@ class MeshPrep:
         if self._last_upload_ms > self._fps_budget_ms:
             self._decimating = True
         decimate = self._decimating
+        t_prep0 = time.perf_counter()
         pkt = prepare_packet(mesh, wall_mode=wall_mode, glow_origin=glow_origin,
                              mesh_seq=mesh_seq, vertex_budget=self._vertex_budget,
                              decimate=decimate, up=self._up)
+        self._last_prep_ms = (time.perf_counter() - t_prep0) * 1000.0
         if self._packer is not None:
+            t_pack0 = time.perf_counter()
             pkt.packed = self._packer(pkt)
+            self._last_pack_ms = (time.perf_counter() - t_pack0) * 1000.0
+            self._last_payload_bytes = len(pkt.packed) if pkt.packed is not None else 0
+        else:
+            self._last_pack_ms = 0.0
+            self._last_payload_bytes = 0
         with self._out_lock:
             self._out_slot = pkt
         return True
+
+    # ---- instrumentation (plan item 2, 2026-08-02) ---------------------------
+    @property
+    def prep_ms(self) -> float:
+        """Wall time of the most recent `prepare_packet` call. 0.0 before the
+        first packet."""
+        return self._last_prep_ms
+
+    @property
+    def pack_ms(self) -> float:
+        """Wall time of the most recent `packer` call (0.0 if no packer was
+        configured, or none has run yet)."""
+        return self._last_pack_ms
+
+    @property
+    def payload_bytes(self) -> int:
+        """Byte length of the most recently packed wire payload (0 if no
+        packer was configured, or none has run yet)."""
+        return self._last_payload_bytes
 
     def latest(self):
         with self._out_lock:

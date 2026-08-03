@@ -57,7 +57,18 @@ class SlamWorker:
         self._mesh_every = max(1, int(mesh_every))
         self._frames_processed = 0
         self._frames_integrated = 0     # successful (non-tracking-lost) frames only
+        # Plan item 2 (2026-08-02): submit()/overwrite counters. `submit()`
+        # forwards into a size-one latest-wins slot (module docstring); every
+        # submit either lands in an empty slot or REPLACES a still-pending one
+        # -- the latter is an overwrite and never reaches `Mapper.step` at
+        # all, so it must not be confused with `Mapper.tracking_lost_count`
+        # (a frame that DID reach the mapper and failed to register). At any
+        # instant: frames_submitted == frames_processed + frames_overwritten
+        # + (1 if a frame is currently sitting in the slot, unprocessed, else 0).
+        self._frames_submitted = 0
+        self._frames_overwritten = 0
         self._last_mesh = None
+        self._last_mesh_extract_ms = 0.0   # time in the last Mapper.mesh() call
         # Set once if the map grows past what Open3D can extract; the live view
         # then holds `_last_mesh`. See run_once.
         self.extraction_blocked_reason: str | None = None
@@ -74,6 +85,9 @@ class SlamWorker:
     # ---- producer side (GUI/reader thread) ----------------------------------
     def submit(self, depth, quat, pressure, reflectance=None, confidence=None) -> None:
         with self._in_lock:
+            self._frames_submitted += 1
+            if self._in_slot is not None:
+                self._frames_overwritten += 1
             self._in_slot = (depth, quat, pressure, reflectance, confidence)
 
     # ---- worker side ---------------------------------------------------------
@@ -106,6 +120,7 @@ class SlamWorker:
             # for the belt-and-braces backstop.
             self._frames_integrated += 1
             if self._frames_integrated == 1 or self._frames_integrated % self._mesh_every == 0:
+                t_extract0 = time.perf_counter()
                 try:
                     self._last_mesh = self._mapper.mesh()
                 except TsdfCapacityError as exc:
@@ -116,11 +131,13 @@ class SlamWorker:
                     # unrepeatable capture. Hold the last good mesh so the view
                     # freezes rather than the server dying, and say so once --
                     # a silently-frozen map is exactly the BUG-035 failure.
+                    self._last_mesh_extract_ms = (time.perf_counter() - t_extract0) * 1000.0
                     if self.extraction_blocked_reason is None:
                         self.extraction_blocked_reason = str(exc)
                         logging.getLogger(__name__).warning(
                             "[slam] live map view frozen: %s", exc)
                 else:
+                    self._last_mesh_extract_ms = (time.perf_counter() - t_extract0) * 1000.0
                     # Republish: trajectory/step are unchanged from the publish
                     # above, but the mesh just got fresher.
                     with self._out_lock:
@@ -136,6 +153,61 @@ class SlamWorker:
     @property
     def tracking_lost_count(self) -> int:
         return self._mapper.tracking_lost_count
+
+    # ---- instrumentation (plan item 2, 2026-08-02) ---------------------------
+    @property
+    def frames_submitted(self) -> int:
+        """Total `submit()` calls -- includes ones later overwritten."""
+        return self._frames_submitted
+
+    @property
+    def frames_processed(self) -> int:
+        """Frames that actually reached `Mapper.step` (popped by `run_once`).
+        Includes tracking-lost frames -- see `Mapper.lost_flags`/
+        `tracking_lost_count` for that distinction; this counter only answers
+        "did it reach the mapper at all", never "did it register"."""
+        return self._frames_processed
+
+    @property
+    def frames_overwritten(self) -> int:
+        """Submits that replaced a still-pending, not-yet-processed input --
+        i.e. frames that NEVER reached `Mapper.step`. Do not fold these into
+        `Mapper.tracking_lost_count`/`lost_flags`: a tracking-lost frame was
+        run through the mapper and failed to register; an overwritten one was
+        never run at all."""
+        return self._frames_overwritten
+
+    @property
+    def mesh_extract_ms(self) -> float:
+        """Wall time of the most recent `Mapper.mesh()` call (extraction),
+        whether it succeeded or raised `TsdfCapacityError`. 0.0 before the
+        first extraction. This IS a synchronous measurement even on CUDA --
+        `TsdfMap._extract()` always returns a host-resident result (see its
+        docstring), so there is no pending device work left when this timer
+        stops."""
+        return self._last_mesh_extract_ms
+
+    @property
+    def device(self) -> str:
+        """The Mapper's own resolved compute device string -- see
+        `Mapper.device`'s docstring for why this must be read from the built
+        object rather than re-inferred by a caller."""
+        return self._mapper.device
+
+    @property
+    def icp_device(self) -> str:
+        """The Mapper's resolved ICP nearest-neighbour device (item 5,
+        2026-08-02) -- usually "CPU:0" while `device` is "CUDA:0". Read from
+        the built object for the same reason as `device`: the point of the
+        knob is that it can be configured, so the only trustworthy report is
+        the one the object gives about itself."""
+        return self._mapper.icp_device
+
+    @property
+    def backend(self) -> str:
+        """"local": this worker runs `Mapper.step` in-process. Contrast
+        `RemoteSlamWorker.backend == "remote"`."""
+        return "local"
 
     # ---- lifecycle (mirrors panel.py's _run_reader thread) -------------------
     def start(self) -> None:

@@ -204,3 +204,66 @@ def test_remote_worker_backward_compatible_with_legacy_untagged_service():
     rw.stop(); lsock.close(); th.join(timeout=2)
     assert got_mesh, ("client must recover the inline mesh from a legacy "
                       "untagged service (container built before the split)")
+
+
+# ---- device/backend/counters (plan item 2, 2026-08-02) ---------------------
+
+def test_remote_worker_backend_is_remote():
+    rw = RemoteSlamWorker(W, H, addr="127.0.0.1:1")
+    assert rw.backend == "remote"
+
+
+def test_remote_worker_device_unknown_until_first_response():
+    rw = RemoteSlamWorker(W, H, addr="127.0.0.1:1")
+    assert rw.device is None
+
+
+def test_remote_worker_reports_the_services_own_device_not_a_host_guess():
+    """The service is built with device="CPU:0" explicitly (this test process
+    is CPU-only regardless), so a passing assertion here proves the string
+    travelled over the wire from the SERVICE's own `worker.device`, not from
+    anything the client inferred locally."""
+    port, lsock, th, srv = _serve_on_ephemeral(device="CPU:0")
+    rw = RemoteSlamWorker(W, H, addr=f"127.0.0.1:{port}", fov_h=55.0, fov_v=42.0)
+    assert rw.connect() is True
+    rw.start()
+    depth = np.full((H, W), 500.0, np.float32)
+    quat = np.array([1.0, 0.0, 0.0, 0.0], np.float32)
+    for _ in range(200):
+        rw.submit(depth, quat, None)
+        time.sleep(0.01)
+        if rw.device is not None:
+            break
+    rw.stop(); lsock.close(); th.join(timeout=2)
+    assert rw.device == "CPU:0"
+
+
+def test_remote_worker_submit_overwrite_counters():
+    """Same latest-wins slot shape as SlamWorker, but measured on the client's
+    SEND side: with no server ever draining it (bogus address), N submits
+    overwrite N-1 of themselves before `_send_loop` even exists."""
+    rw = RemoteSlamWorker(W, H, addr="127.0.0.1:1")
+    depth = np.full((H, W), 500.0, np.float32)
+    quat = np.array([1.0, 0.0, 0.0, 0.0], np.float32)
+    for _ in range(5):
+        rw.submit(depth, quat, None)
+    assert rw.frames_submitted == 5
+    assert rw.frames_overwritten == 4
+    assert rw.frames_processed == 0
+
+
+def test_remote_worker_frames_processed_counts_pose_responses():
+    port, lsock, th, srv = _serve_on_ephemeral(device="CPU:0")
+    rw = RemoteSlamWorker(W, H, addr=f"127.0.0.1:{port}", fov_h=55.0, fov_v=42.0)
+    assert rw.connect() is True
+    rw.start()
+    depth = np.full((H, W), 500.0, np.float32)
+    quat = np.array([1.0, 0.0, 0.0, 0.0], np.float32)
+    for _ in range(200):
+        rw.submit(depth, quat, None)
+        time.sleep(0.01)
+        if rw.frames_processed > 0:
+            break
+    rw.stop(); lsock.close(); th.join(timeout=2)
+    assert rw.frames_processed > 0
+    assert rw.frames_submitted >= rw.frames_processed

@@ -73,6 +73,28 @@ def test_pose_message_roundtrip():
     assert "mesh_v" not in out            # a pose message carries no mesh
 
 
+def test_pose_message_device_omitted_by_default_backward_compatible():
+    """No `device` kwarg -> no "device" key at all, so an older client
+    (`RemoteSlamWorker._recv_loop` uses `.get("device")`) decodes this exactly
+    as it did before the field existed."""
+    pose = np.eye(4, dtype=np.float32)
+    msg = wire.pose_message(1, pose, fitness=0.5, rmse=0.01,
+                            tracking_lost=False, slam_ms=1.0, tracking_lost_count=0)
+    assert "device" not in msg
+    out = wire.decode_message(wire.encode_message(msg))
+    assert "device" not in out
+
+
+def test_pose_message_carries_device_when_given():
+    pose = np.eye(4, dtype=np.float32)
+    msg = wire.pose_message(1, pose, fitness=0.5, rmse=0.01,
+                            tracking_lost=False, slam_ms=1.0, tracking_lost_count=0,
+                            device="CUDA:0")
+    assert msg["device"] == "CUDA:0"
+    out = wire.decode_message(wire.encode_message(msg))
+    assert out["device"] == "CUDA:0"
+
+
 def test_mesh_message_roundtrip():
     o3d = pytest.importorskip("open3d")
     v = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], np.float32)

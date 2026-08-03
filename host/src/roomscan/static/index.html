@@ -248,6 +248,13 @@
 
         .hud-row { display: flex; justify-content: space-between; gap: 16px; font-size: 0.8rem; color: var(--text-muted); }
         .hud-val { color: var(--text-main); font-weight: 700; }
+        /* A tracking-lost frame (reached the mapper, failed to register) and an
+           overwritten frame (never reached the mapper) are different failures
+           with different fixes — plan item 2 requires they never share a
+           label, tile, or colour. Red for the registration failure, amber for
+           the input-side one (matches the Resources bars' warn/crit split). */
+        .hud-val.lost { color: var(--danger); }
+        .hud-val.warn { color: var(--warning); }
         .hud-section-label {
             margin-top: 8px; font-family: 'Inter', sans-serif;
             font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em;
@@ -1225,6 +1232,28 @@
                 <div class="hud-row"><span>Vertices</span><span class="hud-val" id="slam-verts">0</span></div>
                 <div class="hud-row"><span>SLAM</span><span class="hud-val" id="slam-ms">—</span></div>
                 <div class="hud-row" title="The compute device running the SLAM reconstruction (CUDA:0 = GPU-accelerated). Absent/blank on a server that hasn't reported one."><span>Device</span><span class="hud-val" id="slam-device">—</span></div>
+                <div class="hud-row" title="Where Mapper.step is actually running: local = in this server process; remote = a separate SlamService reached over the network. Absent/blank on a server that hasn't reported one."><span>Backend</span><span class="hud-val" id="slam-backend">—</span></div>
+
+                <div class="hud-section-label" title="The SLAM worker's input slot is a single latest-wins buffer: a frame either reaches Mapper.step (Processed) or is replaced by a newer one before that happens (Overwritten). Overwritten is a THROUGHPUT limit, not a bug — it means SLAM cannot keep up with the ~28 Hz sensor rate and is dropping frames by design. It is a different failure from Tracking = LOST above, which DID reach the mapper and failed to register; the two are never the same number.">Frame throughput</div>
+                <div class="hud-row" title="Frames per second actually reaching Mapper.step, measured here from the cumulative Processed counter below. Compare against Device FPS in the top HUD (~28 Hz): if this reads lower, SLAM is the bottleneck."><span>Processed</span><span class="hud-val" id="slam-throughput">—</span></div>
+                <div class="hud-row" title="Frames submitted to the SLAM worker that were overwritten in the input slot before Mapper.step could run on them — they NEVER reached the mapper. This is expected under load (latest-wins is deliberate), but a large or growing share means SLAM is falling behind the sensor. Not the same failure as Tracking = LOST."><span>Overwritten</span><span class="hud-val" id="slam-overwritten">0</span></div>
+
+                <div class="hud-section-label" title="Whether the SLAM kernels ran on this GPU, and what the number actually measures.">GPU</div>
+                <div class="hud-row" title="GPU compute utilization at the last SLAM poll. The bracketed scope matters: 'device' is the WHOLE card's utilization (proves some CUDA kernel ran, not necessarily SLAM's own); 'process' is this process only; 'n/a' means no NVML reading was available."><span>Utilization</span><span class="hud-val" id="slam-gpu-util">—</span></div>
+                <div class="hud-row" title="GPU memory used on the whole card, out of total. Always device-wide — no per-process VRAM reading is available on this box (same number as the Resources card's VRAM row)."><span>VRAM</span><span class="hud-val" id="slam-gpu-vram">—</span></div>
+
+                <details class="sensor-details" id="slam-diag">
+                    <summary title="Per-stage timing for the mapper step and the throttled mesh pipeline. Collapsed by default — full precision is here, not dropped, just out of the way.">Stage timing</summary>
+                    <div class="sensor-details__body">
+                        <div class="hud-row" title="Time spent raycasting the TSDF for ICP's source cloud. Real elapsed time on any device — this stage forces a device-to-host sync internally, so it is not a dispatch-only lower bound."><span>Raycast</span><span class="hud-val" id="slam-raycast-ms">—</span></div>
+                        <div class="hud-row" title="Time spent in ICP registration. Real elapsed time on any device — this stage forces a device-to-host sync internally, so it is not a dispatch-only lower bound."><span>ICP</span><span class="hud-val" id="slam-icp-ms">—</span></div>
+                        <div class="hud-row" title="Time to integrate the frame into the TSDF. On CUDA this is usually a DISPATCH-time lower bound, not kernel-completion time — no cuda.synchronize() is forced here. Read it as 'at least this long', never as 'this many ms of GPU work'."><span>Integrate</span><span class="hud-val" id="slam-integrate-ms">—</span></div>
+                        <div class="hud-row" title="Time to extract a mesh from the TSDF (Mapper.mesh()). A real sync on any device — extraction always returns host-resident geometry. Only updates on ticks where a fresh mesh was actually produced."><span>Mesh extract</span><span class="hud-val" id="slam-mesh-extract-ms">—</span></div>
+                        <div class="hud-row" title="Time MeshPrep spent preparing the extracted mesh for transport (e.g. any decimation). Only updates on ticks where a fresh mesh was actually produced."><span>Mesh prep</span><span class="hud-val" id="slam-mesh-prep-ms">—</span></div>
+                        <div class="hud-row" title="Time spent packing the mesh into the binary /ws-mesh wire format. Only updates on ticks where a fresh mesh was actually produced."><span>Mesh pack</span><span class="hud-val" id="slam-mesh-pack-ms">—</span></div>
+                        <div class="hud-row" title="Size of the last mesh payload sent over /ws-mesh. Only updates on ticks where a fresh mesh was actually produced."><span>Mesh payload</span><span class="hud-val" id="slam-mesh-bytes">—</span></div>
+                    </div>
+                </details>
             </div>
         </div>
 

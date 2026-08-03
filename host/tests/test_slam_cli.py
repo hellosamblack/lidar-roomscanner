@@ -135,3 +135,77 @@ def test_cli_baro_authority_flag_reaches_the_mapper(tmp_path, monkeypatch):
     assert seen[-1] == (0.0, 900)
     assert main([str(tmp_path / "d.bin")] + common) == 0
     assert seen[-1] == (0.05, 900)
+
+
+def test_cli_icp_device_flag_reaches_the_mapper_and_the_report(tmp_path, monkeypatch):
+    """Item 5 (2026-08-02). Two things a device selector can silently fail at,
+    both of which look exactly like "the change had no effect": never reaching
+    the constructor, and never being written down. `--icp-device` must land on
+    `Mapper` AND on the JSON report, because a run with a different ICP index
+    device is not comparable with one without it.
+
+    Also pins the no-flag path to the `[slam]` default, which is the value
+    every existing install will get."""
+    import json
+    frames = [(np.full((42, 54), 1000.0 + 5 * i, np.float32), None, None,
+               (1.0, 0.0, 0.0, 0.0), 101325.0, float(i) * 0.03) for i in range(3)]
+    monkeypatch.setattr(slamcli, "_load_frames", lambda path, max_frames=None: (frames, 54, 42))
+    seen = []
+    orig_init = Mapper.__init__
+
+    def spy_init(self, *args, **kwargs):
+        seen.append(kwargs.get("icp_device"))
+        return orig_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(Mapper, "__init__", spy_init)
+    out = tmp_path / "r.json"
+    common = ["--out-mesh", str(tmp_path / "m.ply"), "--out-traj", str(tmp_path / "t.tum"),
+              "--json", str(out)]
+    assert main([str(tmp_path / "d.bin"), "--icp-device", "CPU:0"] + common) == 0
+    assert seen[-1] == "CPU:0"
+    assert json.loads(out.read_text())["icp_device"] == "CPU:0"
+    assert main([str(tmp_path / "d.bin")] + common) == 0
+    from roomscan.slam.config import SlamConfig
+    assert seen[-1] == SlamConfig.load().icp_device
+
+
+def test_run_forwards_every_configured_mapper_knob(monkeypatch):
+    """`_run` used to re-list all eighteen `Mapper` knobs by hand -- the same
+    second-construction-site shape as BUG-062, and item 5's `icp_device` would
+    have had to be remembered in it. Set every shared field off its default and
+    prove each one arrives."""
+    from roomscan.slam.config import SlamConfig
+
+    overrides = dict(
+        voxel_size=0.02, max_dist=0.07, icp_retry_dist=0.19, max_iter=11,
+        min_fitness=0.44, max_rmse=0.066, min_confidence=33.0,
+        weight_threshold=4.5, baro_authority=0.11, baro_tau_frames=450,
+        stationary_hold=False, stationary_window=17, stationary_coherence=0.71,
+        stationary_step_ceiling=0.041, stationary_rot_ceiling=0.55,
+        release_cache_every=3, block_count=222_000, fov_h=51.0, fov_v=39.0,
+        # A device that does not exist here: `o3d.core.Device` resolves the
+        # string without touching the driver, and this frame is a bootstrap
+        # (no ICP call), so nothing ever allocates on it. Proves the value is
+        # forwarded verbatim rather than re-derived from `device`.
+        icp_device="CUDA:3",
+    )
+    stock = SlamConfig()
+    assert all(getattr(stock, k) != v for k, v in overrides.items())
+
+    frames = [(np.full((42, 54), 1000.0, np.float32), None, None,
+               (1.0, 0.0, 0.0, 0.0), 101325.0, 0.0)]
+    seen = {}
+    orig_init = Mapper.__init__
+
+    def spy_init(self, *args, **kwargs):
+        seen.update(kwargs)
+        # `fov_h`/`fov_v` were positional before; a regression that reverted to
+        # positional args would leave them out of `kwargs` and be caught below.
+        return orig_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(Mapper, "__init__", spy_init)
+    slamcli._run(frames, 54, 42, SlamConfig(**overrides), "translation")
+    missing = {k: (v, seen.get(k)) for k, v in overrides.items() if seen.get(k) != v}
+    assert not missing, f"[slam] keys the offline CLI ignores: {missing}"
+    # `icp_mode` is the one deliberate override: --compare-modes calls _run per mode.
+    assert seen["icp_mode"] == "translation"

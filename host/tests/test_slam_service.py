@@ -86,6 +86,44 @@ def test_service_sends_pose_per_frame_and_mesh_when_ready():
     assert mesh_seen >= 1                       # a mesh was sent at least once
 
 
+def test_pose_messages_carry_the_services_own_device():
+    """Plan item 2 (2026-08-02): the client-side gate is "the worker reports
+    its own device rather than the host inferring it" -- for a remote worker
+    that only means anything if the SERVICE actually puts its resolved device
+    on the wire. Assert every pose message from this service says "CPU:0",
+    the device it was explicitly constructed with here."""
+    srv = SlamService(device="CPU:0", fov_h=55.0, fov_v=42.0)
+    lsock = socket.socket(); lsock.bind(("127.0.0.1", 0)); lsock.listen(1)
+    port = lsock.getsockname()[1]
+
+    def accept_once():
+        conn, _ = lsock.accept()
+        srv.serve_client(conn)
+        conn.close()
+    th = threading.Thread(target=accept_once, daemon=True); th.start()
+
+    cli = socket.create_connection(("127.0.0.1", port)); cli.settimeout(5)
+
+    def drain_until_pose():
+        while True:
+            m = wire.recv_message(cli)
+            assert m is not None
+            if m["type"] == wire.POSE:
+                return m
+
+    # Frame 0 triggers a mesh extraction (worker.py always extracts on the
+    # first successful integration) that would sit unread in the socket
+    # buffer at close() and turn into a spurious ECONNRESET on the server
+    # side -- frame 1 does not (frames_integrated=2, mesh_every=5), so
+    # draining both leaves nothing pending when this test closes the socket.
+    wire.send_message(cli, _synthetic_frame(0))
+    drain_until_pose()
+    wire.send_message(cli, _synthetic_frame(1))
+    m = drain_until_pose()
+    assert m["device"] == "CPU:0"
+    cli.close(); lsock.close(); th.join(timeout=2)
+
+
 def test_serve_survives_bad_client_and_keeps_serving():
     """A malformed frame (missing 'depth') raises inside serve_client; the
     real serve() accept loop must catch it, close that connection, and keep
