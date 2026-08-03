@@ -379,3 +379,81 @@ def test_reader_on_frame_fault_never_kills_the_reader():
     # The only fault is _OneShotSource's own end-of-data terminator; the
     # consumer's exception never became a reader fault.
     assert "consumer exploded" not in repr(fault.get("error"))
+
+
+# --- Task 9 (2026-08-03): metrics + on_frame pacing + write-safety ----------
+
+def test_reader_feeds_the_transform_completion_metric():
+    """`tick_transform` fires once per TRANSFORMED frame, decoupled from
+    `tick_render` (which only ticks on the broadcaster's presentation pull) --
+    the counter a caller diffs against a stream's raw `host_hz` to see
+    transform-stage loss, and against `render_fps` to see presentation
+    decimation. See MetricsRegistry.tick_transform's docstring."""
+    from roomscan.metrics import MetricsRegistry
+    reg = MetricsRegistry(window_s=10.0)
+    stats = Stats()
+    slot: queue.Queue = queue.Queue(maxsize=1)
+    fault: dict = {}
+    frames = b"".join(_depth_frame(i) for i in range(1, 4))
+    _run_reader(_OneShotSource(frames), StreamDecoder(), TransformStage(), stats, slot,
+                fault, LogBus(), None, Recorder(), _Pacer(0.0), lambda: False, None, reg)
+    assert stats.frames == 3
+    assert len(reg._transform_ticks) == 3     # one tick per transformed frame
+
+
+def test_reader_on_frame_tap_is_paced_like_the_render_slot_during_replay():
+    """`on_frame` sits AFTER the pacer's interval wait in `_run_reader`, so a
+    replay's speed control governs the SLAM feed exactly like it governs the
+    render slot -- Detailed/View SLAM tracks what's on screen, not the raw
+    disk-read rate. Live streaming leaves `pacer.interval` at 0 (`_Pacer`'s
+    docstring: "Live capture leaves interval 0 and never pauses"), so this
+    throttle never applies there and `on_frame` runs at the stream's own
+    rate (BUG-060's whole point)."""
+    calls = []
+    t0 = time.monotonic()
+    stats = Stats()
+    slot: queue.Queue = queue.Queue(maxsize=1)
+    frames = b"".join(_depth_frame(s) for s in (1, 2, 3))
+    _run_reader(_OneShotSource(frames), StreamDecoder(), TransformStage(), stats,
+                slot, {}, LogBus(), None, Recorder(), _Pacer(0.05), lambda: False,
+                on_frame=lambda h, o: calls.append(time.monotonic() - t0))
+    assert len(calls) == 3
+    # frames 2 and 3 each wait ~50 ms behind frame 1's near-immediate call;
+    # theoretical minimum 0.10 s, 0.08 keeps a scheduling-jitter margin (same
+    # tolerance as test_reader_paces_frames_with_interval).
+    assert calls[2] - calls[0] >= 0.08
+
+
+class _StubWriteGuardClient:
+    """Exposes both the read-side `offer` (the only method `_run_reader` may
+    call, to route ACK frames) and a write-side `send` -- the CommandClient
+    method that actually puts bytes on the wire (control.py). If a
+    regression ever starts issuing command writes from the reader thread,
+    this fails loudly instead of a stray write silently racing the async
+    command-dispatch path."""
+
+    def __init__(self):
+        self.offered = []
+
+    def offer(self, frame):
+        self.offered.append(frame)
+        return True
+
+    def send(self, *a, **kw):
+        raise AssertionError("command write must never run on the reader thread")
+
+    def send_profile(self, *a, **kw):
+        raise AssertionError("command write must never run on the reader thread")
+
+
+def test_reader_never_writes_commands_from_the_reader_thread():
+    payload = struct.pack("<III", CommandCode.PING, ResultCode.OK, 1)
+    frame = pack_frame(FrameHeader(FrameType.ACK, 0, 0, 42, 0, 0, 0, len(payload)), payload)
+    client = _StubWriteGuardClient()
+    stats, slot, bus, sub, fault = _run(_OneShotSource(frame), client=client)
+    assert len(client.offered) == 1            # ACK routing still works
+    # The only fault is _OneShotSource's own end-of-data terminator (every
+    # `_run`-based test ends this way, see test_reader_surfaces_fault) --
+    # the write-guard's AssertionError, if `send`/`send_profile` were ever
+    # called, must not be it.
+    assert "must never run on the reader thread" not in repr(fault.get("error"))

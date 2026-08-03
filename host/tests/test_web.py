@@ -1666,6 +1666,70 @@ def test_broadcaster_fanout_two_clients_same_frames(tmp_path):
     assert len(set(a)) >= 2
 
 
+def test_broadcaster_point_cloud_rate_stays_capped_under_a_fast_source(tmp_path):
+    """Task 9 item 3: the browser must never be asked to render as many point
+    clouds/s as ingest merely because ingest is fast. The broadcaster's
+    presentation loop is deadline-paced at `POINT_INTERVAL` (~30 Hz),
+    independent of how often the reader thread refills the latest-wins slot
+    -- this predates Task 9 (BUG-060/061 didn't touch it) but was never
+    exercised end-to-end at a rate above the presentation cap. Approximates
+    a >>30 Hz source (e.g. a high-framerate profile) with a fast-paced
+    replay, since no real 90 Hz capture exists yet (firmware Task 5)."""
+    import uvicorn
+    import websockets
+
+    cap = tmp_path / "depth.bin"
+    _make_depth_capture(cap, n_frames=300)
+    pacer = _build_app_state(cap, replay_fps=300.0)   # ~3.3 ms/frame: ~10x POINT_INTERVAL
+
+    port = _free_port()
+    config = uvicorn.Config(web.app, host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+
+    def run_server():
+        asyncio.run(server.serve())
+
+    thread = threading.Thread(target=run_server, daemon=True)
+    thread.start()
+    deadline = time.time() + 10.0
+    while not server.started and time.time() < deadline:
+        time.sleep(0.02)
+    assert server.started, "uvicorn server did not start"
+
+    uri = f"ws://127.0.0.1:{port}/ws"
+    collect_s = 1.0
+
+    async def collect():
+        got = []
+        async with websockets.connect(uri) as ws:
+            pacer.paused.clear()
+            end = time.monotonic() + collect_s
+            while True:
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    m = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+                got.append(m)
+        return got
+
+    try:
+        got = asyncio.run(asyncio.wait_for(collect(), timeout=15.0))
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10.0)
+
+    pcs = _point_clouds(got)
+    # A source running ~300 fps for ~1 s of collection would deliver close to
+    # 300 frames if presentation were coupled to ingest; the ~30 Hz
+    # POINT_INTERVAL loop caps it. Generous bound (well under half the
+    # ingest rate) to absorb scheduling jitter without losing the ability to
+    # discriminate: an uncapped regression would blow well past 100.
+    assert 0 < len(pcs) < 60, f"expected the presentation cap (~30 Hz), got {len(pcs)}"
+
+
 def test_metrics_broadcast_reports_reader_drops_and_gaps(tmp_path):
     """The `metrics` message must carry the READER's drops/gaps counters.
 
@@ -3723,6 +3787,29 @@ def test_build_metrics_message_resources_null_without_a_sampler():
     assert web.build_metrics_message(snap)["resources"] is None
 
 
+def test_build_metrics_message_carries_transform_and_browser_fps():
+    """Task 9: `transform_fps` (uncapped ingest->transform rate) and
+    `browser_fps` (literal point-cloud send count) ride the `metrics`
+    message alongside the existing (presentation-capped) `render_fps`, so
+    the HUD/tooling can tell deliberate decimation apart from real loss."""
+    snap = MetricsSnapshot(render_fps=28.0, streams=[], link_bytes_per_s=0.0,
+                           resources=None, transform_fps=91.4, browser_fps=29.7)
+    msg = web.build_metrics_message(snap)
+    assert msg["render_fps"] == pytest.approx(28.0)
+    assert msg["transform_fps"] == pytest.approx(91.4)
+    assert msg["browser_fps"] == pytest.approx(29.7)
+    json.dumps(msg)
+
+
+def test_build_metrics_message_transform_and_browser_fps_default_zero():
+    """A `MetricsSnapshot` built the old way (positional, no new kwargs) --
+    every pre-Task-9 call site -- must keep working and read 0.0, not raise."""
+    snap = MetricsSnapshot(28.0, [], 0.0, None)
+    msg = web.build_metrics_message(snap)
+    assert msg["transform_fps"] == 0.0
+    assert msg["browser_fps"] == 0.0
+
+
 def test_resources_degrade_to_null_on_a_gpu_less_box():
     """Every GPU/system field must be None-able, not zero. A 0 where a
     measurement should be reads as "plenty of headroom" — the exact trap the
@@ -3922,6 +4009,47 @@ def test_go_live_stops_the_auto_recording():
     _run_inbound(state, {"type": "set_display", "display": "slam"})
     _run_inbound(state, {"type": "go_live"})
     assert ctrl.recording is False and ctrl.stops == 1
+
+
+class _CountingSlamRunner:
+    """Stands in for `SlamRunner` in the swap-handler tests: only `.reset()`
+    matters here, and counting its calls is the whole point (Task 9 item 5 --
+    a source swap must reset the SLAM worker exactly once, not zero times, a
+    stale map bleeding into the new source, and not twice)."""
+
+    def __init__(self):
+        self.resets = 0
+
+    def reset(self):
+        self.resets += 1
+
+
+def test_go_live_resets_the_slam_worker_exactly_once():
+    ui = web.UiState(source="view", display="slam", selected_capture="take.bin")
+    ctrl = _RecCtrl(mode="replay", has_live=True)
+    state, _ = _autorec_state(ui, ctrl)
+    state.slam_runner = _CountingSlamRunner()
+    _run_inbound(state, {"type": "go_live"})
+    assert state.slam_runner.resets == 1
+
+
+def test_reset_slam_called_exactly_once_per_swap_handler():
+    """Same invariant as the behavioral test above, but covering the other
+    two swap paths too (`load_capture`, and delete-causes-switch-away)
+    without paying for a full `_FakeCtrl`/`SessionController` capable of
+    `switch_to_replay` for each: a live run through all three would prove no
+    more than counting the one `_reset_slam(state)` call each handler
+    already contains. Mirrors `test_broadcaster_no_longer_feeds_slam`'s
+    source-level style."""
+    src = pathlib.Path(web.__file__).read_text()
+    switch_away = src[src.index("if switch_away:"):src.index("def _unlink_all")]
+    load_capture = src[src.index('elif mtype == "load_capture" and ctrl is not None:'):
+                       src.index('elif mtype == "go_live" and ctrl is not None:')]
+    go_live = src[src.index('elif mtype == "go_live" and ctrl is not None:'):
+                 src.index('elif mtype == "transport" and ctrl is not None:')]
+    for name, block in [("switch_away", switch_away), ("load_capture", load_capture),
+                        ("go_live", go_live)]:
+        assert block.count("_reset_slam(state)") == 1, (name, block)
 
 
 def test_a_manual_recording_is_never_stopped_by_a_display_switch():
@@ -5073,6 +5201,27 @@ def test_broadcaster_no_longer_broadcasts_mesh_on_ws():
     src = pathlib.Path(web.__file__).read_text()
     body = src[src.index("async def _broadcaster()"):src.index('@app.websocket("/ws")')]
     assert "_broadcast_bytes(clients, mesh_bytes)" not in body
+
+
+def test_broadcaster_ticks_browser_metric_right_after_the_point_cloud_send():
+    """Task 9 item 4: `metrics.tick_browser` must sit at the literal send
+    site inside the `point_cloud` display branch, not somewhere that would
+    also fire in `slam`/`detailed` display (that's what `render_fps`
+    already does, and over-counts there -- see `tick_browser`'s
+    docstring)."""
+    src = pathlib.Path(web.__file__).read_text()
+    body = src[src.index("async def _broadcaster()"):src.index('@app.websocket("/ws")')]
+    pc_block = body[body.index('if ui.display == "point_cloud":'):
+                    body.index('# SLAM mode (web Phase 4)')]
+    assert pc_block.count("metrics.tick_browser(now)") == 1
+    assert (pc_block.index("_broadcast_bytes(_engaged_clients(state, now), last_pc_bytes)")
+            < pc_block.index("metrics.tick_browser(now)"))
+    # And it must NOT appear in the slam/detailed branches.
+    for marker, stop in [('if ui.display == "slam" and slam is not None:', "# IR_IMAGE"),
+                         ('if ui.display == "detailed" and detailed is not None:',
+                          "# Give every")]:
+        block = body[body.index(marker):body.index(stop)]
+        assert "tick_browser" not in block
 
 
 def test_ws_flow_counters_shape():

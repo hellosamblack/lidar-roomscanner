@@ -173,6 +173,23 @@ class MetricsSnapshot:
     resources: ResourceSnapshot | None
     drops: int = 0
     gaps: int = 0
+    # Task 9 (2026-08-03, high-framerate decoupling): the rate at which
+    # TRANSFORMED frames complete (`stage.feed` succeeding), fed from the
+    # reader thread and NOT capped by the broadcaster's presentation cadence
+    # (`render_fps`'s slot-pull tick is capped at ~POINT_INTERVAL, currently
+    # 30 Hz). At a 30 Hz source the two agree; at 90 Hz they diverge, and the
+    # gap IS the deliberate presentation decimation -- distinct from data
+    # loss (compare against a stream's own `host_hz` in `streams`, which is
+    # the pre-transform arrival rate) or SLAM loss (`frames_submitted`/
+    # `frames_processed`/`frames_overwritten` in the `slam` message).
+    transform_fps: float = 0.0
+    # Literal browser-facing send rate: ticked only where the point-cloud
+    # broadcast actually happens (`web._broadcaster`'s `point_cloud` display
+    # branch), so it does not over-count the way `render_fps` does in
+    # `slam`/`detailed` display (see `tick_browser`'s docstring). 0.0 from a
+    # MetricsRegistry never fed one (e.g. the desktop panel, which has no
+    # browser to send to), same null-safe default as `drops`/`gaps`.
+    browser_fps: float = 0.0
 
 
 class MetricsRegistry:
@@ -188,6 +205,8 @@ class MetricsRegistry:
         self._lock = threading.Lock()
         self._meters: dict[int, RateMeter] = {}
         self._render_ticks: deque[float] = deque()
+        self._transform_ticks: deque[float] = deque()
+        self._browser_ticks: deque[float] = deque()
 
     def record(self, header: FrameHeader, nbytes: int, now: float) -> None:
         """Record one decoded DATA frame. Non-DATA frames are ignored (their
@@ -216,6 +235,50 @@ class MetricsRegistry:
             span = ticks[-1] - ticks[0]
             return (len(ticks) - 1) / span if span > 0 else 0.0
 
+    def tick_transform(self, now: float) -> None:
+        """One TRANSFORMED frame completed (Task 9). Fed from the reader
+        thread, right where `stats.update(header)` runs -- i.e. on every
+        frame that survives `TransformStage.feed`, before it is ever paced
+        or handed to a display/SLAM consumer. Unlike `tick_render` (which
+        only ticks when the broadcaster's ~30 Hz loop happens to pull a fresh
+        slot item), this free-runs at the transform's own rate, so it is the
+        number to compare against a source's raw arrival rate (a stream's
+        `host_hz`) to see transform-stage loss, and against `render_fps` to
+        see presentation decimation."""
+        with self._lock:
+            self._transform_ticks.append(now)
+            while self._transform_ticks and now - self._transform_ticks[0] > self.window_s:
+                self._transform_ticks.popleft()
+
+    def transform_fps(self, now: float) -> float:
+        with self._lock:
+            ticks = self._transform_ticks
+            if len(ticks) < 2:
+                return 0.0
+            span = ticks[-1] - ticks[0]
+            return (len(ticks) - 1) / span if span > 0 else 0.0
+
+    def tick_browser(self, now: float) -> None:
+        """One POINT_CLOUD payload actually handed to `_broadcast_bytes`
+        (Task 9). Unlike `tick_render` -- which ticks on every fresh slot
+        pull regardless of display mode, so it over-counts in `slam`/
+        `detailed` display where no point cloud goes to the browser at all
+        -- this ticks only at the real send site, so it is the literal
+        answer to "how many point clouds did the browser get", never
+        conflated with SLAM's own mesh cadence."""
+        with self._lock:
+            self._browser_ticks.append(now)
+            while self._browser_ticks and now - self._browser_ticks[0] > self.window_s:
+                self._browser_ticks.popleft()
+
+    def browser_fps(self, now: float) -> float:
+        with self._lock:
+            ticks = self._browser_ticks
+            if len(ticks) < 2:
+                return 0.0
+            span = ticks[-1] - ticks[0]
+            return (len(ticks) - 1) / span if span > 0 else 0.0
+
     def snapshot(self, now: float) -> MetricsSnapshot:
         with self._lock:
             meters = list(self._meters.items())
@@ -229,7 +292,9 @@ class MetricsRegistry:
                 streams.append(StreamRate(sid, label, m.device_hz(now), m.host_hz(now), bps, m.jitter_ms(now)))
         streams.sort(key=lambda s: _SENSOR_ORDER.get(s.stream_id, 99))
         resources = self.sampler.latest() if self.sampler is not None else None
-        return MetricsSnapshot(self.render_fps(now), streams, link_bps, resources)
+        return MetricsSnapshot(self.render_fps(now), streams, link_bps, resources,
+                               transform_fps=self.transform_fps(now),
+                               browser_fps=self.browser_fps(now))
 
 
 # --- text formatting (pure) --------------------------------------------------

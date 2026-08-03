@@ -125,6 +125,39 @@ def test_registry_render_fps():
     assert abs(snap.render_fps - 50.0) < 1e-6
 
 
+def test_registry_transform_fps_is_independent_of_render_fps():
+    """Task 9: `transform_fps` free-runs at whatever rate `tick_transform` is
+    fed (the reader thread's own pace), never coupled to `tick_render` (the
+    broadcaster's presentation-cadence tick) -- ticking one must not move
+    the other."""
+    reg = MetricsRegistry(window_s=10.0)
+    for i in range(10):
+        reg.tick_transform(now=i * 0.01)     # 9 gaps over 0.09 s -> 100 fps
+    for i in range(4):
+        reg.tick_render(now=i * 0.1)         # 3 gaps over 0.3 s -> 10 fps
+    snap = reg.snapshot(now=0.3)
+    assert abs(snap.transform_fps - 100.0) < 1e-6
+    assert abs(snap.render_fps - 10.0) < 1e-6
+
+
+def test_registry_browser_fps_defaults_zero_when_never_fed():
+    """A registry that's never had `tick_browser` called (e.g. the desktop
+    panel, which has no browser to send to) reports 0.0, not an error."""
+    reg = MetricsRegistry(window_s=10.0)
+    reg.tick_render(now=0.0)
+    reg.tick_render(now=0.1)
+    snap = reg.snapshot(now=0.1)
+    assert snap.browser_fps == 0.0
+
+
+def test_registry_browser_fps_tracks_its_own_ticks():
+    reg = MetricsRegistry(window_s=10.0)
+    for i in range(4):
+        reg.tick_browser(now=i * (1.0 / 30.0))   # 3 gaps over 0.1 s -> 30 fps
+    snap = reg.snapshot(now=3 * (1.0 / 30.0))
+    assert abs(snap.browser_fps - 30.0) < 1e-6
+
+
 def test_registry_link_bytes_is_sum_across_streams():
     reg = MetricsRegistry(window_s=10.0)
     for i in range(5):

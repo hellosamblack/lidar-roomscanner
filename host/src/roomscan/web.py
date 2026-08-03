@@ -1407,6 +1407,14 @@ def build_metrics_message(snapshot: MetricsSnapshot) -> dict:
     return {
         "type": "metrics",
         "render_fps": float(snapshot.render_fps),
+        # Task 9 (2026-08-03): the transform's own completion rate, uncapped
+        # by the ~30 Hz presentation loop above -- at a 30 Hz source the two
+        # agree; a divergence at a higher source rate is deliberate
+        # presentation decimation, not loss. See MetricsSnapshot's docstring.
+        "transform_fps": float(snapshot.transform_fps),
+        # Literal count of point-cloud sends -- see tick_browser's docstring
+        # for why this differs from render_fps in non-point_cloud display.
+        "browser_fps": float(snapshot.browser_fps),
         "streams": [
             {
                 "stream_id": s.stream_id,
@@ -4391,6 +4399,10 @@ async def _broadcaster() -> None:
                     last_pc_key = key
                 if last_pc_bytes is not None:
                     await _broadcast_bytes(_engaged_clients(state, now), last_pc_bytes)
+                    # Task 9: the literal "browser frames sent" counter -- see
+                    # MetricsRegistry.tick_browser's docstring for why this is
+                    # not the same thing as `render_fps`.
+                    metrics.tick_browser(now)
 
             # SLAM mode (web Phase 4): ship the latest `slam` message, then
             # cache the (throttled) MESH for `/ws-mesh` to pump out. The FEED

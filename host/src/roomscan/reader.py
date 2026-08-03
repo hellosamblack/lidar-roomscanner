@@ -129,6 +129,13 @@ def _run_reader(source, decoder, stage, stats, slot, fault, bus, client, recorde
                 continue
             header, outputs = result
             stats.update(header)
+            if metrics is not None:
+                # Task 9: the true transform-completion rate, unbounded by the
+                # broadcaster's presentation cadence -- see
+                # MetricsRegistry.tick_transform's docstring. Ticked here
+                # (before the pacer/on_frame gates below) so a replay's
+                # speed-limited playback doesn't hide the source's real rate.
+                metrics.tick_transform(time.monotonic())
             while pacer.paused.is_set() and not is_stopped():
                 time.sleep(0.05)
             if is_stopped():
