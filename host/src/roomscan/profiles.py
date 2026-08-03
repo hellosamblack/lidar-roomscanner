@@ -20,7 +20,15 @@ fixes the underlying model against DS14879 rev 6 (the VL53L9CX datasheet,
 in the doc. See that spec's amended §3.2/§3.3/§7.1 for the prose version of
 what follows.
 
-**Power.** DS14879 Table 36 "Power consumption" gives real, indoor-only
+**Power — SUPERSEDED 2026-08-03.** The DS14879-two-point-fit model described in
+this paragraph was REPLACED by the decompiled-ProfileTuning.exe model below
+("Power model, decompiled ProfileTuning.exe (2026-08-03)") once that model
+validated 5/5 against owner-run tool readings within 0.01%. Kept here,
+unedited, as the historical record of why the fit existed and what it traded
+off — `POWER_COEFFICIENTS`, `_fit_line`, and `estimate_power_mw`'s old body are
+gone from the code; this prose is not.
+
+DS14879 Table 36 "Power consumption" gives real, indoor-only
 (0 W/m^2 — the outdoor columns are deliberately unused, see below) power
 figures for two (ranging_mode, power_mode) combinations, each measured at TWO
 different exposures per Table 21 "Profile settings" — a real two-point fit,
@@ -78,6 +86,68 @@ Table 9's 420 mW at duty 0.40 (100 fps) — 1.2% off, despite running at a
 different fps and with DSS off (the fitted precision slope came from DSS-ON
 rows). That is the strongest external check this model has, and it passes.
 
+**Power model, decompiled ProfileTuning.exe (2026-08-03) — REPLACES the fit
+above.** ST ships `references/software/53L9A1/ProfileTuning.exe` (support-
+gated, kept locally untracked), a GUI planning tool whose `MainWindow.update()`
+computes AVDD/DVDD/IOVDD/VBAT_Rx/VBAT_Tx terms from a small set of exact
+per-(ranging_mode, power_mode) coefficient tables — ST's OWN equations, not a
+fit to sparse datasheet rows. Extracted with `pyinstxtractor-ng` +
+`decompyle3` (PyInstaller/Python 3.7 payload) into a scratch directory, never
+into `host/.venv`. Reproduced here exactly:
+
+  duty_cycle_2 = exposure_ms / frame_period_ms                 (== this
+                                                                  module's own
+                                                                  `duty_cycle()`)
+  duty_cycle   = max(exposure_ms*1.15 + 2.0, dss_duration_ms) / frame_period_ms
+    where dss_duration_ms = 13.5 for 54x42/binning 2 with DSS on, else 0 — the
+    tool's own per-resolution DSS "housekeeping" window, distinct from (and
+    additional to) the I3C readout time above
+  P_AVDD  = table[ranging_mode]*duty_cycle  + table[power_mode+2]*(1-duty_cycle)   table=(100,100,60,20,0,3,0)
+  P_DVDD  = table[ranging_mode]*duty_cycle  + table[power_mode+2]*(1-duty_cycle)   table=(100,100,25,10,5,6,0)
+  P_IOVDD = table[ranging_mode]*duty_cycle  + table[power_mode+2]*(1-duty_cycle)   table=(1,1,1,1,1,0,0)
+  P_VBAT_Rx = table[ranging_mode]*duty_cycle_2*(ambient_lux+1000)*0.0002
+              + table[power_mode+2]*(1-duty_cycle)                                table=(42,42,20,5,5,0,0)
+  P_VBAT_Tx = table[ranging_mode]*duty_cycle_2 + table[power_mode+2]*(1-duty_cycle)   table=(550,660,15,0,0,6,0)
+  P_total = P_AVDD + P_DVDD + P_IOVDD + P_VBAT_Rx + P_VBAT_Tx
+
+`ranging_mode` indexes 0/1 = Precision/Ambient and `power_mode` indexes
+0/1/2 = Regular/Low/UltraLow (offset +2 into the same tables) — both exactly
+this module's own `RangingMode`/`PowerMode` wire values, so no remapping table
+is needed; table indices 5/6 exist in the tool's own source but are dead code
+(never read by `update()`), reproduced faithfully rather than trimmed.
+`ambient_lux` is a genuine physical input the DS14879-fit model above had NO
+way to represent at all (DS14879's own rows confound exposure with ambient
+light — see the Max range section below for the same problem in a different
+model); `AMBIENT_LUX_DEFAULT` (100.0) is the tool's own "Home, Theatres -
+100 Lux" dropdown entry, a documented indoor reference point, not a
+measurement of any specific room.
+
+**Validation, 2026-08-03:** five owner-run ProfileTuning.exe readings (54x42,
+I3C, DSS Enable, ambient = "Home, Theatres - 100 Lux" unless noted),
+reproduced by the extracted equations to within 0.01% — an order of magnitude
+inside the ~2% bar this replacement was gated on:
+
+  Ambient,   ULP,     6 ms/30 fps: tool 208.4 mW, model 208.41 mW (+0.01%)
+  Precision, ULP,    10 ms/30 fps: tool 255.7 mW, model 255.72 mW (+0.01%)
+  Precision, Regular, 4 ms/37 fps: tool 243.7 mW, model 243.73 mW (+0.01%)
+  Ambient,   Regular, 2 ms/37 fps: tool 210.5 mW, model 210.48 mW (-0.01%)
+  Ambient,   Regular, 4 ms/37 fps: tool 260.0 mW, model 260.01 mW (+0.00%)
+
+(`host/tests/test_profiles.py`'s "Power model (decompiled ProfileTuning.exe)"
+section pins all five.) Because this model is exact-per-ST rather than a
+fit, it no longer reproduces the two real DS14879 Table 36/Table 9 anchors
+the old fit was built from as exactly as that fit necessarily did by
+construction — e.g. Room Mapping now estimates 208.4 mW where DS14879 Table 9
+states 200 mW "(5 klx)": ProfileTuning's own default ambient (100 lux) is not
+DS14879's own footnoted test condition (5000 lux) for that row, and the two
+numbers were never going to agree once ambient light became an explicit,
+independently-set input instead of a hidden constant baked into a fitted
+intercept. This is expected, not a regression — `power_mw` is still labelled
+ESTIMATED everywhere it surfaces (no measured claim without a power meter),
+and `estimate_power_mw`'s docstring/`ProfileEstimate.power_mw` field name are
+unchanged, so `roomscan-web`/the UI consequence readouts pick up the new
+numbers automatically with no call-site changes required.
+
 **Max range.** The original continuous `sqrt(exposure)` formula is dropped
 entirely: DS14879 Tables 23/24 vary exposure and ambient light TOGETHER in
 every row (a longer exposure is how the vendor's own test compensates for
@@ -106,13 +176,33 @@ conservative (gray 17%) indoor figure:
 Minimum distance is Table 22 "Minimum ranging capabilities", exact and NOT
 exposure-dependent: 450 mm ambient, 50 mm precision.
 
-**I3C ToF bus airtime.** The spec's own percentages (28.5/57.0/85.5/95.0% at
-30/60/90/100 fps) were already internally consistent; only the formula
-*as written* ("9.49888 ms x FPS x 100%") had a units bug — it should read
-`T_xfer_ms / frame_period_ms * 100`, equivalently `T_xfer_ms * fps / 10`.
-Fixed here; the coefficient (14,842 bytes / 12.5 MHz = 9.49888 ms) is
-unchanged. This is the sensor's own I3C link only ("ToF bus airtime" per the
-plan's Task 10 label), not the Ethernet/USB transport link Task 6 paces.
+**I3C ToF bus airtime.** The spec's original percentages (28.5/57.0/85.5/95.0%
+at 30/60/90/100 fps) had two problems, not one: the written formula
+("9.49888 ms x FPS x 100%") had a units bug (fixed as `T_xfer_ms /
+frame_period_ms * 100`, equivalently `T_xfer_ms * fps / 10`), AND the
+9.49888 ms coefficient itself was wrong — it was derived from the raw
+12.5 MHz I3C SDR clock, but that is not the achievable transfer rate; per-byte
+protocol overhead (addressing, ACKs, CRC) brings the *effective* throughput
+down to a documented 10 Mbps. **REFINEMENT (2026-08-03, decompiled
+ProfileTuning.exe + AN6522 investigation):** two independent sources agree on
+the 10 Mbps effective figure and disagree with the raw-clock number: AN6522
+Table 5 "Readout duration depending on the readout interface" states, in the
+vendor's own words, "54x42 -> I3C (10 Mbps): 11.8 ms"
+(`references/datasheets/NUCLEO-VL53L9CX/an6522-guidelines-for-tuning-ranging-
+profiles-with-vl53l9cx-stmicroelectronics.pdf`); and the decompiled
+`ProfileTuning.exe` planning tool (`references/software/53L9A1/
+ProfileTuning.exe`, support-gated, kept locally untracked) computes the same
+quantity as `frame_size_bytes * 8 * 1000 / 10e6`. `I3C_XFER_MS` is now
+`14,842 bytes * 8 / 10e6 * 1000 = 11.8736 ms` (was 9.49888 ms at the raw
+12.5 MHz clock). Every bus-utilization consequence moves with it: 30 fps
+28.5% -> ~35.6%, 46 fps (High Frame-Rate preset) 43.7% -> ~54.6%, 60 fps
+57.0% -> ~71.2%; 90/100 fps requests now compute *above* 100% (106.9%/118.7%)
+because the raw transfer alone no longer fits inside the requested period at
+all — `i3c_bus_utilization_pct`'s existing `min(100.0, ...)` clamp reports
+100% for both, which is the honest ceiling, not a claim those requests are
+merely "near saturation". This is the sensor's own I3C link only ("ToF bus
+airtime" per the plan's Task 10 label), not the Ethernet/USB transport link
+Task 6 paces.
 
 **Exposure granularity verdict.** `vl53l9_set_exposure(void*, vl53l9_context_t,
 uint16_t exposure_ms)` (`firmware/vendor/53L9A1/Drivers/BSP/Components/vl53l9/
@@ -183,10 +273,29 @@ the sensor (this was never a validation-rejectable condition; the sensor
 does not reject it either) — but `validate_manual_params` now WARNS when a
 request will be delivered as a period-multiple rather than 1:1, and
 `ProfileEstimate.expected_delivered_fps` reports the honest expected rate
-instead of echoing the request. The extrapolation above 8 ms exposure (holds
-the 8 ms bracket's floor for 9-16 ms) is UNVERIFIED — the trend suggests the
-true floor keeps rising with exposure, so predictions above 8 ms exposure may
-be optimistic, not conservative.
+instead of echoing the request.
+
+**Floor extrapolation above 8 ms exposure, REFINEMENT (2026-08-03).** The
+original placeholder flat-held the 8 ms bracket's floor (23.529 ms) for the
+whole 9-16 ms range and flagged it UNVERIFIED, with no principled basis for
+why 23.529 ms specifically should keep holding. The same decompiled-
+ProfileTuning.exe / AN6522 investigation that corrected the I3C coefficient
+above supplies a principled line instead: `floor_ms(exposure_ms) =
+FLOOR_FW_DEADTIME_MS (1.6 ms, the firmware dead-time term ProfileTuning's own
+planning model adds on top of readout) + I3C_XFER_MS (11.8736 ms, AN6522/
+ProfileTuning per above) + exposure_ms + FLOOR_EXTRAPOLATION_MARGIN_MS
+(~3 ms, the largest residual this line has against the three MEASURED
+brackets below) ~= 16.5 + exposure_ms`. This is DERIVED, not measured, and is
+labelled as such everywhere it appears — Task 5's sweep never ran an exposure
+above 8 ms. The three measured brackets (<=2 -> 20.0 ms, <=4 -> 21.739 ms,
+<=8 -> 23.529 ms) remain authoritative BELOW 8 ms: the same investigation
+showed ST's own planning-tool equation (a flat 26.9 ms regardless of
+exposure, at 54x42/DSS-on — see the amended spec's Sec 3.2.3) diverges from our
+measured hardware, which is consistently FASTER (20.0-23.5 ms), so real
+measurements outrank the tool's formula in the range where both exist. Above
+8 ms, no measurement exists to outrank the derived line, so it is what
+`measured_floor_ms` now returns — an improvement over an unexplained flat
+hold, but still not a substitute for Task 5 actually sweeping 9-16 ms.
 """
 from __future__ import annotations
 
@@ -271,26 +380,40 @@ def dss_enabled_for_fps(fps: int) -> bool:
 
 # (exposure_ms upper bound of the bracket, floor_ms -- the bracket's OWN upper bound,
 # i.e. the conservative/under-promising side). Measured at 54x42/binning 2, Precision
-# context, Regular power; DSS on vs off made no measurable difference. Exposure above
-# 8 ms is UNMEASURED -- `measured_floor_ms` extrapolates by holding the 8 ms bracket's
-# floor, which is NOT verified to be conservative there (the trend suggests the true
-# floor keeps rising with exposure).
+# context, Regular power; DSS on vs off made no measurable difference. These three
+# brackets are AUTHORITATIVE below 8 ms exposure -- real measurements, which the
+# 2026-08-03 refinement investigation showed outrank ST's own planning-tool equation
+# (a flat 26.9 ms) in this range. See module docstring "Floor extrapolation above 8 ms
+# exposure" for what happens above 8 ms (UNMEASURED; a derived line, not this table).
 _FLOOR_MS_BRACKETS: tuple[tuple[float, float], ...] = (
     (2.0, 20.0),
     (4.0, 21.739),
     (8.0, 23.529),
 )
 
+# Extrapolation above 8 ms exposure (UNMEASURED -- Task 5's sweep stopped at 8 ms).
+# REFINEMENT (2026-08-03, decompiled ProfileTuning.exe + AN6522 investigation):
+# floor_ms = FW dead time + I3C readout + exposure + margin, ~= 16.5 + exposure_ms.
+# Replaces the earlier flat-hold-the-8ms-bracket placeholder. See module docstring.
+FLOOR_FW_DEADTIME_MS = 1.6            # firmware dead time, decompiled ProfileTuning.exe
+FLOOR_EXTRAPOLATION_MARGIN_MS = 3.0   # largest residual vs the three measured brackets
+
 
 def measured_floor_ms(exposure_ms: float) -> float:
-    """Conservative (upper-bound-of-bracket) measured per-frame floor, ms, for a
-    given exposure — measured 2026-08-03 (see module docstring). Any requested
-    frame period shorter than this floor is still ACCEPTED by the sensor but
-    delivered as an integer multiple of the requested period, not 1:1."""
+    """Per-frame floor, ms, for a given exposure. Below 8 ms exposure this is the
+    measured (upper-bound-of-bracket, conservative) 2026-08-03 figure -- see module
+    docstring. Above 8 ms (UNMEASURED) it is the DERIVED line `FLOOR_FW_DEADTIME_MS +
+    I3C_XFER_MS + exposure_ms + FLOOR_EXTRAPOLATION_MARGIN_MS`, clearly not a
+    measurement. Any requested frame period shorter than this floor is still ACCEPTED
+    by the sensor but delivered as an integer multiple of the requested period, not 1:1.
+    """
     for bracket_exposure_ms, floor_ms in _FLOOR_MS_BRACKETS:
         if exposure_ms <= bracket_exposure_ms:
             return floor_ms
-    return _FLOOR_MS_BRACKETS[-1][1]  # extrapolated beyond 8 ms -- see docstring
+    # Beyond 8 ms: derived, not measured -- see docstring above and module docstring
+    # "Floor extrapolation above 8 ms exposure".
+    return (FLOOR_FW_DEADTIME_MS + I3C_XFER_MS + exposure_ms
+            + FLOOR_EXTRAPOLATION_MARGIN_MS)
 
 
 def ceiling_fps_for_exposure(exposure_ms: float) -> float:
@@ -332,12 +455,18 @@ def duty_cycle(exposure_ms: float, fps: int) -> float:
     return min(1.0, max(0.0, exposure_ms * fps / 1000.0))
 
 
-# --- I3C ToF bus airtime model (unchanged from the source spec; only the written
-# formula had a units bug, not the coefficient or the resulting percentages) --------
+# --- I3C ToF bus airtime model ------------------------------------------------------
+# REFINEMENT (2026-08-03): I3C_XFER_MS is the DOCUMENTED EFFECTIVE throughput, not the
+# raw 12.5 MHz SDR clock -- AN6522 Table 5 states "54x42 -> I3C (10 Mbps): 11.8 ms"
+# directly, and the decompiled ProfileTuning.exe planning tool computes the identical
+# quantity as frame_size_bytes*8*1000/10e6. See module docstring "I3C ToF bus airtime"
+# for the full derivation and citations.
 
 RAW_3DMD_BYTES_BIN2 = 14842          # binning=2 (54x42), docs/protocol.md
-I3C_BUS_HZ = 12.5e6                  # I3C push-pull SDR clock
-I3C_XFER_MS = (RAW_3DMD_BYTES_BIN2 * 8) / I3C_BUS_HZ * 1000.0  # 9.49888 ms
+I3C_EFFECTIVE_BPS = 10e6             # effective throughput incl. protocol overhead --
+                                      # AN6522 Table 5 + decompiled ProfileTuning.exe,
+                                      # NOT the raw 12.5 MHz SDR clock
+I3C_XFER_MS = (RAW_3DMD_BYTES_BIN2 * 8) / I3C_EFFECTIVE_BPS * 1000.0  # 11.8736 ms
 
 
 def i3c_bus_utilization_pct(fps: int) -> float:
@@ -351,72 +480,69 @@ def i3c_bus_utilization_pct(fps: int) -> float:
     return min(100.0, 100.0 * I3C_XFER_MS / period_ms)
 
 
-# --- Power model ---------------------------------------------------------------------
+# --- Power model (REPLACED 2026-08-03: decompiled ProfileTuning.exe) -----------------
+# See module docstring "Power model, decompiled ProfileTuning.exe (2026-08-03)" for the
+# full derivation, the supersession of the earlier DS14879-fit model (kept in the
+# docstring as history, not in code), and the 5/5 validation against owner-run tool
+# readings. Tables/formula reproduced exactly from the tool's own
+# MainWindow.p_avdd/p_dvdd/p_iovdd/p_vbatrx/p_vbattx and MainWindow.update().
+
+# index 0/1 = ranging_mode (Precision/Ambient); index 2/3/4 = power_mode+2
+# (Regular/Low/UltraLow). Both match this module's own RangingMode/PowerMode wire
+# values exactly -- no remapping table needed. Indices 5/6 are dead in the tool's own
+# source (never read by update()); reproduced faithfully, not trimmed.
+_P_VBATTX = (550.0, 660.0, 15.0, 0.0, 0.0, 6.0, 0.0)
+_P_VBATRX = (42.0, 42.0, 20.0, 5.0, 5.0, 0.0, 0.0)
+_P_AVDD = (100.0, 100.0, 60.0, 20.0, 0.0, 3.0, 0.0)
+_P_DVDD = (100.0, 100.0, 25.0, 10.0, 5.0, 6.0, 0.0)
+_P_IOVDD = (1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0)
+
+# ProfileTuning's own per-resolution DSS "housekeeping" window, 54x42/binning 2 only
+# (our only supported resolution). Distinct from, and additional to, I3C_XFER_MS above.
+_DSS_HOUSEKEEPING_MS_BIN2 = 13.5
+
+# ProfileTuning's own "Home, Theatres - 100 Lux" ambient-light dropdown entry -- a
+# documented indoor reference, not a measurement of any specific room. The five
+# 2026-08-03 validation anchors were all read at this setting (see module docstring).
+AMBIENT_LUX_DEFAULT = 100.0
 
 
-def _fit_line(p1: tuple[float, float], p2: tuple[float, float]) -> tuple[float, float]:
-    """Least-squares through exactly two points: returns (slope, intercept)."""
-    (x1, y1), (x2, y2) = p1, p2
-    slope = (y2 - y1) / (x2 - x1)
-    intercept = y1 - slope * x1
-    return slope, intercept
-
-
-# Real DS14879 Table 36 anchors (indoor / 0 W/m^2 only) x Table 21 exposures -- see
-# module docstring for the full derivation and the ambient-light confound caveat.
-_PRECISION_REGULAR_SLOPE_MW_PER_DUTY, _PRECISION_REGULAR_INTERCEPT_MW = _fit_line(
-    (0.12, 235.0), (0.30, 370.0))
-_AMBIENT_REGULAR_SLOPE_MW_PER_DUTY, _AMBIENT_REGULAR_INTERCEPT_MW = _fit_line(
-    (0.12, 225.0), (0.48, 560.0))
-
-# ULP, Ambient: solved EXACTLY from Table 9's Room Mapping anchor (30 fps, 6 ms,
-# ULP -> 200 mW). This is a real anchor, not an assumption.
-_ROOM_MAPPING_DUTY = 6 * 30 / 1000.0  # 0.18
-_AMBIENT_ULTRA_LOW_INTERCEPT_MW = (
-    200.0 - _AMBIENT_REGULAR_SLOPE_MW_PER_DUTY * _ROOM_MAPPING_DUTY)
-
-# ULP, Precision: no direct anchor. Scaled from the Regular/Precision intercept by
-# the ULP/Regular ratio measured on the Ambient pair above -- a documented
-# assumption (ULP's idle-current saving is ranging-mode-independent), not a lookup.
-_ULTRA_LOW_TO_REGULAR_INTERCEPT_RATIO = (
-    _AMBIENT_ULTRA_LOW_INTERCEPT_MW / _AMBIENT_REGULAR_INTERCEPT_MW)
-_PRECISION_ULTRA_LOW_INTERCEPT_MW = (
-    _PRECISION_REGULAR_INTERCEPT_MW * _ULTRA_LOW_TO_REGULAR_INTERCEPT_RATIO)
-
-# LOW (LP): no usable anchor at all (the only LP row is confounded by ambient
-# light AND a different power mode). Midpoint of ULP/Regular -- the weakest-
-# grounded values in this model.
-_AMBIENT_LOW_INTERCEPT_MW = (
-    _AMBIENT_ULTRA_LOW_INTERCEPT_MW + _AMBIENT_REGULAR_INTERCEPT_MW) / 2.0
-_PRECISION_LOW_INTERCEPT_MW = (
-    _PRECISION_ULTRA_LOW_INTERCEPT_MW + _PRECISION_REGULAR_INTERCEPT_MW) / 2.0
-
-# (ranging_mode, power_mode) -> (intercept_mw, slope_mw_per_duty). LOW-mode entries
-# are the weakest-grounded (see docstring); everything else traces to a real
-# DS14879 anchor or a two-point fit of real anchors.
-POWER_COEFFICIENTS: dict[tuple[RangingMode, PowerMode], tuple[float, float]] = {
-    (RangingMode.PRECISION, PowerMode.REGULAR):
-        (_PRECISION_REGULAR_INTERCEPT_MW, _PRECISION_REGULAR_SLOPE_MW_PER_DUTY),
-    (RangingMode.PRECISION, PowerMode.LOW):
-        (_PRECISION_LOW_INTERCEPT_MW, _PRECISION_REGULAR_SLOPE_MW_PER_DUTY),
-    (RangingMode.PRECISION, PowerMode.ULTRA_LOW):
-        (_PRECISION_ULTRA_LOW_INTERCEPT_MW, _PRECISION_REGULAR_SLOPE_MW_PER_DUTY),
-    (RangingMode.AMBIENT, PowerMode.REGULAR):
-        (_AMBIENT_REGULAR_INTERCEPT_MW, _AMBIENT_REGULAR_SLOPE_MW_PER_DUTY),
-    (RangingMode.AMBIENT, PowerMode.LOW):
-        (_AMBIENT_LOW_INTERCEPT_MW, _AMBIENT_REGULAR_SLOPE_MW_PER_DUTY),
-    (RangingMode.AMBIENT, PowerMode.ULTRA_LOW):
-        (_AMBIENT_ULTRA_LOW_INTERCEPT_MW, _AMBIENT_REGULAR_SLOPE_MW_PER_DUTY),
-}
+def _power_active_duty_cycle(exposure_ms: float, fps: int, dss_enabled: bool) -> float:
+    """ProfileTuning's own `duty_cycle` (distinct from this module's `duty_cycle()`,
+    which is the tool's `duty_cycle_2`): fraction of the frame period the analog
+    front end stays active, driven by whichever is larger of an exposure-derived
+    settle time or the DSS housekeeping window."""
+    if fps <= 0:
+        return 0.0
+    frame_period_ms = 1000.0 / fps
+    dss_ms = _DSS_HOUSEKEEPING_MS_BIN2 if dss_enabled else 0.0
+    active_ms = max(exposure_ms * 1.15 + 2.0, dss_ms)
+    return min(1.0, max(0.0, active_ms / frame_period_ms))
 
 
 def estimate_power_mw(ranging_mode: RangingMode, power_mode: PowerMode,
-                      exposure_ms: float, fps: int) -> float:
-    """Estimated typical power draw, mW. See module docstring for the derivation
-    and its documented confounds/assumptions. Labelled ESTIMATED everywhere this
-    surfaces in the UI/MCP layer — no measured claim without a power meter."""
-    intercept, slope = POWER_COEFFICIENTS[(ranging_mode, power_mode)]
-    return round(intercept + slope * duty_cycle(exposure_ms, fps), 1)
+                      exposure_ms: float, fps: int,
+                      ambient_lux: float = AMBIENT_LUX_DEFAULT) -> float:
+    """Estimated typical power draw, mW — decompiled ProfileTuning.exe's own
+    AVDD+DVDD+IOVDD+VBAT_Rx+VBAT_Tx model (2026-08-03), validated 5/5 against
+    owner-run tool readings within 0.01% (see module docstring). `ambient_lux`
+    defaults to the tool's own "Home, Theatres - 100 Lux" indoor reference — a
+    genuine physical input the earlier fitted model had no way to represent.
+    Labelled ESTIMATED everywhere this surfaces in the UI/MCP layer — no measured
+    claim without a power meter."""
+    r = int(ranging_mode)      # 0 Precision / 1 Ambient -- matches the tool's index
+    lp = int(power_mode) + 2   # 0/1/2 Regular/Low/UltraLow -> tool's table index 2/3/4
+    dss = dss_enabled_for_fps(fps) if fps > 0 else False
+    active_duty = _power_active_duty_cycle(exposure_ms, fps, dss)
+    io_duty = duty_cycle(exposure_ms, fps)  # ProfileTuning's own duty_cycle_2
+
+    avdd = _P_AVDD[r] * active_duty + _P_AVDD[lp] * (1 - active_duty)
+    dvdd = _P_DVDD[r] * active_duty + _P_DVDD[lp] * (1 - active_duty)
+    iovdd = _P_IOVDD[r] * active_duty + _P_IOVDD[lp] * (1 - active_duty)
+    vbat_rx = (_P_VBATRX[r] * io_duty * (ambient_lux + 1000.0) * 0.0002
+               + _P_VBATRX[lp] * (1 - active_duty))
+    vbat_tx = _P_VBATTX[r] * io_duty + _P_VBATTX[lp] * (1 - active_duty)
+    return round(avdd + dvdd + iovdd + vbat_rx + vbat_tx, 1)
 
 
 # --- Max range / min distance model ---------------------------------------------------

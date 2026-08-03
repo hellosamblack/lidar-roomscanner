@@ -5711,10 +5711,11 @@ def test_estimate_to_json_matches_profiles_own_per_field_functions_for_every_pre
 def test_estimate_i3c_xfer_ms_matches_the_fixed_hardware_constant():
     """Unlike fps/power/range (which the preset table can retune), the I3C
     transfer time is a physical constant of the RAW_3DMD frame size and the
-    I3C clock (9.49888 ms) -- independent of which profile is applied, and
-    the one number in this whole card that a fps-ceiling investigation
-    cannot legitimately change."""
-    assert _profiles.I3C_XFER_MS == pytest.approx(9.49888, abs=1e-4)
+    effective I3C throughput (14842 B at 10 Mbps effective = 11.8736 ms,
+    AN6522 Table 5) -- independent of which profile is applied. The earlier
+    9.49888 ms figure used the 12.5 MHz raw clock and understated real
+    transfer time by ~25% (corrected 2026-08-03)."""
+    assert _profiles.I3C_XFER_MS == pytest.approx(14842 * 8 / 10e6 * 1e3, abs=1e-4)
     for pid in _profiles.PRESETS:
         est = _profiles.estimate_preset(pid, transport="udp")
         out = web._estimate_to_json(est)

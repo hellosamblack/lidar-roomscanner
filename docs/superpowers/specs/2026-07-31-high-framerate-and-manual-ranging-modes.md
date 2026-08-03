@@ -77,25 +77,37 @@ uses — §3.3).
 
 | Mode Name | Key / Identifier | Ranging Mode | DSS | FPS (Target) | Exposure | Power Mode | Max Range (Est) | Min Distance | Typical Power (Est) | I3C Bus Utilization |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Room Mapping** | `room_mapping` | Ambient | Yes | 30 FPS | 6 ms | ULP | 8.0 m | 450 mm | 200 mW | 28.5% |
-| **Precision** | `precision` | Precision | Yes | 30 FPS | 10 ms | ULP | 8.8 m | 50 mm | ~267 mW | 28.5% |
-| **High Frame-Rate** | `high_framerate` | Precision | **Yes** | **46 FPS** | 4 ms | Regular | **8.8 m** | 50 mm | **~283 mW** | **43.7%** |
+| **Room Mapping** | `room_mapping` | Ambient | Yes | 30 FPS | 6 ms | ULP | 8.0 m | 450 mm | ~208 mW | 35.6% |
+| **Precision** | `precision` | Precision | Yes | 30 FPS | 10 ms | ULP | 8.8 m | 50 mm | ~256 mW | 35.6% |
+| **High Frame-Rate** | `high_framerate` | Precision | **Yes** | **46 FPS** | 4 ms | Regular | **8.8 m** | 50 mm | **~274 mW** | **54.6%** |
 | **Manual** | `manual` | *Custom* | *Custom* | 1–100 FPS | 1–16 ms (1 ms step) | *Custom* | *Dynamic* | 50 mm / 450 mm | *Dynamic* | *Dynamic* |
+
+**Amended 2026-08-03 (I3C effective rate + power model, same-day refinement, see
+§3.1/§3.2 below):** the I3C Bus Utilization column moved from the raw-12.5-MHz-clock
+figures (28.5/28.5/43.7%) to the documented **effective 10 Mbps** figures
+(35.6/35.6/54.6%) — two independent sources (AN6522 Table 5, the decompiled
+`ProfileTuning.exe` planning tool) agree the achievable I3C throughput is 10 Mbps, not
+the raw SDR clock rate. The Typical Power column moved from the DS14879-two-point-fit
+model to ST's own decompiled `ProfileTuning.exe` equations (exact per-vendor
+coefficients, not a fit), validated 5/5 against owner-run tool readings within 0.01% —
+see §3.2's replacement subsection. Both changes are implementation refinements to an
+already-shipped Task 1, not new findings that alter which profile is used where.
 
 Every cell above except "Typical Power" and "Max Range" was already correct in the
 first draft; only those two columns' *equations* were wrong (§3.2/§3.3 explain why, with
-the datasheet citations). Precision's power rose from an unfounded 220 mW guess to
-~267 mW because no anchor at all previously existed for that exact (ranging mode, power
-mode, resolution) combination — see §3.2's derivation for where the ~267 mW figure comes
-from and how confident to be in it. High Frame-Rate's power figure went through two
-revisions: first from 420 mW (silently borrowed from DS14879's own *100 fps* Gaming
-example) to ~415 mW, computed at the fps that draft's preset claimed to run (90, not
-100) — the two differed by only 1.2%, an external check that the reconciled *model* was
-doing something reasonable. That model is unchanged, but its input isn't: at the
-amended 46 FPS/4 ms/Precision/Regular operating point the same model gives duty
-0.184 → **~283 mW**, distinctly lower than 415 mW because the preset now runs at roughly
-half the duty cycle. The 415 mW / 420 mW comparison remains valid as a model-validation
-data point (§3.2) — it is no longer this preset's own number.
+the datasheet citations). The power figures went through a further revision on
+2026-08-03, superseding the paragraph that used to sit here: the DS14879-fit model
+(Precision ~267 mW, High Frame-Rate ~283 mW via a duty-vs-420 mW/415 mW Gaming-anchor
+comparison) was **replaced outright** by ST's own decompiled `ProfileTuning.exe`
+equations (§3.2's new subsection), which are exact per-vendor coefficients rather than a
+fit and were validated 5/5 against owner-run tool readings within 0.01%. Under the
+replacement model: Room Mapping ~208 mW, Precision ~256 mW, High Frame-Rate ~274 mW (all
+at `AMBIENT_LUX_DEFAULT`, ProfileTuning's own "Home, Theatres - 100 Lux" indoor
+reference — a genuine ambient-light input the old fit had no way to represent). These no
+longer target the old DS14879 Table 9/36 rows the way the retired fit did by
+construction — e.g. Room Mapping's ~208 mW vs DS14879's own 200 mW "(5 klx)" footnote
+differ because ProfileTuning's default ambient (100 lux) is not DS14879's 5000 lux test
+condition for that row, not because either figure is wrong.
 
 Manual requests above a given exposure's measured 1× ceiling remain **accepted** by the
 sensor (unchanged — this was never a rejectable condition, and the sensor does not
@@ -116,38 +128,53 @@ real-time client/server estimation this section originally proposed; only the
 
 ### 3.1 I3C Bus Airtime Model
 
-Unchanged from the first draft except a units-notation fix. The I3C bus operates at
-12.5 MHz Push-Pull (SDR). For a raw 3DMD frame (binning = 2, \(14{,}842\text{ bytes} =
-118{,}736\text{ bits}\)):
+**Amended 2026-08-03 (same-day refinement, decompiled ProfileTuning.exe + AN6522
+investigation):** the units-notation fix from the first draft stands, but the
+underlying coefficient was ALSO wrong, not just the formula's notation. The original
+9.49888 ms figure was derived from the raw 12.5 MHz I3C SDR clock — but that is not
+the achievable transfer rate; per-byte protocol overhead brings the *effective*
+throughput to a documented **10 Mbps**, corroborated by two independent sources: AN6522
+Table 5 "Readout duration depending on the readout interface" states, in the vendor's
+own words, "54x42 → I3C (10 Mbps): 11.8 ms"; and the decompiled `ProfileTuning.exe`
+planning tool computes the identical quantity as `frame_size_bytes * 8 * 1000 / 10e6`.
+For a raw 3DMD frame (binning = 2, \(14{,}842\text{ bytes} = 118{,}736\text{ bits}\)):
 
-$$T_{\text{xfer}} = \frac{118{,}736\text{ bits}}{12.5 \times 10^6\text{ bits/s}} = 9.49888\text{ ms}$$
+$$T_{\text{xfer}} = \frac{118{,}736\text{ bits}}{10 \times 10^6\text{ bits/s}} = 11.8736\text{ ms}$$
 
 $$\text{Bus Utilization (\%)} = \frac{T_{\text{xfer,ms}}}{\text{Frame Period}_{\text{ms}}} \times 100 = T_{\text{xfer,ms}} \times \text{FPS} / 10$$
 
-(the first draft wrote this as "\(9.49888\text{ ms} \times \text{FPS} \times 100\%\)",
-which is dimensionally wrong as literally read — dividing by the 1000 ms/s→ms/ms-period
-conversion was silently folded into the "×100%"; the *resulting* percentages below were
-already correct, only the written formula was not). This is the sensor's own I3C link
-only ("ToF bus airtime" — Task 10's UI label), never the Ethernet/USB transport link §4.1
-paces.
+The formula itself is unchanged from the prior amendment (only the coefficient moved,
+9.49888 → 11.8736 ms); this is the sensor's own I3C link only ("ToF bus airtime" —
+Task 10's UI label), never the Ethernet/USB transport link §4.1 paces.
 
-* **At 30 FPS:** \(9.5\text{ ms} / 33.3\text{ ms} = 28.5\%\) duty cycle (\(71.5\%\) idle airtime for IMU).
-* **At 46 FPS (the amended High Frame-Rate preset):** \(9.5\text{ ms} / 21.7\text{ ms} = 43.7\%\) duty cycle (\(56.3\%\) idle airtime for IMU).
-* **At 60 FPS:** \(9.5\text{ ms} / 16.7\text{ ms} = 57.0\%\) duty cycle (\(43.0\%\) idle airtime for IMU).
-* **At 90 FPS:** \(9.5\text{ ms} / 11.1\text{ ms} = 85.5\%\) duty cycle (\(14.5\%\) idle airtime for IMU).
-* **At 100 FPS:** \(9.5\text{ ms} / 10.0\text{ ms} = 95.0\%\) duty cycle (\(5.0\%\) idle airtime for IMU).
+* **At 30 FPS:** \(11.87\text{ ms} / 33.3\text{ ms} \approx 35.6\%\) duty cycle (\(64.4\%\) idle airtime for IMU).
+* **At 46 FPS (the amended High Frame-Rate preset):** \(11.87\text{ ms} / 21.7\text{ ms} \approx 54.6\%\) duty cycle (\(45.4\%\) idle airtime for IMU).
+* **At 60 FPS:** \(11.87\text{ ms} / 16.7\text{ ms} \approx 71.2\%\) duty cycle (\(28.8\%\) idle airtime for IMU).
+* **At 90 FPS:** \(11.87\text{ ms} / 11.1\text{ ms} \approx 106.9\%\) — the raw transfer alone no longer fits inside the requested period at all; the model clamps to **100%**, not "near saturation."
+* **At 100 FPS:** \(11.87\text{ ms} / 10.0\text{ ms} \approx 118.7\%\) — same clamp, **100%**.
 
 The 90/100 FPS rows above describe the *configured period* the bus schedule is asked to
-hit — they are unchanged and still correct as a bus-airtime model — but per §8, a request
-in that range does not actually get delivered at that rate (§3.2's new quantization
-model); no preset uses them any more, and a Manual request there will carry the §3.2
-delivery-ceiling warning alongside this bus-airtime figure.
+hit — they are still correct as a bus-airtime model, now honestly reporting the bus as
+fully saturated rather than merely 85.5%/95.0% busy — but per §8, a request in that range
+does not actually get delivered at that rate (§3.2.1's quantization model); no preset
+uses them any more, and a Manual request there will carry the §3.2.1 delivery-ceiling
+warning alongside this bus-airtime figure.
 
-Implementation: `roomscan.profiles.i3c_bus_utilization_pct`.
+Implementation: `roomscan.profiles.i3c_bus_utilization_pct` / `I3C_XFER_MS`
+(`host/tests/test_profiles.py`'s "I3C bus airtime" section pins the corrected
+coefficient and derives its expected percentages from it, rather than hand-computed
+literals, so a future re-tune doesn't silently drift the test out of sync with the
+constant it is meant to guard).
 
 ### 3.2 Power Consumption Model
 
-**Replaced.** The first draft's `P = P_baseline + P_laser(Exposure) × FPS + P_mode`
+**Note (2026-08-03): this whole model was replaced again**, by §3.2.2 below — the
+DS14879-two-point-fit described in the rest of this §3.2 is kept as the historical
+record of the *first* replacement (of the original draft's non-reproducing formula) but
+is no longer what `roomscan.profiles.estimate_power_mw` computes. Read §3.2.2 for the
+current model.
+
+**Replaced (original, 2026-08-03 Task 1).** The first draft's `P = P_baseline + P_laser(Exposure) × FPS + P_mode`
 does not reproduce its own preset table (`50 + 5×6×30 = 950`, not 200 mW) and has no
 datasheet citation for its coefficients. The reconciled model is duty-cycle-based and
 traceable to two real DS14879 rev 6 two-point fits plus one real single-point anchor:
@@ -246,10 +273,103 @@ $$\text{expected\_delivered\_fps} = \frac{\text{requested\_fps}}{\left\lceil \df
 these requests) whenever a manual candidate's fps exceeds its exposure's measured 1×
 ceiling, and `ProfileEstimate.expected_delivered_fps` reports the honest expected rate.
 UI/MCP consequence readouts must display `expected_delivered_fps`, not echo the raw fps
-request, for any configuration past this ceiling. Exposure above 8 ms is unmeasured; the
-model extrapolates by holding the 8 ms bracket's floor, which is **not** verified to be
-conservative there (the trend suggests the true floor keeps rising with exposure, so
-predictions above 8 ms exposure may be optimistic rather than conservative).
+request, for any configuration past this ceiling. Exposure above 8 ms is unmeasured.
+
+**Amended 2026-08-03 (floor extrapolation, same-day refinement):** above 8 ms exposure,
+`measured_floor_ms` no longer flat-holds the 8 ms bracket's 23.529 ms — it uses a
+**derived** line from the same decompiled-ProfileTuning.exe/AN6522 investigation as
+§3.1's I3C coefficient: `floor_ms(exposure_ms) = 1.6 ms (FW dead time, ProfileTuning's
+own planning model) + 11.8736 ms (I3C readout, AN6522/ProfileTuning) + exposure_ms +
+~3 ms margin (the line's largest residual against the three measured brackets) ≈
+16.5 + exposure_ms`. This is clearly labelled DERIVED, not measured — Task 5's sweep
+never ran above 8 ms — but it is a better-justified extrapolation than an unexplained
+flat hold, and the same investigation showed *why* the tool's own equation for this
+quantity (a flat 26.9 ms at 54×42/DSS-on, independent of exposure — see §3.2.3) diverges
+from measured hardware there: the three measured brackets below 8 ms remain
+authoritative in that range precisely because they are measurements, and measurement
+outranks the tool's own formula wherever both exist for the same quantity. Above 8 ms,
+no measurement exists to outrank the derived line, so `measured_floor_ms` returns it.
+Implementation: `roomscan.profiles.measured_floor_ms` / `FLOOR_FW_DEADTIME_MS` /
+`FLOOR_EXTRAPOLATION_MARGIN_MS`.
+
+#### 3.2.2 Power model replacement: decompiled ProfileTuning.exe (2026-08-03)
+
+The §3.2 DS14879-two-point-fit model above is **replaced**, not re-tuned, by ST's own
+equations extracted from `references/software/53L9A1/ProfileTuning.exe` (support-gated,
+kept locally untracked) — its `MainWindow.update()` computes exact
+AVDD/DVDD/IOVDD/VBAT_Rx/VBAT_Tx terms from small per-(ranging_mode, power_mode)
+coefficient tables, not a fit to sparse datasheet rows, and includes an **ambient-light
+input** (`ambient_lux`) the fitted model had no way to represent at all. Extracted with
+`pyinstxtractor-ng` + `decompyle3` (PyInstaller/Python 3.7 payload).
+
+**Validation, 2026-08-03** — five owner-run ProfileTuning.exe readings (54×42, I3C, DSS
+Enable, ambient = "Home, Theatres - 100 Lux" unless noted), reproduced by the extracted
+equations to within **0.01%**, an order of magnitude inside the ~2% bar this replacement
+was gated on:
+
+| Config | Tool reading | Model |
+| :--- | ---: | ---: |
+| Ambient, ULP, 6 ms/30 fps | 208.4 mW | 208.41 mW |
+| Precision, ULP, 10 ms/30 fps | 255.7 mW | 255.72 mW |
+| Precision, Regular, 4 ms/37 fps | 243.7 mW | 243.73 mW |
+| Ambient, Regular, 2 ms/37 fps | 210.5 mW | 210.48 mW |
+| Ambient, Regular, 4 ms/37 fps | 260.0 mW | 260.01 mW |
+
+Because this model is exact-per-ST rather than a fit, it no longer targets the two real
+DS14879 Table 36/Table 9 anchors the retired fit was built from as exactly as that fit
+did by construction (e.g. Room Mapping now estimates ~208 mW where DS14879 states 200 mW
+"(5 klx)" — ProfileTuning's own default ambient, 100 lux, is not DS14879's 5000 lux
+footnoted test condition for that row). `ProfileEstimate.power_mw`'s field name and
+semantics ("estimated typical power, mW, not a measured claim") are unchanged, so
+`roomscan-web`/UI consequence readouts pick up the new numbers with no call-site
+changes. Implementation: `roomscan.profiles.estimate_power_mw` / `AMBIENT_LUX_DEFAULT`.
+
+#### 3.2.3 DSS does not affect frame size or achievable frame rate (2026-08-03)
+
+A short but important clarification the measured-ceiling investigation (§3.2.1/§8)
+turned up: **DSS (Dynamic SPAD Selection) is a ranging-*quality* control, not a frame-
+size or frame-rate control, on this firmware.** Our vendored driver
+(`firmware/vendor/53L9A1/Drivers/BSP/Components/vl53l9/vl53l9.c`) fetches the DSS LUT
+**unconditionally** — the source comment reads, verbatim, "in current implementation,
+the dss is always enabled so no check needed" (present at both call sites, lines 681 and
+789) — so toggling our own `STANDBY_DSS_MODE` register write changes SPAD selection
+behavior but has **no effect** on the transmitted frame size or the achievable frame
+rate over our I3C transport.
+
+This resolves a question the §8 investigation left open: ST's own `ProfileTuning.exe`
+and DS14879's Gaming anchor advertise 100+ fps figures under a "DSS Disable" setting,
+and those never reproduced on our hardware. The reason is now clear from the decompiled
+tool itself — "DSS Disable" in ProfileTuning switches the frame payload to a **106-byte
+status-only** output (`frame_size = 106` regardless of resolution, vs. 14,742 bytes at
+54×42 with DSS on), a mode the vendored I3C driver does not implement and which is
+incompatible with the 14,842-byte 3DMD transform pipeline this project streams. The
+100+ fps figures describe that different, unimplemented mode, not an achievable rate for
+our 3DMD frames.
+
+**Owner-run `ProfileTuning.exe` sweep, 2026-08-03** (54×42, I3C, Regular power, ambient
+= "Home, Theatres - 100 Lux"), confirms both halves of this:
+
+* **DSS Enable:** max fps is **flat at 37.2 fps across 2–8 ms exposure** — because at
+  54×42 the tool's own DSS "housekeeping" window (13.5 ms) dominates its
+  `max(exposure_ms×1.15+2.0, dss_duration_ms)` term for any exposure below ~10 ms, so
+  frame duration (and therefore max fps) does not move with exposure in that range. This
+  is the same "flat 26.9 ms" model §3.2.1 refers to (dead time 1.6 ms + I3C readout
+  ~11.79 ms + 13.5 ms DSS window ≈ 26.9 ms → 1000/26.9 ≈ 37.2 fps) — and it is **slower**
+  than our measured hardware (20.0–23.5 ms floors, i.e. faster max fps) at the same
+  DSS-on/54×42 operating point, corroborating §3.2.1's finding that measurement outranks
+  the tool's own equation for this quantity.
+* **DSS Disable (106-byte status-only mode):** max fps **169.9 at 2 ms exposure** / **122.2
+  at 4 ms exposure** — an order of magnitude higher, because the 106-byte payload's
+  readout time is negligible (~0.08 ms) and the 13.5 ms DSS window no longer applies.
+  Effective data rate at this frame size is ~9.5 kB/s at a 90 fps operating point
+  (`106 bytes × 90 fps / 1000 ≈ 9.5 kB/s`) — a fraction of the 3DMD frame's own
+  ~445.3 kB/s at the same rate (`14,842 bytes × 30 fps / 1000`, scaled), underscoring
+  that this is a fundamentally smaller payload, not the same frame delivered faster.
+
+Consequence: no change to any preset or to the ≤60 Hz-DSS-on/>60 Hz-DSS-off rule — DSS
+was already correctly modelled as "free" (no measurable floor difference, §3.2.1). This
+section exists to close out *why* the datasheet's headline frame-rate figures never
+reproduced, so a future reader does not re-open that question assuming a driver bug.
 
 ### 3.3 Max Range Model
 

@@ -105,15 +105,10 @@ def test_every_preset_validates_clean(profile_id):
     assert result.ok, result.errors
 
 
-# --- reconciled anchors: presets must reproduce DS14879 Table 9's own figures ------
-
-
-def test_room_mapping_power_matches_table9_anchor_exactly():
-    # Table 9 "Profile examples": Room Mapping, Ambient, 30 fps, 6 ms, ULP -> 200 mW.
-    # This anchor was used to DERIVE the ULP/Ambient intercept, so it must reproduce
-    # exactly (within float rounding), not approximately.
-    est = estimate_preset(ProfileId.ROOM_MAPPING)
-    assert est.power_mw == pytest.approx(200.0, abs=0.1)
+# --- reconciled anchors: presets must reproduce DS14879 Table 9's own range figures ---
+# (power anchors moved to "Power model (decompiled ProfileTuning.exe)" below, 2026-08-03
+# -- the power model itself was REPLACED, not just re-tuned, so it no longer targets
+# DS14879's Table 9/36 rows the way the retired fitted model did by construction.)
 
 
 def test_room_mapping_range_matches_table9_anchor():
@@ -134,14 +129,52 @@ def test_precision_dss_off_range_matches_table9_gaming_anchor_exactly():
     assert MAX_RANGE_M[(RangingMode.PRECISION, False)] == pytest.approx(5.0)
 
 
-def test_precision_dss_off_power_close_to_table9_gaming_anchor():
-    # Table 9 Gaming anchor is 420 mW @ 100 fps; the MODEL is validated at 90 fps
-    # (Precision/Regular/DSS-off/4 ms -- the shape of the Gaming example), not the
-    # High Frame-Rate preset, which no longer runs this configuration. Predicted
-    # 415.0 mW, 1.2% off the nearby real anchor.
-    power_mw = estimate_power_mw(RangingMode.PRECISION, PowerMode.REGULAR, 4, 90)
-    assert power_mw == pytest.approx(415.0, abs=0.5)
-    assert abs(power_mw - 420.0) / 420.0 < 0.02
+# --- Power model (decompiled ProfileTuning.exe, 2026-08-03) -----------------------
+# REPLACES the earlier DS14879-two-point-fit model (see profiles.py module docstring
+# "Power — SUPERSEDED 2026-08-03" / "Power model, decompiled ProfileTuning.exe
+# (2026-08-03)"). All five owner-run ProfileTuning.exe tool readings this model was
+# gated on: 54x42, I3C, DSS Enable, ambient = "Home, Theatres - 100 Lux"
+# (AMBIENT_LUX_DEFAULT) unless noted. Model reproduces every one to within 0.01%,
+# an order of magnitude inside the ~2% bar the replacement was gated on.
+
+POWER_ANCHOR_TABLE = [
+    # (ranging_mode, power_mode, exposure_ms, fps, tool_reading_mw)
+    (RangingMode.AMBIENT, PowerMode.ULTRA_LOW, 6, 30, 208.4),
+    (RangingMode.PRECISION, PowerMode.ULTRA_LOW, 10, 30, 255.7),
+    (RangingMode.PRECISION, PowerMode.REGULAR, 4, 37, 243.7),
+    (RangingMode.AMBIENT, PowerMode.REGULAR, 2, 37, 210.5),
+    (RangingMode.AMBIENT, PowerMode.REGULAR, 4, 37, 260.0),
+]
+
+
+@pytest.mark.parametrize("ranging_mode,power_mode,exposure_ms,fps,tool_reading_mw",
+                         POWER_ANCHOR_TABLE)
+def test_power_matches_decompiled_profiletuning_anchor(
+        ranging_mode, power_mode, exposure_ms, fps, tool_reading_mw):
+    power_mw = estimate_power_mw(ranging_mode, power_mode, exposure_ms, fps)
+    assert power_mw == pytest.approx(tool_reading_mw, abs=tool_reading_mw * 0.02)
+
+
+def test_room_mapping_preset_power_matches_profiletuning_not_old_ds14879_anchor():
+    # DS14879 Table 9 states 200 mW "(5 klx)" for this exact (Ambient/ULP/6ms/30fps)
+    # operating point -- but that footnoted 5000 lux is NOT ProfileTuning's own
+    # default ambient (100 lux, "Home, Theatres"), and the two were never going to
+    # agree once ambient light became an explicit model input instead of a hidden
+    # constant folded into a fitted intercept. This preset now estimates ~208.4 mW,
+    # matching the POWER_ANCHOR_TABLE row above, not the retired 200.0 mW figure.
+    est = estimate_preset(ProfileId.ROOM_MAPPING)
+    assert est.power_mw == pytest.approx(208.4, abs=0.1)
+    assert est.power_mw != pytest.approx(200.0, abs=0.1)
+
+
+def test_ambient_lux_is_a_genuine_power_input():
+    # The old fitted model had no ambient-light parameter at all; the decompiled
+    # model's VBAT_Rx term scales with it directly, so darker/brighter readings must
+    # move the estimate apart at fixed ranging/power/exposure/fps.
+    dark = estimate_power_mw(RangingMode.AMBIENT, PowerMode.REGULAR, 6, 30, ambient_lux=0.0)
+    bright = estimate_power_mw(RangingMode.AMBIENT, PowerMode.REGULAR, 6, 30,
+                               ambient_lux=100000.0)
+    assert bright > dark
 
 
 # --- High Frame-Rate preset, amended 2026-08-03: measured hardware ceiling ---------
@@ -169,13 +202,16 @@ def test_high_framerate_preset_range_is_precision_dss_on_now():
 
 
 def test_high_framerate_preset_power_recomputes_at_46fps():
-    # duty = 4 ms * 46 fps / 1000 = 0.184; Precision/Regular intercept 145.0,
-    # slope 750.0 -> 145.0 + 750.0*0.184 = 283.0 mW. Distinct from the old 90 fps
-    # figure (415.0 mW) -- the power estimate must actually move with the preset,
-    # not stay pinned to the retired design point.
+    # Decompiled ProfileTuning.exe model (2026-08-03, replaces the retired
+    # DS14879-fit model): Precision/Regular/4 ms/46 fps/DSS-on, ambient =
+    # AMBIENT_LUX_DEFAULT -> 273.6 mW. Distinct from the same config's own
+    # 90 fps/DSS-off figure under this model (369.8 mW, computed directly below)
+    # -- the power estimate must actually move with the preset's own fps/DSS
+    # state, not stay pinned to the retired 90 fps design point.
     est = estimate_preset(ProfileId.HIGH_FRAMERATE)
-    assert est.power_mw == pytest.approx(283.0, abs=0.1)
-    assert est.power_mw != pytest.approx(415.0, abs=0.1)
+    assert est.power_mw == pytest.approx(273.6, abs=0.1)
+    ninety_fps_dss_off = estimate_power_mw(RangingMode.PRECISION, PowerMode.REGULAR, 4, 90)
+    assert est.power_mw != pytest.approx(ninety_fps_dss_off, abs=0.1)
 
 
 def test_high_framerate_preset_delivers_1x_no_quantization():
@@ -481,19 +517,40 @@ def test_power_regular_exceeds_ultra_low_at_same_duty():
 # ---------------------------------------------------------------------------
 # I3C bus airtime
 # ---------------------------------------------------------------------------
+# REFINEMENT (2026-08-03): I3C_XFER_MS moved from the raw 12.5 MHz SDR clock
+# (9.49888 ms) to the documented EFFECTIVE 10 Mbps throughput (11.8736 ms) --
+# see profiles.py module docstring "I3C ToF bus airtime", corroborated by AN6522
+# Table 5 ("54x42 -> I3C (10 Mbps): 11.8 ms") and the decompiled ProfileTuning.exe
+# planning tool's own readout formula. Expected percentages below are DERIVED from
+# I3C_XFER_MS rather than hand-computed literals, so this table tracks the
+# constant rather than needing hand-updating if it is ever refined again.
 
-I3C_UTIL_TABLE = [
-    (30, 28.5),
-    (60, 57.0),
-    (90, 85.5),
-    (100, 95.0),
-]
+I3C_UTIL_FPS_TABLE = [30, 46, 60, 90, 100]
 
 
-@pytest.mark.parametrize("fps,expected_pct", I3C_UTIL_TABLE)
-def test_i3c_bus_utilization_matches_spec_percentages(fps, expected_pct):
+@pytest.mark.parametrize("fps", I3C_UTIL_FPS_TABLE)
+def test_i3c_bus_utilization_matches_derived_percentage(fps):
+    from roomscan.profiles import I3C_XFER_MS, i3c_bus_utilization_pct
+    expected_pct = min(100.0, I3C_XFER_MS * fps / 10.0)
+    assert i3c_bus_utilization_pct(fps) == pytest.approx(expected_pct, abs=0.05)
+
+
+def test_i3c_xfer_ms_is_the_effective_10mbps_figure_not_the_raw_clock():
+    # AN6522 Table 5: "54x42 -> I3C (10 Mbps): 11.8 ms" -- pins the corrected
+    # coefficient so a future edit can't silently drift back to the raw-clock
+    # figure (9.49888 ms) this replaced.
+    from roomscan.profiles import I3C_XFER_MS
+    assert I3C_XFER_MS == pytest.approx(11.8736, abs=1e-4)
+    assert I3C_XFER_MS == pytest.approx(11.8, abs=0.1)  # AN6522's own rounded figure
+
+
+@pytest.mark.parametrize("fps,expect_saturated", [(60, False), (90, True), (100, True)])
+def test_i3c_bus_saturates_above_60fps_at_the_effective_rate(fps, expect_saturated):
+    # At the effective 10 Mbps rate, one raw transfer alone (11.8736 ms) no longer
+    # fits inside a 90/100 fps period (11.111/10.0 ms) at all -- the utilization
+    # clamps to 100%, not merely "near" it as the old raw-clock coefficient implied.
     from roomscan.profiles import i3c_bus_utilization_pct
-    assert i3c_bus_utilization_pct(fps) == pytest.approx(expected_pct, abs=0.1)
+    assert (i3c_bus_utilization_pct(fps) == pytest.approx(100.0)) is expect_saturated
 
 
 def test_i3c_airtime_left_complements_utilization():
@@ -524,10 +581,31 @@ def test_measured_floor_ms_brackets(exposure_ms, expected_floor_ms):
     assert measured_floor_ms(exposure_ms) == pytest.approx(expected_floor_ms)
 
 
-def test_measured_floor_ms_extrapolates_beyond_8ms_by_holding_last_bracket():
-    # Unmeasured (>8 ms exposure); holds the 8 ms bracket's floor rather than
-    # inventing a number -- see the docstring's "UNVERIFIED" caveat.
-    assert measured_floor_ms(16) == pytest.approx(23.529)
+# --- Floor extrapolation above 8 ms exposure (REFINEMENT 2026-08-03) --------------
+# Replaces the earlier flat-hold-the-8ms-bracket placeholder with a DERIVED line:
+# FW dead time (1.6 ms, decompiled ProfileTuning.exe) + I3C_XFER_MS (11.8736 ms,
+# AN6522/ProfileTuning) + exposure_ms + a ~3 ms margin (largest residual vs the
+# three measured brackets) -- see profiles.py module docstring "Floor extrapolation
+# above 8 ms exposure". Still UNMEASURED above 8 ms; this is a better-justified
+# extrapolation, not a promotion to measured status.
+
+
+def test_measured_floor_ms_extrapolates_with_derived_line_not_flat_hold():
+    from roomscan.profiles import (FLOOR_EXTRAPOLATION_MARGIN_MS,
+                                    FLOOR_FW_DEADTIME_MS, I3C_XFER_MS)
+    for exposure_ms in (9, 12, 16):
+        expected = (FLOOR_FW_DEADTIME_MS + I3C_XFER_MS + exposure_ms
+                   + FLOOR_EXTRAPOLATION_MARGIN_MS)
+        assert measured_floor_ms(exposure_ms) == pytest.approx(expected)
+    # No longer flat -- the derived line must actually rise with exposure, unlike
+    # the retired placeholder that held the 8 ms bracket's 23.529 ms for 9-16 ms.
+    assert measured_floor_ms(16) > measured_floor_ms(9)
+    assert measured_floor_ms(16) != pytest.approx(23.529)
+
+
+def test_measured_floor_ms_16ms_derived_value():
+    # Pins the concrete number: 1.6 + 11.8736 + 16 + 3.0 = 32.4736 ms.
+    assert measured_floor_ms(16) == pytest.approx(32.4736)
 
 
 # (requested_fps, exposure_ms, expected_delivered_fps) -- pins the measured
