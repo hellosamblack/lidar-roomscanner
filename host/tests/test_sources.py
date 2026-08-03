@@ -5,8 +5,17 @@ import time
 import pytest
 
 from roomscan.decoder import StreamDecoder
-from roomscan.protocol import FrameHeader, FrameType, StreamId, pack_frame
-from roomscan.sources import FileSource, Recorder, UdpSource, get_best_source, pump
+from roomscan.protocol import EventCode, FrameHeader, FrameType, StreamId, pack_frame
+from roomscan.sources import (
+    ETH_TX_FRAG_BYTES,
+    EthTxPacerModel,
+    FileSource,
+    Recorder,
+    UdpSource,
+    eth_tx_budget,
+    eth_tx_window_ms,
+    pump,
+)
 
 HDR = FrameHeader(FrameType.DATA, StreamId.DEPTH_ZF32, 0, 1, 0, 2, 2, 16)
 FRAME = pack_frame(HDR, struct.pack("<4f", 1.0, 2.0, 3.0, 4.0))
@@ -445,5 +454,222 @@ def test_reassembly_rejects_inconsistent_total_frags():
     try:
         assert _drain(src, 4) == [b"a" * 1400 + b"b" * 1400 + b"c" * 3]
         assert src.frags_invalid == 1
+    finally:
+        src.close()
+
+
+# --- Task 6: Ethernet TX-pacing model (pure, host-side mirror of the firmware) -----
+#
+# Not a byte-level cross-check (ethernet_transport.c pulls in lwIP/HAL headers this
+# host cannot compile) -- these pin the CONTRACT non-negotiable finding #6 describes:
+# the drain deadline derives from the ACTIVE applied frame period (never a fixed
+# 25/33 ms assumption), the pacer drains enough fragments each pump to clear the
+# backlog inside that deadline, and it never interleaves or abandons a partial frame.
+
+def test_eth_tx_window_ms_derives_from_applied_period_not_a_fixed_assumption():
+    # Room Mapping (30 fps, 33333 us) and the measured HFR preset (46 fps, 21739 us)
+    # must NOT collapse to the old fixed 25 ms constant this replaces.
+    assert eth_tx_window_ms(33333) == 33
+    assert eth_tx_window_ms(21739) == 21
+    # ~50 fps manual (2 ms exposure ceiling) and the slowest Manual floor (1 fps).
+    assert eth_tx_window_ms(20000) == 20
+    assert eth_tx_window_ms(1000000) == 1000
+
+
+def test_eth_tx_window_ms_floors_at_one_ms_never_zero_or_negative():
+    assert eth_tx_window_ms(0) == 1
+    assert eth_tx_window_ms(1) == 1        # sub-millisecond period would floor-div to 0
+    assert eth_tx_window_ms(0, 0) == 1     # no governing period at all
+
+
+def test_eth_tx_window_ms_takes_the_shortest_of_multiple_periods():
+    """Task 7 forward-compat: once a decoupled IMU/env tick queues through the
+    same firmware FIFO alongside the ToF period, the deadline must be the
+    SHORTER of the two -- the queue has to clear before whichever cadence
+    reloads it fastest."""
+    assert eth_tx_window_ms(33333, 11111) == 11   # a faster second stream governs
+    assert eth_tx_window_ms(11111, 33333) == 11   # order-independent
+    assert eth_tx_window_ms(33333, 0) == 33       # a zero/absent second period is ignored
+
+
+def test_eth_tx_budget_ceils_and_makes_forward_progress():
+    # Mirrors eth_tx_pump()'s formula exactly: ceil((pending*elapsed)/window).
+    assert eth_tx_budget(pending_fragments=11, elapsed_ms=5, window_ms=21) == 3  # ceil(55/21)
+    assert eth_tx_budget(pending_fragments=1, elapsed_ms=1, window_ms=1000) == 1  # floored to 1, never 0
+    assert eth_tx_budget(pending_fragments=0, elapsed_ms=5, window_ms=21) == 0   # nothing pending
+    assert eth_tx_budget(pending_fragments=11, elapsed_ms=0, window_ms=21) == 0  # no time passed
+
+
+def test_eth_tx_pacer_never_interleaves_frames():
+    """Fragments of two different frames must never appear out of frame-order
+    on the (simulated) wire, even when both are queued before either drains --
+    the host's own reassembly (UdpSource.read()) depends on this."""
+    model = EthTxPacerModel()
+    assert model.enqueue(seq=1, total_bytes=3 * ETH_TX_FRAG_BYTES)  # 3 frags
+    assert model.enqueue(seq=2, total_bytes=2 * ETH_TX_FRAG_BYTES)  # 2 frags
+    while model.pending_fragments() > 0:
+        model.pump(elapsed_ms=5, window_ms=21)
+    seqs_in_emission_order = [seq for seq, _ in model.emitted_order]
+    # every frame's fragments are contiguous, and seq 1 (queued first) finishes
+    # entirely before any seq-2 fragment appears
+    assert seqs_in_emission_order == [1, 1, 1, 2, 2]
+
+
+def test_eth_tx_pacer_never_abandons_a_partial_frame():
+    """A frame that starts draining must eventually emit every fragment, even
+    under a tiny per-pump budget spread across many pump() calls."""
+    model = EthTxPacerModel()
+    total_frags = 6
+    assert model.enqueue(seq=9, total_bytes=total_frags * ETH_TX_FRAG_BYTES - 1)
+    # A budget of 1 fragment/pump (a very slow elapsed/window ratio) must still
+    # eventually drain the whole frame, one fragment at a time, without ever
+    # skipping ahead or resetting.
+    for _ in range(total_frags + 2):  # a couple of spare pumps past exact completion
+        model.pump(elapsed_ms=1, window_ms=1000)
+    assert [idx for _, idx in model.emitted_order] == list(range(total_frags))
+    assert model.pending_fragments() == 0
+
+
+def test_eth_tx_pacer_drains_the_periodic_calib_burst_without_unbounded_growth():
+    """The periodic CALIB+IMU_CAL retransmit (every 64 frames) queues extra
+    frames alongside the RAW frame in the same iteration -- the pacer must
+    still fully drain that burst (not stall or grow the backlog forever) at
+    every acceptance rate (30/46/~50 fps), and do so within a reasonably
+    bounded multiple of the applied period's own window -- not just the
+    steady one-frame-per-period case. The adaptive ceil-division budget is a
+    convergent decay (each pump removes a FRACTION of what remains, not a
+    fixed rate), so exact single-window clearance from a cold/fully-queued
+    burst is not the guarantee; eventual, bounded drain is."""
+    for frame_period_us in (33333, 21739, 20000):  # Room Mapping, HFR, ~50 fps manual
+        window_ms = eth_tx_window_ms(frame_period_us)
+        model = EthTxPacerModel()
+        # One iteration's burst: RAW (14842 B payload) + CALIB (2332 B) + IMU_CAL (4 B).
+        assert model.enqueue(seq=100, total_bytes=RS_HEADER_SIZE + 14842 + 4)
+        assert model.enqueue(seq=101, total_bytes=RS_HEADER_SIZE + 2332 + 4)
+        assert model.enqueue(seq=102, total_bytes=RS_HEADER_SIZE + 4 + 4)
+        elapsed_ms = 0
+        pumps = 0
+        bound_ms = 20 * window_ms  # generous: many pump cycles, never "forever"
+        while model.pending_fragments() > 0 and elapsed_ms <= bound_ms:
+            model.pump(elapsed_ms=5, window_ms=window_ms)
+            elapsed_ms += 5
+            pumps += 1
+        assert model.pending_fragments() == 0, (
+            f"backlog never cleared for a {frame_period_us} us period within {bound_ms} ms")
+
+
+def test_eth_tx_pacer_oversubscribed_90hz_request_still_paces_from_delivered_period():
+    """A 90 Hz manual request delivers as an integer period-multiple of the
+    measured ~46 fps ceiling (docs/superpowers/plans/.../2026-08-03 amendment)
+    -- the pacer must derive its window from the DELIVERED/applied period, not
+    the requested one, so it still keeps up even though the request was
+    oversubscribed."""
+    requested_fps = 90
+    delivered_period_us = 21739  # measured ~46 fps 1x ceiling the sensor actually runs at
+    window_ms = eth_tx_window_ms(delivered_period_us)
+    assert window_ms != round(1_000_000 / requested_fps / 1000)  # NOT derived from the request
+    model = EthTxPacerModel()
+    assert model.enqueue(seq=200, total_bytes=RS_HEADER_SIZE + 14842 + 4)
+    pumps = 0
+    while model.pending_fragments() > 0 and pumps < 20:
+        model.pump(elapsed_ms=5, window_ms=window_ms)
+        pumps += 1
+    assert model.pending_fragments() == 0
+
+
+def test_eth_tx_pacer_enqueue_drop_counted_when_every_slot_is_full():
+    model = EthTxPacerModel(slots=2)
+    assert model.enqueue(seq=1, total_bytes=ETH_TX_FRAG_BYTES)
+    assert model.enqueue(seq=2, total_bytes=ETH_TX_FRAG_BYTES)
+    assert model.enqueue(seq=3, total_bytes=ETH_TX_FRAG_BYTES) is False
+    assert model.enqueue_drops == 1
+
+
+# --- Task 6: firmware TX-queue telemetry, opportunistically parsed off the wire ----
+
+RS_HEADER_SIZE = 32
+
+
+def _tx_queue_stats_datagrams(seq, high_water, transport_id, pending, enqueue_drops,
+                              stack_stalls, emitted_bytes):
+    """Build the fragmented UDP datagrams for one TX_QUEUE_STATS EVENT frame
+    (docs/protocol.md EVENT code 7), the same shape the firmware emits on the
+    periodic CALIB cadence -- fragmented at ETH_TX_FRAG_BYTES exactly like
+    ETH_SendFrame_Gather does, so this exercises the real reassembly path."""
+    detail = (high_water & 0xFF) | ((transport_id & 0xFF) << 8) | ((pending & 0xFFFF) << 16)
+    payload = struct.pack("<IIIII", EventCode.TX_QUEUE_STATS, detail, enqueue_drops,
+                          stack_stalls, emitted_bytes)
+    hdr = FrameHeader(FrameType.EVENT, 0, 0, seq, 0, 0, 0, len(payload))
+    frame = pack_frame(hdr, payload)
+    total = -(-len(frame) // ETH_TX_FRAG_BYTES)
+    return [_frag(seq, i, total, frame[i * ETH_TX_FRAG_BYTES:(i + 1) * ETH_TX_FRAG_BYTES])
+           for i in range(total)]
+
+
+def test_udp_source_captures_tx_queue_stats_event_without_disturbing_normal_decode():
+    datagrams = _tx_queue_stats_datagrams(
+        seq=640, high_water=6, transport_id=2, pending=37,
+        enqueue_drops=0, stack_stalls=0, emitted_bytes=987654)
+    src = _udp_with(datagrams)
+    try:
+        assert src.fw_tx_queue_high_water is None   # nothing seen yet
+        frames = _drain(src, len(datagrams))
+        # The reassembled EVENT frame is still returned to the caller unchanged --
+        # this is a side read, not a substitute for the normal decode path.
+        assert len(frames) == 1
+        assert src.fw_tx_queue_high_water == 6
+        assert src.fw_active_transport == "udp"
+        assert src.fw_tx_pending_fragments == 37
+        assert src.fw_tx_enqueue_drops == 0
+        assert src.fw_tx_stack_stalls == 0
+        assert src.fw_tx_emitted_bytes == 987654
+        assert src.fw_stats_updated_at is not None
+    finally:
+        src.close()
+
+
+def test_udp_source_tx_queue_stats_reflects_nonzero_drops_and_stalls():
+    """The hardware gate needs to be able to PROVE zero -- which means a
+    nonzero value must also come through faithfully, not just the happy
+    zero-everything case."""
+    datagrams = _tx_queue_stats_datagrams(
+        seq=641, high_water=8, transport_id=1, pending=5,
+        enqueue_drops=3, stack_stalls=12, emitted_bytes=42)
+    src = _udp_with(datagrams)
+    try:
+        _drain(src, len(datagrams))
+        assert src.fw_tx_enqueue_drops == 3
+        assert src.fw_tx_stack_stalls == 12
+        assert src.fw_active_transport == "cdc"
+    finally:
+        src.close()
+
+
+def test_udp_source_ignores_a_regular_data_frame_for_tx_queue_stats():
+    """An ordinary DATA frame must not be mistaken for TX_QUEUE_STATS (or
+    crash the peek) -- it simply leaves the cached counters untouched."""
+    src = _udp_with([_frag(50, 0, 1, FRAME)])
+    try:
+        assert _drain(src, 1) == [FRAME]
+        assert src.fw_tx_queue_high_water is None
+    finally:
+        src.close()
+
+
+def test_udp_source_link_rate_accumulates_and_windows(monkeypatch):
+    import roomscan.sources as sources_mod
+
+    t = [1000.0]
+    monkeypatch.setattr(sources_mod.time, "time", lambda: t[0])
+    src = _udp_with([_frag(1, 0, 1, b"x" * 100), _frag(2, 0, 1, b"y" * 200)])
+    try:
+        assert src.link_bytes_per_s is None
+        src.read()   # frame 1: 100 B, window not yet closed
+        assert src.link_bytes_total == 100
+        assert src.link_bytes_per_s is None
+        t[0] += 1.5  # close the ~1 s window
+        src.read()   # frame 2: 200 B
+        assert src.link_bytes_total == 300
+        assert src.link_bytes_per_s == pytest.approx(300 / 1.5)
     finally:
         src.close()

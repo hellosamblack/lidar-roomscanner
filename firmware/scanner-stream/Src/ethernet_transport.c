@@ -261,9 +261,14 @@ bool ETH_IsUp(void)
 #define ETH_TX_FRAG_BYTES   1400u
 #define ETH_TX_SLOT_BYTES   15104u  /* >= 32 hdr + 14842 payload + 4 CRC */
 #define ETH_TX_SLOTS        8u      /* one acquisition iteration queues <= 6 frames */
-/* Drain whatever is queued within this window. Shorter than the 33 ms frame
- * period so the queue is empty again before the next frame lands. */
-#define ETH_TX_WINDOW_MS    25u
+/* Boot-time default only, until the app calls ETH_SetTxWindowMs() with a real
+ * applied-period-derived deadline (Task 6 -- see ethernet_transport.h's block
+ * comment; the old fixed 25 ms constant this replaces was a 30 Hz/33 ms
+ * assumption, non-negotiable finding #6). Kept as a named constant rather than
+ * a magic number so a build that somehow streams before the app's first
+ * profile-apply (should not happen -- g_active_profile is seeded before the
+ * acquisition loop starts) still has a sane, documented default. */
+#define ETH_TX_WINDOW_MS_DEFAULT 33u
 
 typedef struct {
     uint8_t  data[ETH_TX_SLOT_BYTES];
@@ -279,6 +284,18 @@ static uint8_t  eth_tx_tail = 0;    /* oldest queued slot  */
 static uint8_t  eth_tx_count = 0;
 static uint32_t eth_tx_last_pump = 0;
 static uint32_t eth_tx_dropped = 0; /* frames discarded (link lost) */
+static uint32_t eth_tx_window_ms = ETH_TX_WINDOW_MS_DEFAULT; /* Task 6: runtime-set, see .h */
+
+/* Task 6 queue telemetry -- see the getters' declarations in ethernet_transport.h
+ * for what each counts. All monotonic since boot; a 60 s hardware capture samples
+ * start/end and takes the delta. */
+static uint8_t  eth_tx_high_water = 0;      /* max eth_tx_count ever reached */
+static uint32_t eth_tx_enqueue_drops = 0;   /* ETH_SendFrame_Gather() found the queue
+                                              * still full after a blocking flush */
+static uint32_t eth_tx_stack_stalls = 0;    /* pbuf_alloc/udp_sendto refusals inside
+                                              * eth_tx_emit_one() */
+static uint32_t eth_tx_emitted_bytes = 0;   /* bytes actually handed to udp_sendto()
+                                              * (6 B fragment header + chunk), wraps */
 
 /* Emit ONE fragment of the tail slot. Returns false if the stack refused it,
  * leaving the slot's next_frag untouched so the same fragment is retried. */
@@ -292,7 +309,7 @@ static bool eth_tx_emit_one(void)
     if (chunk > ETH_TX_FRAG_BYTES) chunk = ETH_TX_FRAG_BYTES;
 
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, chunk + 6, PBUF_RAM);
-    if (!p) return false;            /* pool pressure: retry next pump */
+    if (!p) { eth_tx_stack_stalls++; return false; }   /* pool pressure: retry next pump */
 
     uint8_t *p_out = (uint8_t *)p->payload;
     p_out[0] = (uint8_t)(s->seq & 0xFF);
@@ -305,8 +322,9 @@ static bool eth_tx_emit_one(void)
 
     err_t err = udp_sendto(upcb, p, &target_ip, 5000);
     pbuf_free(p);
-    if (err != ERR_OK) return false; /* ring full: retry, do NOT abandon */
+    if (err != ERR_OK) { eth_tx_stack_stalls++; return false; } /* ring full: retry, do NOT abandon */
 
+    eth_tx_emitted_bytes += chunk + 6u;
     s->next_frag++;
     if (s->next_frag >= s->total_frags) {
         eth_tx_tail = (uint8_t)((eth_tx_tail + 1u) % ETH_TX_SLOTS);
@@ -346,7 +364,14 @@ static void eth_tx_flush_blocking(void)
  * (2 frags/5 ms = 13 per frame period, against the ~17 a CALIB iteration
  * queues) and the backlog would grow without bound. Sizing the per-call budget
  * from the OUTSTANDING count instead guarantees the queue clears inside the
- * window whatever the cadence, while still spreading a small backlog out. */
+ * window whatever the cadence, while still spreading a small backlog out.
+ *
+ * The window itself (Task 6) is `eth_tx_window_ms`, set by the app from the
+ * ACTIVE applied frame period via ETH_SetTxWindowMs()/ETH_TxWindowMsForPeriod()
+ * -- no longer a fixed 25/33 ms assumption (non-negotiable finding #6). Pure
+ * arithmetic below, no HAL/lwIP types touched, mirrored host-side by
+ * roomscan.sources.eth_tx_budget() (see that function's docstring; not a
+ * byte-level cross-check, this file is not host-compilable). */
 static void eth_tx_pump(void)
 {
     if (eth_tx_count == 0) { eth_tx_last_pump = HAL_GetTick(); return; }
@@ -365,7 +390,8 @@ static void eth_tx_pump(void)
     eth_tx_last_pump = now;
 
     uint32_t pending = eth_tx_pending_frags();
-    uint32_t budget = (pending * elapsed + ETH_TX_WINDOW_MS - 1u) / ETH_TX_WINDOW_MS;
+    uint32_t window_ms = (eth_tx_window_ms > 0u) ? eth_tx_window_ms : 1u;
+    uint32_t budget = (pending * elapsed + window_ms - 1u) / window_ms;
     if (budget == 0) budget = 1;     /* always make forward progress */
 
     while (budget-- > 0) {
@@ -390,7 +416,10 @@ bool ETH_SendFrame_Gather(const uint8_t *hdr, uint32_t hdr_len, const uint8_t *p
      * cost the host a whole frame. */
     if (eth_tx_count >= ETH_TX_SLOTS) {
         eth_tx_flush_blocking();
-        if (eth_tx_count >= ETH_TX_SLOTS) return false;
+        if (eth_tx_count >= ETH_TX_SLOTS) {
+            eth_tx_enqueue_drops++; /* Task 6 telemetry: never got a slot at all */
+            return false;
+        }
     }
 
     eth_tx_slot_t *s = &eth_tx_slots[eth_tx_head];
@@ -404,6 +433,9 @@ bool ETH_SendFrame_Gather(const uint8_t *hdr, uint32_t hdr_len, const uint8_t *p
 
     eth_tx_head = (uint8_t)((eth_tx_head + 1u) % ETH_TX_SLOTS);
     eth_tx_count++;
+    if (eth_tx_count > eth_tx_high_water) {
+        eth_tx_high_water = eth_tx_count; /* Task 6 telemetry */
+    }
 
     /* Send the first fragment inline so a single-fragment frame (IMU/env, the
      * latency-sensitive ones) still leaves immediately and pays nothing for
@@ -418,3 +450,27 @@ bool ETH_HasTarget(void)
 {
     return target_ip.addr != 0;
 }
+
+/* ===================== Task 6: pacing setter + queue telemetry getters ===== */
+
+void ETH_SetTxWindowMs(uint32_t window_ms)
+{
+    eth_tx_window_ms = (window_ms > 0u) ? window_ms : 1u;
+}
+
+uint32_t ETH_TxWindowMsForPeriod(uint32_t frame_period_us)
+{
+    if (frame_period_us == 0u) return 1u;
+    uint32_t ms = frame_period_us / 1000u;
+    return (ms > 0u) ? ms : 1u;
+}
+
+uint8_t ETH_TxQueueHighWater(void) { return eth_tx_high_water; }
+
+uint32_t ETH_TxPendingFragments(void) { return eth_tx_pending_frags(); }
+
+uint32_t ETH_TxEnqueueDrops(void) { return eth_tx_enqueue_drops; }
+
+uint32_t ETH_TxStackStalls(void) { return eth_tx_stack_stalls; }
+
+uint32_t ETH_TxEmittedBytes(void) { return eth_tx_emitted_bytes; }

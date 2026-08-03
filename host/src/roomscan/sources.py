@@ -6,14 +6,147 @@ import struct
 import sys
 import threading
 import time
+import zlib
+from dataclasses import dataclass
 from typing import Iterator, Optional
 
 from zeroconf import Zeroconf
 
 from .decoder import StreamDecoder
-from .protocol import Frame
+from .protocol import (
+    HEADER_SIZE,
+    Frame,
+    FrameHeader,
+    FrameType,
+    ProtocolError,
+    parse_tx_queue_stats_event,
+)
 
 CDC_VID, CDC_PID = 0xCAFE, 0x4001   # milestone 1b TinyUSB descriptors (docs/protocol.md)
+
+
+# --- Ethernet TX pacing model (Task 6) ---------------------------------------
+#
+# Pure host-side mirror of the firmware's paced-fragment TX
+# (firmware/scanner-stream/Src/ethernet_transport.c: eth_tx_pump()/
+# eth_tx_emit_one()/ETH_SendFrame_Gather()/ETH_TxWindowMsForPeriod()). NOT a
+# ctypes byte-level cross-check like host/tests/test_protocol_c_crosscheck.py
+# runs for rs_protocol.c -- that file is HAL-free by design, but
+# ethernet_transport.c pulls in lwIP/HAL headers this host cannot compile.
+# This is a from-spec reimplementation instead, kept textually aligned with
+# the C (identical constants, identical formulas, cross-referenced in both
+# directions), exercised in host/tests/test_sources.py to pin the CONTRACT
+# non-negotiable finding #6 describes: the drain deadline derives from the
+# ACTIVE applied frame period (never a fixed 25/33 ms assumption), enough
+# fragments drain each pump to clear the backlog inside that deadline, and a
+# queued frame is never interleaved with another or abandoned partway.
+#
+# Task 7 forward-compat: `window_ms` here is a plain "how long do you have"
+# input, and `eth_tx_window_ms()` takes a *variadic* set of governing periods
+# (today just the one ToF frame_period_us) rather than being hardcoded to one
+# stream -- a future decoupled IMU/env tick can pass its own period alongside
+# without either function changing shape.
+
+ETH_TX_FRAG_BYTES = 1400   # mirrors ETH_TX_FRAG_BYTES
+ETH_TX_SLOT_BYTES = 15104  # mirrors ETH_TX_SLOT_BYTES (>= 32 hdr + 14842 payload + 4 CRC)
+ETH_TX_SLOTS = 8           # mirrors ETH_TX_SLOTS
+
+
+def eth_tx_window_ms(frame_period_us: int, *other_period_us: int) -> int:
+    """Drain deadline for the TX pacer, mirroring
+    ETH_TxWindowMsForPeriod()/ETH_SetTxWindowMs(): derived from the ACTIVE
+    (applied) frame period, never a fixed assumption (non-negotiable finding
+    #6 -- the old firmware constant this replaces was ETH_TX_WINDOW_MS=25,
+    sized off a 30 Hz/33 ms guess). When more than one period is passed (Task
+    7: a decoupled IMU/env tick queuing through the same firmware FIFO
+    alongside the ToF period), the deadline is the SHORTEST of them -- the
+    queue must clear before whichever cadence reloads it fastest, or that
+    stream's own backlog would never drain in time. A plain ToF-only caller
+    passes just `frame_period_us`, matching the firmware's own single-period
+    call site today."""
+    periods_us = [p for p in (frame_period_us, *other_period_us) if p and p > 0]
+    if not periods_us:
+        return 1
+    ms = min(periods_us) // 1000
+    return ms if ms > 0 else 1
+
+
+def eth_tx_budget(pending_fragments: int, elapsed_ms: int, window_ms: int) -> int:
+    """How many fragments to emit on THIS pump so `pending_fragments` clears
+    within `window_ms`, given `elapsed_ms` since the last pump. Mirrors
+    eth_tx_pump()'s adaptive-budget formula exactly: ceil((pending * elapsed)
+    / window), floored at 1 whenever there is anything pending at all (the
+    firmware's "always make forward progress" comment) and 0 when there is
+    nothing to do or no time has passed (a 0 elapsed_ms firmware call is a
+    same-millisecond re-entry, not a real budget point)."""
+    if pending_fragments <= 0 or elapsed_ms <= 0:
+        return 0
+    window_ms = window_ms if window_ms > 0 else 1
+    budget = -(-(pending_fragments * elapsed_ms) // window_ms)  # ceil division
+    return budget if budget > 0 else 1
+
+
+@dataclass
+class _EthTxQueuedFrame:
+    seq: int
+    total_frags: int
+    next_frag: int = 0
+
+
+class EthTxPacerModel:
+    """Pure simulation of the firmware's fixed-slot FIFO + paced drain
+    (`eth_tx_slots`/`eth_tx_head`/`eth_tx_tail`/`eth_tx_count` in
+    ethernet_transport.c), used only to test the pacing CONTRACT host-side --
+    order preservation, no interleaving, no abandonment, forward progress --
+    independent of hardware. Not part of the live receive path: `UdpSource`
+    only ever RECEIVES fragments the firmware already paced and reassembles
+    them (see `UdpSource.read()`); this model exists purely to pin the
+    SENDER-side contract in a form host/tests/test_sources.py can exercise."""
+
+    def __init__(self, slots: int = ETH_TX_SLOTS):
+        self.slots = slots
+        self._queue: list[_EthTxQueuedFrame] = []
+        self.emitted_order: list[tuple[int, int]] = []  # (seq, frag_idx) emission order
+        self.enqueue_drops = 0  # mirrors eth_tx_enqueue_drops: no slot even after a flush
+
+    def enqueue(self, seq: int, total_bytes: int) -> bool:
+        """Mirrors ETH_SendFrame_Gather(): queue one frame's fragments (the
+        firmware fragments at ETH_TX_FRAG_BYTES). Returns False (and counts an
+        enqueue drop) if every slot is already full -- the model does not
+        reproduce eth_tx_flush_blocking()'s synchronous drain-under-pressure,
+        since that path's whole point is "the caller cannot proceed until a
+        slot frees", not a pacing-contract property; callers that want to
+        exercise backlog-clearing call `pump()` between `enqueue()`s instead,
+        same as the firmware's own per-iteration cadence."""
+        if len(self._queue) >= self.slots:
+            self.enqueue_drops += 1
+            return False
+        total_frags = -(-total_bytes // ETH_TX_FRAG_BYTES)  # ceil division
+        self._queue.append(_EthTxQueuedFrame(seq=seq, total_frags=max(1, total_frags)))
+        return True
+
+    def pending_fragments(self) -> int:
+        """Mirrors eth_tx_pending_frags()."""
+        return sum(f.total_frags - f.next_frag for f in self._queue)
+
+    def pump(self, elapsed_ms: int, window_ms: int) -> int:
+        """Mirrors eth_tx_pump(): drain `eth_tx_budget()` fragments from the
+        HEAD of the queue (oldest frame first), one frame at a time, never
+        starting a later frame's fragments before the earlier one is fully
+        drained -- this IS the "never interleave, never abandon a partial
+        frame" contract, made structural by always emitting from index 0.
+        Returns the number of fragments actually emitted this pump."""
+        budget = eth_tx_budget(self.pending_fragments(), elapsed_ms, window_ms)
+        emitted = 0
+        while budget > 0 and self._queue:
+            head = self._queue[0]
+            self.emitted_order.append((head.seq, head.next_frag))
+            head.next_frag += 1
+            emitted += 1
+            budget -= 1
+            if head.next_frag >= head.total_frags:
+                self._queue.pop(0)
+        return emitted
 
 
 class FileSource:
@@ -112,6 +245,28 @@ class UdpSource:
         self.frags_reordered = 0     # arrived out of order but still usable
         self.frags_duplicate = 0
         self.frags_invalid = 0       # bad index / inconsistent total_frags
+
+        # Total link rate (Task 6 step 5): bytes/s of complete reassembled frames
+        # (DATA+EVENT+ACK all included -- whatever the firmware actually sends),
+        # updated in a rolling ~1 s window every time read() completes a frame.
+        # None until the first window closes.
+        self.link_bytes_total = 0
+        self.link_bytes_per_s: float | None = None
+        self._link_rate_window_start = time.time()
+        self._link_rate_window_bytes = 0
+
+        # Firmware TX-pacer queue telemetry (Task 6 step 5), populated opportunistically
+        # from the periodic TX_QUEUE_STATS EVENT (docs/protocol.md EVENT code 7) --
+        # "when available": None until the first one arrives (older firmware, or a
+        # capture predating this feature, never sends one). See
+        # `_maybe_capture_firmware_stats()`.
+        self.fw_tx_queue_high_water: int | None = None
+        self.fw_tx_pending_fragments: int | None = None
+        self.fw_tx_enqueue_drops: int | None = None
+        self.fw_tx_stack_stalls: int | None = None
+        self.fw_tx_emitted_bytes: int | None = None
+        self.fw_active_transport: str | None = None
+        self.fw_stats_updated_at: float | None = None
 
         # Keepalive: the board unicasts frames to whichever host last sent it a
         # datagram (`target_ip`, set in its udp_recv callback), and only clears
@@ -269,6 +424,8 @@ class UdpSource:
                 self._current_seq = None
                 self._total_frags = 0
                 self._frag_count = 0
+                self._update_link_rate(len(res))
+                self._maybe_capture_firmware_stats(res)
                 return res
             return b""
         except socket.timeout:
@@ -279,6 +436,62 @@ class UdpSource:
             # Interface might be temporarily down (e.g. cable unplugged).
             # Ignore and retry next poll rather than crashing the reader thread.
             return b""
+
+    def _update_link_rate(self, nbytes: int) -> None:
+        """Total link rate (Task 6 step 5): rolling ~1 s window over every
+        complete reassembled frame's wire size (header + payload + CRC),
+        regardless of frame_type -- this is link bandwidth, not a per-stream
+        rate (`metrics.py` already reports those). Called on every completed
+        `read()`, so it costs nothing extra beyond one subtraction/compare."""
+        self.link_bytes_total += nbytes
+        self._link_rate_window_bytes += nbytes
+        elapsed = time.time() - self._link_rate_window_start
+        if elapsed >= 1.0:
+            self.link_bytes_per_s = self._link_rate_window_bytes / elapsed
+            self._link_rate_window_bytes = 0
+            self._link_rate_window_start = time.time()
+
+    def _maybe_capture_firmware_stats(self, frame_bytes: bytes) -> None:
+        """Peek at a fully-reassembled frame for the firmware's periodic
+        TX_QUEUE_STATS EVENT (docs/protocol.md EVENT code 7) and cache its
+        counters as plain attributes -- entirely a side read. `frame_bytes` is
+        not consumed or altered: `pump()`'s caller still decodes it normally
+        through `StreamDecoder`, exactly like every other frame (this EVENT
+        also gets an ordinary, harmless log line there via `parse_event()`'s
+        ascii/"replace" decode of its binary tail -- ugly, not wrong).
+
+        Deliberately tolerant: this is a diagnostic side-channel, not a
+        protocol boundary `read()` should ever raise or block on. Any
+        length/CRC/shape mismatch (a DATA frame, a legacy ACK, a foreign
+        packet that happens to reassemble to something magic-shaped) is
+        silently not-a-match, same as the wire decoder's own unknown-frame
+        tolerance."""
+        if len(frame_bytes) < HEADER_SIZE + 4:
+            return
+        try:
+            hdr = FrameHeader.unpack(frame_bytes[:HEADER_SIZE])
+        except ProtocolError:
+            return
+        if hdr.frame_type != FrameType.EVENT:
+            return
+        total = HEADER_SIZE + hdr.payload_len + 4
+        if len(frame_bytes) != total:
+            return
+        (crc,) = struct.unpack_from("<I", frame_bytes, total - 4)
+        if zlib.crc32(frame_bytes[: total - 4]) != crc:
+            return
+        payload = frame_bytes[HEADER_SIZE : HEADER_SIZE + hdr.payload_len]
+        try:
+            stats = parse_tx_queue_stats_event(payload)
+        except ProtocolError:
+            return
+        self.fw_tx_queue_high_water = stats.queue_high_water
+        self.fw_tx_pending_fragments = stats.pending_fragments
+        self.fw_tx_enqueue_drops = stats.enqueue_drops
+        self.fw_tx_stack_stalls = stats.stack_stalls
+        self.fw_tx_emitted_bytes = stats.emitted_bytes
+        self.fw_active_transport = stats.active_transport
+        self.fw_stats_updated_at = time.time()
 
     def write(self, data: bytes) -> None:
         if self.target_ip:

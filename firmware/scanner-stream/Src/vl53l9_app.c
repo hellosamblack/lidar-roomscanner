@@ -448,16 +448,83 @@ static bool rs_cdc_send(const uint8_t *p, uint32_t n) {
     return true;
 }
 
+/* Task 6 transport-truth routing (plan step 3): which physical transport(s) a
+ * frame is allowed to go out on. RS_ROUTE_BOTH is the historical behavior
+ * (send to whichever of ETH/CDC is currently connected/up) and is what every
+ * call site used before this task; RS_ROUTE_ETH_ONLY/CDC_ONLY pin a frame to
+ * exactly one. Two independent uses:
+ *   - DATA (and the periodic diagnostic EVENT below) isolate to Ethernet-only
+ *     when Ethernet has a claimed target AND the applied FPS is above 60 --
+ *     see rs_active_data_route() -- so an open-but-not-draining CDC endpoint
+ *     can never inject rs_cdc_send()'s ~100 ms stall into the Ethernet
+ *     acquisition path at high rate.
+ *   - ACKs (rs_send_ack/rs_send_ack_ranging_config) always pin to the
+ *     COMMAND's own originating transport (rs_pending_cmd_t.transport,
+ *     Task 4), independent of the isolation rule above -- a CDC-issued
+ *     command must always get its reply on CDC even while DATA is isolated
+ *     to Ethernet, because a live CDC command means a host is actively using
+ *     that link right now. */
+typedef enum {
+    RS_ROUTE_BOTH = 0,
+    RS_ROUTE_ETH_ONLY,
+    RS_ROUTE_CDC_ONLY,
+} rs_send_route_t;
+
+/* Which physical transport a COMMAND arrived on -- CDC (native USB) or ETH
+ * (UDP). Defined here (rather than down near rs_pending_cmd_t, Task 4's
+ * original location) so the routing helpers immediately below, and
+ * rs_send_frame_cdc/rs_send_event further down, can all reference it; the
+ * struct that actually STORES a transport (rs_pending_cmd_t) still lives
+ * near its other pending-command fields. */
+typedef enum {
+    RS_CMD_TRANSPORT_CDC = 0,
+    RS_CMD_TRANSPORT_ETH = 1,
+} rs_cmd_transport_t;
+
+static rs_send_route_t rs_route_for_transport(rs_cmd_transport_t transport) {
+    return (transport == RS_CMD_TRANSPORT_ETH) ? RS_ROUTE_ETH_ONLY : RS_ROUTE_CDC_ONLY;
+}
+
+/* Forward (tentative) declaration: g_active_profile's real definition, with its
+ * full block comment, stays further down near rs_pending_cmd_t (Task 4's
+ * original location) -- repeated here, identically and without an initializer,
+ * so rs_active_data_route() below (used by rs_send_frame_cdc, which appears
+ * before that point in the file) can read its frame_period_us. Both are
+ * `static` file-scope tentative definitions of the same object; the C standard
+ * merges them into one. */
+static rs_ranging_profile_t g_active_profile;
+
+/* Isolation decision for DATA/diagnostic-EVENT frames (plan step 3): Ethernet
+ * has a claimed target (a host has sent it at least one datagram -- the same
+ * gate ETH_SendFrame_Gather itself uses) AND the applied ranging profile's
+ * fps is above the CDC-supportable ceiling (docs/protocol.md, global
+ * constraint: "Ethernet is the only 90 Hz acceptance path"). Below that
+ * threshold, or with no Ethernet target at all, behavior is unchanged from
+ * pre-Task-6: send to whichever transport(s) are actually connected
+ * (automatic CDC fallback when Ethernet has no target -- plan step 4). */
+static rs_send_route_t rs_active_data_route(void) {
+    if (ETH_HasTarget() &&
+        rs_ranging_fps_from_period(g_active_profile.vendor.frame_period_us) > RS_RANGING_DSS_FPS_CEILING) {
+        return RS_ROUTE_ETH_ONLY;
+    }
+    return RS_ROUTE_BOTH;
+}
+
 /* Shared low-level sender: builds header + CRC and pushes header/payload/tail over CDC.
  * frame_type-agnostic so DATA (via rs_send_frame_cdc) and ACK (via rs_send_ack) share one
  * wire-framing implementation -- the only thing that differs between them is what goes in
  * the payload and whether the DROPPED-flag bookkeeping below applies. Stays OUTSIDE the
  * !CONF_TRANSFORM_ONBOARD guard (unlike rs_send_ack) because rs_send_frame_cdc, used by
- * both loop variants, is built on it. */
+ * both loop variants, is built on it. `route` (Task 6) restricts which transport(s) this
+ * one send is allowed to use -- RS_ROUTE_BOTH reproduces every pre-Task-6 call site's
+ * exact prior behavior. */
 
 static bool rs_send_generic_cdc(uint8_t frame_type, uint8_t stream_id, uint32_t seq, uint8_t flags,
-                                const uint8_t *payload, uint32_t len, uint16_t w, uint16_t h) {
-    if (!tud_cdc_connected() && !ETH_IsUp()) {
+                                const uint8_t *payload, uint32_t len, uint16_t w, uint16_t h,
+                                rs_send_route_t route) {
+    bool eth_allowed = (route != RS_ROUTE_CDC_ONLY);
+    bool cdc_allowed = (route != RS_ROUTE_ETH_ONLY);
+    if ((!cdc_allowed || !tud_cdc_connected()) && (!eth_allowed || !ETH_IsUp())) {
         return false;
     }
     uint8_t hdr[RS_HEADER_SIZE];
@@ -468,29 +535,33 @@ static bool rs_send_generic_cdc(uint8_t frame_type, uint8_t stream_id, uint32_t 
     rs_put_u32(tail, crc);
 
     bool eth_sent = false;
-    if (ETH_IsUp()) {
+    if (eth_allowed && ETH_IsUp()) {
         eth_sent = ETH_SendFrame_Gather(hdr, RS_HEADER_SIZE, payload, len, tail, 4);
     }
-    
+
     bool usb_sent = false;
-    if (tud_cdc_connected()) {
+    if (cdc_allowed && tud_cdc_connected()) {
         usb_sent = rs_cdc_send(hdr, RS_HEADER_SIZE) && rs_cdc_send(payload, len) && rs_cdc_send(tail, 4);
     }
-    
+
     return eth_sent || usb_sent;
 }
 
 static void rs_send_frame_cdc(uint8_t stream_id, uint32_t seq, uint8_t flags, const uint8_t *payload,
                               uint32_t len, uint16_t w, uint16_t h) {
     static uint8_t pending_dropped = 0;
+    rs_send_route_t route = rs_active_data_route();
+    bool eth_allowed = (route != RS_ROUTE_CDC_ONLY);
+    bool cdc_allowed = (route != RS_ROUTE_ETH_ONLY);
 
-    if (!tud_cdc_connected() && !ETH_IsUp()) {   /* no host: don't burn 100 ms per frame */
+    if ((!cdc_allowed || !tud_cdc_connected()) && (!eth_allowed || !ETH_IsUp())) {
+        /* no reachable host on an allowed transport: don't burn 100 ms per frame */
         pending_dropped = 1;
         return;
     }
     flags |= pending_dropped ? RS_FLAG_DROPPED : 0u;
 
-    bool ok = rs_send_generic_cdc(RS_FRAME_DATA, stream_id, seq, flags, payload, len, w, h);
+    bool ok = rs_send_generic_cdc(RS_FRAME_DATA, stream_id, seq, flags, payload, len, w, h, route);
     pending_dropped = ok ? 0u : 1u;
 }
 
@@ -563,7 +634,49 @@ static void rs_send_event(uint32_t code, uint32_t detail, const char *msg) {
     if (msg_len) {
         memcpy(payload + 8, msg, msg_len);
     }
-    (void)rs_send_generic_cdc(RS_FRAME_EVENT, 0u, g_last_seq, 0u, payload, (uint32_t)(8u + msg_len), 0u, 0u);
+    /* RS_ROUTE_BOTH: unchanged pre-Task-6 behavior. These are rare fault/boot
+     * diagnostics (SENSOR_INIT_FAIL, TRIGGER_TIMEOUT, ...), not part of the
+     * steady-state DATA cadence the isolation rule exists to protect -- see
+     * rs_send_tx_queue_stats_event() below for the one EVENT code that IS
+     * isolated. */
+    (void)rs_send_generic_cdc(RS_FRAME_EVENT, 0u, g_last_seq, 0u, payload, (uint32_t)(8u + msg_len), 0u, 0u,
+                              RS_ROUTE_BOTH);
+}
+
+/* Task 6 step 2: periodic Ethernet TX-pacer queue telemetry, sent as EVENT code
+ * RS_EVT_TX_QUEUE_STATS (7) on the same 64-frame cadence as the periodic CALIB
+ * retransmit (see its call site in the acquisition loop below) -- so a 60 s
+ * hardware capture at even the slowest Manual rate (1 fps) still samples it many
+ * times, and the hardware gate can read start/end counters off the wire and
+ * take the delta ("prove zero, don't infer it") instead of needing VCOM/printf,
+ * which is not usable unprivileged on this host.
+ *
+ * UNLIKE rs_send_event(), this does NOT build an ASCII message tail -- its
+ * payload past code+detail is three packed binary u32 counters (see
+ * docs/protocol.md's "TX_QUEUE_STATS (EVENT code 7) payload layout"), so it
+ * writes the whole 20-byte payload directly rather than routing through
+ * rs_send_event()'s strlen()-based message path. Routed through
+ * rs_active_data_route() (not RS_ROUTE_BOTH) because it shares the DATA
+ * cadence's isolation contract: at >60 fps with an Ethernet target, this must
+ * never fall back to a stalling CDC send any more than a RAW frame may. */
+static void rs_send_tx_queue_stats_event(uint32_t seq) {
+    uint8_t payload[RS_EVT_TX_QUEUE_STATS_LEN];
+    uint32_t high_water = ETH_TxQueueHighWater();
+    uint32_t pending = ETH_TxPendingFragments();
+    /* Coarse hint only (0=none,1=cdc,2=udp) -- the host's authoritative transport
+     * truth is computed independently (roomscan.web._transport_kind(), from which
+     * physical source class it is actually reading), not from this field. */
+    uint32_t active_transport = ETH_HasTarget() ? 2u : (tud_cdc_connected() ? 1u : 0u);
+    uint32_t detail = (high_water & 0xFFu) | ((active_transport & 0xFFu) << 8) | ((pending & 0xFFFFu) << 16);
+    uint32_t enqueue_drops = ETH_TxEnqueueDrops() + ETH_TxDroppedFrames();
+
+    rs_put_u32(payload + 0, RS_EVT_TX_QUEUE_STATS);
+    rs_put_u32(payload + 4, detail);
+    rs_put_u32(payload + 8, enqueue_drops);
+    rs_put_u32(payload + 12, ETH_TxStackStalls());
+    rs_put_u32(payload + 16, ETH_TxEmittedBytes());
+    (void)rs_send_generic_cdc(RS_FRAME_EVENT, 0u, seq, 0u, payload, sizeof(payload), 0u, 0u,
+                              rs_active_data_route());
 }
 
 /* Wait for a platform event in short slices, pumping TinyUSB between slices so
@@ -690,15 +803,11 @@ static uint32_t rs_malformed_cmd_count = 0;
  * Task 4 additions: `manual` carries a decoded SET_MANUAL_PARAMS candidate (valid only
  * when cmd == RS_CMD_SET_MANUAL_PARAMS -- every other command ignores it, left
  * zero-initialized by the compound literals that stash them). `transport` records which
- * transport the command arrived on; it is not yet used to route the ACK (every ACK still
- * broadcasts over both transports, unchanged -- see rs_send_generic_cdc) -- selective
- * routing to the originating transport is Task 6 scope. Stored now per the plan so Task 6
- * has it to read rather than re-threading it through rs_handle_command() again. */
-typedef enum {
-    RS_CMD_TRANSPORT_CDC = 0,
-    RS_CMD_TRANSPORT_ETH = 1,
-} rs_cmd_transport_t;
-
+ * transport the command arrived on -- Task 6 now uses it (via rs_route_for_transport(),
+ * defined near rs_send_generic_cdc above) to route every ACK back to the command's own
+ * originating transport instead of broadcasting it over both, independent of the DATA
+ * isolation rule rs_active_data_route() applies. `rs_cmd_transport_t` itself is defined
+ * up near rs_send_generic_cdc (not here) so that routing code can reference it. */
 typedef struct {
     bool pending;
     uint32_t cmd;
@@ -1152,23 +1261,32 @@ static int rs_boot_bringup(vl53l9_device_t *p_dev, uint8_t *out_calib_data,
  * or stalls (bounded at ~300 ms by rs_cdc_send's per-call timeout, see the channel block
  * comment above), and RS_FLAG_DROPPED does not apply to control frames (always flags=0).
  * Lives inside the !CONF_TRANSFORM_ONBOARD guard because only the raw-only loop has a
- * command channel; the dual-stream golden loop would leave it unused. */
-static void rs_send_ack(uint32_t token, uint32_t cmd, uint32_t result, uint32_t applied) {
+ * command channel; the dual-stream golden loop would leave it unused.
+ *
+ * `transport` (Task 6 step 3): routes this ACK to the COMMAND's own originating
+ * transport only (rs_route_for_transport()), never broadcasting it over both --
+ * every call site passes the `transport` it received from rs_handle_command() or
+ * rs_pending.transport. */
+static void rs_send_ack(uint32_t token, uint32_t cmd, uint32_t result, uint32_t applied,
+                        rs_cmd_transport_t transport) {
     uint8_t payload[RS_ACK_PAYLOAD_LEN];
     rs_put_u32(payload + 0, cmd);
     rs_put_u32(payload + 4, result);
     rs_put_u32(payload + 8, applied);
-    (void)rs_send_generic_cdc(RS_FRAME_ACK, 0u, token, 0u, payload, sizeof(payload), 0u, 0u);
+    (void)rs_send_generic_cdc(RS_FRAME_ACK, 0u, token, 0u, payload, sizeof(payload), 0u, 0u,
+                              rs_route_for_transport(transport));
 }
 
 /* Extended ACK for commands 9 (SET_MANUAL_PARAMS) and 10 (GET_RANGING_CONFIG): the complete
  * applied/readback ranging configuration after cmd+result (docs/protocol.md #ACK), sent
  * regardless of `result` so the ACK shape a host decodes never depends on whether the
  * command succeeded -- only the values do. Task 2 (this commit) is codec/registry only, so
- * every call site today passes zeros with a non-OK result; Task 4 wires real readback. */
+ * every call site today passes zeros with a non-OK result; Task 4 wires real readback.
+ * `transport` (Task 6 step 3): same originating-transport routing as rs_send_ack() above. */
 static void rs_send_ack_ranging_config(uint32_t token, uint32_t cmd, uint32_t result,
                                        uint8_t ranging_mode, uint32_t frame_period_us,
-                                       uint16_t exposure_ms, uint8_t power_mode) {
+                                       uint16_t exposure_ms, uint8_t power_mode,
+                                       rs_cmd_transport_t transport) {
     uint8_t payload[RS_ACK_RANGING_CONFIG_LEN];
     rs_put_u32(payload + 0, cmd);
     rs_put_u32(payload + 4, result);
@@ -1177,7 +1295,8 @@ static void rs_send_ack_ranging_config(uint32_t token, uint32_t cmd, uint32_t re
     payload[13] = (uint8_t)exposure_ms;
     payload[14] = (uint8_t)(exposure_ms >> 8);
     payload[15] = power_mode;
-    (void)rs_send_generic_cdc(RS_FRAME_ACK, 0u, token, 0u, payload, sizeof(payload), 0u, 0u);
+    (void)rs_send_generic_cdc(RS_FRAME_ACK, 0u, token, 0u, payload, sizeof(payload), 0u, 0u,
+                              rs_route_for_transport(transport));
 }
 
 /* `manual` is non-NULL only when the wire frame that produced this dispatch decoded as
@@ -1190,7 +1309,7 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
                               rs_cmd_transport_t transport, const rs_ranging_manual_params_t *manual) {
     switch (cmd) {
     case RS_CMD_PING:
-        rs_send_ack(token, cmd, RS_RESULT_OK, RS_PROTO_VERSION);
+        rs_send_ack(token, cmd, RS_RESULT_OK, RS_PROTO_VERSION, transport);
         break;
     case RS_CMD_SEND_CALIB:
         /* Send a CALIB frame immediately, independent of the periodic 64-frame cadence
@@ -1204,7 +1323,7 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
          * of its current block scope. */
         rs_send_frame_cdc(RS_STREAM_CALIB, seq_for_calib, 0u, calib_data, VL53L9_CALIB_DATA_SIZE,
                           out_width, out_height);
-        rs_send_ack(token, cmd, RS_RESULT_OK, 0u);
+        rs_send_ack(token, cmd, RS_RESULT_OK, 0u, transport);
         break;
     case RS_CMD_SET_USECASE:
         /* Validate WITHOUT touching the sensor: out-of-range id, or an in-range id whose
@@ -1220,15 +1339,15 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
          * command is pending -- by design (neither outcome touches the sensor, and the
          * more specific diagnosis wins over the transient BUSY). */
         if (param >= VL53L9_NB_USECASES) {
-            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, param);
+            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, param, transport);
             break;
         }
         if (g_ranging_profiles[param].binning != 2u) {
-            rs_send_ack(token, cmd, RS_RESULT_REJECTED_BINNING, g_ranging_profiles[param].binning);
+            rs_send_ack(token, cmd, RS_RESULT_REJECTED_BINNING, g_ranging_profiles[param].binning, transport);
             break;
         }
         if (rs_pending.pending) {
-            rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u);
+            rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u, transport);
             break;
         }
         rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token,
@@ -1239,11 +1358,11 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
          * 1 s. Reject out of range here rather than let the driver call fail later, so a
          * bad param never touches the sensor or consumes the one pending slot. */
         if (param < 10000u || param > 1000000u) {
-            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, param);
+            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, param, transport);
             break;
         }
         if (rs_pending.pending) {
-            rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u);
+            rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u, transport);
             break;
         }
         rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token,
@@ -1254,11 +1373,11 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
          * (the brief's own guess of "1-100ms" doesn't match the driver -- the profile
          * table's exposure_ms values, 4/5/8/10, all sit comfortably inside 1-30). */
         if (param < 1u || param > 30u) {
-            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, param);
+            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, param, transport);
             break;
         }
         if (rs_pending.pending) {
-            rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u);
+            rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u, transport);
             break;
         }
         rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token,
@@ -1266,7 +1385,7 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
         break;
     case RS_CMD_REINIT:
         if (rs_pending.pending) {
-            rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u);
+            rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u, transport);
             break;
         }
         rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = 0u, .token = token,
@@ -1279,11 +1398,11 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
          * point -- vl53l9_stop() must never race an in-flight trigger (see rs_pending's
          * safe-point block comment). */
         if (param > RS_STANDBY_HARD) {
-            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, param);
+            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, param, transport);
             break;
         }
         if (rs_pending.pending) {
-            rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u);
+            rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u, transport);
             break;
         }
         rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token,
@@ -1298,17 +1417,17 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
         /* Same precedence as every other SET_* case: validate without touching the
          * sensor, BEFORE the pending/BUSY check. */
         if (param > RS_PROFILE_MANUAL) {
-            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, param);
+            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, param, transport);
             break;
         }
         if (param == RS_PROFILE_MANUAL && !g_ranging_have_manual) {
             /* docs/protocol.md cmd 8: "MANUAL (3) reapplies the last accepted
              * SET_MANUAL_PARAMS candidate and is rejected until one exists." */
-            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, param);
+            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, param, transport);
             break;
         }
         if (rs_pending.pending) {
-            rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u);
+            rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u, transport);
             break;
         }
         rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token,
@@ -1322,7 +1441,7 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
             rs_send_ack_ranging_config(token, cmd, RS_RESULT_BUSY, g_ranging_last_readback.ranging_mode,
                                        g_ranging_last_readback.frame_period_us,
                                        g_ranging_last_readback.exposure_ms,
-                                       g_ranging_last_readback.power_mode);
+                                       g_ranging_last_readback.power_mode, transport);
             break;
         }
         rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = 0u, .token = token,
@@ -1337,14 +1456,14 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
             rs_send_ack_ranging_config(token, cmd, vr, g_ranging_last_readback.ranging_mode,
                                        g_ranging_last_readback.frame_period_us,
                                        g_ranging_last_readback.exposure_ms,
-                                       g_ranging_last_readback.power_mode);
+                                       g_ranging_last_readback.power_mode, transport);
             break;
         }
         if (rs_pending.pending) {
             rs_send_ack_ranging_config(token, cmd, RS_RESULT_BUSY, g_ranging_last_readback.ranging_mode,
                                        g_ranging_last_readback.frame_period_us,
                                        g_ranging_last_readback.exposure_ms,
-                                       g_ranging_last_readback.power_mode);
+                                       g_ranging_last_readback.power_mode, transport);
             break;
         }
         rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .token = token,
@@ -1354,10 +1473,10 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
     case RS_CMD_SET_IMU_ENV_RATE:
     case RS_CMD_GET_IMU_ENV_RATE:
         /* Legacy cmd+param ACK shape (RS_ACK_PAYLOAD_LEN) -- same as commands 1-8. Task 7. */
-        rs_send_ack(token, cmd, RS_RESULT_UNKNOWN_CMD, 0u);
+        rs_send_ack(token, cmd, RS_RESULT_UNKNOWN_CMD, 0u, transport);
         break;
     default:
-        rs_send_ack(token, cmd, RS_RESULT_UNKNOWN_CMD, 0u);
+        rs_send_ack(token, cmd, RS_RESULT_UNKNOWN_CMD, 0u, transport);
         break;
     }
 }
@@ -1389,6 +1508,10 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
     uint32_t cmd = rs_pending.cmd;
     uint32_t param = rs_pending.param;
     uint32_t token = rs_pending.token;
+    rs_cmd_transport_t transport = rs_pending.transport; /* Task 6: route the deferred ACK
+                                                             * back to whichever transport
+                                                             * this command actually arrived
+                                                             * on (see rs_send_ack()'s doc) */
     rs_ranging_manual_params_t manual = rs_pending.manual; /* only meaningful when
                                                               * cmd == RS_CMD_SET_MANUAL_PARAMS;
                                                               * copied before freeing the slot */
@@ -1419,7 +1542,7 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
         rs_standby_level = RS_STANDBY_ACTIVE;
         rs_send_frame_cdc(RS_STREAM_CALIB, seq_for_calib, 0u, calib_data, VL53L9_CALIB_DATA_SIZE, out_width,
                           out_height);
-        rs_send_ack(token, cmd, RS_RESULT_OK, 0u);
+        rs_send_ack(token, cmd, RS_RESULT_OK, 0u, transport);
         return false;
     }
 
@@ -1441,7 +1564,7 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
         uint8_t to = (uint8_t)param; /* handler validated 0..RS_STANDBY_HARD */
 
         if (to == from) {
-            rs_send_ack(token, cmd, RS_RESULT_OK, to); /* idempotent no-op, no HW touched */
+            rs_send_ack(token, cmd, RS_RESULT_OK, to, transport); /* idempotent no-op, no HW touched */
             return false;
         }
 
@@ -1472,7 +1595,7 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
                 rs_send_frame_cdc(RS_STREAM_CALIB, seq_for_calib, 0u, calib_data,
                                   VL53L9_CALIB_DATA_SIZE, out_width, out_height);
             }
-            rs_send_ack(token, cmd, RS_RESULT_OK, RS_STANDBY_ACTIVE);
+            rs_send_ack(token, cmd, RS_RESULT_OK, RS_STANDBY_ACTIVE, transport);
             return false;
         }
 
@@ -1490,7 +1613,7 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
                  * stays ACTIVE. Mirrors the profile path's identical stop-failure arm. */
                 vl53l9_status_t status = { 0 };
                 vl53l9_get_status(p_dev, &status);
-                rs_send_ack(token, cmd, RS_RESULT_SENSOR_ERROR, rs_pack_status(&status));
+                rs_send_ack(token, cmd, RS_RESULT_SENSOR_ERROR, rs_pack_status(&status), transport);
                 if (rs_sensor_reinit(p_dev, calib_data)) {
                     handle_error();
                     return true;
@@ -1522,7 +1645,7 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
             platform_power_disable(CONF_DEVICE_ID); /* XSHUT low: fully unpower the VCSEL */
         }
         rs_standby_level = to;
-        rs_send_ack(token, cmd, RS_RESULT_OK, to);
+        rs_send_ack(token, cmd, RS_RESULT_OK, to, transport);
         return false;
     }
 
@@ -1536,7 +1659,7 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
         if (rs_ranging_read_config(p_dev, &rb) == 0) {
             g_ranging_last_readback = rb;
             rs_send_ack_ranging_config(token, cmd, RS_RESULT_OK, rb.ranging_mode, rb.frame_period_us,
-                                       rb.exposure_ms, rb.power_mode);
+                                       rb.exposure_ms, rb.power_mode, transport);
         } else {
             /* Transient I3C read failure: nothing was written, so there is nothing to
              * restore -- report SENSOR_ERROR with the last known-good readback rather
@@ -1545,7 +1668,7 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
                                        g_ranging_last_readback.ranging_mode,
                                        g_ranging_last_readback.frame_period_us,
                                        g_ranging_last_readback.exposure_ms,
-                                       g_ranging_last_readback.power_mode);
+                                       g_ranging_last_readback.power_mode, transport);
         }
         return false;
     }
@@ -1631,9 +1754,9 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
                                        g_ranging_last_readback.ranging_mode,
                                        g_ranging_last_readback.frame_period_us,
                                        g_ranging_last_readback.exposure_ms,
-                                       g_ranging_last_readback.power_mode);
+                                       g_ranging_last_readback.power_mode, transport);
         } else {
-            rs_send_ack(token, cmd, RS_RESULT_SENSOR_ERROR, rs_pack_status(&status));
+            rs_send_ack(token, cmd, RS_RESULT_SENSOR_ERROR, rs_pack_status(&status), transport);
         }
         if (rs_sensor_reinit(p_dev, calib_data)) {
             /* the direct best-effort reinit above also failed: hand off to
@@ -1733,27 +1856,33 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
     if (!applied_ok) {
         if (cmd == RS_CMD_SET_MANUAL_PARAMS) {
             rs_send_ack_ranging_config(token, cmd, RS_RESULT_SENSOR_ERROR, rb.ranging_mode,
-                                       rb.frame_period_us, rb.exposure_ms, rb.power_mode);
+                                       rb.frame_period_us, rb.exposure_ms, rb.power_mode, transport);
         } else {
             /* legacy shape (usecase/period/exposure/profile): applied = packed status
              * word on SENSOR_ERROR, matching docs/protocol.md's general convention --
              * NOT the rejected candidate's id/value. */
             vl53l9_status_t status = { 0 };
             vl53l9_get_status(p_dev, &status);
-            rs_send_ack(token, cmd, RS_RESULT_SENSOR_ERROR, rs_pack_status(&status));
+            rs_send_ack(token, cmd, RS_RESULT_SENSOR_ERROR, rs_pack_status(&status), transport);
         }
         return false;
     }
 
     g_active_profile = candidate; /* adopt only now that the sensor has accepted it */
+    /* Task 6: the TX pacer's drain deadline follows whichever period is now active --
+     * never the fixed 25/33 ms assumption this replaces (non-negotiable finding #6).
+     * Legacy SET_USECASE/SET_FRAME_PERIOD_US/SET_EXPOSURE_MS reach here too (they edit
+     * a copy of g_active_profile, same as every other candidate path), so the window
+     * tracks the period under every reconfig command, not only cmd 8/9. */
+    ETH_SetTxWindowMs(ETH_TxWindowMsForPeriod(g_active_profile.vendor.frame_period_us));
 
     if (cmd == RS_CMD_SET_RANGING_PROFILE) {
-        rs_send_ack(token, cmd, RS_RESULT_OK, candidate.profile_id);
+        rs_send_ack(token, cmd, RS_RESULT_OK, candidate.profile_id, transport);
     } else if (cmd == RS_CMD_SET_MANUAL_PARAMS) {
         g_ranging_last_manual = candidate;
         g_ranging_have_manual = true;
         rs_send_ack_ranging_config(token, cmd, RS_RESULT_OK, rb.ranging_mode, rb.frame_period_us,
-                                   rb.exposure_ms, rb.power_mode);
+                                   rb.exposure_ms, rb.power_mode, transport);
     } else {
         /* legacy usecase/period/exposure: applied = the value actually in effect
          * (docs/protocol.md) -- usecase has no driver-side clamping to observe, so echo
@@ -1766,7 +1895,7 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
         } else if (cmd == RS_CMD_SET_EXPOSURE_MS) {
             applied = rb.exposure_ms;
         }
-        rs_send_ack(token, cmd, RS_RESULT_OK, applied);
+        rs_send_ack(token, cmd, RS_RESULT_OK, applied, transport);
     }
     return false;
 }
@@ -1965,6 +2094,10 @@ void vl53l9_app() {
      * construction" -- so it has nothing to reject high-rate/DSS-off commands FROM). */
 #if !CONF_TRANSFORM_ONBOARD
     rs_ranging_boot_default(&g_active_profile);
+    /* Task 6: seed the TX pacer's window before the acquisition loop (and hence
+     * ETH_Process()/eth_tx_pump()) ever runs, so it is never left at
+     * ETH_TX_WINDOW_MS_DEFAULT's boot placeholder once real streaming starts. */
+    ETH_SetTxWindowMs(ETH_TxWindowMsForPeriod(g_active_profile.vendor.frame_period_us));
 #endif
     uint16_t raw_buffer_size = 0; /* bytes */
     uint8_t out_width = 0, out_height = 0; /* pixels */
@@ -2748,6 +2881,9 @@ void vl53l9_app() {
                     rs_send_frame_cdc(RS_STREAM_IMU_CAL, rs_counter, 0u, imu_cal,
                                       RS_IMU_CAL_SIZE, 0u, 0u);
                 }
+                /* Task 6 step 2: Ethernet TX-pacer queue telemetry, same cadence as CALIB
+                 * (see rs_send_tx_queue_stats_event()'s own comment for why). */
+                rs_send_tx_queue_stats_event(rs_counter);
                 rs_calib_countdown = 64;
             }
             rs_calib_countdown--;

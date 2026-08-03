@@ -54,6 +54,9 @@ class EventCode(IntEnum):
     SENSOR_ERROR_STATUS = 4
     TX_OVERFLOW = 5
     AUTO_WAKE_MOTION = 6
+    TX_QUEUE_STATS = 7  # Ethernet TX-pacer queue telemetry (Task 6); see
+                        # parse_tx_queue_stats_event() -- its payload is NOT the
+                        # general ASCII message parse_event() decodes.
 
 
 class CommandCode(IntEnum):
@@ -192,6 +195,12 @@ IMU_TICK_FREQ_FINE_STEP = 0.0013   # 0.13% per FREQ_FINE LSB
 # above, and it LEADS the depth frame rather than lagging it.
 IMU_SYNC_SIZE = 22   # u32 ticks, u32 latch_us, u32 drain_us, u32 quat_mid_ticks, u16 read_us, u16 quat_n, u8 valid, u8 rsv
 
+# --- EVENT code TX_QUEUE_STATS (7): Ethernet TX-pacer queue telemetry (Task 6) --------
+# 4 code + 4 detail + 4 enqueue_drops + 4 stack_stalls + 4 emitted_bytes. Mirrors firmware
+# RS_EVT_TX_QUEUE_STATS_LEN (firmware/scanner-stream/Src/rs_protocol.h). See
+# parse_tx_queue_stats_event() below for the field layout.
+RS_EVT_TX_QUEUE_STATS_LEN = 20
+
 
 class ProtocolError(Exception):
     pass
@@ -241,6 +250,62 @@ def parse_event(payload: bytes) -> tuple[int, int, str]:
         raise ProtocolError(f"event payload too short: {len(payload)} bytes")
     code, detail = struct.unpack_from("<II", payload, 0)
     return code, detail, payload[8:].decode("ascii", "replace")
+
+
+# --- EVENT code TX_QUEUE_STATS (7): Ethernet TX-pacer queue telemetry (Task 6) --------
+#
+# docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md Task 6
+# step 2: "prove zero, don't infer it" -- the firmware emits this on the same 64-frame
+# cadence as the periodic CALIB retransmit (firmware/scanner-stream/Src/vl53l9_app.c,
+# rs_send_tx_queue_stats_event()) so a 60 s hardware capture at any rate samples it many
+# times. Deliberately NOT routed through parse_event(): every other EVENT code's payload
+# past code+detail is the general ASCII message, but this one packs three binary u32
+# counters there instead (docs/protocol.md "TX_QUEUE_STATS (EVENT code 7) payload
+# layout") -- parse_event() would garble it through its ascii/"replace" decode.
+_TX_QUEUE_STATS_TRANSPORT_NAMES = {0: "none", 1: "cdc", 2: "udp"}
+
+
+@dataclass(frozen=True)
+class TxQueueStatsEvent:
+    """Decoded TX_QUEUE_STATS payload. `active_transport` is the firmware's own
+    coarse hint (Ethernet preferred if it has a target, else CDC if connected,
+    else none) -- NOT the host's authoritative transport truth, which is
+    computed independently from which physical source class is actually being
+    read (`roomscan.web._transport_kind()`)."""
+    queue_high_water: int
+    active_transport: str        # "none" | "cdc" | "udp"
+    pending_fragments: int
+    enqueue_drops: int
+    stack_stalls: int
+    emitted_bytes: int
+
+
+def parse_tx_queue_stats_event(payload: bytes) -> TxQueueStatsEvent:
+    """Decode EVENT code TX_QUEUE_STATS (7)'s 20-byte payload (docs/protocol.md).
+
+    Raises ProtocolError on the wrong length or a mismatched code -- callers
+    that peek at raw EVENT bytes (e.g. `UdpSource`, which must not assume
+    every EVENT it sees is this one) should catch that and treat it as "not a
+    TX_QUEUE_STATS frame", the same tolerant-skip convention the rest of the
+    wire decoder uses for anything it doesn't recognize.
+    """
+    if len(payload) != RS_EVT_TX_QUEUE_STATS_LEN:
+        raise ProtocolError(
+            f"tx-queue-stats payload must be {RS_EVT_TX_QUEUE_STATS_LEN} bytes, got {len(payload)}")
+    code, detail, enqueue_drops, stack_stalls, emitted_bytes = struct.unpack("<IIIII", payload)
+    if code != EventCode.TX_QUEUE_STATS:
+        raise ProtocolError(f"not a TX_QUEUE_STATS event (code={code})")
+    high_water = detail & 0xFF
+    transport_id = (detail >> 8) & 0xFF
+    pending = (detail >> 16) & 0xFFFF
+    return TxQueueStatsEvent(
+        queue_high_water=high_water,
+        active_transport=_TX_QUEUE_STATS_TRANSPORT_NAMES.get(transport_id, "none"),
+        pending_fragments=pending,
+        enqueue_drops=enqueue_drops,
+        stack_stalls=stack_stalls,
+        emitted_bytes=emitted_bytes,
+    )
 
 
 def pack_command(cmd: int, param: int, token: int) -> bytes:

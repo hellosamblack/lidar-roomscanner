@@ -186,6 +186,7 @@ Event-code registry:
 | 4 | SENSOR_ERROR_STATUS| vl53l9 status word from handle path |
 | 5 | TX_OVERFLOW        | frames dropped since last report    |
 | 6 | AUTO_WAKE_MOTION   | LSM6DSV16X `WAKE_UP_SRC` register byte (bit layout: `docs/protocol.md` links to the datasheet; `WU_IA` = wake-up detected, `X_WU`/`Y_WU`/`Z_WU` = triggering axis) |
+| 7 | TX_QUEUE_STATS     | Ethernet TX-pacer queue telemetry (Task 6, 2026-08-03). Unlike codes 1–6 this event carries a **20-byte payload**, not a bare detail word: `<IIIII>` LE = `code`(7) @0, packed `detail` @4 (`queue_high_water` = bits 0–7, `active_transport` id = bits 8–15 (0 none / 1 cdc / 2 udp — the firmware's coarse hint, NOT the host's authoritative transport truth), `pending_fragments` = bits 16–31), `enqueue_drops` @8, `stack_stalls` @12, `emitted_bytes` @16 (both counters cumulative since boot). Emitted on the 64-frame CALIB cadence by raw-only builds. Host decoder: `roomscan.protocol.parse_tx_queue_stats_event()`; consumed by `UdpSource` (tolerant-skip on any other EVENT). |
 
 Firmware emission (Phase 3 Task 5, raw-only builds only — `CONF_TRANSFORM_ONBOARD=0`):
 `handle_error()` emits `SENSOR_ERROR_STATUS` (detail = packed status word: `fsm<<24 |
@@ -426,6 +427,11 @@ specced with the Phase 4 transport work).
   `device_hz`/`host_hz` are computed from in the first place, never from `seq`. IMU_SYNC (13) is
   NOT sent during idle — its meaning ("where THIS ToF frame's edge sits on the LSM clock") has no
   referent without a ToF frame. No layout change to any stream, no version bump.
+- **v2 rev 2026-08-03 (b)**: additive — EVENT code 7 `TX_QUEUE_STATS` (Ethernet TX-pacer queue
+  telemetry, high-framerate plan Task 6). Unlike codes 1–6 it carries a 20-byte payload (layout in
+  the EVENT table above); emitted on the 64-frame CALIB cadence by raw-only builds. Hosts that
+  treat EVENT payloads as a bare detail word skip it harmlessly (tolerant-skip convention). No
+  layout change to any existing frame; no version bump.
 - **v2** (2026-08-03): **layout change — version bump.** Five new command codes (8-12,
   `docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md` Task 2):
   `SET_RANGING_PROFILE` (8), `SET_MANUAL_PARAMS` (9), `GET_RANGING_CONFIG` (10),

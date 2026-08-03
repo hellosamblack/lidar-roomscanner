@@ -55,6 +55,16 @@
 #define RS_EVT_TX_OVERFLOW         (5u)
 #define RS_EVT_AUTO_WAKE_MOTION    (6u) /* idle-loop self-woke on LSM Wake-Up detection (not a
                                           * host command); detail = WAKE_UP_SRC register byte */
+#define RS_EVT_TX_QUEUE_STATS      (7u) /* Ethernet TX-pacer queue telemetry (Task 6,
+                                          * docs/superpowers/plans/2026-07-31-high-framerate-and-
+                                          * manual-ranging-modes.md). UNLIKE every other EVENT
+                                          * code, its payload past code+detail is NOT the general
+                                          * ASCII message -- it is three packed u32 counters (see
+                                          * docs/protocol.md's "TX_QUEUE_STATS (EVENT code 7)
+                                          * payload layout"). Sent on the same 64-frame cadence as
+                                          * the periodic CALIB retransmit. */
+#define RS_EVT_TX_QUEUE_STATS_LEN  (20u) /* 4 code + 4 detail + 4 enqueue_drops + 4 stack_stalls
+                                           * + 4 emitted_bytes */
 
 /* COMMAND (RS_FRAME_COMMAND) payload. Two shapes exist as of v2 (docs/protocol.md #COMMAND):
  *   - legacy: u32 cmd, u32 param (LE) -- RS_CMD_PAYLOAD_LEN (8) bytes. Commands 1-8, 10, 11, 12.
