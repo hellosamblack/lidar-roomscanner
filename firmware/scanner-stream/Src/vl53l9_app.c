@@ -594,44 +594,33 @@ static int rs_wait_event_usb(uint32_t evt, uint32_t timeout_ms) {
 }
 
 #if !CONF_TRANSFORM_ONBOARD
-/* Raw-only trigger-early overlap (this task): settle then trigger, sharing one helper
- * for every trigger call in this mode -- the pre-loop seed for frame 1, the
- * "trigger(N+1)" issued right after frame N's readout ack, and any retry after a lost
- * trigger inside the acquire loop below. Every one of those needs the same settle
- * (a hardware requirement: a trigger issued back-to-back with the previous readout ack
- * -- COMMAND_ACK_FRAME_READ inside vl53l9_get_frame_async_ack -- is intermittently
- * ignored by the sensor, see Task 8's race writeup); folding settle+trigger into one
- * function makes that impossible to accidentally skip at a new call site.
- *
- * Settle-time experiment (the one bounded experiment allowed by the P2.5 Task 4 brief):
- * 5 ms (the Task 8 value) measured 25.9 fps (med 39 ms/frame); 2 ms measured 27.7 fps
- * (med 36-37 ms/frame) across two 30 s captures, both with crc 0, gaps 0, and max
- * inter-frame delta <= 39 ms -- i.e. no lost-trigger stalls (a lost trigger appears as a
- * ~1 s delta via the retry path below, and none occurred). 2 ms is kept; if the
- * lost-trigger race ever resurfaces at this value, the bounded-retry net below degrades
- * it to a visible stall rather than a lost frame, and this is the knob to raise back to
- * 5. (HAL_Delay(n) actually waits n+1 ticks, so 2 here means ~3 ms wall time.) */
-#define RS_TRIGGER_SETTLE_MS (2u)
-/* Returns the vl53l9 error code (0 on success) instead of dead-ending into
- * handle_error() itself (Task 5 recursion guard -- see the block comment above
- * rs_recover() below for the full reasoning): rs_sensor_reinit()'s own post-start tail
- * calls this to seed frame 1, and rs_sensor_reinit() is itself called BY handle_error()'s
- * recovery loop -- if this function called handle_error() on failure, a sensor that keeps
- * coming up trigger-broken would recurse handle_error -> rs_sensor_reinit ->
- * rs_trigger_next -> handle_error without bound. Every ordinary (non-recovery) call site
- * below still routes a failure through handle_error() explicitly, exactly as before. */
-static int rs_trigger_next(vl53l9_device_t *p_dev) {
-    HAL_Delay(RS_TRIGGER_SETTLE_MS);
-    return vl53l9_trigger_frame(p_dev);
-}
+/* Autonomous acquisition (Task 5): the manual-trigger settle-then-trigger helper that
+ * used to live here (rs_trigger_next(), ~2 ms HAL_Delay + vl53l9_trigger_frame() per
+ * frame) is GONE from this build. rs_ranging's presets and manual candidates now
+ * resolve to VL53L9_SYNC_AUTONOMOUS (rs_ranging.c) -- vl53l9_trigger_frame() itself
+ * rejects any call outside VL53L9_SYNC_MANUAL (vl53l9.c:609,
+ * VL53L9_ERROR_INVALID_OPERATION), so calling it here would simply fail. Once
+ * vl53l9_start() runs (rs_boot_bringup / rs_sensor_reinit / the reconfig-apply path
+ * below), the sensor free-runs FRAME_READY interrupts on its own configured
+ * frame_period_us with no host action per frame -- realizing a real target FPS at
+ * all, per non-negotiable finding #2 (frame_period_us was inert under
+ * VL53L9_SYNC_MANUAL). Every former rs_trigger_next() call site below is either
+ * deleted outright (nothing to trigger) or, where a genuine FRAME_READY timeout needs
+ * bounding, replaced by rs_ranging_frame_timeout_ms()-sized waits with no re-trigger
+ * step. Legacy on-board-transform builds (CONF_TRANSFORM_ONBOARD=1) are untouched:
+ * that loop still calls vl53l9_trigger_frame() inline, unconditionally, and remains
+ * VL53L9_SYNC_MANUAL (plan step 1: "MANUAL_TRIGGER only for the legacy
+ * onboard-transform path"). */
 
 /* ---- Host->device command channel (Phase 3 Task 2) --------------------------------
  *
  * Raw-only path only (not the on-MCU-transform golden loop above): the poll point is
  * called once per acquisition-loop iteration, after frame N's readout is fully acked
- * and BEFORE frame N+1's trigger (moved from its original after-the-RAW-send position
- * by Task 4 -- the reconfig safe point needs the sensor genuinely idle, see the
- * call site's ORDERING IS LOAD-BEARING comment), never from inside rs_wait_event_usb
+ * and before anything else touches the sensor for frame N+1 (moved from its original
+ * after-the-RAW-send position by Task 4 -- the reconfig safe point needs the sensor
+ * genuinely idle, see the call site's ORDERING IS LOAD-BEARING comment; Task 5 removed
+ * the manual-trigger step this used to precede, but the safe point itself -- readout
+ * acked, nothing else pending -- is unchanged), never from inside rs_wait_event_usb
  * (that primitive stays single-purpose: pump tud_task while waiting on a platform
  * event, nothing else).
  *
@@ -671,24 +660,29 @@ static uint32_t rs_malformed_cmd_count = 0;
  * binning checks that never touch the sensor) and, if valid, stores it here instead of
  * acking immediately -- only ONE slot, so a second reconfig command arriving before this
  * one is applied acks BUSY (see rs_handle_command's SET_* / REINIT cases). The actual
- * sensor-touching apply (stop -> reprofile -> restart -> re-trigger) runs from
+ * sensor-touching apply (stop -> reprofile -> restart) runs from
  * rs_apply_pending_config(), called once per main-loop iteration from
- * rs_poll_commands()'s call site (#else / raw-only branch of vl53l9_app()) -- BEFORE
- * that iteration's own rs_trigger_next(N+1) call, which is skipped in favor of
- * rs_apply_pending_config()'s own post-restart trigger whenever a command is pending.
+ * rs_poll_commands()'s call site (#else / raw-only branch of vl53l9_app()). Task 5:
+ * "restart" is now the whole story -- VL53L9_SYNC_AUTONOMOUS means the sensor resumes
+ * free-running FRAME_READY on its own the instant vl53l9_start() returns, so there is
+ * no longer a trigger-for-N+1 step this apply needs to precede or replace; it simply
+ * runs at the loop's one safe point before the next iteration's FRAME_READY wait.
  *
- * Safe-point requirement (empirical, hardware finding -- see the call site's comment
- * for the full trace): vl53l9_stop() must never be called while a trigger is genuinely
- * in flight. An earlier version of this code applied pending config AFTER the
- * iteration's trigger-for-N+1 call, on the assumption that vl53l9_stop() would cleanly
- * cancel it; on hardware this instead corrupted the sensor's internal ranging state
- * (one good frame post-restart, then FSM_STATE_STREAMING silently dropped back to
- * FSM_STATE_STANDBY with sof_outside_blanking + internal_fw error bits set) --
- * reproduced even with a same-profile no-op reapply, so it was the stop-while-in-flight
- * itself, not any particular profile field. The apply now runs at the one point in the
- * iteration where frame N's own ranging is fully read out (DMA ack complete) and NOTHING
- * has been triggered yet for N+1 -- genuinely idle, matching the brief's "safe point
- * apply, before [re-]trigger" literally rather than just in spirit.
+ * Safe-point requirement (empirical, hardware finding from the original manual-trigger
+ * design -- kept because the underlying vl53l9_stop() constraint is unchanged by Task 5):
+ * vl53l9_stop() must never be called while a trigger/ranging cycle is genuinely in
+ * flight. An earlier version of this code applied pending config AFTER the iteration's
+ * trigger-for-N+1 call, on the assumption that vl53l9_stop() would cleanly cancel it; on
+ * hardware this instead corrupted the sensor's internal ranging state (one good frame
+ * post-restart, then FSM_STATE_STREAMING silently dropped back to FSM_STATE_STANDBY with
+ * sof_outside_blanking + internal_fw error bits set) -- reproduced even with a
+ * same-profile no-op reapply, so it was the stop-while-in-flight itself, not any
+ * particular profile field. The apply runs at the one point in the iteration where frame
+ * N's own ranging is fully read out (DMA ack complete) and the sensor is genuinely idle
+ * -- Task 5 re-validated this same safe point is still correct for
+ * VL53L9_SYNC_AUTONOMOUS: nothing is "in flight" to race because there is no separate
+ * trigger step at all, only the free-running FSM itself, which vl53l9_stop() is defined
+ * to gate on FSM_STATE_STREAMING (vl53l9.c:591-597) regardless of sync mode.
  *
  * The ACK for a pending command is sent from rs_apply_pending_config(), not from
  * rs_handle_command() -- "ACK only after the sensor accepted" per the brief.
@@ -762,6 +756,74 @@ static bool g_ranging_have_manual = false;
  * ACK payload beyond its fixed 12 bytes. */
 static uint32_t rs_pack_status(const vl53l9_status_t *s) {
     return ((uint32_t)s->fsm << 24) | ((uint32_t)s->command << 16) | (uint32_t)s->firmware;
+}
+
+/* FSM_STATE_STANDBY's numeric value (vl53l9.c's private _fsm_state_t enum: NONE=0,
+ * READY_TO_BOOT=1, STANDBY=2, STREAMING=3) -- that enum has no public header, but
+ * vl53l9_status_t.fsm (vl53l9_get_status(), a PUBLIC call) is a bare uint8_t carrying
+ * the exact same register value, confirmed on-target (Task 5: a stop-then-status
+ * probe read back 3 immediately after a successful vl53l9_stop(), i.e. still
+ * FSM_STATE_STREAMING -- see rs_wait_standby()'s own comment). Mirrored here as a
+ * local constant rather than re-declaring the vendor's private enum. */
+#define RS_FSM_STATE_STANDBY_VALUE (2u)
+
+/* Bound for rs_wait_standby()'s poll, used at the profile-apply safe point (this is a
+ * one-time cost per reconfigure command, not a per-frame cost, so a generous margin
+ * over the observed settle time -- typically 1-2 ms on-target -- costs nothing in
+ * steady-state cadence). */
+#define RS_RANGING_STOP_SETTLE_TIMEOUT_MS (50u)
+
+/* Bounded settle wait for vl53l9_stop() (Task 5 hardware finding, plan step 3's
+ * vl53l9_stop()-safety investigation). vl53l9_stop() returning success only means
+ * COMMAND_STOP_STREAM was accepted -- its own _write_cmd() implementation
+ * (vl53l9.c:891-915) polls the COMMAND register until it clears, NOT the FSM state
+ * register, and those are not the same instant. Reproduced on hardware (2026-08-03):
+ * immediately calling rs_ranging_write_profile() after a successful vl53l9_stop()
+ * failed VL53L9_ERROR_INVALID_STATE on vl53l9_set_sync_mode()'s own
+ * FSM_STATE_STANDBY gate (vl53l9_utils_set_profile()'s first setter call) -- a status
+ * probe taken at that exact point read fsm=3 (STREAMING), not yet settled. The
+ * restore-to-old-profile attempt a few instructions later hit the identical race and
+ * ALSO failed, so profile-apply commands got NO ack at all (neither write ever
+ * reached an ack-sending line) and silently funneled into handle_error()'s bounded
+ * recovery on every single attempt -- 6/6 reproduced with a manual SET_MANUAL_PARAMS
+ * switch and separately with a same-value SET_RANGING_PROFILE reapply, so this is not
+ * specific to any one candidate profile.
+ *
+ * Specific to VL53L9_SYNC_AUTONOMOUS (Task 5): under the old VL53L9_SYNC_MANUAL
+ * design this race was apparently never observed (Task 4's hardware gate exercised
+ * the identical stop-then-reprofile sequence repeatedly) -- plausible mechanism,
+ * though not confirmed at the register level (out of this task's reach without
+ * vendor-internal documentation): a manual-sync sensor only ranges between explicit
+ * triggers, so at any moment stop() is issued it is very likely already idle between
+ * cycles; an autonomous-sync sensor is continuously scheduling its next frame
+ * on-chip, so interrupting that scheduler mid-cycle plausibly takes measurably
+ * longer to fully settle to FSM_STATE_STANDBY. Whatever the exact mechanism, the fix
+ * is the same either way: prove STANDBY via the PUBLIC vl53l9_get_status() readback
+ * before writing profile fields, rather than trusting vl53l9_stop()'s return alone.
+ * A fixed guessed delay was deliberately rejected -- polling is both faster in the
+ * common case (most settles observed within 1-2 ms) and correct in the worst case
+ * (bounded by timeout_ms rather than hoping a guessed constant is always enough).
+ *
+ * Lives in vl53l9_app.c, not rs_ranging.c/.h, because rs_ranging.h documents itself
+ * as HAL-free (register I/O + wire constants only) and this loop's pacing needs
+ * HAL_Delay(), which every other settle wait in this file already uses. Returns 0
+ * once FSM_STATE_STANDBY is observed, the first vl53l9_get_status() error
+ * encountered, or VL53L9_ERROR_TIMEOUT if it never settles within timeout_ms. */
+static int rs_wait_standby(vl53l9_device_t *p_dev, uint32_t timeout_ms) {
+    for (uint32_t waited = 0;; waited++) {
+        vl53l9_status_t status = { 0 };
+        int ret = vl53l9_get_status(p_dev, &status);
+        if (ret) {
+            return ret;
+        }
+        if (status.fsm == RS_FSM_STATE_STANDBY_VALUE) {
+            return 0;
+        }
+        if (waited >= timeout_ms) {
+            return VL53L9_ERROR_TIMEOUT;
+        }
+        HAL_Delay(1);
+    }
 }
 
 /* ---- Multi-device I3C dynamic address assignment (IKS4A1 HUB1 native-I3C bus) ------
@@ -877,18 +939,21 @@ static int rs_assign_dynamic_addresses(void) {
 }
 
 /* Full sensor re-init cycle, SELF-CONTAINED through to a running stream: reset -> I3C
- * address -> init -> calib re-read -> apply the CURRENT g_active_profile -> re-assert
- * manual sync -> start -> settle -> stale-event clear -> first trigger. Mirrors
- * vl53l9_app()'s own pre-loop setup sequence (reset/platform_assign_dynamic_address/
- * vl53l9_init/vl53l9_get_calib_data/vl53l9_utils_set_profile/vl53l9_set_sync_mode/
- * vl53l9_start, above) so REINIT is a faithful "do the boot sequence again" rather than
- * a partial reset -- and this is exactly the sequence Task 5's bounded-retry recovery
- * needs, hence factored out as a standalone callable. The post-start tail (settle +
- * event-ack + trigger) lives INSIDE this function deliberately: it is the safety
- * envelope for the stale-event hardware bug documented below, and any future caller
- * (Task 5's recovery path) must inherit it structurally rather than having to know to
- * replicate it. On success the sensor is streaming with frame 1 already triggered --
- * the caller resumes the normal wait-for-GPIO-event loop directly.
+ * address -> init -> calib re-read -> apply the CURRENT g_active_profile (autonomous
+ * sync included) -> start -> settle -> stale-event clear. Mirrors vl53l9_app()'s own
+ * pre-loop setup sequence (reset/platform_assign_dynamic_address/vl53l9_init/
+ * vl53l9_get_calib_data/vl53l9_utils_set_profile/vl53l9_start, above) so REINIT is a
+ * faithful "do the boot sequence again" rather than a partial reset -- and this is
+ * exactly the sequence Task 5's bounded-retry recovery needs, hence factored out as a
+ * standalone callable. The post-start tail (settle + event-ack) lives INSIDE this
+ * function deliberately: it is the safety envelope for the stale-event hardware bug
+ * documented below, and any future caller (Task 5's recovery path) must inherit it
+ * structurally rather than having to know to replicate it. On success the sensor is
+ * already streaming (VL53L9_SYNC_AUTONOMOUS: vl53l9_start() alone puts the FSM into a
+ * free-running FRAME_READY cadence at g_active_profile's frame_period_us -- no trigger
+ * of any kind is needed or possible here, see the block comment above this file's
+ * "Autonomous acquisition" section) -- the caller resumes the normal
+ * wait-for-GPIO-event loop directly.
  *
  * Stale-event hazard (empirical, Task 4 hardware finding): platform_power_reset()
  * toggles XSHUT (platform_utils.c:75-81) and platform_assign_dynamic_address() re-inits
@@ -897,11 +962,12 @@ static int rs_assign_dynamic_addresses(void) {
  * uncleared, the main loop's next rs_wait_event_usb(PLATFORM_GPIO_IT_EVT, ...) consumes
  * that stale flag immediately and vl53l9_get_frame_async() correctly reports
  * VL53L9_ERROR_INVALID_STATE (vl53l9.c:706-711: FRAME_READY register reads 0) --
- * reproduced on hardware: the re-init and seeded trigger both succeeded, then the very
- * next frame read failed this way and the loop's retry budget (Task 8's 1 ms/8-attempt
- * window, sized for the sub-millisecond real race, not a fully stale flag) exhausted
- * into handle_error(). Acknowledging both events right before the fresh trigger ensures
- * the next wait can only be satisfied by a genuinely new edge.
+ * reproduced on hardware (under the original manual-trigger design): the re-init and
+ * seeded trigger both succeeded, then the very next frame read failed this way and the
+ * loop's retry budget exhausted into handle_error(). Acknowledging both events right
+ * before returning ensures the loop's next wait can only be satisfied by a genuinely
+ * new edge -- still correct under autonomous sync, where the "next edge" is the
+ * sensor's own free-running cadence rather than anything this function triggers.
  *
  * calib_data is written in place, and the CALLER RETRANSMITS it over CDC after a
  * successful return (calibration may have changed across a physical reset) -- every
@@ -909,11 +975,9 @@ static int rs_assign_dynamic_addresses(void) {
  * explicitly, and rs_recover() retransmits on its success path so all
  * handle_error()-driven recoveries inherit it (see its comment).
  * Returns 0 on success, the first non-zero vl53l9_error on failure (VL53L9_ERROR_* per
- * vl53l9.h:47-53) -- INCLUDING a failed seed trigger: rs_trigger_next() (Task 5) now
- * returns its error code instead of calling handle_error() itself, and this function
- * propagates it like any other stage failure. This is deliberate (recursion guard, see
- * rs_recover()'s comment): this function must never call handle_error(), because
- * handle_error()'s own recovery loop is what calls this function. */
+ * vl53l9.h:47-53). This is deliberate (recursion guard, see rs_recover()'s comment):
+ * this function must never call handle_error(), because handle_error()'s own recovery
+ * loop is what calls this function. */
 static int rs_sensor_reinit(vl53l9_device_t *p_dev, uint8_t *calib_data) {
     int ret;
 
@@ -936,21 +1000,14 @@ static int rs_sensor_reinit(vl53l9_device_t *p_dev, uint8_t *calib_data) {
     }
 
     /* Task 4: rs_ranging_write_profile() applies g_active_profile's vendor fields via
-     * vl53l9_utils_set_profile() AND its DSS state via rs_ranging_apply_dss() -- both are
-     * needed to reproduce the pre-reset config exactly (vl53l9_set_binning(), called from
+     * vl53l9_utils_set_profile() -- INCLUDING .sync (VL53L9_SYNC_AUTONOMOUS, Task 5) --
+     * AND its DSS state via rs_ranging_apply_dss() -- both are needed to reproduce the
+     * pre-reset config exactly (vl53l9_set_binning(), called from
      * vl53l9_utils_set_profile(), ALWAYS re-enables DSS, so without the second step a
      * REINIT/hard-standby-wake while a >60fps DSS-off profile was active would silently
-     * turn DSS back on -- plan step 6). */
+     * turn DSS back on -- plan step 6). No separate sync-mode override follows this call
+     * (Task 5 removed it): the profile's own .sync field is authoritative. */
     ret = rs_ranging_write_profile(p_dev, &g_active_profile);
-    if (ret) {
-        return ret;
-    }
-
-    /* g_ranging_profiles[] entries all set .sync = VL53L9_SYNC_AUTONOMOUS
-     * (vl53l9_utils.c:32/41/51/59); this app is manual-trigger only (see
-     * vl53l9_app()'s own override of the same shape below), so re-assert it after every
-     * profile application, exactly like the pre-loop setup does. */
-    ret = vl53l9_set_sync_mode(p_dev, VL53L9_SYNC_MANUAL);
     if (ret) {
         return ret;
     }
@@ -961,28 +1018,28 @@ static int rs_sensor_reinit(vl53l9_device_t *p_dev, uint8_t *calib_data) {
     }
 
     /* Post-start tail (the safety envelope -- see the function comment): settle margin
-     * matching the pre-loop boot sequence's HAL_Delay(50), clear any stale latched
-     * events from the reset, then seed the first frame. A failed seed trigger is
-     * propagated to our own caller (recursion guard -- see the function comment and
-     * rs_trigger_next's own comment); it is NOT retried here. */
+     * matching the pre-loop boot sequence's HAL_Delay(50), then clear any stale latched
+     * events from the reset. Nothing to trigger (autonomous free-run) -- success. */
     HAL_Delay(50);
     platform_acknowledge_event(PLATFORM_GPIO_IT_EVT);
     platform_acknowledge_event(PLATFORM_I3C_DMA_RX_EVT);
-    return rs_trigger_next(p_dev);
+    return 0;
 }
 
 /* ---- Bounded sensor recovery (Phase 3 Task 5) --------------------------------------
  *
- * Recursion guard, spelled out (the residual flagged in Task 4's review): the naive
- * version of this feature has handle_error() call rs_sensor_reinit() to recover, and
- * rs_sensor_reinit()'s own tail calls rs_trigger_next() to seed frame 1. If
- * rs_trigger_next() dead-ended into handle_error() on failure (as it used to), a sensor
- * that keeps coming up trigger-broken would recurse handle_error -> rs_sensor_reinit ->
- * rs_trigger_next -> handle_error -> rs_sensor_reinit -> ... without bound (each level
- * consuming stack, never unwinding). Fixed structurally, not by convention:
- * rs_trigger_next() and rs_sensor_reinit() now both return ordinary error codes and
- * NEITHER of them ever calls handle_error(). rs_recover() below is the ONLY function
- * that calls rs_sensor_reinit() in a retry loop, and rs_recover() itself never calls
+ * Recursion guard, spelled out (the residual flagged in Task 4's review; Task 5 removed
+ * the seed-trigger step this guard was originally written around, but the guard itself
+ * still matters -- see below): the naive version of this feature has handle_error() call
+ * rs_sensor_reinit() to recover, and (under the pre-Task-5 manual-trigger design)
+ * rs_sensor_reinit()'s own tail called rs_trigger_next() to seed frame 1; had
+ * rs_trigger_next() dead-ended into handle_error() on failure, a sensor that keeps coming
+ * up trigger-broken would recurse handle_error -> rs_sensor_reinit -> rs_trigger_next ->
+ * handle_error -> rs_sensor_reinit -> ... without bound (each level consuming stack,
+ * never unwinding). Fixed structurally, not by convention, and the fix generalizes to
+ * Task 5's autonomous design unchanged: rs_sensor_reinit() returns an ordinary error code
+ * and never calls handle_error() itself. rs_recover() below is the ONLY function that
+ * calls rs_sensor_reinit() in a retry loop, and rs_recover() itself never calls
  * handle_error() or itself -- it is the bottom of this call chain, not a link in it.
  *
  * Resume-the-loop design: handle_error() (below) either (a) recovers via rs_recover()
@@ -994,9 +1051,10 @@ static int rs_sensor_reinit(vl53l9_device_t *p_dev, uint8_t *calib_data) {
  * while(1) iteration from its top, deliberately abandoning whatever local state (a
  * partially retried wait, a parsed frame, a pending command) belonged to the pre-fault
  * sensor generation. This is safe because rs_sensor_reinit() (which the recovery calls)
- * leaves the sensor with frame 1 ALREADY TRIGGERED and both stale platform events
- * acknowledged (its own safety envelope) -- exactly the state the top of the raw-only
- * loop expects when it begins by waiting on PLATFORM_GPIO_IT_EVT. A command that was
+ * leaves the sensor ALREADY STREAMING (VL53L9_SYNC_AUTONOMOUS: vl53l9_start() alone is
+ * enough, no seed trigger exists to fail) and both stale platform events acknowledged
+ * (its own safety envelope) -- exactly the state the top of the raw-only loop expects
+ * when it begins by waiting on PLATFORM_GPIO_IT_EVT. A command that was
  * mid-apply when the fault hit gets no ACK; the host's CommandClient times out and the
  * user can retry -- simpler and safer than trying to reconstruct a coherent ACK for a
  * config change that may not have taken effect on the now-fully-reset sensor.
@@ -1013,7 +1071,7 @@ static int rs_recover(void) {
         HAL_Delay(backoff_ms);
         int ret = rs_sensor_reinit(&device[CONF_DEVICE_ID], calib_data);
         if (ret == 0) {
-            /* Streaming again, frame 1 already triggered inside rs_sensor_reinit -- which
+            /* Streaming again (autonomous free-run, no trigger involved) -- rs_sensor_reinit
              * also re-read calib_data across the physical reset, so RETRANSMIT it here
              * (rs_sensor_reinit's contract: the caller owning the recovery retransmits).
              * Doing it INSIDE rs_recover, not at handle_error()'s or any other caller's
@@ -1038,21 +1096,22 @@ static int rs_recover(void) {
     return -1; /* 5 attempts exhausted */
 }
 
-/* Boot bring-up (Task 5): reset -> I3C address -> init -> calib -> profile-apply ->
- * sync-mode -> start -- the full sequence vl53l9_app() used to run inline exactly once,
- * with no error recovery on any step. Its call site in vl53l9_app() wraps this in the
- * SAME bounded-retry shape as rs_recover() (5 attempts, 100/200/400/800/1600 ms
- * backoff), which is what converts the historical ~1-in-5 first-power-up failure into a
- * self-healing delay instead of an immediate handle_error() hang.
+/* Boot bring-up (Task 5): reset -> I3C address -> init -> calib -> profile-apply
+ * (autonomous sync included) -> start -- the full sequence vl53l9_app() used to run
+ * inline exactly once, with no error recovery on any step. Its call site in
+ * vl53l9_app() wraps this in the SAME bounded-retry shape as rs_recover() (5 attempts,
+ * 100/200/400/800/1600 ms backoff), which is what converts the historical ~1-in-5
+ * first-power-up failure into a self-healing delay instead of an immediate
+ * handle_error() hang.
  *
- * Deliberately NOT rs_sensor_reinit(): that function's post-start tail also seeds frame
- * 1's trigger and clears stale platform events -- correct for REINIT/recovery, where the
- * caller is about to resume the acquisition loop immediately, but wrong here. Boot
- * bring-up runs BEFORE vl53l9_app()'s own buffer allocation, tud_connect(), and
- * DTR-gate-then-trigger-frame-1 sequence (further down, unchanged) -- triggering frame 1
- * this early would race those steps and risk an unwanted second trigger once the main
- * loop seeds frame 1 itself. This function leaves the sensor in STANDBY, matching
- * exactly what the original inline boot sequence did (out_calib_data is written in
+ * Deliberately NOT rs_sensor_reinit(): that function's post-start tail also clears
+ * stale platform events -- correct for REINIT/recovery, where the caller is about to
+ * resume the acquisition loop immediately, but wrong here. Boot bring-up runs BEFORE
+ * vl53l9_app()'s own buffer allocation, tud_connect(), and DTR-gate sequence (further
+ * down, unchanged). This function leaves the sensor already STREAMING under
+ * VL53L9_SYNC_AUTONOMOUS (Task 5: vl53l9_start() alone is sufficient -- there is no
+ * "trigger frame 1" step to race against those later steps, unlike the pre-Task-5
+ * manual-trigger design this comment used to describe) (out_calib_data is written in
  * place, as before).
  *
  * Task 4: `profile` is now an rs_ranging_profile_t (vendor fields + DSS state), applied
@@ -1080,11 +1139,6 @@ static int rs_boot_bringup(vl53l9_device_t *p_dev, uint8_t *out_calib_data,
     }
 
     ret = rs_ranging_write_profile(p_dev, profile);
-    if (ret) {
-        return ret;
-    }
-
-    ret = vl53l9_set_sync_mode(p_dev, VL53L9_SYNC_MANUAL);
     if (ret) {
         return ret;
     }
@@ -1350,12 +1404,19 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
             handle_error();
             return true;
         }
-        /* rs_sensor_reinit() returned with the sensor streaming and frame 1 already
-         * triggered (settle + stale-event clear + trigger are inside it -- its safety
-         * envelope, see its comment). All that's left here: re-send CALIB (it may have
-         * changed across the physical reset; unconditional, independent of the periodic
-         * 64-frame cadence in the caller, same rationale as RS_CMD_SEND_CALIB above)
-         * and ack. */
+        /* rs_sensor_reinit() returned with the sensor genuinely STREAMING (autonomous
+         * free-run resumed inside it -- its safety envelope, see its comment),
+         * regardless of what rs_standby_level said before this REINIT (a client may
+         * legitimately REINIT while the sensor is soft/hard-parked -- rs_handle_command's
+         * REINIT case never checks rs_standby_level). Same fix as the profile-apply
+         * vl53l9_stop()-failure branch below, and the same bug class: without this, a
+         * REINIT issued while parked leaves rs_standby_level stuck at its stale
+         * SOFT/HARD value and the loop-top idle check silently starves RAW/CALIB/
+         * stream-13 from here on even though the hardware is genuinely active again.
+         * All that's left here: re-send CALIB (it may have changed across the physical
+         * reset; unconditional, independent of the periodic 64-frame cadence in the
+         * caller, same rationale as RS_CMD_SEND_CALIB above) and ack. */
+        rs_standby_level = RS_STANDBY_ACTIVE;
         rs_send_frame_cdc(RS_STREAM_CALIB, seq_for_calib, 0u, calib_data, VL53L9_CALIB_DATA_SIZE, out_width,
                           out_height);
         rs_send_ack(token, cmd, RS_RESULT_OK, 0u);
@@ -1370,10 +1431,12 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
          *
          * A wake sets rs_standby_level = ACTIVE *before* the hardware calls, on purpose:
          * the post-condition of any wake attempt that RETURNS (rather than spinning) is
-         * "sensor streaming with frame 1 triggered" -- either the clean path here or, on
-         * fault, handle_error()'s recovery via rs_sensor_reinit(). Flipping the shadow
-         * first keeps it truthful even when a fault forces `return true`, so the loop-top
-         * idle check does not strand a now-streaming sensor in the idle branch. */
+         * "sensor streaming" (autonomous free-run resumes on its own the instant
+         * vl53l9_start() returns -- no trigger step to wait on) -- either the clean path
+         * here or, on fault, handle_error()'s recovery via rs_sensor_reinit(). Flipping
+         * the shadow first keeps it truthful even when a fault forces `return true`, so
+         * the loop-top idle check does not strand a now-streaming sensor in the idle
+         * branch. */
         uint8_t from = rs_standby_level;
         uint8_t to = (uint8_t)param; /* handler validated 0..RS_STANDBY_HARD */
 
@@ -1385,9 +1448,10 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
         if (to == RS_STANDBY_ACTIVE) {
             rs_standby_level = RS_STANDBY_ACTIVE; /* optimistic -- see block comment */
             if (from == RS_STANDBY_SOFT) {
-                /* Sensor stayed configured, just parked in STANDBY: restart + seed frame 1.
-                 * Post-restart settle + stale-event clear mirror the reconfig path's tail
-                 * (cheap insurance even though a clean stop() left no reset edges). */
+                /* Sensor stayed configured, just parked in STANDBY: restart resumes the
+                 * autonomous free-run directly (no trigger step). Post-restart settle +
+                 * stale-event clear mirror the reconfig path's tail (cheap insurance even
+                 * though a clean stop() left no reset edges). */
                 if (vl53l9_start(p_dev)) {
                     handle_error();
                     return true;
@@ -1395,15 +1459,12 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
                 HAL_Delay(50);
                 platform_acknowledge_event(PLATFORM_GPIO_IT_EVT);
                 platform_acknowledge_event(PLATFORM_I3C_DMA_RX_EVT);
-                if (rs_trigger_next(p_dev)) {
-                    handle_error();
-                    return true;
-                }
             } else {
                 /* from HARD: XSHUT was low, so a full re-bring-up is required (reset ->
-                 * re-address -> init -> calib -> start -> seed frame 1, all inside
-                 * rs_sensor_reinit's safety envelope). calib may have changed across the
-                 * physical reset -- retransmit it, same as the REINIT path above. */
+                 * re-address -> init -> calib -> start, all inside rs_sensor_reinit's
+                 * safety envelope; autonomous free-run resumes with no trigger step).
+                 * calib may have changed across the physical reset -- retransmit it, same
+                 * as the REINIT path above. */
                 if (rs_sensor_reinit(p_dev, calib_data)) {
                     handle_error();
                     return true;
@@ -1466,13 +1527,11 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
     }
 
     if (cmd == RS_CMD_GET_RANGING_CONFIG) {
-        /* Read-only: never stops the sensor, so (unlike every other pending command)
-         * this iteration's normal trigger-for-N+1 must still happen here explicitly --
-         * the caller (vl53l9_app()'s main loop) unconditionally skips its own
-         * rs_trigger_next() call whenever ANY command was pending, on the assumption
-         * that whichever branch handled it already triggered as part of its own
-         * stop/restart sequence. This branch never stops the sensor, so it must
-         * trigger too. */
+        /* Read-only: never stops the sensor. Under the pre-Task-5 manual-trigger design
+         * this branch had to issue its own trigger-for-N+1 (every other pending command
+         * triggered as part of its own stop/restart sequence, and this one never stops
+         * the sensor). Task 5: nothing to trigger at all -- the autonomous free-run
+         * continues regardless of whether a GET_RANGING_CONFIG landed this iteration. */
         rs_ranging_readback_t rb = { 0 };
         if (rs_ranging_read_config(p_dev, &rb) == 0) {
             g_ranging_last_readback = rb;
@@ -1487,10 +1546,6 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
                                        g_ranging_last_readback.frame_period_us,
                                        g_ranging_last_readback.exposure_ms,
                                        g_ranging_last_readback.power_mode);
-        }
-        if (rs_trigger_next(p_dev)) {
-            handle_error();
-            return true;
         }
         return false;
     }
@@ -1540,18 +1595,32 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
      * vl53l9_set_context:424, vl53l9_set_binning:462, vl53l9_set_exposure has no such
      * gate but is meaningless while streaming) -- vl53l9_stop() (vl53l9.c:591) is the
      * STREAMING -> STANDBY transition and is what the vl53l9_utils_set_profile header
-     * note (vl53l9_utils.h:127) means by "device must be in standby mode". */
+     * note (vl53l9_utils.h:127) means by "device must be in standby mode".
+     *
+     * vl53l9_stop()'s own return alone is NOT sufficient proof of that, though (Task 5
+     * hardware finding -- see rs_wait_standby()'s own comment for the full trace): its
+     * success only means the STOP command was accepted, not that the FSM register has
+     * actually settled to STANDBY yet. Chaining rs_wait_standby() onto a successful
+     * stop() folds that settle wait into this same `ret`/`if (ret)` failure handling --
+     * a timeout here is handled completely identically to vl53l9_stop() itself
+     * failing, which is correct: either way, the device is not provably in a state
+     * rs_ranging_write_profile() can safely touch. */
     int ret = vl53l9_stop(p_dev);
+    if (ret == 0) {
+        ret = rs_wait_standby(p_dev, RS_RANGING_STOP_SETTLE_TIMEOUT_MS);
+    }
     if (ret) {
         /* vl53l9_stop() only fails when the sensor has ALREADY left FSM_STATE_STREAMING
          * (its sole gate, vl53l9.c:593 -- INVALID_STATE) or the stop command itself
          * timed out; either way the device is NOT healthily streaming, so returning to
          * the acquisition loop as-is would just dead-end in handle_error() at the next
-         * trigger (vl53l9_trigger_frame's own STREAMING gate, vl53l9.c:604). Ack the
-         * failure, then attempt a full best-effort re-init back onto the previous
-         * known-good profile (g_active_profile is still the old profile -- candidate
-         * was never applied); only if THAT also fails, fall to the terminal spin
-         * (Task 5 upgrades it). */
+         * trigger (vl53l9_trigger_frame's own STREAMING gate, vl53l9.c:604). The
+         * settle-wait above can also land here (VL53L9_ERROR_TIMEOUT) if the FSM never
+         * reaches STANDBY within its bound -- same non-streaming, not-safe-to-write
+         * conclusion. Ack the failure, then attempt a full best-effort re-init back
+         * onto the previous known-good profile (g_active_profile is still the old
+         * profile -- candidate was never applied); only if THAT also fails, fall to
+         * the terminal spin (Task 5 upgrades it). */
         vl53l9_status_t status = { 0 };
         vl53l9_get_status(p_dev, &status);
         if (cmd == RS_CMD_SET_MANUAL_PARAMS) {
@@ -1573,8 +1642,34 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
             return true;
         }
         /* recovered: sensor streaming again on the old profile (DSS included --
-         * rs_sensor_reinit() now applies it via rs_ranging_write_profile()), frame 1
-         * triggered inside rs_sensor_reinit; calib may have changed across the reset */
+         * rs_sensor_reinit() now applies it via rs_ranging_write_profile()); calib may
+         * have changed across the reset.
+         *
+         * BUG found on hardware during Task 5's vl53l9_stop()-safety testing (plan step
+         * 3), fixed here: vl53l9_stop() above can fail for a reason this branch's own
+         * comment already names -- "the sensor has ALREADY left FSM_STATE_STREAMING" --
+         * and the concrete way that happens in practice is the sensor genuinely being
+         * parked by RS_CMD_SET_STANDBY (soft/hard), e.g. the web server's own
+         * activity-based auto-idle firing between commands. rs_sensor_reinit() above
+         * unconditionally leaves the sensor STREAMING regardless of why it wasn't
+         * streaming a moment ago, but this branch never updated rs_standby_level to
+         * match -- so the shadow stayed at its stale SOFT/HARD value while the hardware
+         * was genuinely ACTIVE again. The loop-top idle check
+         * (`if (rs_standby_level != RS_STANDBY_ACTIVE)`) then kept routing every
+         * subsequent iteration into the idle branch: RAW_3DMD/CALIB/stream-13 silently
+         * stopped being serviced entirely (the FRAME_READY edges the free-running sensor
+         * kept producing were never read out) while IMU/env kept flowing at the idle
+         * tick's ~18 Hz, and profile-apply commands kept ACKing OK with correct readback
+         * throughout -- a state where every command-level probe says healthy while the
+         * data plane is silently dead. Reproduced on hardware (2026-08-03): a
+         * SET_MANUAL_PARAMS landing while server-auto-idled hit exactly this path, then
+         * every RAW_3DMD/CALIB/IMU_SYNC frame went missing for the rest of that session
+         * until an explicit SET_STANDBY(ACTIVE) command's OWN optimistic
+         * shadow-set-before-hardware-call (see the block comment above rs_pending's
+         * `from`/`to` handling) incidentally repaired it. Fix: this reinit path is just
+         * as much a "the sensor is now definitely active" event as that SET_STANDBY
+         * ACTIVE arm is, so it gets the same shadow update. */
+        rs_standby_level = RS_STANDBY_ACTIVE;
         rs_send_frame_cdc(RS_STREAM_CALIB, seq_for_calib, 0u, calib_data, VL53L9_CALIB_DATA_SIZE, out_width,
                           out_height);
         return false;
@@ -1589,7 +1684,10 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
          * back... while the device is in standby" point. */
         rb_ret = rs_ranging_read_config(p_dev, &rb);
     } else {
-        /* restore the previous (known-good) profile, DSS included, before leaving standby */
+        /* restore the previous (known-good) profile, DSS included, before leaving standby.
+         * rs_wait_standby() above already proved the FSM was in STANDBY before this
+         * candidate write was attempted, so a failure here is a genuine write error
+         * (e.g. an out-of-range register value), not the same settle race. */
         int restore_ret = rs_ranging_write_profile(p_dev, &g_active_profile);
         if (restore_ret) {
             /* double failure: no known-good profile could be re-applied.
@@ -1600,12 +1698,12 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
         rb_ret = rs_ranging_read_config(p_dev, &rb);
     }
 
-    /* Re-assert manual sync after EVERY profile application, success or restore (both
-     * paths just wrote .sync via rs_ranging_write_profile()) -- same reasoning as
-     * rs_sensor_reinit() above. */
-    int sync_ret = vl53l9_set_sync_mode(p_dev, VL53L9_SYNC_MANUAL);
+    /* .sync (VL53L9_SYNC_AUTONOMOUS, Task 5) was already written by
+     * rs_ranging_write_profile() above -- candidate's on success, g_active_profile's on
+     * restore -- so no separate sync-mode call is needed here (Task 5 removed the
+     * unconditional VL53L9_SYNC_MANUAL override this used to be). */
     int start_ret = vl53l9_start(p_dev);
-    if (sync_ret || start_ret) {
+    if (start_ret) {
         /* Could not get back to streaming at all (neither candidate nor restored
          * profile). handle_error()'s bounded recovery is the only way back. */
         handle_error();
@@ -1614,17 +1712,15 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
 
     /* Post-restart settle + stale-event clear -- see the identical comments on the
      * REINIT path above; same margin, same reasoning, applies here too since both paths
-     * call vl53l9_start() then trigger cold (vl53l9_stop()/vl53l9_start() are a less
-     * violent transition than a physical reset, but the defensive clear is cheap and
-     * this path was where the stop-while-triggered fault originally reproduced, so it
-     * gets the same care). */
+     * call vl53l9_start() (vl53l9_stop()/vl53l9_start() are a less violent transition
+     * than a physical reset, but the defensive clear is cheap and this path was where
+     * the stop-while-triggered fault originally reproduced under the old manual-trigger
+     * design, so it gets the same care). Nothing to trigger afterward: the autonomous
+     * free-run resumes on its own the instant vl53l9_start() returns, under whichever
+     * profile is now active. */
     HAL_Delay(50);
     platform_acknowledge_event(PLATFORM_GPIO_IT_EVT);
     platform_acknowledge_event(PLATFORM_I3C_DMA_RX_EVT);
-    if (rs_trigger_next(p_dev)) { /* seed the first frame under whichever profile is now active */
-        handle_error();
-        return true;
-    }
 
     if (rb_ret == 0) {
         /* a genuine readback succeeded -- best-effort: a readback failure alone never
@@ -2271,69 +2367,64 @@ void vl53l9_app() {
 
 #else /* !CONF_TRANSFORM_ONBOARD */
 
-    /* Raw-only loop with trigger-early overlap (Phase 2.5 Task 4).
+    /* Raw-only autonomous acquisition loop (Task 5; supersedes the Phase 2.5 Task 4
+     * "trigger-early overlap" design this comment used to describe).
      *
-     * The Phase 2 raw-only loop serialized the ~15 ms CDC send of frame N-1 into the
-     * frame period: trigger(N) sat at the TOP of the loop, so the sensor idled while the
-     * MCU pushed bytes to the host (~41 ms/frame = 5 ms settle + ~15 ms un-hidden send +
-     * ~20 ms ranging/DMA/parse; see the P2 Task 5 report). Here the trigger for frame
-     * N+1 is issued BEFORE frame N's send, so the sensor's integration/ranging of N+1
-     * runs concurrently with the send of N:
+     * Every rs_ranging preset/manual candidate now resolves to VL53L9_SYNC_AUTONOMOUS
+     * (rs_ranging.c) and boot bring-up (above) has already called vl53l9_start() --
+     * the sensor is ALREADY free-running FRAME_READY at g_active_profile's
+     * frame_period_us before this loop's first iteration, with no host trigger of any
+     * kind, ever (vl53l9_trigger_frame() itself rejects a call outside
+     * VL53L9_SYNC_MANUAL -- vl53l9.c:609). This is what makes frame_period_us -- and
+     * therefore a real target FPS -- effective at all; non-negotiable finding #2 of the
+     * plan was that it stayed inert under the old manual-trigger design no matter what
+     * value was written. The steady-state shape per iteration:
      *
-     *   GPIO wait (pumped) -> ack -> DMA kick(N) -> DMA wait (pumped) -> readout ack(N)
-     *   -> parse metadata(N) -> settle + trigger(N+1) -> send CALIB-cadence + RAW(N)
-     *   while the sensor integrates N+1 -> loop.
+     *   GPIO wait (pumped, timeout sized from the applied period) -> ack -> LSM-clock
+     *   latch -> DMA kick(N) -> DMA wait (pumped) -> readout ack(N) -> parse metadata(N)
+     *   -> command poll / safe-point reconfig (may stop/reprofile/restart the sensor,
+     *   still autonomous afterward) -> send CALIB-cadence + RAW(N) + IMU/env/sync(N) ->
+     *   loop.
      *
-     * Ordering decisions, in the order they appear:
+     * There is no separate "trigger N+1" step to position early or late anymore: the
+     * sensor's own cadence is independent of how long this loop takes to process and
+     * send frame N. If this loop's per-iteration work (dominated by the RAW send, ~15 ms
+     * observed at 30 fps) exceeds the applied frame period, iterations simply fall
+     * behind the sensor's free-running cadence -- there is no software knob here that
+     * changes that; Task 5's hardware gate is precisely a test of whether that happens
+     * at 60/90/100 fps, see the report.
      *
-     *  - parse BEFORE send (deviation from the plan sketch, which listed parse last):
-     *    vl53l9_utils_parse_frame is pure pointer arithmetic over the raw buffer -- no
-     *    bus traffic (vl53l9_utils.c:149-179) -- so it can run any time after the buffer
-     *    is complete. It must run after the readout ack (the metadata lives at
-     *    buffer_size - sizeof(vl53l9_meta_t), i.e. in the tail segment that
-     *    vl53l9_get_frame_async_ack retrieves), and running it before the send lets the
-     *    wire seq be frame N's OWN frame_counter -- the send in this loop carries the
-     *    CURRENT frame, so the prev-counter tracking of the dual-stream loop
-     *    (rs_prev_counter/rs_have_prev) is gone in this mode. Seq on the wire always
-     *    matches the payload by construction.
+     * parse BEFORE send (unchanged from the prior design): vl53l9_utils_parse_frame is
+     * pure pointer arithmetic over the raw buffer -- no bus traffic (vl53l9_utils.c:
+     * 149-179) -- so it can run any time after the buffer is complete. It must run after
+     * the readout ack (the metadata lives at buffer_size - sizeof(vl53l9_meta_t), i.e.
+     * in the tail segment vl53l9_get_frame_async_ack retrieves), and running it before
+     * the send lets the wire seq be frame N's OWN frame_counter.
      *
-     *  - trigger only after readout ack + settle (Task 8 races): the settle+trigger
-     *    helper rs_trigger_next enforces the RS_TRIGGER_SETTLE_MS gap after the readout
-     *    ack; the ack happened just above (parse in between is microseconds of pointer
-     *    reads).
+     * Buffer safety (unchanged from the prior design): the send reads
+     * in_raw_mem[raw_mem_index] -- the SAME buffer this iteration's DMA filled --
+     * strictly after the DMA-done wait and readout ack for it completed. No DMA is in
+     * flight during the send at all: the next DMA is kicked only in the next iteration
+     * (after the GPIO wait), and it targets in_raw_mem[raw_mem_index ^ 1] because
+     * raw_mem_index toggles at loop bottom. Single-buffer semantics would therefore
+     * suffice in this mode, but the double buffer is KEPT: the allocation is shared with
+     * the dual-stream loop above, which genuinely needs it (its DMA of N overlaps its
+     * processing/send of N-1).
      *
-     *  - trigger BEFORE send: the INT edge for N+1 may fire while the send is still in
-     *    flight (ranging ~20 ms vs send ~15 ms, and a slow host can stall the send up to
-     *    100 ms). That is safe: the ISR-set event flag in g_platform_evt persists until
-     *    platform_acknowledge_event, so an edge landing during the send is latched and
-     *    the next iteration's GPIO wait returns immediately (same contract
-     *    rs_wait_event_usb already relies on between its 5 ms slices).
-     *
-     * Buffer safety (truth for THIS ordering): the send reads in_raw_mem[raw_mem_index]
-     * -- the SAME buffer this iteration's DMA filled -- strictly after the DMA-done wait
-     * and readout ack for it completed. No DMA is in flight during the send at all: the
-     * next DMA is kicked only in the next iteration (after the GPIO wait), and it
-     * targets in_raw_mem[raw_mem_index ^ 1] because raw_mem_index toggles at loop
-     * bottom. Single-buffer semantics would therefore suffice in this mode, but the
-     * double buffer is KEPT: the allocation is shared with the dual-stream loop above,
-     * which genuinely needs it (its DMA of N overlaps its processing/send of N-1).
-     *
-     * First-frame edge: the trigger for frame 1 is seeded once before the loop (below,
-     * after the DTR gate so acquisition still starts on host connect). Iteration 1 then
-     * captures frame 1 completely before anything is sent, so every frame -- including
-     * frame 1, which golden captures need for TNR alignment -- is sent, and the CALIB
-     * countdown (initial value 0) fires before the first RAW send exactly as before.
+     * First-frame edge: no seed trigger exists to run before this loop (Task 5 removed
+     * it) -- the sensor is already producing frames from boot bring-up's vl53l9_start().
+     * Iteration 1 captures frame 1 (whatever the sensor produced first) completely
+     * before anything is sent, so every frame -- including frame 1, which golden
+     * captures need for TNR alignment -- is sent, and the CALIB countdown (initial value
+     * 0) fires before the first RAW send exactly as before.
      *
      * No CONF_STREAM_BINARY/CONF_STREAM_RAW guards inside this loop: the #error at the
      * top of the file guarantees both are 1 whenever CONF_TRANSFORM_ONBOARD is 0. */
 
-    /* g_active_profile is already Room Mapping, live on the sensor (rs_ranging_boot_default()
-     * + rs_boot_bringup(), above) -- no re-seed needed here. Later SET_USECASE/PERIOD/
-     * EXPOSURE/SET_RANGING_PROFILE/SET_MANUAL_PARAMS commands mutate this copy, never
-     * g_ranging_profiles[]/rs_ranging's own preset table. */
-    if (rs_trigger_next(p_dev)) { /* seed trigger for frame 1 */
-        handle_error(); /* recovers (re-triggers frame 1 itself) or never returns */
-    }
+    /* g_active_profile is already Room Mapping, live and free-running on the sensor
+     * (rs_ranging_boot_default() + rs_boot_bringup(), above) -- no re-seed needed here.
+     * Later SET_USECASE/PERIOD/EXPOSURE/SET_RANGING_PROFILE/SET_MANUAL_PARAMS commands
+     * mutate this copy, never g_ranging_profiles[]/rs_ranging's own preset table. */
 
     while (1) {
 
@@ -2344,10 +2435,11 @@ void vl53l9_app() {
 
         /* Laser-wear idle (RS_CMD_SET_STANDBY). While parked in standby the sensor is not
          * ranging, so there is no frame-ready edge coming -- entering the wait cycle below
-         * would just block on rs_wait_event_usb's 1000 ms timeout every iteration and emit
-         * spurious TRIGGER_TIMEOUT events. Instead keep the transport + command channel
-         * alive and re-loop; the wake command arrives here, and rs_apply_pending_config's
-         * wake arm restarts ranging (start/reinit + trigger) and flips rs_standby_level
+         * would just block on rs_wait_event_usb's (period-derived) timeout every iteration
+         * and emit spurious TRIGGER_TIMEOUT events. Instead keep the transport + command
+         * channel alive and re-loop; the wake command arrives here, and
+         * rs_apply_pending_config's wake arm restarts ranging (start/reinit; autonomous
+         * free-run resumes with no trigger) and flips rs_standby_level
          * back to ACTIVE, at which point the next iteration falls through to the normal
          * cycle. seq_for_calib = g_last_seq (last captured counter) per the EVENT-frame /
          * recovery convention -- no new frame exists while idled. */
@@ -2426,19 +2518,24 @@ void vl53l9_app() {
             if (rs_pending.pending) {
                 (void)rs_apply_pending_config(p_dev, calib_data, out_width, out_height, g_last_seq);
                 /* Return value ignored on purpose: a fault mid-wake already ran
-                 * handle_error()'s recovery (sensor streaming, frame 1 triggered) and the
-                 * wake arm set rs_standby_level = ACTIVE up front, so the next iteration
-                 * simply takes the normal path -- no fault-resume bookkeeping needed here. */
+                 * handle_error()'s recovery (sensor streaming again) and the wake arm
+                 * set rs_standby_level = ACTIVE up front, so the next iteration simply
+                 * takes the normal path -- no fault-resume bookkeeping needed here. */
             }
             HAL_Delay(2); /* gentle idle cadence: keep CPU/USB calm while the laser rests */
             continue;
         }
 
-        /* Wait for data-ready. Same bounded-retry disambiguation as the dual-stream
-         * loop (Task 8): a timeout means either the trigger was lost (re-trigger, with
-         * settle, via rs_trigger_next) or the edge landed after the timeout (poll
-         * FRAME_READY, then fall through and ack, clearing any late edge so it cannot
-         * leak into the next iteration). */
+        /* Wait for data-ready. Task 5: the sensor is free-running (VL53L9_SYNC_AUTONOMOUS)
+         * -- there is no "trigger lost" case anymore, only "no FRAME_READY within budget"
+         * (a genuine fault: a wedged sensor, a dropped I3C transaction) or "the edge landed
+         * between the timeout firing and this check" (a race, not a fault -- poll
+         * FRAME_READY directly and, if it's actually ready, fall through and ack, clearing
+         * any late edge so it cannot leak into the next iteration). The wait timeout is
+         * sized from the CURRENTLY APPLIED frame period (plan step 5) rather than a fixed
+         * 1000 ms: at 90/100 fps a fixed 1000 ms window would silently swallow ~90-100
+         * missed frames before ever declaring a fault, and at manual's 1 fps floor it would
+         * be too tight for genuinely healthy hardware. See rs_ranging_frame_timeout_ms(). */
         int rs_attempts = 0;
         bool rs_fault_recovered = false; /* set when handle_error() ran and recovered
                                            * (never left true across a handle_error()
@@ -2455,12 +2552,13 @@ void vl53l9_app() {
          * which is the end of its integration window and therefore the physical time the
          * depth samples describe. This, not the send-time clock, is what goes in the
          * frame's t_us (armed below, just before the sends). Everything between here and
-         * the sends -- DMA readout, metadata parse, the command poll, the trigger for N+1,
-         * the transmit itself -- is variable-latency work that used to fold into the stamp
-         * and show up as skew against the IMU clock. */
+         * the sends -- DMA readout, metadata parse, the command poll, the transmit itself
+         * -- is variable-latency work that used to fold into the stamp and show up as
+         * skew against the IMU clock. */
         uint64_t rs_ready_us = 0;
+        uint32_t rs_wait_timeout_ms = rs_ranging_frame_timeout_ms(g_active_profile.vendor.frame_period_us);
         for (;;) {
-            ret = rs_wait_event_usb(PLATFORM_GPIO_IT_EVT, 1000);
+            ret = rs_wait_event_usb(PLATFORM_GPIO_IT_EVT, rs_wait_timeout_ms);
             rs_ready_us = g_evt_stamp_us; /* stamped inside the wait, at the interrupt */
             if (ret) {
                 uint8_t rs_is_ready = 0;
@@ -2474,12 +2572,10 @@ void vl53l9_app() {
                         rs_fault_recovered = true;
                         break;
                     }
-                    if (rs_trigger_next(p_dev)) { /* trigger lost: re-trigger (no event to ack) */
-                        rs_send_event(RS_EVT_TRIGGER_TIMEOUT, (uint32_t)rs_attempts, NULL);
-                        handle_error();
-                        rs_fault_recovered = true;
-                        break;
-                    }
+                    /* AUTONOMOUS: nothing to re-trigger -- the sensor free-runs on its
+                     * own schedule regardless of what this loop does. Just keep waiting,
+                     * bounded by rs_attempts above; a real fault still terminates into
+                     * handle_error() within a small, period-scaled number of attempts. */
                     continue;
                 }
             }
@@ -2530,9 +2626,9 @@ void vl53l9_app() {
             continue; /* resume the outer while(1) from a clean iteration */
         }
 
-        ret = rs_wait_event_usb(PLATFORM_I3C_DMA_RX_EVT, 1000);
+        ret = rs_wait_event_usb(PLATFORM_I3C_DMA_RX_EVT, rs_wait_timeout_ms);
         if (ret) {
-            rs_send_event(RS_EVT_DMA_TIMEOUT, 1u, NULL); /* single 1000 ms wait, no
+            rs_send_event(RS_EVT_DMA_TIMEOUT, 1u, NULL); /* single period-scaled wait, no
                                                             * internal retry at this
                                                             * point -- detail is a
                                                             * constant attempt count */
@@ -2558,20 +2654,19 @@ void vl53l9_app() {
         uint32_t rs_counter = (uint32_t)frame.p_metadata->frame_counter;
         g_last_seq = rs_counter; /* EVENT frames from here on carry this as their seq */
 
-        /* Command-channel poll point: BEFORE this iteration's trigger-for-N+1 (moved
-         * here from after it -- see the empirical finding below), after frame N's DMA
-         * readout is fully acked (no I3C transaction in flight) so RX draining and any
-         * reconfig it decides on run with the bus idle. RX never blocks; response TX is
-         * best-effort with bounded worst-case stalls against a wedged host (capped at
-         * RS_CMD_MAX_DISPATCH_PER_POLL dispatches, ~1.2 s ceiling -- see the channel
-         * block comment). PING and SEND_CALIB ack immediately inside; SET_USECASE/
-         * SET_FRAME_PERIOD_US/SET_EXPOSURE_MS/REINIT only validate and stash a pending
-         * request (rs_pending) here -- applied below.
+        /* Command-channel poll point: after frame N's DMA readout is fully acked (no I3C
+         * transaction in flight) so RX draining and any reconfig it decides on run with
+         * the bus idle. RX never blocks; response TX is best-effort with bounded
+         * worst-case stalls against a wedged host (capped at RS_CMD_MAX_DISPATCH_PER_POLL
+         * dispatches, ~1.2 s ceiling -- see the channel block comment). PING and
+         * SEND_CALIB ack immediately inside; SET_USECASE/SET_FRAME_PERIOD_US/
+         * SET_EXPOSURE_MS/REINIT only validate and stash a pending request (rs_pending)
+         * here -- applied below.
          *
-         * ORDERING IS LOAD-BEARING (empirical, Task 4 hardware finding): the original
-         * design called rs_poll_commands()/rs_apply_pending_config() AFTER this
-         * iteration's rs_trigger_next(N+1) (the "trigger-early overlap" position used
-         * every other iteration), on the theory that vl53l9_stop() would simply cancel
+         * ORDERING IS LOAD-BEARING (empirical, Task 4 hardware finding, re-validated for
+         * Task 5's autonomous design): under the ORIGINAL manual-trigger design,
+         * rs_poll_commands()/rs_apply_pending_config() ran AFTER that iteration's
+         * trigger-for-N+1 call, on the theory that vl53l9_stop() would simply cancel
          * whatever trigger was already in flight. On hardware this corrupted the
          * sensor's internal ranging state instead: EVERY reconfig (including a same-
          * profile no-op re-apply -- isolated by testing SET_USECASE 1 while usecase 1
@@ -2581,12 +2676,13 @@ void vl53l9_app() {
          * FSM_STATE_STANDBY, with vl53l9_status_t.error.sof_outside_blanking = 1 and
          * .error.internal_fw = 1 (a firmware-detected internal fault, not a bad register
          * write -- every driver call in the apply sequence itself returned 0/success).
-         * Root cause: vl53l9_stop() while a trigger is genuinely in flight is not a
-         * clean cancel. Moving the poll/apply point to HERE -- after frame N's own
-         * ranging is fully read out and before N+1 is ever triggered -- means
-         * vl53l9_stop() is only ever called with nothing in flight; the fault did not
-         * reproduce after this change (see the task report for the before/after
-         * hardware traces). */
+         * Root cause: vl53l9_stop() while ranging is genuinely in flight is not a clean
+         * cancel. The poll/apply point stays HERE under Task 5's autonomous design --
+         * after frame N's own ranging is fully read out, with nothing else touching the
+         * sensor -- for the same reason: vl53l9_stop() is only ever called with the
+         * sensor genuinely idle (there is no "N+1 trigger" to be ahead of anymore, only
+         * the free-running FSM itself, which vl53l9_stop() gates on
+         * FSM_STATE_STREAMING regardless of sync mode). */
         rs_poll_commands(calib_data, out_width, out_height, rs_counter);
         rs_poll_eth_commands(calib_data, out_width, out_height, rs_counter); /* UDP command channel */
 
@@ -2601,24 +2697,21 @@ void vl53l9_app() {
         }
 
         if (rs_pending.pending) {
-            /* rs_apply_pending_config() triggers its own first frame under whichever
-             * profile ends up active before returning -- this REPLACES the normal
-             * rs_trigger_next(N+1) call below for this iteration. A `true` return means
-             * a fault hit mid-apply and handle_error() already recovered the sensor via
-             * its OWN reinit -- this iteration's frame N send below would be reading
-             * stale/irrelevant buffers, so abandon it and resume the loop fresh (see
-             * the design comment above rs_recover()). */
+            /* rs_apply_pending_config() leaves the sensor free-running (autonomous)
+             * under whichever profile ends up active before returning -- there is no
+             * separate "trigger N+1" step to replace anymore (Task 5). A `true` return
+             * means a fault hit mid-apply and handle_error() already recovered the
+             * sensor via its OWN reinit -- this iteration's frame N send below would be
+             * reading stale/irrelevant buffers, so abandon it and resume the loop fresh
+             * (see the design comment above rs_recover()). */
             if (rs_apply_pending_config(p_dev, calib_data, out_width, out_height, rs_counter)) {
                 continue;
             }
-        } else {
-            /* trigger frame N+1 now (settle enforced inside): the sensor integrates
-             * while the CDC sends below are in flight */
-            if (rs_trigger_next(p_dev)) {
-                handle_error();
-                continue;
-            }
         }
+        /* AUTONOMOUS (Task 5): nothing to trigger here either way -- the sensor free-runs
+         * at g_active_profile's frame_period_us on its own, whether or not a command was
+         * pending this iteration. The CDC/Ethernet sends below simply run concurrently
+         * with whatever ranging the sensor is already doing for frame N+1. */
 
         /* Everything from here to the disarm below describes frame N, so it is stamped with
          * frame N's FRAME_READY instant rather than the moment each send happens. That

@@ -52,34 +52,42 @@ uint8_t rs_ranging_dss_enabled_for_period(uint32_t frame_period_us) {
     return (rs_ranging_fps_from_period(frame_period_us) <= RS_RANGING_DSS_FPS_CEILING) ? 1u : 0u;
 }
 
+uint32_t rs_ranging_frame_timeout_ms(uint32_t frame_period_us) {
+    uint32_t period_ms = frame_period_us / 1000u;
+    uint32_t margin_ms = period_ms * RS_RANGING_TIMEOUT_MARGIN_MULT;
+    return (margin_ms > RS_RANGING_TIMEOUT_FLOOR_MS) ? margin_ms : RS_RANGING_TIMEOUT_FLOOR_MS;
+}
+
 /* Preset table -- exactly host/src/roomscan/profiles.py's PRESETS dict (Table 2.1
  * of the amended spec, reconciled Task 1), in vendor units instead of wire units
  * since this is what actually gets written to hardware. Binning fixed at 2
  * (54x42) for every preset -- plan's global constraint. `.sync` is
- * VL53L9_SYNC_MANUAL directly (not the vendor table's AUTONOMOUS default): this
- * task keeps the existing manual-trigger acquisition loop -- autonomous sync is
- * Task 5 -- and every apply site re-asserts VL53L9_SYNC_MANUAL immediately after
- * anyway, so this is belt-and-braces, not load-bearing on its own. `.id` is the
- * vendor vl53l9_profile_t's own (unused anywhere in the vendor tree) usecase-id
- * field -- left 0, since our host-facing identity is `profile_id` below, not
- * this vendor field. */
+ * VL53L9_SYNC_AUTONOMOUS (Task 5): the production/raw-only acquisition loop no
+ * longer calls vl53l9_trigger_frame() at all -- the sensor free-runs FRAME_READY at
+ * its own configured frame_period_us once started, which is the only way to
+ * actually realize a target FPS (non-negotiable finding #2: frame_period_us is
+ * inert under VL53L9_SYNC_MANUAL). This matches the vendor's own g_ranging_profiles[]
+ * default (vl53l9_utils.c) that this scanner-owned table used to diverge from.
+ * `.id` is the vendor vl53l9_profile_t's own (unused anywhere in the vendor tree)
+ * usecase-id field -- left 0, since our host-facing identity is `profile_id`
+ * below, not this vendor field. */
 static const rs_ranging_profile_t rs_ranging_presets[3] = {
     { /* RS_PROFILE_ROOM_MAPPING: Ambient, DSS on, 30 fps, 6 ms, ULP */
-        .vendor = { .id = 0u, .sync = VL53L9_SYNC_MANUAL, .power = VL53L9_POWER_ULTRA_LOW,
+        .vendor = { .id = 0u, .sync = VL53L9_SYNC_AUTONOMOUS, .power = VL53L9_POWER_ULTRA_LOW,
                     .context = VL53L9_CONTEXT_LONG, .frame_period_us = 33333u, .binning = 2u,
                     .exposure_ms = 6u },
         .profile_id = RS_PROFILE_ROOM_MAPPING,
         .dss_enabled = 1u,
     },
     { /* RS_PROFILE_PRECISION: Precision, DSS on, 30 fps, 10 ms, ULP */
-        .vendor = { .id = 0u, .sync = VL53L9_SYNC_MANUAL, .power = VL53L9_POWER_ULTRA_LOW,
+        .vendor = { .id = 0u, .sync = VL53L9_SYNC_AUTONOMOUS, .power = VL53L9_POWER_ULTRA_LOW,
                     .context = VL53L9_CONTEXT_SHORT, .frame_period_us = 33333u, .binning = 2u,
                     .exposure_ms = 10u },
         .profile_id = RS_PROFILE_PRECISION,
         .dss_enabled = 1u,
     },
     { /* RS_PROFILE_HIGH_FRAMERATE: Precision, DSS off (forced, >60fps), 90 fps, 4 ms, Regular */
-        .vendor = { .id = 0u, .sync = VL53L9_SYNC_MANUAL, .power = VL53L9_POWER_REGULAR,
+        .vendor = { .id = 0u, .sync = VL53L9_SYNC_AUTONOMOUS, .power = VL53L9_POWER_REGULAR,
                     .context = VL53L9_CONTEXT_SHORT, .frame_period_us = 11111u, .binning = 2u,
                     .exposure_ms = 4u },
         .profile_id = RS_PROFILE_HIGH_FRAMERATE,
@@ -133,7 +141,7 @@ uint32_t rs_ranging_validate_manual(const rs_ranging_manual_params_t *params) {
 
 void rs_ranging_manual_candidate(const rs_ranging_manual_params_t *params, rs_ranging_profile_t *out) {
     out->vendor.id = 0u;
-    out->vendor.sync = VL53L9_SYNC_MANUAL;
+    out->vendor.sync = VL53L9_SYNC_AUTONOMOUS; /* Task 5: see the preset table's comment above */
     out->vendor.power = rs_ranging_vendor_power(params->power_mode);
     out->vendor.context = rs_ranging_context_for_wire_mode(params->ranging_mode);
     out->vendor.frame_period_us = params->frame_period_us;

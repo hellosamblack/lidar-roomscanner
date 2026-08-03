@@ -3249,3 +3249,20 @@ the dedicated `set_idle` message → `_dispatch_standby()`, which never routes t
 separate `set_idle` path instead of just using generic `cmd` here in the first place — worth checking
 that history before adding the case, in case there was a reason (e.g. wanting persisted
 enabled/level state that a bare `cmd` round-trip doesn't carry).
+
+## BUG-072 — standby-shadow desync: a failed `vl53l9_stop()` recovery left the loop parked forever
+
+**Status:** fixed (2026-08-03, Task 5 of the high-framerate plan) · **Area:** firmware/scanner-stream ·
+**Found by:** the "one-off first-command-after-flash timeout" flagged in Task 4's hardware pass, which
+reproduced and traced during Task 5's autonomous-sync work.
+
+If a profile-apply's `vl53l9_stop()` failed because the sensor was already standby-parked (e.g. the web
+server's own auto-idle had fired), the recovery path reinitialized the sensor to genuinely STREAMING but
+never resynced `rs_standby_level` — the main loop then stayed in its idle branch forever: RAW/CALIB/
+stream-13 stopped while IMU/env kept flowing at ~18 Hz and ACKs kept reporting OK, so every health
+signal looked alive. Fixed at both call sites (profile-apply stop-failure path and `RS_CMD_REINIT`).
+Sibling fix in the same pass: under autonomous sync, `vl53l9_stop()` returning success only means the
+stop command was *accepted* — the FSM can still read STREAMING for a few ms, failing the next
+STANDBY-gated call on both the candidate write *and* its restore, so no ACK was ever sent (6/6 repro).
+Fixed with `rs_wait_standby()`, a bounded poll of `vl53l9_get_status().fsm` chained onto every stop.
+After both fixes: 12/12 stress switches + 4/4 live 90↔30 switches clean.

@@ -42,6 +42,17 @@
 #define RS_RANGING_FRAME_PERIOD_MIN_US (10000u)   /* vl53l9_set_frame_period()'s own bound */
 #define RS_RANGING_FRAME_PERIOD_MAX_US (1000000u)
 
+/* Per-frame wait-timeout sizing (Task 5, plan step 5): a bounded margin over the
+ * applied frame period, not the old fixed 1000 ms wait. A fixed 1000 ms window at
+ * 90/100 fps would silently absorb ~90-100 missed frames before a genuine fault (a
+ * wedged sensor, a dropped I3C transaction) is ever detected; at 1 fps (manual's
+ * floor) it would fire spuriously on perfectly healthy hardware. MARGIN_MULT/FLOOR_MS
+ * are empirical (Task 5 on-target tuning against real FRAME_READY/DMA jitter, not a
+ * datasheet number) -- see rs_ranging_frame_timeout_ms()'s call sites in
+ * vl53l9_app.c for where GPIO_IT/DMA_RX event waits use this. */
+#define RS_RANGING_TIMEOUT_MARGIN_MULT (4u)
+#define RS_RANGING_TIMEOUT_FLOOR_MS    (60u)
+
 /* Decoded SET_MANUAL_PARAMS (cmd 9) fields, wire units throughout (ranging_mode:
  * RS_RANGING_MODE_*, power_mode: RS_POWER_MODE_*, exposure_ms: integer ms,
  * frame_period_us: round(1e6/fps)) -- mirrors rs_parsed_command_t's `u.manual`
@@ -108,6 +119,13 @@ uint8_t rs_ranging_wire_power(vl53l9_power_mode_t power);
  * inverse of the host's fps_to_period_us()) -- used only to decide the
  * DSS/>60Hz rule below; never sent on the wire itself. */
 uint32_t rs_ranging_fps_from_period(uint32_t frame_period_us);
+
+/* Bounded per-frame event-wait timeout (Task 5, plan step 5): max(FLOOR_MS,
+ * MARGIN_MULT * period_ms). Used for both the FRAME_READY (PLATFORM_GPIO_IT_EVT) and
+ * DMA-complete (PLATFORM_I3C_DMA_RX_EVT) waits in the autonomous acquisition loop --
+ * see vl53l9_app.c. A frame_period_us of 0 (should never occur; g_active_profile is
+ * always seeded before use) resolves to the floor, not a divide-by-zero. */
+uint32_t rs_ranging_frame_timeout_ms(uint32_t frame_period_us);
 
 /* Global constraint: DSS enabled at <=60 fps, forced off above it. */
 uint8_t rs_ranging_dss_enabled_for_period(uint32_t frame_period_us);
