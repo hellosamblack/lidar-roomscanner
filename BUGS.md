@@ -3266,3 +3266,27 @@ stop command was *accepted* — the FSM can still read STREAMING for a few ms, f
 STANDBY-gated call on both the candidate write *and* its restore, so no ACK was ever sent (6/6 repro).
 Fixed with `rs_wait_standby()`, a bounded poll of `vl53l9_get_status().fsm` chained onto every stop.
 After both fixes: 12/12 stress switches + 4/4 live 90↔30 switches clean.
+
+## BUG-073 — rapid reconfiguration near the rate ceiling can drop the ACK entirely (no ACK, no BUSY)
+
+**Status:** open · **Area:** firmware/scanner-stream · **Found by:** the 2026-08-03 frame-rate-ceiling
+investigation, sweeping 90→92→95→97→99→100 Hz manual params back-to-back with ~1 s settle.
+
+Three consecutive `SET_MANUAL_PARAMS` requests (92/95/97 Hz) got neither an ACK nor a BUSY; the next
+(99 Hz) ACKed after 4.7 s with bimodal interval stats. A controlled retest of the same values from a
+settled baseline (2 s settle) succeeded every time, so the trigger is reconfig-before-settle, not the
+values. Points at `rs_apply_pending_config`'s documented `handle_error(); return true;` no-ACK path
+firing when a reconfig lands before the previous one has settled. A host retry recovers, but the
+contract says every accepted command produces exactly one ACK/BUSY. Recheck after the ceiling
+amendment (the shipped preset moves out of the 90–100 Hz band, but manual requests can still go there).
+
+## BUG-074 — SET_STANDBY wake path likely missing the BUG-072 standby-shadow repair
+
+**Status:** open, unconfirmed · **Area:** firmware/scanner-stream · **Found by:** same investigation —
+the ToF stream was found wedged at 0 Hz at session start (IMU/env still free-running ~18.2 Hz, PING
+fine) and `SET_STANDBY(wake=0)` timed out 3× (up to 20 s) while `REINIT` fixed it immediately.
+
+BUG-072 repaired the `rs_standby_level` shadow on the profile-apply stop-failure and REINIT paths, but
+the SET_STANDBY wake path appears not to have the same repair — matching the observed "wake times out,
+REINIT recovers" signature. Check and fix alongside Task 7's work in `vl53l9_app.c` (same file), with a
+wake-after-desync hardware test.
