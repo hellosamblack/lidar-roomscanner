@@ -75,6 +75,10 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-064 | fixed   | host/web      | **"SLAM rendered nothing" — it rendered perfectly and two UI cards covered 97% of it.** In View, `#browser-card` + `#preview-card` sit over the middle of the viewport, which is exactly where the map is drawn; only the 14 px gutter between them showed through. Live never had it (both cards hide when `source != "view"`) |
 | BUG-065 | fixed   | host/web      | `slam.js`'s padded vertex buffers produced a **fractional `BufferAttribute.count`** (36799.666) and therefore **NaN bounding boxes/spheres** on every SLAM mesh — `Math.ceil(needLen * 1.5)` need not be a multiple of `itemSize`, and Three then reads one slot past the end. Invisible only while `frustumCulled = false` holds everywhere |
 | BUG-066 | fixed   | host/web      | `load_capture` hard-coded `ui.mode = "realtime"`, so loading a capture while the display was `slam` broadcast the contradiction `mode: "realtime", display: "slam"` |
+| BUG-067 | open    | host/slam     | **A stationary tripod scan reports 18–20 m of travel and 0.6–1.7 m of net displacement, with zero tracking-lost frames.** `icp_mode="translation"` freezes rotation at the IMU prior, so prior error has no rotational degree of freedom to land in and is absorbed *entirely* as translation — and frame-to-model then integrates the bad pose, making it permanent. Shifting the prior one frame (33 ms) moves drift 0.24 → 1.92 m |
+| BUG-068 | fixed   | host/slam     | The point-to-plane degeneracy guard `_COND_CEILING = 1e8` **can never fire** — worst conditioning ever observed is 203.5, five orders of magnitude below it — so ill-conditioned translation solves are accepted silently at fitness 0.88. The estimate slid 1.2 m in 3 s (43 cm/s) through a wall while reporting a healthy fit |
+| BUG-069 | open    | host/slam     | `StationarityGate` is structurally unable to fire on a tripod pan (`rot_ceiling_deg=0.3` vs the ~1 °/frame of an actual pan), and is **display-only** by construction, so even when it does fire it cannot stop the map from absorbing invented motion |
+| BUG-070 | anomaly | host/slam     | Reported drift is not invariant to a **physically null relabelling of compass heading**: a constant `graft_yaw` offset swings a stationary capture's reported displacement from 0.81 ± 0.53 m (0°) to 2.89 ± 0.14 m (90°), repeatably. This is why Live SLAM (mag-grafted prior) reads ~4× worse than Detailed (raw SFLP prior) on the same bytes |
 
 ---
 
@@ -2971,3 +2975,249 @@ server. But `mode` is the documented compatibility alias, and a stale alias is t
 reads it next — which is the whole shape of BUG-044 (eight `state` echoes dropping capability
 context) one field over. Fixed by deriving it like everywhere else; verified by driving a real
 `load_capture` over `/ws` while the display was `slam` and asserting the echo agrees.
+
+---
+
+## BUG-067 — a stationary tripod scan reports 18–20 m of travel, silently
+
+**Status:** open (architectural — needs a design decision, not a patch) · **Area:** host/slam
+(`slam/odometry.py` `register`, `slam/mapper.py` `step`) · **Found by:** the owner's
+`captures/imuTranslationError.bin`, 2026-08-02: "in ephemeral slam mode it seems to go crazy and
+start moving in different directions; in detailed slam mode it also shows the scanner moving
+through a wall."
+
+The capture is a **tripod** scan — 4 holds and 3 pans, tilt 29.6°→124.4°, up to 156 °/s — so the
+sensor's true translation is the tripod head's lever arm, centimetres. It is also clean: 0 CRC
+failures, 3 lost frames of 3044 (0.1%), so BUG-049 is not in play.
+
+Ensembles of 10 runs each (standard innocuous perturbations), truth ≈ 0:
+
+| prior | max excursion | net | path | tracking-lost |
+|---|---|---|---|---|
+| raw SFLP (Detailed, `_load_frames`) | 0.62 ± 0.37 m | 0.40 ± 0.43 m | 18.0 m | **0 / 3019** |
+| mag-fused (Live, `sensor.fused_quat()`) | 1.69 ± 0.52 m | 1.56 ± 0.57 m | 20.0 m | **0 / 3019** |
+
+**The failure is silent and confident.** Mean ICP fitness is 0.88 in every run and not one frame is
+reported lost. Nothing in the HUD, the metrics, or `Mapper.lost_flags` says the trajectory is
+fabricated — which is the same shape as BUG-035 and BUG-049: the reconstruction is wrong in a way
+the instrument cannot see.
+
+**Mechanism.** `register(mode="translation")` holds rotation at `init_pose`'s rotation — the SFLP
+prior — and solves only 3-DoF translation. There is therefore **no degree of freedom in which a
+rotation-prior error can be expressed as a rotation**; the solver's only way to reduce the
+point-to-plane residual is to move the sensor. Two measurements:
+
+* Per-frame step scales monotonically with angular rate — 3.3 mm/frame below 0.1 °/frame, 7.0 at
+  0.3–1.0, 11.3 at 2–4, 17.9 above 4 (corr 0.40). Drift is concentrated in the pans; the four
+  holds contribute ~2 cm each while one 26 s pan contributes 0.39 m.
+* Shifting the prior by **one frame (33 ms)** moves net drift from 0.24 m to **1.92 m**.
+
+Because SLAM is frame-to-model, each fabricated increment is integrated into the TSDF and becomes
+the reference the next frame is matched against, so the error is latched rather than averaged out.
+
+**Ruled out.** Transport loss (0.1%); the barometer (`baro_authority=0` gives 0.53 vs 0.49 m);
+live frame-drops — decimating to 10 fps and 5 fps makes it *better*, 0.38 and 0.31 m, not worse, so
+`SlamWorker`'s latest-wins slot is not implicated; and empty FOV (97–100% of zones valid
+throughout, mean range 1.25–3.3 m).
+
+**Not fixable by tuning.** The two candidate directions are a genuine zero-velocity constraint (see
+BUG-069, whose gate is both unable to fire here and display-only) and giving the solver a rotational
+degree of freedom with the IMU as a *soft* prior rather than a hard constraint — but `6dof` is
+already disqualified on accuracy by the 2026-08-02 CUDA ICP study (8.0 ± 3.6 m closure vs 0.67), so
+this is a soft-prior design question, not a mode switch. BUG-068 bounds the worst single event but
+does not address this.
+
+**Related, and worth costing first:** BUG-031 measured the SFLP quaternion as leading the depth
+frame by **+7.76 ms**, put `quat_mid_ticks`/`quat_n` on the wire, and applied nothing, noting the
+correction "wants its own before/after on a moving capture". The one-frame-shift number above is
+that sensitivity, and it is large.
+
+**But a sub-frame phase sweep does NOT localize the prior's phase — do not read it as validating
+that correction.** Slerping the prior by α frames (n=5 per point, max excursion):
+
+```
+  alpha    ms        excursion               net
+  -0.50  -16.6   0.502 +/- 0.046    0.230 +/- 0.031
+  -0.25   -8.3   0.496 +/- 0.017    0.234 +/- 0.022
+  +0.00   +0.0   0.752 +/- 0.489    0.546 +/- 0.569
+  +0.25   +8.3   0.523 +/- 0.044    0.339 +/- 0.009
+  +0.50  +16.6   0.519 +/- 0.028    0.360 +/- 0.089
+  +0.75  +25.0   0.565 +/- 0.011    0.314 +/- 0.008
+```
+
+α = −0.25 (−8.3 ms) is the minimum and sits temptingly close to BUG-031's +7.76 ms — but **every**
+non-zero α is better than α = 0, in *both* directions, and all of them collapse the variance
+(sd 0.489 → 0.01–0.05). A genuine phase error would give a one-sided minimum, not a notch at zero.
+What actually distinguishes α = 0 is that it is the only point using a *raw* sample: any α ≠ 0
+interpolates two neighbours, which low-passes the prior. So this measures the benefit of
+**smoothing the rotation prior**, not its phase, and BUG-031's offset remains untested. Worth
+pursuing on its own terms — a filtered prior is cheap and collapsed the instability here — but it
+needs validation on real-motion captures before it goes anywhere near the shipped path.
+
+---
+
+## BUG-068 — the point-to-plane degeneracy guard can never fire
+
+**Status:** fixed 2026-08-03 · **Area:** host/slam (`slam/odometry.py`) · **Found by:** instrumenting
+the 3×3 normal equations while chasing BUG-067, 2026-08-02.
+
+`_translation_icp` guards the translation solve with
+
+```python
+_COND_CEILING = 1e8
+cond = np.linalg.cond(a)
+if not np.isfinite(cond) or cond > _COND_CEILING:
+    return t, fitness, rmse, True     # singular -> caller treats as tracking-lost
+```
+
+Its comment is right about the physics — a planar target makes `A = Σ nᵢnᵢᵀ` rank-deficient and
+in-plane translation genuinely unrecoverable — but **1e8 is not a threshold any real frame can
+reach**. Over 3018 consecutive frames of a room scan the worst conditioning observed is **203.5**
+(median 7.8, p99 39.1). The guard fires on **0** frames; its margin is ~4.9e5× too loose. It is,
+in practice, dead code.
+
+**What it lets through.** At t ≈ 85–95 s of `captures/imuTranslationError.bin` — end of the third
+pan, aimed at a close near-planar surface (mean range 1.25→1.70 m, depth sd 0.44 m) — conditioning
+degrades to median 10.6 / p95 91 / max 203 against 2–9 elsewhere, and the estimate **slides 1.2 m
+in 3 s (43 cm/s)** through a wall, preferentially along the weakest-observability axis (per-frame
+|cos| 0.685 vs 0.549 baseline). Mean fitness across that window is 0.867 and no frame is reported
+lost. Conditioning predicts the damage across the whole capture: mean step is 5.0 mm at cond < 5,
+8.5 at 10–20, 14.0 at 20–50 and **31.0 at 50–200**.
+
+**Why raising the gate's sensitivity is the wrong fix.** Rejection is terminal here: a rejected
+frame is tracking-lost, `predict_pose` freezes translation at `t_prev`, and nothing relocalizes —
+that is precisely BUG-036, where one rejected frame cost 423 frames (22%) of a circuit. Tightening
+`_COND_CEILING` to ~50 would trade a slide for a dead run.
+
+**Fix — cap the effective condition number instead of rejecting.** The eigen-decomposition of the
+(symmetric PSD) normal equations is floored at `λ_max / cond_cap` before the solve, which shrinks
+the correction along directions the geometry cannot observe while leaving observable directions
+**exactly** untouched. Frames whose conditioning is already under the cap take the original
+`np.linalg.solve` path and are bit-identical, so this is a no-op everywhere except the tail it
+targets. The genuinely-singular path (non-finite, or a zero largest eigenvalue) still reports
+`singular=True`.
+
+**Choosing the cap — measured on three captures, not on the failing one.** Matched ensembles
+(n=5, standard perturbations), max excursion; the tripod capture's truth is ~0, the other two are
+real travel:
+
+| `icp_cond_cap` | imuTranslationError | coffeeRoomCircuitNoMnt | roomSweepFull |
+|---|---|---|---|
+| 0 (pre-fix) | 0.752 ± 0.489 | 3.440 ± 0.072 | 3.398 ± 0.207 |
+| 40 | 0.675 ± 0.327 | 3.389 ± 0.024 | 3.498 ± 0.110 |
+| **20 (shipped)** | **0.459 ± 0.074** | **3.406 ± 0.066** | **3.373 ± 0.158** |
+| 10 | 0.454 ± 0.017 | 3.369 ± 0.008 | **2.025 ± 0.371** |
+
+The figure that matters is the tripod capture's **standard deviation**, not its mean: at cap 0 the
+run is bistable (BUG-070) and capping collapses the spread 0.489 → 0.074, i.e. it removes the slide
+rather than shifting an average. Real travel survives — both real-motion captures stay inside their
+own ensemble spread — while their *path length* falls (28.9 → 21.6 m on the circuit) without max
+excursion moving, which is jitter leaving rather than signal. **10 is deliberately not shipped**
+despite scoring best on the tripod: it moves `roomSweepFull`'s reported displacement by 40%, i.e. it
+starts eating real motion, and it damps ~40% of frames where 20 damps ~10% (cond p90 = 19.7).
+
+Tracking-lost count is 0 at every cap on all three captures, and ICP escalations are 0 at every cap,
+so the cap neither kills frames nor suppresses BUG-036's rescue path on real data.
+
+**The cost, stated plainly.** From a single frame, genuine motion along a weakly observed axis and
+an ICP slide are *the same measurement*, so the cap suppresses both. On the test suite's
+cond-207 curved-plane fixture it recovers ~60% of a real in-plane shift (the normal-direction
+component stays exact at every cap). That trade is taken deliberately because it is **asymmetric**:
+an under-recovery is self-correcting, since frame-to-model re-aligns against the map absolutely on
+the next frame, whereas an over-recovery is integrated into the TSDF and is permanent.
+`test_weakly_observable_translation_is_damped_by_the_cap` pins that cost with numbers so retuning
+`_COND_CAP` cannot hide it.
+
+**An unexpected benefit.** The cap also prevents the *divergence* that used to present as a lost
+frame: an in-plane displacement of 0.70 m made the unbounded solve overshoot to −0.76 and then find
+zero correspondences, reporting tracking-lost. Bounded, the same frame registers. This changed
+`test_escalating_rescues_a_frame_the_tight_radius_loses`, whose fixture had been exercising
+escalation *via* that divergence — it now displaces along the plane normal, so its failure is a
+genuine point-to-plane residual that no cap can mask.
+
+**Not a fix for BUG-067 or BUG-070.** The tripod capture still reports 0.459 m of travel it never
+made, and re-running BUG-070's heading sweep with the cap leaves the heading sensitivity intact
+(0° 0.469 ± 0.079, 90° 2.107 ± 0.540). This bounds one failure mode; it does not make the
+translation estimate trustworthy.
+
+---
+
+## BUG-069 — the stationarity gate cannot fire on a tripod, and could not help if it did
+
+**Status:** open · **Area:** host/slam (`slam/motion.py`, `slam/mapper.py` `step`) · **Found by:**
+BUG-067's tripod capture, 2026-08-02.
+
+`StationarityGate` exists to stop the ICP translation estimate random-walking while the sensor sits
+still — the owner's original "device is stationary → model should be too". It has two properties
+that together make it useless for the case it is named after.
+
+**1. It is structurally unable to fire during a pan.** The gate requires mean per-frame rotation
+≤ `rot_ceiling_deg = 0.3`, on the documented reasoning that "during a real scan the user is almost
+always rotating the sensor to aim at the scene, so any appreciable rotation means *actively
+scanning, not still*". A tripod pan is the counterexample that assumption excludes by construction:
+rotation with **zero** translation. The capture's three pans run at 25–31 °/s ≈ 0.8–1.0 °/frame,
+3× over the ceiling, so the gate is off for exactly the 43% of the capture that produces
+essentially all of the drift.
+
+**2. It is display-only, so it could not protect the map anyway.** `Mapper.step` applies a True
+verdict to `report_pose` alone; `self._t_prev` and the TSDF integration always use the raw ICP
+pose. That is deliberate and documented ("a false hold can never corrupt the reconstruction"), and
+it is the right call for a gate that can misfire — but it means the *reconstruction* has no
+zero-velocity constraint at all, only the preview does.
+
+Fixing this is not a threshold change. It needs a discriminator that separates "rotating in place"
+from "rotating while walking" — the coherence test was meant to be it, and `rot_ceiling_deg` was
+added precisely because coherence alone misfired on a scan's curved path. Doing it properly means
+earning the right to let a hold reach the map, which is a bigger change than relaxing a constant.
+
+---
+
+## BUG-070 — reported drift changes by 2 m under a physically null change of compass heading
+
+**Status:** anomaly (reproducible, measured, not root-caused) · **Area:** host/slam · **Found by:**
+isolating why Live SLAM and Detailed disagree on BUG-067's capture, 2026-08-02.
+
+Live SLAM feeds `sensor.fused_quat()` (SFLP with a magnetometer heading graft, +56.8° on this
+capture); Detailed feeds the raw SFLP quat via `_load_frames`. Live reads ~4× worse. The obvious
+explanation — that the mag correction *wanders*, which it does, ±2–3° over the run — **is wrong**:
+a **frozen constant** graft is just as bad (1.81 ± 0.77 m vs the live 1.69 ± 0.52 m).
+
+`graft_yaw` is a pure heading change; verified numerically that boresight tilt and the CV-world
+up-component are preserved to machine precision under grafts of 45/90/180°, and the
+`T_WORLD_TO_CV @ R @ T_CV_TO_BODY` sandwich carries it correctly. So a constant graft relabels
+compass directions and changes no physics. Yet, sweeping it (n=4 each, max excursion):
+
+```
+  0° 0.81 ± 0.53    15° 1.28 ± 0.89    30° 0.81 ± 0.32    45° 1.42 ± 0.61
+ 57° 1.59 ± 0.70    60° 1.37 ± 0.62    75° 2.21 ± 0.62    90° 2.89 ± 0.14   180° 2.84 ± 0.17
+```
+
+**What it is not.** Not the voxel lattice: a 90° rotation about world up maps the cubic lattice onto
+itself, so 0/90/180 would agree, and they do not. Not the barometer: `baro_authority=0` gives 2.77
+at 90° vs 3.02 with it on. Not a tracking failure: 0 lost frames, mean fitness 0.882–0.885 at both
+0° and 90°.
+
+**What it looks like.** The 0° and 90° runs track *identically* (distance-from-origin within 0.1 m)
+until t ≈ 88 s, then 90° slips 0.83 → 2.98 m across the BUG-068 window while 0° does not. So heading
+is not a systematic cause — it biases which side of a **bistable** marginal event the run lands on.
+That a null relabelling can decide a 2 m outcome is the honest measure of how unstable this
+translation estimate is (BUG-067), and it means **any single-run comparison across captures with
+different headings is confounded** — a sharper version of the "score ensembles, not single runs"
+rule from BUG-037.
+
+**BUG-068 did NOT fix it** — the prediction first written here was wrong, and is corrected rather
+than deleted. Re-running the sweep with the shipped conditioning cap (n=4, max excursion):
+
+```
+   heading      cap 0 (pre-fix)     cap 20 (shipped)
+       0°      0.814 +/- 0.529      0.469 +/- 0.079
+      45°      1.421 +/- 0.605      1.454 +/- 0.706
+      57°      1.591 +/- 0.699      0.926 +/- 0.417
+      90°      2.887 +/- 0.141      2.107 +/- 0.540
+     180°      2.844 +/- 0.170      2.409 +/- 0.605
+```
+
+The cap stabilises the 0° case (spread 0.529 → 0.079) and does nothing for the heading dependence
+itself: 45° is unchanged and 90° is still 4.5× the 0° result. So this is a **second, independent**
+defect, not a downstream symptom of BUG-068. Still not root-caused; recorded so a future session
+does not have to rediscover it, and so nobody assumes the conditioning fix covered it.

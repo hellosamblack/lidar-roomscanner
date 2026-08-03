@@ -22,12 +22,85 @@ def _resolve_device(device) -> o3d.core.Device:
     return device if isinstance(device, o3d.core.Device) else o3d.core.Device(device)
 
 
-# Condition-number ceiling for the 3x3 translation normal-equations matrix
+# Condition-number CAP for the 3x3 translation normal-equations matrix
 # A = sum(n_i n_i^T). A perfectly (or near-) planar target has all normals
 # pointing the same way, so A is rank-deficient in the two in-plane
 # directions -- in-plane translation is genuinely unrecoverable from
 # point-to-plane residuals there, not an artifact of a particular solver.
-_COND_CEILING = 1e8
+#
+# BUG-068: this used to be a rejection threshold at 1e8, which no real frame can
+# reach -- over 3018 consecutive frames of a room scan the worst conditioning
+# observed is 203.5 (median 7.8, p99 39.1), so the guard fired on zero frames and
+# was dead code. What it let through: at cond 10-200 the estimate slid 1.2 m in
+# 3 s along the weakest-observability axis, through a wall, at fitness 0.867 and
+# with no frame reported lost.
+#
+# Rejecting harder is the wrong fix -- a rejected frame is tracking-lost,
+# `predict_pose` freezes translation at t_prev and nothing relocalizes, which is
+# exactly BUG-036 (one rejected frame cost 423 frames of a circuit). So instead of
+# refusing to solve, we bound HOW FAR the solve may move along directions the
+# geometry cannot observe: floor the eigenvalues of A at lambda_max / _COND_CAP.
+# Observable directions (eigenvalue already above the floor) are untouched, and a
+# frame whose conditioning is under the cap takes the original solve path and is
+# bit-identical -- see `_solve_translation_step`.
+#
+# 20 was chosen by a matched ensemble sweep (n=5 per point) over three captures,
+# NOT by picking the value that most flatters the failing one. Max excursion,
+# where the tripod capture's truth is ~0 and the other two are real travel:
+#
+#   cond_cap        imuTranslationError    coffeeRoomCircuitNoMnt   roomSweepFull
+#   0 (pre-fix)     0.752 +/- 0.489        3.440 +/- 0.072          3.398 +/- 0.207
+#   40              0.675 +/- 0.327        3.389 +/- 0.024          3.498 +/- 0.110
+#   20  <- shipped  0.459 +/- 0.074        3.406 +/- 0.066          3.373 +/- 0.158
+#   10              0.454 +/- 0.017        3.369 +/- 0.008          2.025 +/- 0.371
+#
+# The number that matters is the STANDARD DEVIATION on the tripod capture, not
+# the mean: at cap 0 the run is bistable (BUG-070) -- some runs survive the
+# ill-conditioned window at t~88 s and some slide 1.2 m -- and capping collapses
+# that spread 0.489 -> 0.074. Real travel is untouched: both real-motion captures
+# stay inside their own ensemble spread, and their path length falls (28.9 -> 21.6 m
+# on the circuit) while max excursion does not, which is jitter leaving, not signal.
+#
+# 10 is deliberately NOT shipped even though it scores best on the tripod: it moves
+# roomSweepFull's reported displacement by 40% (3.398 -> 2.025), i.e. it is eating
+# real motion. It also damps ~40% of frames, where 20 damps ~10% (cond p90 = 19.7),
+# so 20 stays a tail-targeted fix rather than a change to normal operation.
+_COND_CAP = 20.0
+
+
+def _solve_translation_step(a: np.ndarray, b: np.ndarray,
+                            cond_cap: float = _COND_CAP) -> tuple[np.ndarray | None, float]:
+    """Solve the 3x3 point-to-plane normal equations `a dt = b`, bounding the step
+    along directions the geometry cannot observe. Returns (dt, cond); dt is None
+    when `a` is genuinely singular and the caller should report a failed
+    registration.
+
+    Below `cond_cap` this is `np.linalg.solve(a, b)` verbatim -- the eigen path is
+    not taken at all, so well-conditioned frames are bit-identical to the
+    pre-BUG-068 solver. Above it, `a`'s eigenvalues are floored at
+    `lambda_max / cond_cap`, which shrinks dt along the weak directions (dt's
+    component on eigenvector i is (v_i.b)/w_i, so raising a small w_i shrinks it)
+    and leaves every direction already above the floor exactly as it was.
+
+    `cond_cap <= 0` disables the cap, restoring the original unbounded solve.
+    """
+    try:
+        cond = float(np.linalg.cond(a))
+    except np.linalg.LinAlgError:
+        # `cond` runs an SVD, which raises rather than returning inf on a
+        # non-finite matrix. A NaN normal-equations matrix is unsolvable, which
+        # is the same answer as a non-finite condition number.
+        return None, float("inf")
+    if not np.isfinite(cond):
+        return None, cond
+    if cond_cap <= 0.0 or cond <= cond_cap:
+        return np.linalg.solve(a, b), cond
+    w, v = np.linalg.eigh(a)            # ascending; `a` is symmetric PSD by construction
+    w_max = float(w[-1])
+    if not np.isfinite(w_max) or w_max <= 0.0:
+        return None, cond
+    w = np.maximum(w, w_max / cond_cap)
+    return v @ ((v.T @ b) / w), cond
 
 
 @dataclass
@@ -41,14 +114,19 @@ class RegistrationResult:
 def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: np.ndarray,
                      t0: np.ndarray, max_dist: float, max_iter: int,
                      tol: float = 1e-7,
-                     device: str | o3d.core.Device = "CPU:0") -> tuple[np.ndarray, float, float, bool]:
+                     device: str | o3d.core.Device = "CPU:0",
+                     cond_cap: float = _COND_CAP) -> tuple[np.ndarray, float, float, bool]:
     """Iterated closest-point, translation-only, point-to-plane. `rotated_src`
     is the source cloud with the (held-fixed) prior rotation already applied.
     Returns (t, fitness, rmse, singular) -- fitness/rmse mirror Open3D's ICP
     result semantics (fitness = matched_fraction, rmse = RMS of the
     point-to-plane residual among matches); singular=True means the normal
-    equations were too ill-conditioned to trust (e.g. constant-normal planar
-    geometry) and the caller should treat this as a failed registration."""
+    equations were unsolvable (non-finite, or rank zero) and the caller should
+    treat this as a failed registration.
+
+    Merely ill-conditioned geometry is NOT a failure here (BUG-068): the step is
+    bounded by `cond_cap` instead of rejected, because a rejection is terminal --
+    it freezes the pose and nothing relocalizes (BUG-036)."""
     dev = _resolve_device(device)
     n_source = rotated_src.shape[0]
     tgt_t = o3d.core.Tensor(tgt_pts, device=dev)
@@ -78,11 +156,10 @@ def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: 
         rmse = float(np.sqrt(np.mean(r ** 2)))
 
         a = n.T @ n                                       # 3x3 normal equations
-        cond = np.linalg.cond(a)
-        if not np.isfinite(cond) or cond > _COND_CEILING:
-            return t, fitness, rmse, True
         b = -(n * r[:, None]).sum(axis=0)
-        dt = np.linalg.solve(a, b)
+        dt, _cond = _solve_translation_step(a, b, cond_cap)
+        if dt is None:
+            return t, fitness, rmse, True
         t = t + dt
         if np.linalg.norm(dt) < tol:
             break
@@ -92,7 +169,8 @@ def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: 
 def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointCloud,
              init_pose: np.ndarray, mode: str = "translation", max_dist: float = 0.05,
              min_fitness: float = 0.3, max_rmse: float = 0.05,
-             max_iter: int = 6, device: str | o3d.core.Device = "CPU:0") -> RegistrationResult:
+             max_iter: int = 6, device: str | o3d.core.Device = "CPU:0",
+             cond_cap: float = _COND_CAP) -> RegistrationResult:
     # max_iter=6 (Task 9.5): chosen for ACCURACY, not speed. Swept against the
     # real capture (docs/phase6-slam-validation.md "Post-optimization"): trajectory
     # drift is MONOTONICALLY WORSE with more iterations --
@@ -114,7 +192,7 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
         rotated_src = (R @ src_pts.T).T
         t, fitness, rmse, singular = _translation_icp(
             rotated_src, tgt_pts, tgt_normals, init_pose[:3, 3], max_dist, max_iter,
-            device=device)
+            device=device, cond_cap=cond_cap)
         if singular:
             return RegistrationResult(pose=init_pose.copy(), fitness=0.0,
                                       rmse=float("inf"), ok=False)

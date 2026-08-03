@@ -1287,6 +1287,37 @@ channel, barometer as soft 1-DoF Z constraint.
 > **3.6% over 75.3 m**, versus ~3.1% single-room — so drift scales with path length and does **not**
 > compound across rooms, which weakens rather than strengthens the case for loop closure. Fix the
 > transport, re-record DC-B, then evaluate.
+>
+> **⚠️ A second blocker for 6.D, found 2026-08-02: the translation estimate fabricates motion, and
+> says nothing (BUG-067).** The owner's `captures/imuTranslationError.bin` is a **tripod** scan —
+> true translation ≈ the tripod head's lever arm, centimetres — and the pipeline reports **18–20 m of
+> path** and 0.62 ± 0.37 m (Detailed) to 1.69 ± 0.52 m (Live) of net displacement, over 10-run
+> ensembles, with **0 tracking-lost frames and mean fitness 0.88**. The capture is clean (0 CRC, 0.1%
+> loss), so BUG-049 is not involved. `icp_mode = "translation"` holds rotation at the SFLP prior, so
+> rotation-prior error has no rotational degree of freedom to land in and is absorbed *entirely* as
+> translation, then integrated into the TSDF by frame-to-model. Ruled out: barometer, live
+> frame-drops (decimating to 5 fps makes it *better*), empty FOV.
+>
+> **This is upstream of every drift number on this page.** A % -of-path figure is only meaningful if
+> the path is real, and on a stationary rig 100% of it is not. Two of the three defects behind it are
+> open — **BUG-067** (architectural: needs a soft rotation prior or a genuine zero-velocity
+> constraint; `6dof` is already disqualified on accuracy, see 2026-08-02's CUDA ICP study) and
+> **BUG-069** (`StationarityGate` cannot fire during a tripod pan, and is display-only so it could
+> not protect the map if it did). **BUG-068 is fixed** (2026-08-03): the point-to-plane degeneracy
+> guard `_COND_CEILING = 1e8` could never fire — worst conditioning ever observed is 203.5 — and let
+> the estimate slide 1.2 m in 3 s through a wall at fitness 0.87; it is now a **cap** on the effective
+> condition number (`[slam] icp_cond_cap`, default 20) that bounds the step along unobservable
+> directions instead of rejecting the frame, since rejection is terminal (BUG-036). Also open,
+> and independent: **BUG-070**, reported drift is not invariant to a physically null relabelling of
+> compass heading (0.81 m at 0° vs 2.89 m at 90°), which is why Live and Detailed disagree on the
+> same bytes — and which **confounds any single-run comparison across captures with different
+> headings**.
+>
+> Effect of the BUG-068 fix on 6.D's own baseline capture, `coffeeRoomCircuitNoMnt.bin` (n=5):
+> horizontal closure **0.719 ± 0.150 → 0.651 ± 0.077 m**, max excursion unchanged (3.440 → 3.406),
+> path length **28.9 → 21.6 m**. Closure sits inside the previously published 0.74 ± 0.19 m, so the
+> **~3% headline stands**; the path-length drop is jitter leaving the estimate, in the same direction
+> as BUG-037's finding that ~35% of reported path was invented.
 
 > **Orientation accuracy for handheld use (2026-07-29)** — a full pass on the orientation path,
 > triggered by BUG-027's leftover "beat the fp16 floor" item and then **re-prioritised by the owner's

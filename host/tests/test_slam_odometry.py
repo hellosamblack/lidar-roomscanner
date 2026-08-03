@@ -5,11 +5,15 @@ import pytest
 from roomscan.slam.odometry import register, register_escalating, RegistrationResult
 
 
-def _plane_cloud(n=40, z=1.0):
+def _plane_cloud(n=40, z=1.0, curvature=0.15):
     xs, ys = np.meshgrid(np.linspace(-0.5, 0.5, n), np.linspace(-0.4, 0.4, n))
     pts = np.stack([xs.ravel(), ys.ravel(), np.full(xs.size, z)], axis=1).astype(np.float32)
-    # add mild curvature so ICP has translational grip in x and y too
-    pts[:, 2] += 0.15 * (pts[:, 0] ** 2 + pts[:, 1] ** 2)
+    # Curvature is what gives ICP translational grip in x and y. It is also
+    # exactly what sets the conditioning of the 3x3 normal equations, and hence
+    # whether BUG-068's cap engages: 0.15 -> cond 207, 0.30 -> 52, 0.50 -> 19,
+    # 0.80 -> 7.9. The 0.15 default is a WEAKLY observable plane, kept as the
+    # default because several tests below depend on that marginality.
+    pts[:, 2] += curvature * (pts[:, 0] ** 2 + pts[:, 1] ** 2)
     pc = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
     pc.point.positions = o3d.core.Tensor(pts)
     pc.estimate_normals()
@@ -17,7 +21,13 @@ def _plane_cloud(n=40, z=1.0):
 
 
 def test_translation_recovered():
-    target = _plane_cloud()
+    # `curvature=0.8` (cond 7.9) so this pins what its name says -- the solver
+    # recovers a known translation -- rather than doubling as a test of
+    # BUG-068's conditioning cap. The weakly-observable case (the 0.15 default,
+    # cond 207) is covered explicitly by
+    # `test_weakly_observable_translation_is_damped_by_the_cap` below, which
+    # pins the cap's cost instead of hiding it behind a loosened tolerance.
+    target = _plane_cloud(curvature=0.8)
     src_pts = target.point.positions.numpy().copy()
     shift = np.array([0.03, -0.02, 0.04], dtype=np.float32)
     src_pts += shift
@@ -180,12 +190,14 @@ def test_translation_gate_reflects_genuine_translation_fit_not_stale_6dof():
 # --- register_escalating: retry a failed gate at a wider correspondence radius
 
 
-def _far_pair(shift_m):
-    """A source displaced from the target by `shift_m` along x, so the residual
-    is tunable relative to the correspondence radius."""
+def _far_pair(shift_m, axis=0):
+    """A source displaced from the target by `shift_m`, so the residual is
+    tunable relative to the correspondence radius. `axis=0` displaces IN-PLANE
+    (a weakly observable direction); `axis=2` along the plane normal (a genuine,
+    fully observable point-to-plane residual)."""
     target = _plane_cloud()
     src_pts = target.point.positions.numpy().copy()
-    src_pts[:, 0] += shift_m
+    src_pts[:, axis] += shift_m
     source = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
     source.point.positions = o3d.core.Tensor(src_pts)
     return source, target
@@ -217,15 +229,22 @@ def test_escalating_rescues_a_frame_the_tight_radius_loses():
     """The whole point: a displacement that finds no correspondences at 0.05
     must still register once retried wider. This is the single-frame failure
     that killed 423 frames of captures/coffeeRoomCircuitMnt.bin."""
-    source, target = _far_pair(0.70)
+    # Displaced along the plane NORMAL, not in-plane. An in-plane displacement
+    # used to fail the tight radius only because the unbounded solve DIVERGED
+    # past the target (-0.76 for a 0.70 shift) and then found zero
+    # correspondences; BUG-068's cap prevents that divergence, so that fixture
+    # no longer exercises escalation at all. A normal-direction displacement is
+    # a genuine point-to-plane residual: it exceeds 0.05 outright, at any cap.
+    source, target = _far_pair(0.10, axis=2)
     tight = register(source, target, np.eye(4), mode="translation", max_dist=0.05)
     assert not tight.ok, "fixture no longer exercises a tight-radius failure"
+    assert tight.fitness == 0.0, "the failure must be zero correspondences"
 
     res, escalated = register_escalating(source, target, np.eye(4), retry_dist=0.20,
                                          mode="translation", max_dist=0.05)
     assert escalated is True
     assert res.ok
-    assert res.pose[0, 3] == pytest.approx(-0.70, abs=0.02)
+    assert res.pose[2, 3] == pytest.approx(-0.10, abs=0.02)
 
 
 def test_escalating_reports_escalation_even_when_retry_also_fails():
@@ -236,3 +255,125 @@ def test_escalating_reports_escalation_even_when_retry_also_fails():
                                          mode="translation", max_dist=0.05)
     assert escalated is True
     assert not res.ok
+
+
+# ---- BUG-068: conditioning cap on the translation normal equations -----------
+
+def _normals_with_cond(cond_target: float, n: int = 600) -> np.ndarray:
+    """Unit normals whose `N.T @ N` has roughly the requested condition number:
+    a dominant +Z cluster with a controllable in-plane spread."""
+    rng = np.random.default_rng(7)
+    spread = float(np.sqrt(1.0 / max(cond_target, 1.0 + 1e-9)))
+    v = np.tile(np.array([0.0, 0.0, 1.0]), (n, 1)) + spread * rng.normal(size=(n, 3))
+    return v / np.linalg.norm(v, axis=1, keepdims=True)
+
+
+def test_cond_cap_is_a_no_op_below_the_cap():
+    """Well-conditioned frames must be BIT-identical to the pre-BUG-068 solver --
+    the fix targets a tail, and a fix that perturbs every frame is a new
+    variable in every drift measurement the repo has already taken."""
+    from roomscan.slam.odometry import _solve_translation_step
+
+    n = _normals_with_cond(2.0)
+    a, b = n.T @ n, np.array([0.003, -0.007, 0.011])
+    assert np.linalg.cond(a) < 20.0, "fixture must sit below the shipped cap"
+    dt, cond = _solve_translation_step(a, b, cond_cap=20.0)
+    assert np.array_equal(dt, np.linalg.solve(a, b))
+    assert cond == pytest.approx(np.linalg.cond(a))
+
+
+def test_cond_cap_bounds_the_weak_axis_and_leaves_the_observable_one_exact():
+    """Near-planar geometry: the step along the unobservable in-plane directions
+    is suppressed, while the component along the well-observed normal direction
+    is untouched. This is what stops the 1.2 m/3 s slide of BUG-068 without
+    rejecting the frame (rejection is terminal -- BUG-036)."""
+    from roomscan.slam.odometry import _solve_translation_step
+
+    n = _normals_with_cond(5000.0)
+    a, b = n.T @ n, np.array([0.05, -0.04, 0.02])
+    assert np.linalg.cond(a) > 20.0, "fixture must sit above the shipped cap"
+
+    uncapped = np.linalg.solve(a, b)
+    capped, _ = _solve_translation_step(a, b, cond_cap=20.0)
+    assert np.linalg.norm(capped) < 0.25 * np.linalg.norm(uncapped)
+
+    strong = np.linalg.eigh(a)[1][:, -1]        # best-observed direction
+    assert float(capped @ strong) == pytest.approx(float(uncapped @ strong), rel=1e-9)
+
+
+def test_cond_cap_disabled_restores_the_unbounded_solve():
+    """`icp_cond_cap = 0` must reproduce the pre-fix behaviour exactly, so the
+    change can be bisected against and A/B'd without editing code."""
+    from roomscan.slam.odometry import _solve_translation_step
+
+    n = _normals_with_cond(5000.0)
+    a, b = n.T @ n, np.array([0.05, -0.04, 0.02])
+    dt, _ = _solve_translation_step(a, b, cond_cap=0.0)
+    assert np.array_equal(dt, np.linalg.solve(a, b))
+
+
+def test_cond_cap_still_reports_a_genuinely_singular_system():
+    """Capping replaces the ill-conditioned REJECTION, not the unsolvable one:
+    a rank-zero / non-finite system must still come back as a failed
+    registration rather than a silent zero step."""
+    from roomscan.slam.odometry import _solve_translation_step
+
+    b = np.array([1.0, 2.0, 3.0])
+    assert _solve_translation_step(np.zeros((3, 3)), b, cond_cap=20.0)[0] is None
+    assert _solve_translation_step(np.full((3, 3), np.nan), b, cond_cap=20.0)[0] is None
+
+
+def test_ill_conditioned_frame_is_bounded_not_rejected():
+    """End-to-end through `register`: a near-planar target must still return an
+    accepted pose. The old code's only response to bad conditioning was to fail
+    the frame, and a failed frame freezes the pose with no relocalization."""
+    target = _flat_plane_cloud()
+    source = _flat_plane_cloud()
+    source.point.positions = source.point.positions + o3d.core.Tensor(
+        [[0.0, 0.0, 0.004]], dtype=o3d.core.float32)
+    res = register(source, target, np.eye(4), mode="translation", max_dist=0.05)
+    assert isinstance(res, RegistrationResult)
+    # Bounded: the in-plane slide the cap exists to stop must stay small.
+    assert abs(res.pose[0, 3]) < 0.05 and abs(res.pose[1, 3]) < 0.05
+
+
+def test_weakly_observable_translation_is_damped_by_the_cap():
+    """BUG-068's cost, pinned with numbers rather than hidden.
+
+    On a weakly observable plane (the 0.15-curvature fixture, cond 207) the cap
+    under-recovers genuine in-plane motion, because from a single frame a real
+    in-plane displacement and an ICP slide are the SAME measurement. The trade is
+    taken deliberately and it is asymmetric: an under-recovery is self-correcting
+    (the next frame re-aligns against the map absolutely, frame-to-model), while
+    an over-recovery is integrated into the TSDF and is permanent.
+
+    The normal direction -- the one the geometry actually observes -- is exact at
+    every cap. Anyone retuning `_COND_CAP` should see this number move.
+    """
+    target = _plane_cloud()                      # curvature 0.15 -> cond 207
+    shift = np.array([0.03, -0.02, 0.04], dtype=np.float32)
+    source = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
+    source.point.positions = o3d.core.Tensor(target.point.positions.numpy() + shift)
+
+    uncapped = register(source, target, np.eye(4), mode="translation", cond_cap=0.0)
+    assert np.allclose(uncapped.pose[:3, 3], -shift, atol=0.01)
+
+    capped = register(source, target, np.eye(4), mode="translation")   # shipped default
+    assert capped.ok
+    assert capped.pose[2, 3] == pytest.approx(-0.04, abs=1e-3)   # observable: exact
+    # In-plane: recovered but damped, ~60% of truth at cond 207 / cap 20.
+    assert -0.024 < capped.pose[0, 3] < -0.014
+    assert 0.005 < capped.pose[1, 3] < 0.015
+
+
+def test_cap_prevents_the_divergence_that_used_to_present_as_a_lost_frame():
+    """The cap is not purely a cost. An in-plane displacement large enough to
+    make the unbounded solve overshoot the target (-0.76 for a 0.70 m shift)
+    found zero correspondences afterwards and was reported tracking-lost --
+    which freezes the pose with no relocalization. Bounding the step keeps the
+    frame registrable."""
+    source, target = _far_pair(0.70)
+    assert not register(source, target, np.eye(4), mode="translation",
+                        max_dist=0.05, cond_cap=0.0).ok
+    assert register(source, target, np.eye(4), mode="translation",
+                    max_dist=0.05, cond_cap=200.0).pose[0, 3] == pytest.approx(-0.70, abs=0.01)

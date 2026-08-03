@@ -70,6 +70,15 @@ class SlamConfig:
     # Escalating only on failure fixed that run (423 lost -> 0) while leaving a
     # clean run bit-identical (0 escalations). See odometry.register_escalating.
     icp_retry_dist: float = 0.10
+    # Cap on the effective condition number of the 3x3 point-to-plane normal
+    # equations (BUG-068). Below it the solve is unchanged; above it the step is
+    # bounded along the directions the geometry cannot observe, instead of the
+    # frame being rejected -- rejection is terminal here (see icp_retry_dist).
+    # 0 disables the cap, restoring the pre-BUG-068 unbounded solve.
+    # Literal, not an import: `config` must stay Open3D-free. The value is
+    # pinned to `odometry._COND_CAP` by
+    # test_mapper_kwargs_defaults_match_mapper_signature.
+    icp_cond_cap: float = 20.0
     min_fitness: float = 0.3
     max_rmse: float = 0.05
     fov_h: float = 55.0
@@ -227,6 +236,7 @@ class SlamConfig:
             "fov_h": self.fov_h, "fov_v": self.fov_v,
             "icp_mode": self.icp_mode, "voxel_size": self.voxel_size,
             "max_dist": self.max_dist, "icp_retry_dist": self.icp_retry_dist,
+            "icp_cond_cap": self.icp_cond_cap,
             "max_iter": self.max_iter,
             "min_fitness": self.min_fitness, "max_rmse": self.max_rmse,
             "min_confidence": self.min_confidence,

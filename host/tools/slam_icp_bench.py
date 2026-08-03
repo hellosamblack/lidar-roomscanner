@@ -69,12 +69,17 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "host" / "src"))
 
 from roomscan.slam import odometry as _odometry            # noqa: E402
-from roomscan.slam.odometry import RegistrationResult      # noqa: E402
+from roomscan.slam.odometry import (                       # noqa: E402
+    RegistrationResult, _solve_translation_step,
+)
 
 _reg = o3d.t.pipelines.registration
 
 DEFAULT_FRAMES = 400
-_COND_CEILING = _odometry._COND_CEILING
+# Mirror the SHIPPED cap, by reference. This rig exists to profile the shipped
+# pipeline; a rig that quietly keeps the old solver stops doing that (the exact
+# failure recorded on 2026-08-02, when two rigs had drifted off the real path).
+_COND_CAP = _odometry._COND_CAP
 
 
 def _dev(device) -> o3d.core.Device:
@@ -144,11 +149,12 @@ def gpu_translation_icp(src_t: o3d.core.Tensor, tgt_t: o3d.core.Tensor,
         rmse = float(np.sqrt(sq / n_valid))
 
         a = M[:3, :3]                          # sum w n n^T
-        cond = np.linalg.cond(a)
-        if not np.isfinite(cond) or cond > _COND_CEILING:
-            return t, fitness, rmse, True
         b = -M[:3, 3]                          # -sum w n r
-        dt = np.linalg.solve(a, b)
+        # Same conditioning cap as odometry._translation_icp (BUG-068), so the
+        # A/B stays an apples-to-apples comparison of WHERE the work runs.
+        dt, _cond = _solve_translation_step(a, b, _COND_CAP)
+        if dt is None:
+            return t, fitness, rmse, True
         t = t + dt
         if np.linalg.norm(dt) < tol:
             break

@@ -27,7 +27,7 @@ from .cloud import source_cloud
 from .frames import baro_height_m, predict_pose, world_up
 from .intrinsics import pinhole
 from .motion import StationarityGate
-from .odometry import register_escalating
+from .odometry import _COND_CAP, register_escalating
 from .tsdf import DEFAULT_BLOCK_COUNT, TsdfMap
 
 _MIN_VALID_POINTS = 100
@@ -108,6 +108,7 @@ class Mapper:
                  baro_authority: float = 0.05, baro_tau_frames: int = 900,
                  max_dist: float = 0.05,
                  icp_retry_dist: float = 0.10,
+                 icp_cond_cap: float = _COND_CAP,
                  min_fitness: float = 0.3, max_rmse: float = 0.05,
                  max_iter: int = 6,
                  min_confidence: float | None = _DEFAULT_MIN_CONFIDENCE,
@@ -159,6 +160,7 @@ class Mapper:
                              release_cache_every=release_cache_every,
                              block_count=block_count)
         self._gate = dict(max_dist=max_dist, min_fitness=min_fitness, max_rmse=max_rmse,
+                          cond_cap=icp_cond_cap,
                           max_iter=max(1, int(max_iter)))
         self._retry_dist = icp_retry_dist
         # Frames where the tight radius failed and the wider retry was tried.
