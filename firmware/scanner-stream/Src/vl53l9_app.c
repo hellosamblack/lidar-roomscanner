@@ -645,15 +645,16 @@ static int rs_trigger_next(vl53l9_device_t *p_dev) {
  * wedged host already costs the RAW send path. A healthy host drains fast enough that
  * none of these limits are approached (measured: no fps change at ~28 fps).
  *
- * RX accumulation: a small flat buffer (commands are 44 B; a handful fit comfortably)
- * with memmove-compaction after each parse step -- simpler than a true ring buffer at
- * this size and call rate (one poll per ~36 ms frame period), and rs_parse_command's
- * contract (see rs_protocol.h) already does the "how much of the front can I discard"
- * reasoning, so the buffer code here only needs to shuffle bytes, not interpret them.
- * Draining and parsing are interleaved (parse after every read chunk) so a burst of
- * back-to-back commands larger than the buffer -- e.g. 3+ x 44 B in one host write,
- * TinyUSB's 256 B RX FIFO holds them fine -- is consumed command-by-command instead of
- * overflowing and losing a valid frame already at the buffer front. */
+ * RX accumulation: a small flat buffer (commands are 44 or 48 B depending on shape -- see
+ * rs_protocol.h's RS_CMD_FRAME_SIZE_LEGACY/_MANUAL; a handful fit comfortably) with
+ * memmove-compaction after each parse step -- simpler than a true ring buffer at this size
+ * and call rate (one poll per ~36 ms frame period), and rs_parse_command's contract (see
+ * rs_protocol.h) already does the "how much of the front can I discard" reasoning, so the
+ * buffer code here only needs to shuffle bytes, not interpret them. Draining and parsing
+ * are interleaved (parse after every read chunk) so a burst of back-to-back commands
+ * larger than the buffer -- e.g. 3+ commands in one host write, TinyUSB's 256 B RX FIFO
+ * holds them fine -- is consumed command-by-command instead of overflowing and losing a
+ * valid frame already at the buffer front. */
 #define RS_CMD_RX_BUFSIZE (128u)
 
 /* Bounds one poll's worth of command handling (and thus its worst-case TX stall, see
@@ -1050,10 +1051,29 @@ static int rs_boot_bringup(vl53l9_device_t *p_dev, uint8_t *out_calib_data, vl53
  * Lives inside the !CONF_TRANSFORM_ONBOARD guard because only the raw-only loop has a
  * command channel; the dual-stream golden loop would leave it unused. */
 static void rs_send_ack(uint32_t token, uint32_t cmd, uint32_t result, uint32_t applied) {
-    uint8_t payload[12];
+    uint8_t payload[RS_ACK_PAYLOAD_LEN];
     rs_put_u32(payload + 0, cmd);
     rs_put_u32(payload + 4, result);
     rs_put_u32(payload + 8, applied);
+    (void)rs_send_generic_cdc(RS_FRAME_ACK, 0u, token, 0u, payload, sizeof(payload), 0u, 0u);
+}
+
+/* Extended ACK for commands 9 (SET_MANUAL_PARAMS) and 10 (GET_RANGING_CONFIG): the complete
+ * applied/readback ranging configuration after cmd+result (docs/protocol.md #ACK), sent
+ * regardless of `result` so the ACK shape a host decodes never depends on whether the
+ * command succeeded -- only the values do. Task 2 (this commit) is codec/registry only, so
+ * every call site today passes zeros with a non-OK result; Task 4 wires real readback. */
+static void rs_send_ack_ranging_config(uint32_t token, uint32_t cmd, uint32_t result,
+                                       uint8_t ranging_mode, uint32_t frame_period_us,
+                                       uint16_t exposure_ms, uint8_t power_mode) {
+    uint8_t payload[RS_ACK_RANGING_CONFIG_LEN];
+    rs_put_u32(payload + 0, cmd);
+    rs_put_u32(payload + 4, result);
+    payload[8] = ranging_mode;
+    rs_put_u32(payload + 9, frame_period_us);
+    payload[13] = (uint8_t)exposure_ms;
+    payload[14] = (uint8_t)(exposure_ms >> 8);
+    payload[15] = power_mode;
     (void)rs_send_generic_cdc(RS_FRAME_ACK, 0u, token, 0u, payload, sizeof(payload), 0u, 0u);
 }
 
@@ -1154,6 +1174,24 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
             break;
         }
         rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token };
+        break;
+    /* Protocol v2 registry (commands 8-12, docs/protocol.md): codec/registry only in this
+     * commit -- rs_parse_command decodes them cleanly (legacy or manual shape) and they get
+     * a well-formed ACK in their command's registered shape, but nothing is applied to the
+     * sensor yet. Real profile application (Task 4) and IMU/env rate decoupling (Task 7)
+     * replace these stub cases; until then every one of them acks UNKNOWN_CMD. */
+    case RS_CMD_SET_RANGING_PROFILE:
+    case RS_CMD_SET_IMU_ENV_RATE:
+    case RS_CMD_GET_IMU_ENV_RATE:
+        /* Legacy cmd+param ACK shape (RS_ACK_PAYLOAD_LEN) -- same as commands 1-8. */
+        rs_send_ack(token, cmd, RS_RESULT_UNKNOWN_CMD, 0u);
+        break;
+    case RS_CMD_SET_MANUAL_PARAMS:
+    case RS_CMD_GET_RANGING_CONFIG:
+        /* Extended ranging-config ACK shape (RS_ACK_RANGING_CONFIG_LEN) -- see
+         * rs_send_ack_ranging_config's contract: sent even for a non-OK result so the
+         * ACK's wire shape depends only on which command it answers, never on outcome. */
+        rs_send_ack_ranging_config(token, cmd, RS_RESULT_UNKNOWN_CMD, 0u, 0u, 0u, 0u);
         break;
     default:
         rs_send_ack(token, cmd, RS_RESULT_UNKNOWN_CMD, 0u);
@@ -1474,8 +1512,8 @@ static void rs_poll_commands_from(rs_cmd_read_fn read_fn, uint8_t *rx_buf, uint3
         /* Consume everything parseable right now; rs_parse_command reports exactly how
          * many front bytes to drop each step (full contract in rs_protocol.h). */
         while (*p_rx_len > 0 && dispatched < RS_CMD_MAX_DISPATCH_PER_POLL) {
-            uint32_t cmd, param, token;
-            int32_t r = rs_parse_command(rx_buf, *p_rx_len, &cmd, &param, &token);
+            rs_parsed_command_t pc;
+            int32_t r = rs_parse_command(rx_buf, *p_rx_len, &pc);
             if (r == 0) {
                 break; /* candidate pending: wait for more RX bytes */
             }
@@ -1489,7 +1527,13 @@ static void rs_poll_commands_from(rs_cmd_read_fn read_fn, uint8_t *rx_buf, uint3
                 progressed = true;
             }
             if (r > 0) {
-                rs_handle_command(cmd, param, token, calib_data, out_width, out_height, seq_for_calib);
+                /* rs_handle_command's dispatch is still scalar cmd+param (Task 2 is
+                 * codec/registry only -- SET_MANUAL_PARAMS's decoded fields are unused
+                 * until Task 4 wires real application, so pass 0 for its "param"; every
+                 * other command uses the legacy shape's param directly). */
+                uint32_t param = (pc.kind == RS_PARSED_CMD_LEGACY) ? pc.u.legacy.param : 0u;
+                rs_handle_command(pc.cmd, param, pc.token, calib_data, out_width, out_height,
+                                  seq_for_calib);
                 dispatched++;
             } else {
                 rs_malformed_cmd_count++;
@@ -1507,7 +1551,8 @@ static void rs_poll_commands_from(rs_cmd_read_fn read_fn, uint8_t *rx_buf, uint3
                 /* Full buffer the parser cannot advance. Theoretically unreachable: a
                  * full 128 B buffer always yields parser progress (any complete-frame,
                  * false-magic, or no-magic outcome consumes bytes; the only 0-consume
-                 * outcome needs len < RS_CMD_FRAME_SIZE at a front magic). Kept as a
+                 * outcome needs len < RS_CMD_FRAME_SIZE_MANUAL (48, the larger of the two
+                 * shapes) at a front magic). Kept as a
                  * defensive escape: drop ONE byte past the front (preserving any later
                  * magic candidate, unlike a whole-buffer wipe) and count it. */
                 memmove(rx_buf, rx_buf + 1, *p_rx_len - 1u);

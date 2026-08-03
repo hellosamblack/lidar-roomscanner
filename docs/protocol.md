@@ -1,14 +1,20 @@
-# roomscanner wire protocol — v1
+# roomscanner wire protocol — v2
 
 Transport-agnostic binary framing for sensor→host streams. Little-endian throughout.
 One frame = 32-byte header, payload, CRC32. See the `protocol-change` skill before editing.
+
+v2 (2026-08, see "Version history") changed only the COMMAND/ACK registry: five new
+command codes (8-12) and, with them, one new COMMAND payload shape and one new ACK
+payload shape. The 32-byte header and every DATA/EVENT stream are byte-for-byte
+unchanged from v1. A v1 recording still decodes — `FrameHeader.unpack()` accepts either
+version byte, and new encodes use v2 (`roomscan.protocol.SUPPORTED_VERSIONS = (1, 2)`).
 
 ## Frame layout
 
 | Offset | Size | Field         | Notes                                                        |
 |--------|------|---------------|--------------------------------------------------------------|
 | 0      | 4    | `magic`       | ASCII `RSCN` (bytes `52 53 43 4E`)                           |
-| 4      | 1    | `version`     | `1`                                                          |
+| 4      | 1    | `version`     | `1` or `2` (see "Version history"); new encodes use `2`      |
 | 5      | 1    | `frame_type`  | `1` = DATA, `2` = EVENT (device error/log), `3` = COMMAND (host→device), `4` = ACK (device→host) |
 | 6      | 1    | `stream_id`   | see Stream registry below; ignored for COMMAND/ACK           |
 | 7      | 1    | `flags`       | bit0 = DROPPED (DATA/EVENT only); COMMAND/ACK = 0            |
@@ -208,32 +214,69 @@ already restarted ranging by the time it sends this — it exists purely so the 
 
 ## COMMAND frame payload (frame_type = 3)
 
-Host→device commands. Header `seq` = host-chosen token (not a frame counter); `stream_id`, `width`, `height`, `flags` all 0.
+Host→device commands. Header `seq` = host-chosen token (not a frame counter); `stream_id`, `width`, `height`, `flags` all 0. **v2 introduces a second payload shape** — see below; header `payload_len` tells the decoder which shape follows (this is the layout change v2 exists for: v1's fixed 8-byte payload cannot carry SET_MANUAL_PARAMS's fields).
+
+### Legacy shape — commands 1-8, 10, 11, 12 (`payload_len` = 8)
 
 | Offset | Size | Field  | Notes                  |
 |--------|------|--------|------------------------|
 | 0      | 4    | cmd    | u32 LE, see command registry |
-| 4      | 4    | param  | u32 LE, command-specific (e.g. usecase ID, period in µs, exposure in ms) |
+| 4      | 4    | param  | u32 LE, command-specific (e.g. usecase ID, period in µs, exposure in ms, profile enum, rate_hz); ignored for GET_RANGING_CONFIG (10) and GET_IMU_ENV_RATE (12) |
 
-All COMMAND payloads are 8 bytes; header `payload_len` = 8.
+### Manual shape — command 9 (SET_MANUAL_PARAMS) only (`payload_len` = 12)
+
+| Offset | Size | Field             | Notes                  |
+|--------|------|-------------------|------------------------|
+| 0      | 4    | cmd               | u32 LE, always `9` (SET_MANUAL_PARAMS) |
+| 4      | 1    | ranging_mode      | u8, see ranging-mode registry (0 = AMBIENT, 1 = PRECISION) |
+| 5      | 4    | frame_period_us   | u32 LE, `round(1_000_000 / fps)`, integer FPS 1–100 |
+| 9      | 2    | exposure_ms       | u16 LE, **integer milliseconds** (Task 1 finding: the current `vl53l9_set_exposure()` driver takes integer ms; a 0.5 ms step is not implemented by the firmware, so this field and the spec both use whole milliseconds — `RS_EXPOSURE_MS_STEP` / `roomscan.protocol.EXPOSURE_MS_STEP`, both `1`) |
+| 11     | 1    | power_mode        | u8, see power-mode registry (0 = ULP, 1 = LP, 2 = REGULAR) |
+
+No padding on the wire (offsets are cumulative, not struct-aligned): total 12 bytes.
+`roomscan.protocol.pack_manual_command()` / `parse_manual_command()`; firmware
+`rs_parse_command()`'s `RS_PARSED_CMD_MANUAL` branch (`firmware/scanner-stream/Src/rs_protocol.c`).
 
 ## ACK frame payload (frame_type = 4)
 
-Device→host acknowledgement of a COMMAND. Header `seq` = echoes the COMMAND token (not the device's frame counter); `stream_id`, `width`, `height`, `flags` all 0.
+Device→host acknowledgement of a COMMAND. Header `seq` = echoes the COMMAND token (not the device's frame counter); `stream_id`, `width`, `height`, `flags` all 0. **v2 introduces a second payload shape**, selected by which command the ACK answers (not by `result`) — see below.
+
+### Legacy shape — commands 1-8, 11, 12 (`payload_len` = 12)
 
 | Offset | Size | Field   | Notes                  |
 |--------|------|---------|------------------------|
 | 0      | 4    | cmd     | u32 LE, echoes the command code from the COMMAND |
 | 4      | 4    | result  | u32 LE, 0 = OK; nonzero = error (see result-code registry) |
-| 8      | 4    | applied | u32 LE, command-specific: applied value, detail, or info |
+| 8      | 4    | applied | u32 LE, command-specific: applied value, detail, or info. **For 11 (SET_IMU_ENV_RATE) and 12 (GET_IMU_ENV_RATE), `applied` IS the applied `rate_hz`** (0 = coupled) |
 
-ACK payloads are exactly 12 bytes (header `payload_len` = 12); longer payloads are malformed
-and rejected — unlike EVENT's legitimate variable message tail. Future ACK growth would come
-via a new frame revision.
+### Ranging-config shape — commands 9 (SET_MANUAL_PARAMS), 10 (GET_RANGING_CONFIG) (`payload_len` = 16)
+
+| Offset | Size | Field           | Notes                  |
+|--------|------|-----------------|------------------------|
+| 0      | 4    | cmd             | u32 LE, echoes the command code from the COMMAND |
+| 4      | 4    | result          | u32 LE, 0 = OK; nonzero = error (see result-code registry) |
+| 8      | 1    | ranging_mode    | u8, the **applied/readback** ranging mode (see ranging-mode registry) |
+| 9      | 4    | frame_period_us | u32 LE, the applied/readback frame period |
+| 13     | 2    | exposure_ms     | u16 LE, the applied/readback exposure (integer ms) |
+| 15     | 1    | power_mode      | u8, the applied/readback power mode (see power-mode registry) |
+
+The complete applied/readback ranging configuration after `cmd`+`result` — proves what the
+device actually applied rather than echoing the request back at itself. **Sent with this
+16-byte shape regardless of `result`**: a BUSY/BAD_PARAM/SENSOR_ERROR ACK for cmd 9 or 10
+is still 16 bytes (config fields zeroed or holding the prior known-good config, per the
+firmware's implementation), never a shorter payload — the ACK's wire shape depends only on
+which command it answers, so a host can always parse it the same way before even looking at
+`result`. `roomscan.protocol.parse_typed_ack(cmd, payload)` dispatches on `cmd` and returns
+a typed `LegacyAck` or `RangingConfigAck` (not a raw tuple); the older `parse_ack(payload)`
+remains for the always-12-byte legacy shape (commands 1-8, 11, 12) unchanged.
+
+Both ACK shapes are exact — a payload of any other length for the command in question is
+malformed and rejected, unlike EVENT's legitimate variable message tail. Future ACK growth
+(a third shape) would come via a new frame revision.
 
 ### Command registry
 
-| cmd | Name              | param meaning | applied meaning |
+| cmd | Name              | param / payload meaning | applied / ACK meaning |
 |-----|-------------------|---------------|-----------------|
 | 1   | PING              | ignored       | firmware protocol version (u32) |
 | 2   | SEND_CALIB        | ignored       | 0 — device transmits a CALIB frame immediately; lets a late-attaching host obtain calibration immediately instead of waiting the ≤63-frame retransmit cadence (closes ROADMAP's CALIB-on-DTR-connect item when wired in firmware) |
@@ -242,6 +285,35 @@ via a new frame revision.
 | 5   | SET_EXPOSURE_MS   | exposure in ms (u32) | applied exposure (u32) |
 | 6   | REINIT            | ignored       | 0 — the ACK is sent **after** the re-init completes (normally well under the host's 2 s timeout); if the first re-init attempt itself faults, the device enters its bounded recovery ladder (up to ~3.1 s) and may finish successfully after the host has already timed out — hosts must treat a REINIT timeout as "outcome unknown", not "failed" (a late ACK is silently ignored by token matching) |
 | 7   | SET_STANDBY       | standby level (u32): 0 = wake/resume, 1 = soft standby, 2 = hard power-down | standby level now in effect (u32) — echoes param on success. Idles the ToF laser (VCSEL) to reduce wear when no host is viewing. **Soft** (1) = `vl53l9_stop()` → FSM STANDBY: VCSEL stops firing per frame, I3C config/calibration retained, instant resume via wake. **Hard** (2) = additionally `platform_power_disable()` (XSHUT low): sensor fully unpowered; waking re-runs the full re-init cycle (reset → re-address → init → calib → start), so a wake-from-hard ACK is sent **after** that completes (same "outcome unknown on timeout" caveat as REINIT). Applied only at the per-frame safe point (after readout ack, before the next trigger) so `vl53l9_stop()` never races an in-flight trigger. While idled the device streams no DATA frames but keeps servicing the command channel; wake resumes streaming. A wake (0) issued while already active, or a standby issued while already idled at that level, is a harmless no-op ack |
+| 8   | SET_RANGING_PROFILE | profile enum (u32), see profile registry | applied profile enum (u32) — legacy 8-byte COMMAND payload, legacy 12-byte ACK. Presets 0-2 (ROOM_MAPPING/PRECISION/HIGH_FRAMERATE) apply immediately; MANUAL (3) reapplies the **last accepted SET_MANUAL_PARAMS candidate** and is rejected (BAD_PARAM) until one exists. **v2 codec only in this revision — firmware application logic lands in a later phase (ROADMAP Phase "High Frame-Rate Ranging Profiles"); a device running only the v2 codec ACKs UNKNOWN_CMD** |
+| 9   | SET_MANUAL_PARAMS | manual shape (12 B, see above) | ranging-config shape (16 B, see above) — the one command that needed v2: v1's fixed 8-byte payload cannot carry `ranging_mode`+`frame_period_us`+`exposure_ms`+`power_mode` together. Same "codec only in this revision" caveat as cmd 8 |
+| 10  | GET_RANGING_CONFIG | ignored (legacy 8-byte shape) | ranging-config shape (16 B) — the complete current applied ranging configuration, read back from the device rather than assumed; needed to restore authoritative state after a web-server restart or when a second client attaches. Same "codec only in this revision" caveat |
+| 11  | SET_IMU_ENV_RATE  | rate_hz (u32): `0` = coupled to the ToF trigger (**default**, today's behavior, byte-identical framing), `1`–`480` decouples streams 9/10/11 onto their own service tick | applied rate_hz (u32) — legacy 8-byte COMMAND payload, legacy 12-byte ACK (`applied` = rate_hz). A requested rate above the 60 Hz sensor-hub cycle sub-samples stream 10 (env) specifically; streams 9 (quat)/11 (raw) can still hit the requested rate. Rejects > 480 Hz (`RS_IMU_ENV_RATE_MAX_HZ` / `IMU_ENV_RATE_MAX_HZ`). Same "codec only in this revision" caveat as cmd 8 — decoupled draining is a later phase (ROADMAP "Independent IMU/env poll-rate control") |
+| 12  | GET_IMU_ENV_RATE  | ignored (legacy 8-byte shape) | applied rate_hz (u32) and coupled/decoupled state — legacy 12-byte ACK, needed for the same restart/second-client restoration as cmd 10. Same "codec only in this revision" caveat |
+
+### Ranging-profile registry (SET_RANGING_PROFILE param / ACK applied)
+
+| id | Name           |
+|----|----------------|
+| 0  | ROOM_MAPPING   |
+| 1  | PRECISION      |
+| 2  | HIGH_FRAMERATE |
+| 3  | MANUAL         |
+
+### Ranging-mode registry (SET_MANUAL_PARAMS `ranging_mode` / the cmd 9/10 ACK's `ranging_mode`)
+
+| id | Name      | Notes |
+|----|-----------|-------|
+| 0  | AMBIENT   | DSS-assisted, 450 mm min distance |
+| 1  | PRECISION | no DSS, 50 mm min distance |
+
+### Power-mode registry (SET_MANUAL_PARAMS `power_mode` / the cmd 9/10 ACK's `power_mode`)
+
+| id | Name    |
+|----|---------|
+| 0  | ULP     |
+| 1  | LP      |
+| 2  | REGULAR |
 
 ### Result-code registry
 
@@ -354,3 +426,34 @@ specced with the Phase 4 transport work).
   `device_hz`/`host_hz` are computed from in the first place, never from `seq`. IMU_SYNC (13) is
   NOT sent during idle — its meaning ("where THIS ToF frame's edge sits on the LSM clock") has no
   referent without a ToF frame. No layout change to any stream, no version bump.
+- **v2** (2026-08-03): **layout change — version bump.** Five new command codes (8-12,
+  `docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md` Task 2):
+  `SET_RANGING_PROFILE` (8), `SET_MANUAL_PARAMS` (9), `GET_RANGING_CONFIG` (10),
+  `SET_IMU_ENV_RATE` (11), `GET_IMU_ENV_RATE` (12). Commands 8, 10, 11, 12 reuse the
+  existing 8-byte cmd+param COMMAND shape and 12-byte legacy ACK shape unchanged. Command
+  9 (`SET_MANUAL_PARAMS`) needs a 12-byte COMMAND payload (`cmd` + `ranging_mode` u8 +
+  `frame_period_us` u32 + `exposure_ms` u16 + `power_mode` u8) that does not fit v1's
+  fixed 8-byte payload — this is why the version bumped rather than staying additive.
+  Commands 9 and 10 also get a new 16-byte "ranging-config" ACK shape (cmd + result + the
+  same four config fields) so the host gets the complete applied/readback configuration
+  instead of one scalar. The 32-byte frame header, every DATA/EVENT stream, and the
+  legacy 8-byte COMMAND / 12-byte ACK shapes used by commands 1-8/11/12 are all
+  byte-for-byte unchanged; `FrameHeader.unpack()` accepts version 1 or 2
+  (`roomscan.protocol.SUPPORTED_VERSIONS`), so existing v1 recordings still decode, and
+  new encodes use version 2. **This commit is codec/registry only**: the firmware parses
+  all five new commands correctly (`rs_parse_command()` returns a bounded
+  `rs_parsed_command_t` deriving total frame length from the validated header's
+  `payload_len` rather than one fixed 44-byte constant) and ACKs each in its command's
+  registered shape, but every one of them currently ACKs `UNKNOWN_CMD` — no ranging
+  profile or IMU/env rate is actually applied to the sensor yet. Application logic lands
+  in later plan tasks (profile application: Task 4; IMU/env rate decoupling: Task 7).
+  Golden vectors: `golden_depth_2x2_v2.bin` (a v2 DATA frame, version byte 2), the
+  pre-existing `golden_depth_2x2.bin` is deliberately left frozen at version 1 forever
+  (the v1-compat regression vector), plus new `golden_command_manual.bin` and
+  `golden_ack_ranging_config.bin`, all hand-packed independently of `protocol.py`
+  (`host/tests/make_fixtures.py`). New host-compiled C-parser cross-check
+  (`host/tests/test_protocol_c_crosscheck.py`) compiles the real
+  `firmware/scanner-stream/Src/rs_protocol.c` with the system C compiler and drives it
+  via `ctypes` against Python-generated v2 vectors, covering concatenated 44/48-byte
+  commands, a magic split across reads, garbage resync, corrupt CRC, wrong
+  version/frame_type, and a reserved (neither-8-nor-12) `payload_len`.

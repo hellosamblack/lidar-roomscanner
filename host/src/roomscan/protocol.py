@@ -1,4 +1,4 @@
-"""Wire protocol v1 — see docs/protocol.md. Keep in lockstep via protocol-change skill."""
+"""Wire protocol v2 — see docs/protocol.md. Keep in lockstep via protocol-change skill."""
 from __future__ import annotations
 
 import struct
@@ -9,7 +9,13 @@ from enum import IntEnum
 import numpy as np
 
 MAGIC = b"RSCN"
-VERSION = 1
+VERSION = 2
+# v2 changed only the COMMAND/ACK payload registry (new commands 8-12, one new 12-byte
+# COMMAND shape for SET_MANUAL_PARAMS, one new 16-byte ACK shape for commands 9/10). The
+# 32-byte frame header and every DATA/EVENT stream are byte-for-byte unchanged, so a v1
+# recording still decodes: FrameHeader.unpack() accepts either version, new encodes use
+# VERSION (2). See docs/protocol.md "Version history".
+SUPPORTED_VERSIONS = (1, 2)
 HEADER_SIZE = 32
 FLAG_DROPPED = 0x01
 
@@ -58,6 +64,51 @@ class CommandCode(IntEnum):
     SET_EXPOSURE_MS = 5
     REINIT = 6
     SET_STANDBY = 7
+    SET_RANGING_PROFILE = 8   # legacy cmd+param shape; param = ProfileId
+    SET_MANUAL_PARAMS = 9     # v2-only manual shape (see pack_manual_command)
+    GET_RANGING_CONFIG = 10   # legacy cmd+param shape; param ignored
+    SET_IMU_ENV_RATE = 11     # legacy cmd+param shape; param = rate_hz (0 = coupled)
+    GET_IMU_ENV_RATE = 12     # legacy cmd+param shape; param ignored
+
+
+class ProfileId(IntEnum):
+    """SET_RANGING_PROFILE (cmd 8) param / ACK applied. Presets 0-2 apply immediately;
+    MANUAL (3) reapplies the last accepted SET_MANUAL_PARAMS candidate and is rejected
+    until one exists (docs/superpowers/specs/2026-07-31-high-framerate-and-manual-ranging-modes.md
+    section 5.1)."""
+    ROOM_MAPPING = 0
+    PRECISION = 1
+    HIGH_FRAMERATE = 2
+    MANUAL = 3
+
+
+class RangingMode(IntEnum):
+    """SET_MANUAL_PARAMS (cmd 9) `ranging_mode` field, and the same field name in the
+    cmd 9/10 extended ACK. AMBIENT = DSS-assisted, 450 mm min distance; PRECISION =
+    no DSS, 50 mm min distance."""
+    AMBIENT = 0
+    PRECISION = 1
+
+
+class PowerMode(IntEnum):
+    """SET_MANUAL_PARAMS (cmd 9) `power_mode` field, and the same field name in the
+    cmd 9/10 extended ACK."""
+    ULP = 0
+    LP = 1
+    REGULAR = 2
+
+
+# SET_MANUAL_PARAMS (cmd 9) exposure_ms unit: integer milliseconds. Task 1 finding: the
+# current vl53l9_set_exposure() driver takes integer ms; a 0.5 ms step is not implemented
+# by the firmware, so the wire field and the spec both use whole milliseconds — single
+# source of truth for the unit, see docs/protocol.md.
+EXPOSURE_MS_STEP = 1
+
+# SET_IMU_ENV_RATE (cmd 11) param / ACK applied bounds. 0 is the default: one IMU/env
+# sample per ToF trigger, byte-identical to pre-v2 firmware behavior (Task 7 implements
+# the decoupled path; this registry is the codec-level contract).
+IMU_ENV_RATE_COUPLED = 0
+IMU_ENV_RATE_MAX_HZ = 480
 
 
 class StandbyLevel(IntEnum):
@@ -162,7 +213,7 @@ class FrameHeader:
         magic, ver, ftype, stream, flags, seq, t_us, w, h, plen, _res = _HEADER.unpack(buf)
         if magic != MAGIC:
             raise ProtocolError(f"bad magic {magic!r}")
-        if ver != VERSION:
+        if ver not in SUPPORTED_VERSIONS:
             raise ProtocolError(f"unsupported version {ver}")
         return cls(ftype, stream, flags, seq, t_us, w, h, plen)
 
@@ -216,11 +267,146 @@ def parse_ack(payload: bytes) -> tuple[int, int, int]:
 
     ACK payloads are exactly 12 bytes; any other length is malformed (unlike
     EVENT's legitimate variable message tail) and raises ProtocolError.
+
+    This is the legacy raw-tuple decoder (commands 1-8, 11, 12 all use this 12-byte
+    shape; for 11/12 `applied` IS the applied rate_hz). Commands 9 and 10 use a longer,
+    differently-shaped ACK and are NOT decodable with this function — use
+    `parse_typed_ack` instead, which dispatches on the command code and returns a typed
+    `LegacyAck`/`RangingConfigAck` rather than an untyped tuple.
     """
-    if len(payload) != 12:
-        raise ProtocolError(f"ACK payload must be exactly 12 bytes, got {len(payload)}")
+    if len(payload) != ACK_LEGACY_SIZE:
+        raise ProtocolError(f"ACK payload must be exactly {ACK_LEGACY_SIZE} bytes, got {len(payload)}")
     cmd, result, applied = struct.unpack("<III", payload)
     return cmd, result, applied
+
+
+# --- v2 typed COMMAND/ACK codec (SET_MANUAL_PARAMS + the extended ranging-config ACK) -------
+# See docs/protocol.md "COMMAND frame payload" / "ACK frame payload" for the authoritative
+# byte-offset tables. This is the payload-layout change v2 exists for: v1's fixed 8-byte
+# cmd+param COMMAND payload cannot carry SET_MANUAL_PARAMS's four fields.
+
+ACK_LEGACY_SIZE = 12  # cmd(4) + result(4) + applied(4) -- commands 1-8, 11, 12
+
+_MANUAL_PARAMS_FMT = "<IBIHB"  # cmd, ranging_mode, frame_period_us, exposure_ms, power_mode
+MANUAL_PARAMS_PAYLOAD_SIZE = struct.calcsize(_MANUAL_PARAMS_FMT)  # 12
+assert MANUAL_PARAMS_PAYLOAD_SIZE == 12
+
+_RANGING_CONFIG_FMT = "<BIHB"  # ranging_mode, frame_period_us, exposure_ms, power_mode
+RANGING_CONFIG_SIZE = struct.calcsize(_RANGING_CONFIG_FMT)  # 8 -- the config-only portion
+ACK_RANGING_CONFIG_SIZE = 8 + RANGING_CONFIG_SIZE  # cmd(4) + result(4) + config(8) = 16
+assert ACK_RANGING_CONFIG_SIZE == 16
+
+
+@dataclass(frozen=True)
+class ManualParams:
+    """Decoded SET_MANUAL_PARAMS (cmd 9) payload fields, sans the leading cmd word.
+
+    `exposure_ms` is an integer millisecond count (EXPOSURE_MS_STEP; Task 1 finding: no
+    0.5 ms step in the current driver). `ranging_mode`/`power_mode` are the raw wire ints
+    -- construct with `RangingMode`/`PowerMode` members for readability, e.g.
+    `ManualParams(RangingMode.PRECISION, 11_111, 4, PowerMode.REGULAR)`.
+    """
+    ranging_mode: int
+    frame_period_us: int
+    exposure_ms: int
+    power_mode: int
+
+
+def pack_manual_command(params: ManualParams, token: int) -> bytes:
+    """Pack a SET_MANUAL_PARAMS (cmd 9) COMMAND frame.
+
+    Payload: cmd(u32) + ranging_mode(u8) + frame_period_us(u32) + exposure_ms(u16) +
+    power_mode(u8), 12 bytes total, no padding on the wire -- MANUAL_PARAMS_PAYLOAD_SIZE.
+    This is the one COMMAND payload v1 cannot represent (v1's payload is a fixed 8 bytes),
+    which is why protocol v2 exists. Returns the full wire frame (header + payload + CRC).
+    """
+    payload = struct.pack(_MANUAL_PARAMS_FMT, CommandCode.SET_MANUAL_PARAMS,
+                          params.ranging_mode, params.frame_period_us,
+                          params.exposure_ms, params.power_mode)
+    header = FrameHeader(
+        frame_type=FrameType.COMMAND,
+        stream_id=0,
+        flags=0,
+        seq=token,
+        t_us=0,
+        width=0,
+        height=0,
+        payload_len=len(payload),
+    )
+    return pack_frame(header, payload)
+
+
+def parse_manual_command(payload: bytes) -> ManualParams:
+    """Decode a SET_MANUAL_PARAMS COMMAND payload -> ManualParams.
+
+    Device-side counterpart of `pack_manual_command` (the firmware's C decoder is
+    `rs_parse_command`'s RS_PARSED_CMD_MANUAL branch; this exists on the host so the same
+    v2 vectors can be round-tripped and cross-checked in tests). Raises ProtocolError on
+    the wrong length or a payload whose leading cmd word isn't SET_MANUAL_PARAMS.
+    """
+    if len(payload) != MANUAL_PARAMS_PAYLOAD_SIZE:
+        raise ProtocolError(
+            f"SET_MANUAL_PARAMS payload must be {MANUAL_PARAMS_PAYLOAD_SIZE} bytes, "
+            f"got {len(payload)}")
+    cmd, ranging_mode, frame_period_us, exposure_ms, power_mode = struct.unpack(
+        _MANUAL_PARAMS_FMT, payload)
+    if cmd != CommandCode.SET_MANUAL_PARAMS:
+        raise ProtocolError(
+            f"expected SET_MANUAL_PARAMS ({int(CommandCode.SET_MANUAL_PARAMS)}) cmd word, got {cmd}")
+    return ManualParams(ranging_mode, frame_period_us, exposure_ms, power_mode)
+
+
+@dataclass(frozen=True)
+class LegacyAck:
+    """Typed form of the legacy 12-byte ACK (cmd, result, applied) -- commands 1-8, 11,
+    12. For 11 (SET_IMU_ENV_RATE) and 12 (GET_IMU_ENV_RATE) `applied` IS the applied
+    rate_hz (0 = coupled)."""
+    cmd: int
+    result: int
+    applied: int
+
+
+@dataclass(frozen=True)
+class RangingConfigAck:
+    """Typed form of the extended 16-byte ACK -- commands 9 (SET_MANUAL_PARAMS) and 10
+    (GET_RANGING_CONFIG). Carries the complete applied/readback ranging configuration
+    after cmd+result, so the host can prove what the device actually applied instead of
+    echoing the request back at itself. Sent with this shape regardless of `result`
+    (docs/protocol.md): a BUSY/BAD_PARAM/SENSOR_ERROR result still returns 16 bytes, with
+    the config fields either the prior known-good config or zeroed, never a shorter
+    payload -- the ACK's wire shape depends only on which command it answers."""
+    cmd: int
+    result: int
+    ranging_mode: int
+    frame_period_us: int
+    exposure_ms: int
+    power_mode: int
+
+
+_RANGING_CONFIG_ACK_CMDS = frozenset({CommandCode.SET_MANUAL_PARAMS, CommandCode.GET_RANGING_CONFIG})
+
+
+def parse_typed_ack(cmd: int, payload: bytes) -> "LegacyAck | RangingConfigAck":
+    """Typed ACK decode, keyed by the command code the ACK answers.
+
+    Commands 9 (SET_MANUAL_PARAMS) and 10 (GET_RANGING_CONFIG) use the extended 16-byte
+    ranging-config ACK shape; every other command (1-8, 11, 12) uses the legacy 12-byte
+    cmd+result+applied shape. The caller always knows which command it sent, so dispatch
+    is by `cmd`, not by inferring the shape from payload length -- see docs/protocol.md
+    "ACK frame payload" for the exact byte offsets each shape uses.
+    """
+    if cmd in _RANGING_CONFIG_ACK_CMDS:
+        if len(payload) != ACK_RANGING_CONFIG_SIZE:
+            raise ProtocolError(
+                f"ranging-config ACK payload must be {ACK_RANGING_CONFIG_SIZE} bytes, "
+                f"got {len(payload)}")
+        c, result, ranging_mode, frame_period_us, exposure_ms, power_mode = struct.unpack(
+            "<II" + _RANGING_CONFIG_FMT[1:], payload)
+        return RangingConfigAck(c, result, ranging_mode, frame_period_us, exposure_ms, power_mode)
+    if len(payload) != ACK_LEGACY_SIZE:
+        raise ProtocolError(f"ACK payload must be exactly {ACK_LEGACY_SIZE} bytes, got {len(payload)}")
+    c, result, applied = struct.unpack("<III", payload)
+    return LegacyAck(c, result, applied)
 
 
 def decode_imu_quat(payload: bytes) -> tuple[float, float, float, float]:

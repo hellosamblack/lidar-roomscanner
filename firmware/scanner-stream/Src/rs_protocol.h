@@ -1,4 +1,4 @@
-/* Wire protocol v1 — single source of truth: roomscanner/docs/protocol.md.
+/* Wire protocol v2 — single source of truth: roomscanner/docs/protocol.md.
  * HAL-free on purpose: host-compilable for cross-checking against the Python codec. */
 #ifndef RS_PROTOCOL_H
 #define RS_PROTOCOL_H
@@ -6,7 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define RS_PROTO_VERSION     (1u)
+#define RS_PROTO_VERSION     (2u)
 #define RS_HEADER_SIZE       (32u)
 #define RS_FRAME_DATA        (1u)
 #define RS_FRAME_EVENT       (2u)
@@ -56,7 +56,11 @@
 #define RS_EVT_AUTO_WAKE_MOTION    (6u) /* idle-loop self-woke on LSM Wake-Up detection (not a
                                           * host command); detail = WAKE_UP_SRC register byte */
 
-/* COMMAND (RS_FRAME_COMMAND) payload: u32 cmd, u32 param (LE). */
+/* COMMAND (RS_FRAME_COMMAND) payload. Two shapes exist as of v2 (docs/protocol.md #COMMAND):
+ *   - legacy: u32 cmd, u32 param (LE) -- RS_CMD_PAYLOAD_LEN (8) bytes. Commands 1-8, 10, 11, 12.
+ *   - manual: u32 cmd, u8 ranging_mode, u32 frame_period_us, u16 exposure_ms, u8 power_mode (LE,
+ *     no padding on the wire) -- RS_CMD_MANUAL_PAYLOAD_LEN (12) bytes. Command 9 only; the reason
+ *     v2 exists (v1's fixed 8-byte payload cannot carry it). */
 #define RS_CMD_PING                (1u)
 #define RS_CMD_SEND_CALIB          (2u)
 #define RS_CMD_SET_USECASE         (3u)
@@ -64,13 +68,52 @@
 #define RS_CMD_SET_EXPOSURE_MS     (5u)
 #define RS_CMD_REINIT              (6u)
 #define RS_CMD_SET_STANDBY         (7u) /* param: 0 = wake/resume, 1 = soft standby, 2 = hard power-down */
+#define RS_CMD_SET_RANGING_PROFILE (8u)  /* param: RS_PROFILE_* (legacy cmd+param shape) */
+#define RS_CMD_SET_MANUAL_PARAMS   (9u)  /* manual shape -- see above */
+#define RS_CMD_GET_RANGING_CONFIG  (10u) /* param ignored (legacy cmd+param shape) */
+#define RS_CMD_SET_IMU_ENV_RATE    (11u) /* param: rate_hz, 0 = coupled to ToF trigger (default) */
+#define RS_CMD_GET_IMU_ENV_RATE    (12u) /* param ignored (legacy cmd+param shape) */
 
 /* Standby levels (RS_CMD_SET_STANDBY param + ACK applied). */
 #define RS_STANDBY_ACTIVE          (0u) /* streaming (VCSEL firing per frame) */
 #define RS_STANDBY_SOFT            (1u) /* vl53l9_stop() -> FSM STANDBY; VCSEL idle, config kept */
 #define RS_STANDBY_HARD            (2u) /* + platform_power_disable() (XSHUT low); full re-bring-up to wake */
 
-/* ACK (RS_FRAME_ACK) payload: u32 cmd, u32 result, u32 applied (LE). */
+/* SET_RANGING_PROFILE (cmd 8) param / ACK applied. Presets 0-2 apply immediately; MANUAL (3)
+ * reapplies the last accepted SET_MANUAL_PARAMS candidate and is rejected until one exists
+ * (application logic lands in Task 4 -- this registry is the codec-level contract). */
+#define RS_PROFILE_ROOM_MAPPING    (0u)
+#define RS_PROFILE_PRECISION       (1u)
+#define RS_PROFILE_HIGH_FRAMERATE  (2u)
+#define RS_PROFILE_MANUAL          (3u)
+
+/* SET_MANUAL_PARAMS (cmd 9) ranging_mode field (also echoed by the cmd 9/10 ACK). */
+#define RS_RANGING_MODE_AMBIENT    (0u)
+#define RS_RANGING_MODE_PRECISION  (1u)
+
+/* SET_MANUAL_PARAMS (cmd 9) power_mode field (also echoed by the cmd 9/10 ACK). */
+#define RS_POWER_MODE_ULP     (0u)
+#define RS_POWER_MODE_LP      (1u)
+#define RS_POWER_MODE_REGULAR (2u)
+
+/* SET_MANUAL_PARAMS (cmd 9) exposure_ms unit: integer milliseconds, one per LSB (Task 1: the
+ * current vl53l9_set_exposure() driver takes integer ms; a 0.5 ms step is not implemented, so
+ * the spec and this wire field both use whole milliseconds -- see docs/protocol.md). */
+#define RS_EXPOSURE_MS_STEP   (1u)
+
+/* SET_IMU_ENV_RATE (cmd 11) param / ACK applied bounds. 0 is the default: one IMU/env sample
+ * per ToF trigger, byte-identical to pre-v2 firmware behavior. 1-480 decouples streams 9/10/11
+ * onto their own service tick (Task 7); 480 is the LSM6DSV16X XL/GY/SFLP ODR ceiling. */
+#define RS_IMU_ENV_RATE_COUPLED  (0u)
+#define RS_IMU_ENV_RATE_MAX_HZ   (480u)
+
+/* ACK (RS_FRAME_ACK) payload. Two shapes (docs/protocol.md #ACK):
+ *   - legacy: u32 cmd, u32 result, u32 applied (LE) -- RS_ACK_PAYLOAD_LEN (12) bytes. Commands
+ *     1-8, 11, 12. For 11/12 `applied` IS the applied rate_hz.
+ *   - ranging-config: u32 cmd, u32 result, u8 ranging_mode, u32 frame_period_us, u16 exposure_ms,
+ *     u8 power_mode (LE, no padding) -- RS_ACK_RANGING_CONFIG_LEN (16) bytes. Commands 9, 10: the
+ *     complete applied/readback ranging configuration, sent regardless of `result` so the ACK
+ *     shape a host decodes never depends on whether the command succeeded (only the values do). */
 #define RS_RESULT_OK               (0u)
 #define RS_RESULT_UNKNOWN_CMD      (1u)
 #define RS_RESULT_BAD_PARAM        (2u)
@@ -78,9 +121,17 @@
 #define RS_RESULT_SENSOR_ERROR     (4u)
 #define RS_RESULT_BUSY             (5u)
 
-/* Wire size of one inbound COMMAND frame: RS_HEADER_SIZE (32) + cmd/param (8) + CRC32 (4). */
-#define RS_CMD_PAYLOAD_LEN (8u)
-#define RS_CMD_FRAME_SIZE  (RS_HEADER_SIZE + RS_CMD_PAYLOAD_LEN + 4u)
+#define RS_ACK_PAYLOAD_LEN          (12u) /* legacy: cmd, result, applied */
+#define RS_ACK_RANGING_CONFIG_LEN   (16u) /* cmd, result, ranging_mode, frame_period_us,
+                                            * exposure_ms, power_mode */
+
+/* Wire sizes of an inbound COMMAND frame's two payload shapes: RS_HEADER_SIZE (32) + payload +
+ * CRC32 (4). rs_parse_command derives the actual total from the validated header's payload_len
+ * (one of these two values) rather than a single global constant -- see its contract below. */
+#define RS_CMD_PAYLOAD_LEN         (8u)
+#define RS_CMD_MANUAL_PAYLOAD_LEN  (12u)
+#define RS_CMD_FRAME_SIZE_LEGACY   (RS_HEADER_SIZE + RS_CMD_PAYLOAD_LEN + 4u)        /* 44 */
+#define RS_CMD_FRAME_SIZE_MANUAL   (RS_HEADER_SIZE + RS_CMD_MANUAL_PAYLOAD_LEN + 4u) /* 48 */
 
 void rs_put_u32(uint8_t *p, uint32_t v);
 
@@ -91,44 +142,83 @@ void rs_write_header(uint8_t out[RS_HEADER_SIZE], uint8_t frame_type, uint8_t st
                      uint8_t flags, uint32_t seq, uint64_t t_us, uint16_t width,
                      uint16_t height, uint32_t payload_len);
 
+/* Which of the two COMMAND payload shapes rs_parse_command decoded. */
+typedef enum {
+    RS_PARSED_CMD_LEGACY = 0, /* cmd + param (u32) -- commands 1-8, 10, 11, 12 */
+    RS_PARSED_CMD_MANUAL = 1, /* cmd + ranging_mode/frame_period_us/exposure_ms/power_mode --
+                                * command 9 (SET_MANUAL_PARAMS) only */
+} rs_parsed_cmd_kind_t;
+
+/* Bounded parsed-command result. Every field is decoded straight off the validated wire bytes;
+ * `payload_len` and `kind` always agree (payload_len == RS_CMD_PAYLOAD_LEN <=> kind == LEGACY,
+ * payload_len == RS_CMD_MANUAL_PAYLOAD_LEN <=> kind == MANUAL) -- kept as two fields because the
+ * caller usually wants one or the other, not both re-derived. */
+typedef struct {
+    uint8_t  version;      /* header version byte, == RS_PROTO_VERSION (parser rejects others) */
+    uint32_t token;         /* header seq field: host-chosen token, echoed in the ACK */
+    uint32_t cmd;
+    uint32_t payload_len;
+    rs_parsed_cmd_kind_t kind;
+    union {
+        struct {
+            uint32_t param;
+        } legacy;
+        struct {
+            uint8_t  ranging_mode;
+            uint32_t frame_period_us;
+            uint16_t exposure_ms;
+            uint8_t  power_mode;
+        } manual;
+    } u;
+} rs_parsed_command_t;
+
 /* rs_parse_command: pull one COMMAND frame out of the front of an accumulation buffer.
  * Pure buffer parsing, no I/O -- the caller owns RX (tud_cdc_read or anything else) and
  * buffer accumulation/compaction; this function only decides how many bytes at buf[0..len)
  * can be discarded and whether a valid command was found among them.
  *
- * Scans for the 4-byte "RSCN" magic starting at buf[0]. Three outcomes:
+ * Scans for the 4-byte "RSCN" magic starting at buf[0]. Outcomes:
  *
  *   - No magic candidate anywhere in buf: returns -(int32_t)len, i.e. "drop everything"
  *     (up to the last 3 bytes, which are kept in case they are the start of a magic that
  *     completes with the next RX chunk -- so the true drop count can be len-3 in that case).
- *     cmd, param, and token are left untouched.
+ *     *out is left untouched.
  *
- *   - A magic candidate is found at offset k, but fewer than RS_CMD_FRAME_SIZE (44) bytes
- *     remain from k to the end of buf: returns -(int32_t)k. If k == 0 this is 0, meaning
- *     "consume nothing, just wait for more RX bytes before calling again" -- the candidate
- *     is still pending, not yet known good or bad. If k > 0, the garbage strictly before
- *     the candidate is dropped while the candidate itself is kept for next call.
+ *   - A magic candidate is found at offset k, but fewer than RS_HEADER_SIZE (32) bytes
+ *     remain from k to the end of buf: returns -(int32_t)k. The header itself (in
+ *     particular payload_len, which decides how many MORE bytes are needed) cannot be read
+ *     yet, so the candidate is left pending -- not yet known good or bad. If k > 0, the
+ *     garbage strictly before the candidate is dropped while the candidate itself is kept
+ *     for the next call.
  *
- *   - A magic candidate at offset k with >= RS_CMD_FRAME_SIZE bytes available: the header
- *     (version == RS_PROTO_VERSION, frame_type == RS_FRAME_COMMAND, payload_len ==
- *     RS_CMD_PAYLOAD_LEN -- version rejection mirrors the host decoder's symmetric
- *     behavior) and the CRC-32 over bytes [k, k+40) against the trailing u32 LE at
- *     [k+40, k+44) are validated.
- *       - All pass: decodes cmd/param/token (LE) and returns k + RS_CMD_FRAME_SIZE (the
- *         garbage prefix, if any, plus the consumed frame) -- a positive return.
- *       - Any fails: the candidate was a false positive (e.g. "RSCN" bytes inside a
- *         payload) or an incompatible version. Returns -(int32_t)(k + 1): drop the
- *         prefix plus one byte of the candidate, so the next call rescans starting one
- *         byte later (in case the real magic starts there).
+ *   - A magic candidate at offset k with >= RS_HEADER_SIZE bytes available, but its header's
+ *     version/frame_type/payload_len is invalid (version != RS_PROTO_VERSION, frame_type !=
+ *     RS_FRAME_COMMAND, or payload_len is neither RS_CMD_PAYLOAD_LEN nor
+ *     RS_CMD_MANUAL_PAYLOAD_LEN -- the only two shapes any COMMAND legitimately carries):
+ *     returns -(int32_t)(k + 1) -- a false-positive magic (e.g. "RSCN" bytes inside a
+ *     payload) or an incompatible version, so the next call rescans starting one byte later.
+ *
+ *   - A magic candidate at offset k with a validated header whose *implied total length*
+ *     (RS_HEADER_SIZE + payload_len + 4, derived from that payload_len -- NOT one fixed
+ *     global constant, since RS_CMD_PAYLOAD_LEN and RS_CMD_MANUAL_PAYLOAD_LEN imply
+ *     different totals) is not yet fully available: returns -(int32_t)k, same "candidate
+ *     pending" meaning as above.
+ *
+ *   - A magic candidate at offset k with its full implied length available: the CRC-32 over
+ *     bytes [k, k+RS_HEADER_SIZE+payload_len) is checked against the trailing wire u32.
+ *       - Match: decodes cmd/token plus the payload fields into *out (kind selected by
+ *         payload_len) and returns k + (RS_HEADER_SIZE + payload_len + 4) -- a positive
+ *         return.
+ *       - Mismatch: returns -(int32_t)(k + 1), same "false positive, resync one byte in"
+ *         outcome as an invalid header.
  *
  * Caller convention: a POSITIVE return is a decoded command -- consume that many bytes
- * from the front of the accumulation buffer, dispatch the command, no counting. A NEGATIVE
+ * from the front of the accumulation buffer, dispatch *out, no counting. A NEGATIVE
  * return means bytes should still be dropped (consume -return bytes) but nothing was
  * decoded -- the caller should treat this as one resync/malformed event for its counters
  * (regardless of how many bytes were dropped). A ZERO return means: do not drop anything,
  * a candidate may still complete once more RX bytes arrive -- do not count this as
  * malformed. */
-int32_t rs_parse_command(const uint8_t *buf, size_t len, uint32_t *cmd, uint32_t *param,
-                         uint32_t *token);
+int32_t rs_parse_command(const uint8_t *buf, size_t len, rs_parsed_command_t *out);
 
 #endif /* RS_PROTOCOL_H */

@@ -1,4 +1,11 @@
-"""Incremental frame decoder: tolerates garbage, partial reads, and corruption."""
+"""Incremental frame decoder: tolerates garbage, partial reads, and corruption.
+
+Version-agnostic by construction: every check here (magic, header size, payload_len
+bound, CRC) is independent of the protocol version byte. `FrameHeader.unpack()` is the
+one place version acceptance is decided (`roomscan.protocol.SUPPORTED_VERSIONS`), so a
+v1 recording and a live v2 stream decode through the exact same path here -- a v1
+capture replaying after the host moves to v2 is not a special case this module needs to
+know about, only `protocol.py`'s header check."""
 from __future__ import annotations
 
 import struct

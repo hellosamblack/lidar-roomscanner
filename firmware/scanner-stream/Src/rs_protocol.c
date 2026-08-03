@@ -73,8 +73,11 @@ static uint32_t get_u32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-int32_t rs_parse_command(const uint8_t *buf, size_t len, uint32_t *cmd, uint32_t *param,
-                         uint32_t *token) {
+static uint16_t get_u16(const uint8_t *p) {
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+int32_t rs_parse_command(const uint8_t *buf, size_t len, rs_parsed_command_t *out) {
     size_t k;
     int found = 0;
 
@@ -93,8 +96,9 @@ int32_t rs_parse_command(const uint8_t *buf, size_t len, uint32_t *cmd, uint32_t
     }
 
     size_t remaining = len - k;
-    if (remaining < RS_CMD_FRAME_SIZE) {
-        /* candidate pending -- not enough bytes yet to validate it */
+    if (remaining < RS_HEADER_SIZE) {
+        /* candidate pending -- not even a full header yet, so payload_len (which decides
+         * the real total length) cannot be read */
         return -(int32_t)k;
     }
 
@@ -102,19 +106,49 @@ int32_t rs_parse_command(const uint8_t *buf, size_t len, uint32_t *cmd, uint32_t
     uint8_t version = p[4];
     uint8_t frame_type = p[5];
     uint32_t payload_len = get_u32(p + 24);
-    if (version != RS_PROTO_VERSION || frame_type != RS_FRAME_COMMAND ||
-        payload_len != RS_CMD_PAYLOAD_LEN) {
+
+    uint32_t frame_total;
+    rs_parsed_cmd_kind_t kind;
+    if (payload_len == RS_CMD_PAYLOAD_LEN) {
+        frame_total = RS_CMD_FRAME_SIZE_LEGACY;
+        kind = RS_PARSED_CMD_LEGACY;
+    } else if (payload_len == RS_CMD_MANUAL_PAYLOAD_LEN) {
+        frame_total = RS_CMD_FRAME_SIZE_MANUAL;
+        kind = RS_PARSED_CMD_MANUAL;
+    } else {
+        /* neither known COMMAND payload shape: false-positive magic (or an incompatible
+         * payload_len) -- resync one byte in, same as a version/frame_type mismatch */
+        return -(int32_t)(k + 1u);
+    }
+    if (version != RS_PROTO_VERSION || frame_type != RS_FRAME_COMMAND) {
         return -(int32_t)(k + 1u); /* false-positive magic: resync one byte in */
     }
 
-    uint32_t crc_calc = rs_crc32(0u, p, RS_HEADER_SIZE + RS_CMD_PAYLOAD_LEN);
-    uint32_t crc_wire = get_u32(p + RS_HEADER_SIZE + RS_CMD_PAYLOAD_LEN);
+    if (remaining < frame_total) {
+        /* header decoded and shape known, but the body/CRC hasn't fully arrived yet */
+        return -(int32_t)k;
+    }
+
+    uint32_t crc_calc = rs_crc32(0u, p, RS_HEADER_SIZE + payload_len);
+    uint32_t crc_wire = get_u32(p + RS_HEADER_SIZE + payload_len);
     if (crc_calc != crc_wire) {
         return -(int32_t)(k + 1u);
     }
 
-    *cmd = get_u32(p + 32);
-    *param = get_u32(p + 36);
-    *token = get_u32(p + 8); /* header seq field: host-chosen token */
-    return (int32_t)(k + RS_CMD_FRAME_SIZE);
+    out->version = version;
+    out->token = get_u32(p + 8); /* header seq field: host-chosen token */
+    out->cmd = get_u32(p + RS_HEADER_SIZE);
+    out->payload_len = payload_len;
+    out->kind = kind;
+    if (kind == RS_PARSED_CMD_MANUAL) {
+        /* cmd(4) + ranging_mode(1) + frame_period_us(4) + exposure_ms(2) + power_mode(1),
+         * no padding on the wire -- offsets are cumulative from RS_HEADER_SIZE. */
+        out->u.manual.ranging_mode = p[RS_HEADER_SIZE + 4u];
+        out->u.manual.frame_period_us = get_u32(p + RS_HEADER_SIZE + 5u);
+        out->u.manual.exposure_ms = get_u16(p + RS_HEADER_SIZE + 9u);
+        out->u.manual.power_mode = p[RS_HEADER_SIZE + 11u];
+    } else {
+        out->u.legacy.param = get_u32(p + RS_HEADER_SIZE + 4u);
+    }
+    return (int32_t)(k + frame_total);
 }

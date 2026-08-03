@@ -8,8 +8,44 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def golden_depth_2x2() -> bytes:
+    """A frozen v1 capture vector -- DO NOT bump the hardcoded version byte (1) here even
+    though the host now defaults to v2. This fixture's job is to prove an old v1 recording
+    still decodes after the protocol moved on (docs/protocol.md "Version history" v2 entry,
+    host/tests/test_protocol.py's v1-compat tests)."""
     header = struct.pack("<4sBBBBIQHHII", b"RSCN", 1, 1, 0, 0, 7, 123_456_789, 2, 2, 16, 0)
     payload = struct.pack("<4f", 1000.0, 2000.0, 0.0, 500.0)
+    return header + payload + zlib.crc32(header + payload).to_bytes(4, "little")
+
+
+def golden_depth_2x2_v2() -> bytes:
+    """Same DATA frame as golden_depth_2x2(), but with the v2 version byte -- what
+    pack_frame() produces today (VERSION == 2). The header/payload/CRC layout is
+    otherwise byte-for-byte identical; only offset 4 (version) differs from the v1
+    fixture above."""
+    header = struct.pack("<4sBBBBIQHHII", b"RSCN", 2, 1, 0, 0, 7, 123_456_789, 2, 2, 16, 0)
+    payload = struct.pack("<4f", 1000.0, 2000.0, 0.0, 500.0)
+    return header + payload + zlib.crc32(header + payload).to_bytes(4, "little")
+
+
+def golden_command_manual() -> bytes:
+    """One v2 SET_MANUAL_PARAMS (cmd 9) COMMAND frame, hand-packed independently of
+    roomscan.protocol -- the golden-vector point. Payload: cmd(9) + ranging_mode(1 =
+    PRECISION) + frame_period_us(11111, ~90 FPS) + exposure_ms(4) + power_mode(2 =
+    REGULAR), 12 bytes, no padding."""
+    payload = struct.pack("<IBIHB", 9, 1, 11111, 4, 2)
+    # header: COMMAND(3), stream_id=0, seq=token(55), t_us=0, w=h=0, payload_len=12
+    header = struct.pack("<4sBBBBIQHHII", b"RSCN", 2, 3, 0, 0, 55, 0, 0, 0, len(payload), 0)
+    return header + payload + zlib.crc32(header + payload).to_bytes(4, "little")
+
+
+def golden_ack_ranging_config() -> bytes:
+    """One v2 extended ACK (16-byte ranging-config shape) for cmd 10 (GET_RANGING_CONFIG),
+    hand-packed independently of roomscan.protocol. Payload: cmd(10) + result(0 = OK) +
+    ranging_mode(0 = AMBIENT) + frame_period_us(33333, ~30 FPS) + exposure_ms(6) +
+    power_mode(0 = ULP), 16 bytes, no padding."""
+    payload = struct.pack("<IIBIHB", 10, 0, 0, 33333, 6, 0)
+    # header: ACK(4), stream_id=0, seq=token(55), t_us=0, w=h=0, payload_len=16
+    header = struct.pack("<4sBBBBIQHHII", b"RSCN", 2, 4, 0, 0, 55, 0, 0, 0, len(payload), 0)
     return header + payload + zlib.crc32(header + payload).to_bytes(4, "little")
 
 
@@ -100,6 +136,9 @@ def build_sensors_snippet(path):
 if __name__ == "__main__":
     FIXTURES.mkdir(exist_ok=True)
     (FIXTURES / "golden_depth_2x2.bin").write_bytes(golden_depth_2x2())
+    (FIXTURES / "golden_depth_2x2_v2.bin").write_bytes(golden_depth_2x2_v2())
+    (FIXTURES / "golden_command_manual.bin").write_bytes(golden_command_manual())
+    (FIXTURES / "golden_ack_ranging_config.bin").write_bytes(golden_ack_ranging_config())
     (FIXTURES / "golden_imu_raw.bin").write_bytes(golden_imu_raw())
     (FIXTURES / "golden_imu_cal.bin").write_bytes(golden_imu_cal())
     (FIXTURES / "golden_imu_sync.bin").write_bytes(golden_imu_sync())
