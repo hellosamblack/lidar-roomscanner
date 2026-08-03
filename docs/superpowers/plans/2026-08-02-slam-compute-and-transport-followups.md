@@ -148,7 +148,23 @@ previous mesh transmits. Not implemented or benchmarked; treat as follow-up
 unless on-rig verification shows remote SLAM is the active deployment and its
 pose age still violates the contract.
 
-## Item 7 — TSDF saturation polling cleanup (OPEN, low priority)
+## Item 7 — TSDF saturation polling cleanup ✅ DONE (2026-08-02)
+
+`_SATURATION_CHECK_EVERY = 25`, deliberately matching the adjacent
+`_HEADROOM_CHECK_EVERY` because both are the same kind of cost (a device-sync
+hashmap read). The 90% warning, the rehash-headroom guard, and BUG-053's
+`TsdfCapacityError` extraction ceiling are **untouched** — different code paths,
+different constants, and their tests still pin them.
+
+**The cost is stated rather than assumed:** the warning can now fire up to
+`_SATURATION_CHECK_EVERY - 1` = **24 integrates late**. That is safe only because
+the map grows monotonically, so a stride can delay a warning but can never skip
+one, and BUG-035's ~30 frames of headroom at 90% absorbs it. A test drives a fake
+hashmap whose true size crosses 90% at call 30 — not a multiple of 25 — and
+asserts the warning stays silent until the poll at call 50, then fires exactly
+once.
+
+### Original brief (OPEN, low priority)
 
 `TsdfMap.integrate()` calls `_check_saturation()` after every integration, which
 reads the CUDA hashmap size on each call until the 90% warning fires

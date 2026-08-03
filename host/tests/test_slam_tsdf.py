@@ -319,8 +319,11 @@ def test_the_grid_rehashes_to_grow_past_its_initial_block_count():
     assert live_cap > 64, f"hashmap should have rehashed; capacity still {live_cap}"
 
 
-def test_saturation_warns_once_when_the_map_nears_capacity(caplog):
+def test_saturation_warns_once_when_the_map_nears_capacity(monkeypatch, caplog):
     # A capacity small enough that one wall integration blows past 90%.
+    # Cadence pinned to 1 so this test is about the warn-once behaviour, not
+    # the polling stride (that's covered separately below).
+    monkeypatch.setattr(tsdf_mod, "_SATURATION_CHECK_EVERY", 1)
     m = TsdfMap(voxel_size=0.02, depth_max=5.0, block_count=8)
     with caplog.at_level("WARNING"):
         m.integrate(_wall_depth(1.0), pinhole(W, H), np.eye(4))
@@ -332,11 +335,104 @@ def test_saturation_warns_once_when_the_map_nears_capacity(caplog):
     assert "does not grow" not in hits[0].getMessage()
 
 
-def test_no_saturation_warning_with_headroom(caplog):
+def test_no_saturation_warning_with_headroom(monkeypatch, caplog):
+    monkeypatch.setattr(tsdf_mod, "_SATURATION_CHECK_EVERY", 1)
     m = TsdfMap(voxel_size=0.02, depth_max=5.0, block_count=40000)
     with caplog.at_level("WARNING"):
         m.integrate(_wall_depth(1.0), pinhole(W, H), np.eye(4))
     assert not [r for r in caplog.records if "block_count" in r.getMessage()]
+
+
+# ------------------------------------------------------- item 7 (2026-08-02)
+# _check_saturation() now polls the hashmap size on a _SATURATION_CHECK_EVERY
+# stride instead of every integrate() (BUG-035's warning cost was measured at
+# ~5.8us/call, ~0.02s/sweep -- real but not worth paying every call). These
+# pin: the poll actually happens on that cadence and not more often, a
+# threshold crossed BETWEEN polls is still caught (late, not missed) on the
+# very next poll, and the ceiling/capacity-error machinery below is untouched.
+
+
+class _CountingHashmap:
+    """Stands in for `self._vbg.hashmap()`: counts `.size()` calls and reports
+    whatever `size_fn()` says the true block count is *right now* -- letting a
+    test grow the "real" map every simulated integrate while only sampling it
+    on the check's own stride, exactly like the CUDA hashmap being polled less
+    often than the grid actually grows."""
+
+    def __init__(self, size_fn):
+        self._size_fn = size_fn
+        self.query_count = 0
+
+    def size(self):
+        self.query_count += 1
+        return self._size_fn()
+
+
+def _fake_map(block_count, size_fn):
+    m = TsdfMap(voxel_size=0.02, block_count=block_count)
+    hm = _CountingHashmap(size_fn)
+    m._vbg = types.SimpleNamespace(hashmap=lambda: hm)
+    return m, hm
+
+
+def test_check_saturation_polls_the_hashmap_only_every_nth_call():
+    # Far from the 90% threshold the whole time, so only the polling cadence
+    # is under test here, not the warning.
+    m, hm = _fake_map(block_count=1_000_000, size_fn=lambda: 10)
+    n_calls = 3 * tsdf_mod._SATURATION_CHECK_EVERY + 4
+    for _ in range(n_calls):
+        m._check_saturation()
+    assert hm.query_count == n_calls // tsdf_mod._SATURATION_CHECK_EVERY
+
+
+def test_check_saturation_does_not_poll_at_all_before_the_first_stride():
+    m, hm = _fake_map(block_count=1_000_000, size_fn=lambda: 999_999)
+    for _ in range(tsdf_mod._SATURATION_CHECK_EVERY - 1):
+        m._check_saturation()
+    assert hm.query_count == 0
+
+
+def test_saturation_crossing_between_polls_still_warns_but_up_to_a_stride_late(caplog):
+    # The map's TRUE size grows every simulated integrate (3 blocks/call --
+    # driven by the test loop, independent of whether the check samples it),
+    # so it crosses the 90-block threshold (block_count=100) at call 30 --
+    # NOT a multiple of the 25-call stride. The check only samples the
+    # hashmap at calls 25 and 50, so the warning must NOT fire at the true
+    # crossing (30) but MUST fire by the next poll (50): a stride delays the
+    # warning, it does not lose it.
+    true_size = {"n": 0}
+    m, hm = _fake_map(block_count=100, size_fn=lambda: true_size["n"])
+
+    with caplog.at_level("WARNING"):
+        for i in range(1, 51):
+            true_size["n"] = i * 3   # the map's real growth, whether polled or not
+            m._check_saturation()
+            hit = any("block_count" in r.getMessage() for r in caplog.records)
+            if i < 50:
+                assert not hit, f"warned early at call {i} (true crossing is call 30)"
+    hits = [r for r in caplog.records if "block_count" in r.getMessage()]
+    assert len(hits) == 1, "must still warn exactly once after the delayed poll"
+    assert hm.query_count == 2, "polled at calls 25 and 50, not every call"
+
+
+def test_saturation_check_every_matches_the_headroom_check_cadence():
+    # Not load-bearing that these two constants be EQUAL, but they were
+    # deliberately chosen to match (same reasoning: a device-sync hashmap
+    # read, cheap enough to pay every 25 integrates). Pin the value so a
+    # change to either doesn't silently drift from the other, and so this
+    # constant can't quietly regress to "every call" (1) without a test
+    # noticing something changed.
+    assert tsdf_mod._SATURATION_CHECK_EVERY == tsdf_mod._HEADROOM_CHECK_EVERY == 25
+
+
+def test_saturation_check_cadence_is_independent_of_the_headroom_check():
+    # _check_rehash_headroom (CUDA-only, its own counter) must not be
+    # perturbed by _check_saturation's cadence bookkeeping, or vice versa.
+    m, _ = _fake_map(block_count=1_000_000, size_fn=lambda: 10)
+    for _ in range(tsdf_mod._SATURATION_CHECK_EVERY):
+        m._check_saturation()
+    assert m._integrates_since_headroom_check == 0
+    assert m._integrates_since_saturation_check == 0
 
 
 def test_empty_map_extraction_does_not_count_as_an_extraction():

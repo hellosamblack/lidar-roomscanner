@@ -126,6 +126,21 @@ _SATURATION_WARN_FRAC = 0.90
 _REHASH_IMMINENT_FRAC = 0.95
 _HEADROOM_CHECK_EVERY = 25
 
+# Item 7 of docs/superpowers/plans/2026-08-02-slam-compute-and-transport-followups.md
+# (BUG-035 follow-up). BUG-035 measured the hashmap-size read
+# _check_saturation() does on every integrate() at ~5.8us/call, ~0.02s over a
+# full sweep -- not a leading cost -- but there's no reason to pay even that
+# every call when _check_rehash_headroom right below already polls on a
+# 25-integrate stride. Same cadence here, for the same reason.
+#
+# This DELAYS the warning by up to _SATURATION_CHECK_EVERY - 1 integrates past
+# the moment the map actually crosses 90%: the map only grows (never shrinks),
+# so a stride can never cause a MISSED warning, only a late one, worst case 24
+# integrates late. BUG-035's budget -- ~30 frames of headroom at 90% before
+# tracking collapsed -- comfortably absorbs that. State this rather than
+# assuming the stride is free.
+_SATURATION_CHECK_EVERY = 25
+
 
 # Largest active-block count Open3D's marching cubes survives, on EITHER device.
 #
@@ -208,6 +223,7 @@ class TsdfMap:
         self._host_extract_reason: str | None = None
         self.block_resolution = int(block_resolution)
         self._integrates_since_headroom_check = 0
+        self._integrates_since_saturation_check = 0
         self._vbg = o3d.t.geometry.VoxelBlockGrid(
             attr_names=("tsdf", "weight", "color"),
             attr_dtypes=(o3d.core.float32, o3d.core.float32, o3d.core.float32),
@@ -271,12 +287,20 @@ class TsdfMap:
         actionable is "this scan needed more than you configured for it",
         because the run that failed was the one sitting at 97% of its initial
         capacity, while every run given headroom it never had to grow into
-        completed cleanly."""
+        completed cleanly.
+
+        Polled every `_SATURATION_CHECK_EVERY` integrates rather than every
+        one (item 7 of the 2026-08-02 follow-ups plan) -- see that constant's
+        comment for why this is safe to delay but never safe to skip."""
         # Early-out first: this runs on every integrate, and after the warning
         # has fired there is nothing left to do, so don't pay for the hashmap
         # size read (a device sync on CUDA) for the rest of the scan.
         if self._saturation_warned or self.block_count <= 0:
             return
+        self._integrates_since_saturation_check += 1
+        if self._integrates_since_saturation_check < _SATURATION_CHECK_EVERY:
+            return
+        self._integrates_since_saturation_check = 0
         used = int(self._vbg.hashmap().size())
         cap = self.block_count
         if used >= _SATURATION_WARN_FRAC * cap:
