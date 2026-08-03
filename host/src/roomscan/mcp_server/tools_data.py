@@ -583,3 +583,90 @@ def slam_stall_profile(capture: str, frames: int = 1500, device: str = "",
             f"of wall starved; the biggest contributor is the {worst!r} stage. A freeze "
             f"this long stops the broadcaster, plain HTTP, and the SLAM feed alike.")
     return rep
+
+
+@mcp.tool()
+def slam_icp_bench(capture: str = "", what: str = "all", frames: int = 400,
+                   raycast_frames: int = 200, ensemble_n: int = 10,
+                   device: str = "", ab_pairs: int = 4, ab_frames: int = 0,
+                   baseline_icp_device: str = "", candidate_icp_device: str = "CPU:0",
+                   timeout_s: float = 5400.0) -> dict:
+    """Matched device benchmark for the SLAM ICP solve and the raycast round-trips.
+
+    Answers "would moving this to the GPU (or off it) help?" with measurements
+    rather than intuition, on ONE device over the SAME recorded ICP inputs.
+    `what` selects the pass:
+
+    * `api` -- which Open3D 0.19 tensor ops force a host synchronization. Run
+      this FIRST before designing any device-resident code. On the installed
+      build `sum(dim=)`, boolean-mask indexing, `nonzero()`, `.item()`, every
+      linalg entry point AND `nns.hybrid_search` all sync; elementwise ops,
+      `matmul`, `T()`, gathers, `concatenate` and uploads do not. A call
+      returning a device tensor is NOT evidence that no sync happened, which is
+      why this probes against a deep CUDA queue instead of just timing the op.
+    * `icp` -- four solvers on identical (source, model, init) triples recorded
+      from a real replay: the shipped `translation`, Open3D tensor `6dof`, a
+      fully GPU-resident translation solve, and the shipped translation with its
+      NN index on the host. Reports wall time, GIL-held blocking cost, and a
+      per-call equivalence check against the shipped solver (round-off is
+      ~1e-16 m; a real algorithmic difference lands many orders above that).
+    * `raycast` -- the cost of `TsdfMap.raycast()`'s download/mask/re-upload and
+      of `Mapper.step()`'s second download of the same positions just to count
+      them, against a device-resident alternative.
+    * `ensemble` -- accuracy, not speed: a matched perturbation ensemble per
+      variant plus a NON-INFERIORITY gate (paired bootstrap CI inside one
+      standard deviation of the BASELINE ensemble's own closure). Minutes per
+      variant; this is the pass a decision rides on.
+    * `ab` -- interleaved, paired, WHOLE-PIPELINE A/B of `Mapper.icp_device`
+      (item 5): replays the entire capture through the shipped `Mapper` once
+      per arm, `ab_pairs` times, alternating which arm runs first so warm-up
+      and box drift bias both arms equally. Use this, not `icp`, to size the
+      change -- the isolated microbenchmark swung 43% between sessions on
+      identical inputs. Reports the per-pair spread (never one number), a
+      whole-trajectory equivalence check, `tick_share`, and a CPU-load + GPU
+      sample around every arm. `baseline_icp_device` empty = "follow the
+      compute device", i.e. the pre-item-5 behaviour.
+
+    The GPU-resident variant lives in the tool, not in `roomscan.slam.odometry`
+    -- the shipped ICP path is deliberately untouched so a later before/after
+    stays interpretable.
+
+    Runs in a subprocess and never binds the device, but it does allocate a TSDF
+    on the compute device, so it competes with a live `roomscan-web` for the GPU.
+
+    Wraps `host/tools/slam_icp_bench.py::run()`.
+    """
+    import json
+
+    cmd = [str(VENV_PY), str(HOST / "tools" / "slam_icp_bench.py")]
+    if capture:
+        p = (REPO / capture) if not Path(capture).is_absolute() else Path(capture)
+        if not p.is_file():
+            return {"error": f"no such capture: {rel(p)}"}
+        cmd.append(str(p))
+    elif what != "api":
+        return {"error": f"what={what!r} needs a capture; only what='api' runs without one"}
+    cmd += ["--what", what, "--frames", str(frames),
+            "--raycast-frames", str(raycast_frames), "-n", str(ensemble_n),
+            "--ab-pairs", str(ab_pairs),
+            "--candidate-icp-device", candidate_icp_device]
+    if ab_frames:
+        cmd += ["--ab-frames", str(ab_frames)]
+    if baseline_icp_device:
+        cmd += ["--baseline-icp-device", baseline_icp_device]
+    if device:
+        cmd += ["--device", device]
+    try:
+        proc = subprocess.run(cmd, cwd=str(REPO), timeout=timeout_s,
+                              capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "cmd": " ".join(cmd),
+                "error": f"timed out after {timeout_s}s -- lower `frames` or `ensemble_n`"}
+    if proc.returncode != 0:
+        return {"ok": False, "cmd": " ".join(cmd), "returncode": proc.returncode,
+                "stdout": proc.stdout[-2000:], "stderr": proc.stderr[-2000:]}
+    # The tool prints progress lines before the JSON body on the ensemble pass.
+    body = proc.stdout[proc.stdout.index("{"):]
+    rep = json.loads(body)
+    rep["ok"] = True
+    return rep

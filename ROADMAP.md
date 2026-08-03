@@ -142,7 +142,7 @@ not necessarily to every later phase of the product.
 
 | Status | Documents | Roadmap tracking |
 | --- | --- | --- |
-| **Active** | [orientation / eCompass resume](docs/superpowers/plans/2026-07-29-orientation-resume.md)<br>[high-frame-rate plan](docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md)<br>[Live/View + Detailed plan](docs/superpowers/plans/2026-07-31-web-live-view-detailed.md)<br>[high-frame-rate specification](docs/superpowers/specs/2026-07-31-high-framerate-and-manual-ranging-modes.md)<br>[Live/View + Detailed specification](docs/superpowers/specs/2026-07-31-web-live-view-detailed-design.md)<br>[Rerun observability sidecar](docs/superpowers/specs/2026-08-02-rerun-observability-sidecar-design.md) | Phase 3 high-rate/manual follow-up; Phase 6 orientation/DC-E, Detailed-SLAM follow-ups, and sub-phase 6.J. |
+| **Active** | [orientation / eCompass resume](docs/superpowers/plans/2026-07-29-orientation-resume.md)<br>[high-frame-rate plan](docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md)<br>[Live/View + Detailed plan](docs/superpowers/plans/2026-07-31-web-live-view-detailed.md)<br>[high-frame-rate specification](docs/superpowers/specs/2026-07-31-high-framerate-and-manual-ranging-modes.md)<br>[Live/View + Detailed specification](docs/superpowers/specs/2026-07-31-web-live-view-detailed-design.md)<br>[Rerun observability sidecar](docs/superpowers/specs/2026-08-02-rerun-observability-sidecar-design.md)<br>[SLAM compute & transport follow-ups](docs/superpowers/plans/2026-08-02-slam-compute-and-transport-followups.md)<br>[matched CUDA ICP / raycast study](docs/superpowers/plans/2026-08-02-cuda-icp-study.md) | Phase 3 high-rate/manual follow-up; Phase 6 orientation/DC-E, Detailed-SLAM follow-ups, sub-phase 6.J, and the BUG-061 compute/transport follow-ups. The ICP study is **complete** (items 4 + 5 landed 2026-08-02) and stays listed here because its "closed questions" — no GPU-resident solve, never `6dof` — are the reason not to re-open them. |
 | **Completed plans** | [Phase 1 binary protocol + visualizer](docs/superpowers/plans/completed/2026-07-07-phase1-binary-protocol-visualizer.md)<br>[Phase 2 raw streaming + PC transform](docs/superpowers/plans/completed/2026-07-08-phase2-raw-streaming-pc-transform.md)<br>[Phase 2.5 color/FoV/overlap](docs/superpowers/plans/completed/2026-07-08-phase2.5-color-fov-overlap.md)<br>[Phase 3 runtime configuration](docs/superpowers/plans/completed/2026-07-08-phase3-runtime-config-robustness.md)<br>[IKS4A1 HUB1 I3C](docs/superpowers/plans/completed/2026-07-09-iks4a1-hub1-multidevice-i3c.md)<br>[LSM orientation/env panel](docs/superpowers/plans/completed/2026-07-09-lsm6dsv16x-orientation-env-panel.md)<br>[Phase 3.5 GUI panel](docs/superpowers/plans/completed/2026-07-09-phase3.5-gui-panel.md)<br>[surface interpolation design](docs/superpowers/plans/completed/2026-07-09-surface-interpolation-design.md)<br>[surface interpolation implementation](docs/superpowers/plans/completed/2026-07-09-surface-interpolation-implementation.md)<br>[magnetometer yaw correction](docs/superpowers/plans/completed/2026-07-10-lsm6dsv16x-mag-yaw-correction.md)<br>[Phase 6 core SLAM](docs/superpowers/plans/completed/2026-07-10-phase6-slam.md)<br>[live-view FPS](docs/superpowers/plans/completed/2026-07-13-live-view-fps.md)<br>[panel UI redesign](docs/superpowers/plans/completed/2026-07-14-panel-ui-redesign.md) | Phases 1–4 and completed Phase 6 sub-work; desktop-panel work is historical because the web UI is primary. |
 | **Completed specifications** | [LSM orientation/env](docs/superpowers/specs/completed/2026-07-09-lsm6dsv16x-orientation-env-panel-design.md)<br>[magnetometer yaw correction](docs/superpowers/specs/completed/2026-07-10-lsm6dsv16x-mag-yaw-correction-design.md)<br>[Phase 6 core SLAM](docs/superpowers/specs/completed/2026-07-10-phase6-slam-design.md)<br>[viewer metrics HUD](docs/superpowers/specs/completed/2026-07-10-viewer-metrics-hud-design.md)<br>[live-view FPS](docs/superpowers/specs/completed/2026-07-13-live-view-fps-design.md)<br>[panel UI redesign](docs/superpowers/specs/completed/2026-07-13-panel-ui-redesign-design.md)<br>[vendored external dependencies](docs/superpowers/specs/completed/2026-07-15-vendor-external-deps-design.md)<br>[Web Phase 1 core instrument](docs/superpowers/specs/completed/2026-07-15-web-phase1-core-instrument-design.md)<br>[Web Phase 2 sensors](docs/superpowers/specs/completed/2026-07-16-web-phase2-sensors-design.md)<br>[Web Phase 3 recording/playback](docs/superpowers/specs/completed/2026-07-16-web-phase3-recording-playback-design.md)<br>[Web Phase 4 SLAM](docs/superpowers/specs/completed/2026-07-16-web-phase4-slam-design.md)<br>[3D mag-cal feedback](docs/superpowers/specs/completed/2026-07-29-magcal-3d-feedback-design.md) | Completed Phase 4 / Web / Phase 6 foundations and their measured outcomes are recorded in the corresponding phase sections below. |
 | **Deprecated** | [GPU container service plan](docs/superpowers/plans/deprecated/2026-07-13-slam-gpu-container-service.md)<br>[GPU container service design](docs/superpowers/specs/deprecated/2026-07-13-slam-gpu-container-service-design.md) | Superseded by in-process local CUDA:0; the optional remote backend remains documented only as legacy support. |
@@ -1026,8 +1026,37 @@ because the tests asserted the value was a *float*).
 > is not a tracking-lost frame and must not be counted as one), the **matched CUDA ICP/raycast
 > study** (now unblocked — `translation` is only partly GPU-accelerated, and the raycast makes two
 > avoidable host round-trips), remote-service output scheduling, and the low-priority saturation
-> polling cleanup. It needs an **Active** row in the plans/specs register once the concurrent
-> archive-move session lands that table.
+> polling cleanup. It is registered as **Active** in the plans/specs register above.
+>
+> **Items 4 and 5 are now done** (2026-08-02) — `docs/superpowers/plans/2026-08-02-cuda-icp-study.md`.
+> The study **rejected** the GPU-resident translation solve (correct to float round-off and
+> gate-accepted, but +2.37 ms/frame and it holds the GIL almost solidly — `tick_share` 0.058, with
+> repeatable multi-second whole-process freezes) and **rejected `6dof` on accuracy** (8.0 ± 3.6 m
+> loop closure against the baseline's 0.67, 3/10 ensemble runs dead). Both are recorded as **closed
+> questions**. The win ran the other way and shipped as item 5: **`Mapper.icp_device` (default
+> `"CPU:0"`) runs ICP's nearest-neighbour index on the HOST** while the TSDF integrate/raycast stay
+> on CUDA, plumbed as a `[slam]` key through the CLI, `SlamRunner` and `DetailedSlamPreset`;
+> `Mapper.step`'s second `positions.cpu().numpy()` (a whole device→host copy to read one integer) is
+> replaced by `TsdfMap.raycast(..., with_count=True)`. Output is **bit-identical** — 0.0 m over 11
+> paired whole-capture replays on two captures, identical block counts, 0 lost, 0 escalations —
+> which is why it is worth having: it is free.
+>
+> **The speed prediction did NOT reproduce in full, and the honest number is smaller.** Re-measured
+> with the interleaved paired A/B the study says is the only instrument that survived scrutiny
+> (new `slam_icp_bench --what ab`): **−0.231 ± 0.130 ms/frame (−1.9%)** on
+> `captures/coffeeRoomCircuitNoMnt.bin`, but **+0.087 ± 0.121 ms (+0.7%) — no win at all** on
+> `captures/roomSweepFull20260730.bin`. `register` is reliably faster on both (−0.53 / −0.24 ms);
+> raycast + integrate take ~0.22 ms back, and on the larger map that is all of it. Two cautions
+> ride with those numbers: part of the stage-level give-back is the **CUDA sync point moving** out
+> of `register` rather than new work (only the whole-step delta is trustworthy), and every
+> measurement was taken under a **steady 12-core external load** — step p50 11.5–12.3 ms against the
+> study's quiet-box 5.4 ms. A quiet box was never available, so the study's −10% figure is neither
+> confirmed nor refuted. Guards re-run and green: long-scan VRAM tail growth **0.0123 MiB/frame**
+> over 1500 frames with 301 extractions, and every benchmark stayed at ≤52,161 blocks — far below
+> BUG-053's 250,000 refusal, which nothing here moves. **Still open:** BUG-061's live pose-age /
+> mesh-backlog contract has not been re-verified after a compute change — the owner's live server
+> could not be disturbed and no new browser session could be opened, so it needs an
+> owner-supervised window.
 
 **Open, non-blocking:** the narrow-viewport overlap probes (1280×800 / 1100×560 / 820×700) were not
 run — `ui_screenshot`'s width/height did not resize the viewport, so only 1600×1000 is measured

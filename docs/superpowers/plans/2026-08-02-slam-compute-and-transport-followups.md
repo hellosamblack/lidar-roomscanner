@@ -1,14 +1,15 @@
 # SLAM compute & transport follow-ups (from the BUG-061 review)
 
-**Status:** active. Items 1–3 are **done and landed**; items 4–7 are open.
+**Status:** active. Items 1–5 and 7 are **done**; item 6 is
+**deferred by its own condition** (verified 2026-08-02 — see that section).
 **Origin:** the owner's concurrency/GPU review written during the BUG-061 push
 (2026-08-02). This file replaces the root-level `BUG-061-handoff.md` scratch log,
 whose execution-state half is obsolete now that BUG-061 (`6b7e8fb`) and BUG-062
 (`bf3d74c`) have landed. The review's substance is preserved below.
 
-> **Register note:** a concurrent session is mid-way through the plans/specs
-> archive move that adds the "Plans and specifications register" table to
-> `ROADMAP.md`. This document needs an **Active** row there once that lands.
+> **Register note:** the plans/specs archive move landed (`22cfad0`), and this
+> document is now carried as an **Active** row in `ROADMAP.md` → "Plans and
+> specifications register".
 
 ---
 
@@ -25,15 +26,24 @@ Two execution environments appear in this evidence and must not be conflated:
 
 | Evidence | Result | Confidence / limitation |
 |---|---|---|
-| Agent venv, Open3D 0.19.0 | `o3d.core.cuda.is_available()` false; `preferred_device()` = `CPU:0`; `[slam].backend` = `local` | Directly measured, but this sandbox is **not** the owner's CUDA rig |
+| ~~Agent venv, Open3D 0.19.0~~ **superseded 2026-08-02** | ~~`o3d.core.cuda.is_available()` false~~ — it reads **True** in `host/.venv`: Open3D 0.19.0, 1 device, RTX 2000 Ada Laptop, 8188 MiB. `[slam].backend` = `local` still holds | The original row was wrong, and it was load-bearing: it is what made item 4 look rig-only. Item 4 ran here on real CUDA:0. Remaining limitation is narrower — this is a *laptop* Ada shared with the owner's server, so carry **ratios** forward, not absolute milliseconds |
 | `slam_stall_profile.py`, first 300 frames of `captures/roomSweepFull20260730.bin`, `CPU:0` | 14.7 s wall, 300 integrated, 20.42 effective fps; `step` p50 19.1 ms, `mesh` p50 55.4 ms, `prep` p50 67.0 ms, `pack` p50 4.8 ms; watchdog starvation 49.1% of wall, worst stall 94.0 ms | A CPU baseline only. The tool runs stages serially to attribute cost; it is not a measurement of live latest-wins drops. **These magnitudes will not transfer to the rig — re-run on CUDA:0 before sizing any work off them.** |
 | CUDA at-scale validation on the rig | GPU median 8.85 ms vs CPU 18.94 ms (~2.1×); GPU degradation flat while CPU climbed | `BUGS.md:1507-1513`; re-run after any compute-path change |
 | Long-scan validation | Per-frame CUDA memory flat; the leak was throttled extraction, fixed by cache release. CUDA marching cubes unsafe above ~250k active blocks | Measured and guarded; **do not "fix" this by raising `block_count`** |
 
-The sandbox result does **not** disprove that the owner's live web process was on
-CUDA:0 — it only means CUDA-specific changes cannot be validated from here. The
-rig, a clean CUDA replay, and the device reported by the actual worker remain
-authoritative.
+~~The sandbox result does not disprove that the owner's live web process was on
+CUDA:0 — it only means CUDA-specific changes cannot be validated from here.~~
+**Obsolete:** CUDA-specific changes *can* be validated from here, and item 4 was.
+What survives from that paragraph is the discipline, not the constraint: the
+device **reported by the actual worker** remains authoritative over any host-side
+inference — which is now enforced in code, since `SlamRunner` re-reads
+`worker.device` every poll instead of trusting `preferred_device()` once (item 2).
+
+A sharper environment lesson replaced it during item 4: **`nvidia-smi` alone is
+not a sufficient environment check on this box.** An 8-pair A/B run was discarded
+because a concurrent session's headless Chrome hit 1270% CPU and slowed *both*
+arms ~2.3× while the GPU looked idle. Check CPU load and GPU together, and
+discard contaminated runs rather than averaging them in.
 
 ## What the current threading actually provides
 
@@ -128,7 +138,27 @@ Expose separately:
 the mapper and needs its own counter. Likewise, VRAM allocation proves a TSDF
 exists on CUDA, not that kernels use the device efficiently.
 
-## Item 4 — Matched CUDA ICP / raycast study (OPEN — now unblocked by BUG-062)
+## Item 4 — Matched CUDA ICP / raycast study ✅ DONE — see `2026-08-02-cuda-icp-study.md`
+
+**Result:** the GPU-resident translation solve is **rejected** — correct to float
+round-off and gate-accepted, but +2.37 ms/frame (+44% of a SLAM step) and it
+holds the GIL almost solidly (`tick_share` 0.058, repeatable multi-second
+freezes). `6dof` is **rejected on accuracy**: 8.0 ± 3.6 m closure vs the
+baseline's 0.67, 3/10 ensemble runs dead. The measurable win runs the other way —
+run the ICP nearest-neighbour index on the **host** while the rest stays on CUDA:
+bit-identical output over 3177 calls and a full n=10 ensemble, −0.2 to −0.55
+ms/frame. The raycast round-trips are only 0.15 ms/frame and the device-resident
+replacement measured 0.43 ms/frame *worse*. Full evidence, caveats and the
+non-inferiority tolerance are in the study doc; new instrument
+`host/tools/slam_icp_bench.py` / MCP `slam_icp_bench`.
+
+**Also correct the evidence table above:** `o3d.core.cuda.is_available()` is now
+**True** in `host/.venv` (Open3D 0.19.0, RTX 2000 Ada, 8188 MiB). The "CUDA
+cannot be validated from this sandbox" row is obsolete.
+
+The original brief follows, for the record.
+
+### Original brief (OPEN — now unblocked by BUG-062)
 
 The default `icp_mode` is `translation`, and that path is **only partly GPU
 accelerated**: source/target positions and target normals are copied into NumPy;

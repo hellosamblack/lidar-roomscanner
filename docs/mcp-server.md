@@ -94,6 +94,7 @@ ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, com
 `slam_rerender(capture, voxel_size?, block_count?, device?, max_frames?)`,
 `slam_ensemble(capture, n?, device?, voxel_size?, block_count?)`,
 `slam_stall_profile(capture, frames?, device?, decimate?)`,
+`slam_icp_bench(capture?, what?, frames?, raycast_frames?, ensemble_n?, device?, ab_pairs?, ab_frames?, baseline_icp_device?, candidate_icp_device?)`,
 `doctor()`, `orientation_probe(mode)`.
 
 `slam_stall_profile` answers "why does the live view feel frozen?" with a number.
@@ -107,6 +108,36 @@ of wall starved (mostly numpy, which releases the GIL), while the same stage wit
 a near-static capture showed zero stalls on code that freezes 1261 ms on a real
 room sweep. It runs in a subprocess and never binds the device, so it is safe
 beside a live server (both just get slower). Found BUG-060.
+
+`slam_icp_bench` answers "would moving this on (or off) the GPU help?" with
+measurements instead of intuition. `what="api"` is the one to run **first** before
+writing any device-resident code: it probes each Open3D 0.19 tensor op against a
+deep CUDA queue and reports which ones force a hidden host synchronization — on
+the installed build `sum(dim=)`, boolean-mask indexing, `nonzero()`, `.item()`,
+every linalg entry point *and* `nns.hybrid_search` all sync, while elementwise
+ops, `matmul`, gathers, `concatenate` and uploads do not. A call returning a
+device tensor is **not** evidence that no sync happened. `what="icp"` races four
+solvers over identical recorded inputs; `what="raycast"` costs the
+download/mask/re-upload round trip; `what="ensemble"` scores accuracy with a
+matched perturbation ensemble and a **non-inferiority** gate whose tolerance is
+one standard deviation of the baseline ensemble's own closure. Its `gil` block
+reports `tick_share` — read that, not `starved_pct`: code that holds the GIL
+completely starves the watchdog itself, so the percentage *under*-reads exactly
+when it matters (measured: 1 tick in 10.93 s). Findings in
+`docs/superpowers/plans/2026-08-02-cuda-icp-study.md`.
+
+`what="ab"` is the pass to use when a **change** has to be sized, rather than two
+implementations compared: an interleaved, paired, whole-pipeline A/B of
+`Mapper.icp_device` over the shipped code, alternating which arm runs first in
+each pair. Use it instead of `what="icp"` for that job — the isolated
+microbenchmark swung **43%** between sessions on identical inputs, which is far
+larger than the effect being measured. It reports the per-pair spread (never one
+number), a whole-trajectory equivalence check against the other arm (expected
+exactly `0.0`, with `frac_frames_with_misses` printed because a full-match scene
+has no power over the correspondence handling at all), `tick_share`, and a **CPU
+load + GPU** sample around every arm. That last part is not decoration: a
+sibling session's headless Chrome at 1200% CPU is invisible to `nvidia-smi` and
+slows both arms ~2.3×, and the variant under test is the CPU-bound one.
 
 `slam_loop_closure_gate(baseline, loop_closure)` applies the pre-registered paired 95% confidence gate to
 the two matched circuit ensembles; global loop closure stays disabled unless both

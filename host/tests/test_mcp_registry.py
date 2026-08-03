@@ -34,6 +34,7 @@ EXPOSED: dict[str, tuple[str, ...]] = {
     "orientation_probe.py": ("orientation_probe",),
     "skew_check.py": ("capture_skew",),
     "slam_ensemble.py": ("slam_ensemble",),
+    "slam_icp_bench.py": ("slam_icp_bench",),
     "slam_stall_profile.py": ("slam_stall_profile",),
     "web_ui_shot.py": ("ui_screenshot", "ui_eval", "ui_wait_for", "ui_reset"),
 }
