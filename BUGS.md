@@ -71,6 +71,10 @@ the next free ID, a date, and a file reference where the problem lives.
 | BUG-060 | fixed   | host/web      | Live SLAM ran at 5 fps and updated the view once a second on an idle GPU — `uvicorn.run()` defaults `ws_per_message_deflate=True` and `_broadcast_bytes` awaits `send_bytes` **per client**, so each 3.2 MB MESH was zlib-deflated once per connected tab on the event loop. Worse than the UI symptom: `SlamRunner.submit()` ran only from that broadcaster, so **5 frames in 6 never reached the TSDF**, silently |
 | BUG-062 | fixed   | host/slam     | **Thirteen `[slam]` keys were silently ignored by Live SLAM** — `SlamRunner._construct` hand-picked five mapper kwargs, so `icp_mode`, `voxel_size`, `max_iter`, `max_dist`, the quality gates and every `stationary_*` knob changed the CLI and Detailed paths but never reached the live mapper. Editing `roomscan.toml` looked like it worked and did nothing |
 | BUG-061 | fixed   | host/web      | Ephemeral SLAM lagged **up to 15 s** behind the operator, in playback and far worse live. `/ws` has no write backpressure, so the 12 MB/s MESH governor was open-loop and the whole-map re-sends piled into an unbounded transport buffer — **37 MB in flight** on the owner's connection. The 30 Hz `slam` pose JSON was queued *behind* those megabytes on the same ordered stream, so the camera lagged with the geometry |
+| BUG-063 | open    | host/tools    | The GIL-starvation metric under-reports precisely when starvation is total — summed tick lateness over wall time falls toward zero as blocking approaches 100%, because the watchdog thread stops being scheduled at all (1 tick landed of ~2186 due read as "10.3% starved"). `slam_icp_bench.py` fixed with `tick_share`; `slam_stall_profile.py` still to do |
+| BUG-064 | fixed   | host/web      | **"SLAM rendered nothing" — it rendered perfectly and two UI cards covered 97% of it.** In View, `#browser-card` + `#preview-card` sit over the middle of the viewport, which is exactly where the map is drawn; only the 14 px gutter between them showed through. Live never had it (both cards hide when `source != "view"`) |
+| BUG-065 | fixed   | host/web      | `slam.js`'s padded vertex buffers produced a **fractional `BufferAttribute.count`** (36799.666) and therefore **NaN bounding boxes/spheres** on every SLAM mesh — `Math.ceil(needLen * 1.5)` need not be a multiple of `itemSize`, and Three then reads one slot past the end. Invisible only while `frustumCulled = false` holds everywhere |
+| BUG-066 | fixed   | host/web      | `load_capture` hard-coded `ui.mode = "realtime"`, so loading a capture while the display was `slam` broadcast the contradiction `mode: "realtime", display: "slam"` |
 
 ---
 
@@ -2872,3 +2876,98 @@ instrument that reads *healthy* under total blocking would have waved through ex
 BUG-060/BUG-061 failure mode. Generalises the repo's standing lesson one level down: a native call's
 wall time is not its blocking cost — and here even the starvation *percentage* was not its blocking
 cost. Pair any "it didn't starve" claim with the number of samples the claim rests on.
+
+---
+
+## BUG-064 — "SLAM rendered nothing": it rendered perfectly, and two cards covered 97% of it
+
+**Status:** fixed · **Area:** host/web (`static/browser.js`) · **Found by:** the owner, 2026-08-02,
+reporting a live SLAM session that "rendered nothing at all", then the same of an offline replay.
+
+**The symptom was true and the inference from it was wrong.** Nothing appeared, so every candidate
+considered was upstream: the mapper never armed, the worker failed to construct, the mesh never got
+packed, the credit transport stalled. All four were wrong. Measured on the live server while it was
+displaying the capture:
+
+| stage | evidence | verdict |
+|---|---|---|
+| mapper | `slam` msg: 468 frames integrated, `mesh_seq` 76, 2656 blocks, `CUDA:0` | healthy |
+| transport | `/ws` 360 `slam` msgs in 12 s; `/ws-mesh` delivered 3,410,108 B | healthy |
+| payload | re-parsed with `slam.js`'s layout: 8 sections, **slack 0 bytes** | healthy |
+| client | `slam.js: first mesh: 24533 non-wall verts`, `group.visible = true` | healthy |
+
+The map was on screen the whole time. `#browser-card` (Captures) and `#preview-card` sit in the
+centre column, which is where the map is drawn: projecting the mesh's bounding box gave a screen
+rect of 447x482 px, of which **97% was covered** by those two cards — 112,788 px by the browser and
+95,918 px by the preview — leaving the 14 px gutter between them, which is the thin coloured strip
+visible in the owner's screenshots and reads as noise. **Live mode never showed this** because both
+cards carry `classList.toggle('hidden', source !== 'view')`.
+
+**The fix.** Entering a map display (`slam`/`detailed`) in View collapses both cards. Collapse, not
+`.hidden`: the squircle rail is a permanent map of every panel, so one click brings them back and
+you can still pick another capture without leaving the map. It fires **only on the transition into**
+a map display, never on each `state` echo — `state` is re-broadcast on every unrelated setting
+change, and re-collapsing on each one would fight the user every time they reopened a card (the
+same trap that killed the oscillate orbit's return leg). After: **coverage 0.97 → 0.02**.
+
+**What this cost, and the lesson.** Roughly an hour of instrumenting a pipeline that was working,
+because "nothing rendered" was read as "nothing was produced". A renderer has a stage the other
+diagnostics never reach: **something drew over it**. When every upstream stage measures healthy,
+stop bisecting upstream and ask what is in front of the camera — projecting the geometry's bounding
+box to screen coordinates and intersecting it with the DOM answers that in one call. Generalises
+BUG-033 and BUG-061 Part D, both of which were also "the geometry is fine, the *view* is not".
+
+---
+
+## BUG-065 — padded vertex buffers gave a fractional `count`, so every SLAM bound was NaN
+
+**Status:** fixed · **Area:** host/web (`static/slam.js`) · **Found by:** inspecting the live scene
+graph while chasing BUG-064, 2026-08-02.
+
+**The defect.** `ensureAttrCapacity` allocates with headroom so consecutive growing packets don't
+re-trigger a GPU realloc (BUG-061 Part A):
+
+```js
+const capacity = Math.ceil(Math.max(needLen, 1) * GROWTH_HEADROOM);   // 1.5
+```
+
+`needLen` is a **flat element count** (`3 * vertexCount`), so this rounds to a whole *element*, not
+a whole *item*. For most inputs the result is not a multiple of `itemSize`: `3 * 24533 * 1.5 =
+110398.5 → 110399`. `BufferAttribute.count` is `array.length / itemSize`, which is then
+**36799.666…**, and `computeBoundingBox`/`computeBoundingSphere` walk `i < count`, read
+`array[110399]` — one past the end — get `undefined`, and return **NaN**.
+
+**Measured live**, non-wall mesh: `count: 36799.666666666664`, `boundingBox.min.z: NaN`,
+`boundingBox.max.z: NaN`. Unioning it into the map's bounds poisoned those too, so "where is the map
+on screen" could not be answered until the padding was accounted for.
+
+**Why nothing was visibly broken.** The *draw* is bounded by the index plus `setDrawRange`, neither
+of which consults `count`, and all six SLAM objects carry `frustumCulled = false` (BUG-033,
+BUG-061 Part D) so nothing asked for the bounds. It is a landmine, not a live failure: re-enable
+culling on any one of them, add a raycast/pick, or write a frame-the-map camera helper, and it
+inherits the NaN — and a NaN bounding sphere culls the object **always**, which presents as exactly
+the blank viewport of BUG-033.
+
+**The fix.** Round the padded capacity up to a whole number of items, and set `count` to the **live**
+element count after each `array.set` so bounds describe the data rather than the allocation (the
+zeroed tail would otherwise fold the world origin into every bound). Bounds are invalidated on each
+rewrite. Verified on the rig: all 14 SLAM geometries report integer `count`, array lengths divisible
+by 3, and finite boxes and spheres.
+
+---
+
+## BUG-066 — `load_capture` broadcast `mode: "realtime"` alongside `display: "slam"`
+
+**Status:** fixed · **Area:** host/web (`web.py`) · **Found by:** reading `rig_status` output during
+BUG-064, 2026-08-02.
+
+`load_capture` set `ui.mode = "realtime"` unconditionally while leaving `ui.display` alone, so
+loading a capture while the display was `slam` put a self-contradicting `state` on the wire. Every
+other site that moves either field derives the alias (`ui.mode = "realtime" if ui.display ==
+"point_cloud" else "slam"`); this one did not.
+
+Nothing was visibly broken: `slam.js` reads `display` and treats `mode` only as a fallback for an old
+server. But `mode` is the documented compatibility alias, and a stale alias is trusted by whoever
+reads it next — which is the whole shape of BUG-044 (eight `state` echoes dropping capability
+context) one field over. Fixed by deriving it like everywhere else; verified by driving a real
+`load_capture` over `/ws` while the display was `slam` and asserting the echo agrees.

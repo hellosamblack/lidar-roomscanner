@@ -14,7 +14,7 @@ import os
 import subprocess
 import urllib.request
 
-from .paths import LOGS, REPO, VENV_PY, WEB_PAGE, WEB_URL
+from .paths import HOST, LOGS, REPO, VENV_PY, WEB_PAGE, WEB_URL
 from .server import mcp
 from .session import rig
 
@@ -428,3 +428,42 @@ async def rig_save(timeout: float = 120.0) -> dict:
                          "Live SLAM only -- for a capture use "
                          "rig_view(display='detailed', regenerate=True)"}
     return {"ok": True, "saved": saved}
+
+
+@mcp.tool()
+async def rig_ws_probe(seconds: float = 10.0, url: str = "") -> dict:
+    """Split "nothing rendered" into the three questions it actually collapses.
+
+    Watches the same `/ws` + `/ws-mesh` a browser tab uses and reports, as
+    `verdict`: whether the SERVER is computing (the `slam` message's
+    `frames_integrated` / `mesh_seq` / `blocks_used`), whether the TRANSPORT is
+    delivering (per-type JSON counts, binary tag counts, MESH bytes actually
+    received), and whether the PAYLOAD is well formed (one MESH re-parsed with
+    `slam.js`'s exact layout). All three green means the fault is in the browser
+    -- geometry, camera, or something drawing over the viewport -- and no amount
+    of further server reading will find it.
+
+    `payload_ok` is the one people skip. `slam.js` walks the packet with bare
+    `new Float32Array(buffer, off, n)` views, so a header that disagrees with the
+    payload by one element does not degrade: the constructor throws, the handler
+    dies, and the map silently stops updating. `slack_bytes != 0` in
+    `mesh_decode` means the packer and the reader have drifted apart.
+
+    This acks every mesh it receives, because `/ws-mesh` is credit-gated and a
+    silent client gets one mesh and then a 1-per-5-s trickle, which looks exactly
+    like a server that stopped sending.
+
+    Keep `seconds` small. Connection count is a performance variable on this
+    server -- `/ws` has no backpressure and `_broadcast_bytes` awaits per client
+    on the event loop (BUG-060, BUG-061) -- so a long probe changes what it
+    measures. Never binds the device stream.
+
+    Wraps `host/tools/ws_probe.py::probe_async()`.
+    """
+    import sys
+
+    if str(HOST) not in sys.path:
+        sys.path.insert(0, str(HOST))
+    from tools.ws_probe import DEFAULT_URL, probe_async
+
+    return await probe_async(seconds=seconds, url=url or DEFAULT_URL)

@@ -36,6 +36,7 @@ EXPOSED: dict[str, tuple[str, ...]] = {
     "slam_ensemble.py": ("slam_ensemble",),
     "slam_icp_bench.py": ("slam_icp_bench",),
     "slam_stall_profile.py": ("slam_stall_profile",),
+    "ws_probe.py": ("rig_ws_probe",),
     "web_ui_shot.py": ("ui_screenshot", "ui_eval", "ui_wait_for", "ui_reset"),
 }
 

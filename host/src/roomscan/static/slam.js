@@ -205,13 +205,33 @@ export function createSlam(hub, sceneApi) {
     // `needLen` is a flat element count (e.g. 3 * vertexCount for positions,
     // already how the wire format hands us pos/col; index arrays are likewise
     // already flattened by the caller).
+    // The padded capacity must be a whole number of ITEMS, not just a whole
+    // number of elements. `Math.ceil(needLen * 1.5)` on the flat count alone
+    // lands on a length that is not a multiple of `itemSize` for most inputs
+    // (3 * 24533 * 1.5 -> 110399), which makes `BufferAttribute.count`
+    // FRACTIONAL -- 36799.666. Three then walks `i < count` in
+    // computeBoundingBox/computeBoundingSphere, reads one slot past the end of
+    // the typed array, and every bound comes back NaN. That was live on the
+    // real rig: the non-wall mesh's bbox read `z: NaN`, and it stayed invisible
+    // only because `frustumCulled = false` holds on all six SLAM objects
+    // (BUG-033, BUG-061). Anything that asks for bounds -- re-enabled culling,
+    // a raycast/pick, a frame-the-map camera helper -- inherits the NaN.
     function ensureAttrCapacity(geom, name, ArrayCtor, itemSize, needLen) {
         const existing = geom.getAttribute(name);
         if (existing && existing.array.length >= needLen) return existing;
-        const capacity = Math.ceil(Math.max(needLen, 1) * GROWTH_HEADROOM);
-        const attr = new THREE.BufferAttribute(new ArrayCtor(capacity), itemSize);
+        const items = Math.ceil(Math.max(needLen, 1) * GROWTH_HEADROOM / itemSize);
+        const attr = new THREE.BufferAttribute(new ArrayCtor(items * itemSize), itemSize);
         geom.setAttribute(name, attr);
         return attr;
+    }
+
+    // `count` must describe the LIVE data, not the allocated capacity. The DRAW
+    // is bounded by the index + drawRange, so padding never reaches the screen,
+    // but `computeBoundingBox`/`Sphere` walk `count` and would fold the zeroed
+    // tail -- i.e. the world origin -- into every bound. Call this after the
+    // `array.set`, on every attribute whose capacity outlives one packet.
+    function setLiveCount(attr, items) {
+        attr.count = items;
     }
 
     function ensureIndexCapacity(geom, ArrayCtor, needLen) {
@@ -301,6 +321,9 @@ export function createSlam(hub, sceneApi) {
         colAttr.array.set(col);
         posAttr.needsUpdate = true;
         colAttr.needsUpdate = true;
+        setLiveCount(posAttr, nV / 3);
+        setLiveCount(colAttr, nV / 3);
+        g.boundingBox = g.boundingSphere = null;   // stale bounds for a rewritten buffer
 
         const nI = idx.length;
         if (nI > 0) {
@@ -321,6 +344,8 @@ export function createSlam(hub, sceneApi) {
             const posAttr = ensureAttrCapacity(g, 'position', Float32Array, 3, nV);
             posAttr.array.set(pos);
             posAttr.needsUpdate = true;
+            setLiveCount(posAttr, nV / 3);
+            g.boundingBox = g.boundingSphere = null;
         }
         const nI = idx ? idx.length : 0;
         if (nI > 0) {

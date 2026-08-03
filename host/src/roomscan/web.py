@@ -4627,7 +4627,13 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         ui.source, ui.selected_capture = "view", path.name
         if ui.display in ("preview", "detailed"):
             ui.display = "point_cloud"
-        ui.mode = "realtime"
+        # Derive the compat alias from `display`, like every other site that
+        # moves either one -- this used to hard-code "realtime", so loading a
+        # capture while the display was `slam` broadcast the contradiction
+        # `mode: "realtime", display: "slam"`. `slam.js` reads `display` and
+        # only falls back to `mode`, so nothing was visibly broken, but the
+        # alias is exactly the kind of stale field a later reader trusts.
+        ui.mode = "realtime" if ui.display == "point_cloud" else "slam"
         await _broadcast_session(state)
         await _broadcast_state(state)
 

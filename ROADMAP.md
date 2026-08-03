@@ -1057,6 +1057,24 @@ because the tests asserted the value was a *float*).
 > mesh-backlog contract has not been re-verified after a compute change — the owner's live server
 > could not be disturbed and no new browser session could be opened, so it needs an
 > owner-supervised window.
+>
+> **BUG-064/065/066 (2026-08-02) — the next "SLAM rendered nothing" report was not a SLAM bug.**
+> The owner reported a live scan, then an offline replay, rendering nothing at all. Every stage
+> measured healthy: mapper 468 frames integrated on `CUDA:0`, `/ws` shipping 30 Hz pose, `/ws-mesh`
+> delivering a 3.41 MB MESH that re-parses to **zero slack**, and the client logging `first mesh:
+> 24533 non-wall verts`. The map was on screen the whole time — `#browser-card` + `#preview-card`
+> sit over the centre of the viewport and covered **97%** of its projected footprint (BUG-064; now
+> 2%, both collapse on entering a map display in View, recoverable from the squircle rail). Two
+> latent defects fell out of the same inspection: `slam.js`'s padded buffers gave a **fractional
+> `BufferAttribute.count`** and therefore **NaN** bounds on every SLAM mesh (BUG-065 — harmless only
+> while `frustumCulled = false` holds, and a NaN bounding sphere culls *always*, i.e. BUG-033's
+> blank viewport), and `load_capture` broadcast `mode: "realtime"` beside `display: "slam"`
+> (BUG-066). New instrument `host/tools/ws_probe.py` / MCP `rig_ws_probe` splits the symptom into
+> server-computing / transport-delivering / payload-well-formed in one call, and acks meshes because
+> a silent `/ws-mesh` client sees one mesh and then a 1-per-5-s trickle that reads as a dead server.
+> **The lesson is where to stop bisecting:** when every upstream stage is healthy, ask what is drawn
+> *in front of* the geometry — project its bounding box to screen coordinates and intersect it with
+> the DOM.
 
 **Open, non-blocking:** the narrow-viewport overlap probes (1280×800 / 1100×560 / 820×700) were not
 run — `ui_screenshot`'s width/height did not resize the viewport, so only 1600×1000 is measured

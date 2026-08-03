@@ -176,6 +176,32 @@ export function createBrowser(hub, capture) {
         status.textContent = deleteNote ? base + ' — ' + deleteNote : base;
     }
 
+    // These two cards are the capture PICKER, and they sit over the middle of
+    // the viewport -- which is exactly where a map is drawn. Measured on the
+    // rig in View + SLAM: 97% of the map's screen footprint was covered by
+    // #browser-card + #preview-card, leaving only the 14 px gutter between
+    // them, so a perfectly good reconstruction read as "nothing rendered".
+    // Live mode never had this because both cards hide when source != 'view'.
+    //
+    // Collapse (rail-recoverable in one click), never `.hidden`: you still have
+    // to be able to pick a different capture without leaving the map display.
+    // Fires ONLY on the transition into a map display -- `state` is re-broadcast
+    // on every unrelated setting change, so re-collapsing on each echo would
+    // fight the user every time they re-opened a card (the state-echo trap that
+    // killed the oscillate orbit's return leg).
+    const MAP_DISPLAYS = new Set(['slam', 'detailed']);
+    function collapseForMapDisplay(prevSource, prevDisplay) {
+        const now = source === 'view' && MAP_DISPLAYS.has(display);
+        const before = prevSource === 'view' && MAP_DISPLAYS.has(prevDisplay);
+        if (!now || before) return;
+        for (const [card, id] of [[browserCard, 'browser'], [previewCard, 'preview']]) {
+            if (!card || card.classList.contains('collapsed')) continue;
+            card.classList.add('collapsed');
+            try { localStorage.setItem(`roomscan.card.${id}.collapsed`, '1'); } catch (err) {}
+        }
+        window.__relayout?.();
+    }
+
     function renderPreview() {
         const c = captures.find((x) => x.name === previewed) || null;
         previewCard?.classList.toggle('hidden', source !== 'view' || !c);
@@ -379,9 +405,12 @@ export function createBrowser(hub, capture) {
     });
 
     hub.on('state', (msg) => {
+        const prevDisplay = display;
+        const prevSource = source;
         source = msg.source || 'live';
         display = msg.display || 'point_cloud';
         viewMode = msg.view_mode || 'world';
+        collapseForMapDisplay(prevSource, prevDisplay);
         if (msg.browser_sort) prefs.sort = msg.browser_sort;
         if (msg.browser_view) prefs.view = msg.browser_view;
         if (typeof msg.browser_thumbs === 'boolean') prefs.thumbs = msg.browser_thumbs;

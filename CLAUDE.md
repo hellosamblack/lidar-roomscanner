@@ -176,6 +176,26 @@ Full detail in `ROADMAP.md`. Summary:
   never instrumented, only its socket queues. Payload is still the whole map (ROADMAP 6.I).
   **Ordering matters on an ordered transport, and "no backpressure" is a property of the stack** —
   never assume a rate governor bounds a queue.)*
+  *(2026-08-02 — **BUG-064/065/066: the next "SLAM rendered nothing" was not a SLAM bug.** A live
+  scan and then an offline replay both showed nothing. Every stage measured healthy — mapper 468
+  frames integrated on `CUDA:0`, `/ws` at 30 Hz pose, `/ws-mesh` delivering a 3.41 MB MESH that
+  re-parses to **zero slack**, client logging `first mesh: 24533 non-wall verts`. The map was on
+  screen throughout: **`#browser-card` + `#preview-card` covered 97%** of its projected footprint,
+  leaving the 14 px gutter between them (BUG-064 — Live never had it, both cards hide when
+  `source != "view"`). They now collapse on entering a map display in View, recoverable from the
+  squircle rail, on the **transition only** so the `state` echo can't fight the user; coverage 0.97
+  → 0.02. Two latent defects from the same inspection: `slam.js`'s capacity padding
+  (`Math.ceil(needLen * 1.5)`) need not be a multiple of `itemSize`, giving a **fractional
+  `BufferAttribute.count`** (36799.666) and **NaN** bounding boxes/spheres on every SLAM mesh
+  (BUG-065) — invisible only because `frustumCulled = false` holds everywhere, and a NaN bounding
+  sphere culls *always*, which is BUG-033's blank viewport; and `load_capture` broadcast
+  `mode: "realtime"` beside `display: "slam"` (BUG-066). New instrument `host/tools/ws_probe.py` /
+  MCP `rig_ws_probe`: splits the symptom into server-computing / transport-delivering /
+  payload-well-formed, re-parsing one MESH with `slam.js`'s own layout — and **acking**, because a
+  silent `/ws-mesh` client gets one mesh then a 1-per-5-s trickle that reads as a dead server.
+  **When every upstream stage measures healthy, stop bisecting upstream and ask what is drawn in
+  front of the geometry** — project its bounding box to screen coordinates and intersect it with
+  the DOM.)*
   *(2026-07-31 follow-up: the display enum additionally includes `preview`, a View-only orientation-thumbnail mode. Playback now defaults to 1×; Detailed build opens an honest estimate/confirmation dialog; Turbo/Gray applies to Point cloud, SLAM, and Detailed presentation.)*
 - **Phase 4 — ✅ done. X-NUCLEO-IKS4A1 integrated** (2026-07-10): streams 9 (SFLP quat) + 10 (env via LSM sensor hub), panel sensors group, host yaw fusion — see the architecture bullet above for what's still open. Edge-AI (in-sensor MLC/ISPU) belongs at this tier, not on the M33 — see the edge-ai-tooling memory.
 - **Phase 5 — ✅ Complete: transport upgrade to Ethernet** (lwIP/UDP + zero-config direct link). The device successfully streams raw frames over Ethernet. PTP support remains an optional future addition if required by SLAM. *(2026-07-21: the host→device COMMAND channel now works over Ethernet too — it was CDC-only, the ETH transport discarded inbound datagrams; inbound UDP now feeds the same command parser as CDC.)* *(2026-07-28: **the board now runs untethered** — the NUCLEO-H563ZI has no HSE crystal, so the system clock was the ST-LINK's MCO and the firmware wedged before `ETH_Init()` whenever CN1 was unplugged. PLL1 now sources from HSI unconditionally, same 250 MHz SYSCLK; power from USB_USER with JP2 at 9-10. Boot-progress LEDs added — LD1 green = clocks up, LD2 yellow blinking = acquisition loop alive, LD3 red = wedged. BUG-023/024/025.)*

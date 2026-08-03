@@ -73,6 +73,7 @@ the MCP surface catches up on the next server start. Same failure shape as a sta
 | `rig_view(source?, display?, regenerate?)` | authoritative Live/View and Point cloud/Preview/SLAM/Detailed control |
 | `rig_playback(action, value?)` | `go_live` / `load_capture` / transport |
 | `rig_save()` | export the **Live** SLAM map (`.ply` + `.tum`). Live SLAM only — a live scan is unrepeatable, so its one-shot export stays; for a recorded capture the persistent artifact is the sidecar from `rig_view(display="detailed", regenerate=True)` |
+| `rig_ws_probe(seconds?, url?)` | splits "nothing rendered" into server-computing / transport-delivering / payload-well-formed. Acks every mesh (`/ws-mesh` is credit-gated, so a silent client sees one mesh then a 1-per-5-s trickle) and re-parses one MESH with `slam.js`'s exact layout — `slack_bytes != 0` means packer and reader have drifted. Keep `seconds` small: connection count is a performance variable here (BUG-060/061) |
 
 **ui_\*** — headless Chrome, held open across calls.
 
