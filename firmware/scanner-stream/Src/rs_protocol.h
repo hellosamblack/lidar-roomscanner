@@ -80,8 +80,10 @@
 #define RS_STANDBY_HARD            (2u) /* + platform_power_disable() (XSHUT low); full re-bring-up to wake */
 
 /* SET_RANGING_PROFILE (cmd 8) param / ACK applied. Presets 0-2 apply immediately; MANUAL (3)
- * reapplies the last accepted SET_MANUAL_PARAMS candidate and is rejected until one exists
- * (application logic lands in Task 4 -- this registry is the codec-level contract). */
+ * reapplies the last accepted SET_MANUAL_PARAMS candidate and is rejected until one exists.
+ * Application logic (cmd 8/9/10) lands in Task 4 (rs_ranging.h/.c + vl53l9_app.c); this
+ * registry stays the codec-level contract both share. Cmd 11/12 (SET_IMU_ENV_RATE/
+ * GET_IMU_ENV_RATE) remain stub UNKNOWN_CMD until Task 7. */
 #define RS_PROFILE_ROOM_MAPPING    (0u)
 #define RS_PROFILE_PRECISION       (1u)
 #define RS_PROFILE_HIGH_FRAMERATE  (2u)

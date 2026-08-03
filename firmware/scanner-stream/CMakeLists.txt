@@ -50,6 +50,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Src/vl53l9_app.c
     Src/rs_protocol.c
+    Src/rs_ranging.c
     Src/rs_lsm.c
 
     # LSM6DSV16X register driver (vendored from X-NUCLEO-IKS4A1, unedited)

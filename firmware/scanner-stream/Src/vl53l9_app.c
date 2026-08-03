@@ -50,6 +50,7 @@
 #include "stm32h5xx_nucleo.h"
 #include "tusb.h"
 #include "rs_lsm.h"
+#include "rs_ranging.h"
 
 extern UART_HandleTypeDef hcom_uart[];
 extern void rs_boot_heartbeat(void);   /* yellow LD2 liveness -- see main.c */
@@ -690,12 +691,27 @@ static uint32_t rs_malformed_cmd_count = 0;
  * apply, before [re-]trigger" literally rather than just in spirit.
  *
  * The ACK for a pending command is sent from rs_apply_pending_config(), not from
- * rs_handle_command() -- "ACK only after the sensor accepted" per the brief. */
+ * rs_handle_command() -- "ACK only after the sensor accepted" per the brief.
+ *
+ * Task 4 additions: `manual` carries a decoded SET_MANUAL_PARAMS candidate (valid only
+ * when cmd == RS_CMD_SET_MANUAL_PARAMS -- every other command ignores it, left
+ * zero-initialized by the compound literals that stash them). `transport` records which
+ * transport the command arrived on; it is not yet used to route the ACK (every ACK still
+ * broadcasts over both transports, unchanged -- see rs_send_generic_cdc) -- selective
+ * routing to the originating transport is Task 6 scope. Stored now per the plan so Task 6
+ * has it to read rather than re-threading it through rs_handle_command() again. */
+typedef enum {
+    RS_CMD_TRANSPORT_CDC = 0,
+    RS_CMD_TRANSPORT_ETH = 1,
+} rs_cmd_transport_t;
+
 typedef struct {
     bool pending;
     uint32_t cmd;
     uint32_t param;
     uint32_t token;
+    rs_cmd_transport_t transport;
+    rs_ranging_manual_params_t manual;
 } rs_pending_cmd_t;
 
 static rs_pending_cmd_t rs_pending = { 0 };
@@ -711,11 +727,32 @@ static uint8_t rs_standby_level = RS_STANDBY_ACTIVE;
 
 /* Active profile, persists across reconfig commands so SET_FRAME_PERIOD_US /
  * SET_EXPOSURE_MS compose (each edits a copy of the currently-active profile, never the
- * shared g_ranging_profiles[] table -- vl53l9_utils.h:152). Seeded from
- * g_ranging_profiles[CONF_USECASE] once, right before the raw-only loop starts (see
- * vl53l9_app() below); SET_USECASE replaces it wholesale with a copy of the requested
- * table entry, SET_FRAME_PERIOD_US/SET_EXPOSURE_MS edit one field of the existing copy. */
-static vl53l9_profile_t g_active_profile;
+ * shared g_ranging_profiles[] table -- vl53l9_utils.h:152) and so REINIT/hard-standby-wake/
+ * recovery can re-apply the exact same configuration, DSS included (rs_ranging.h's
+ * rs_ranging_profile_t wraps the vendor vl53l9_profile_t with the scanner-owned profile_id
+ * and dss_enabled fields -- Task 4). Seeded via rs_ranging_boot_default() (Room Mapping,
+ * plan step 6) right before the raw-only loop starts (see vl53l9_app() below); the legacy
+ * SET_USECASE/SET_FRAME_PERIOD_US/SET_EXPOSURE_MS commands mutate .vendor fields only (see
+ * their handling in rs_apply_pending_config -- they predate DSS-awareness and always force
+ * .dss_enabled = 1, matching their exact pre-Task-4 behavior); SET_RANGING_PROFILE/
+ * SET_MANUAL_PARAMS replace the whole struct. */
+static rs_ranging_profile_t g_active_profile;
+
+/* Last known-good live readback (rs_ranging_read_config()) of the config actually in
+ * force -- updated on every successful cmd 8/9/10 apply/read, and seeded at boot. Used as
+ * the ACK payload for cmd 9/10 requests that are rejected or BUSY before ever touching
+ * hardware (BAD_PARAM/BUSY): docs/protocol.md's ranging-config ACK shape is sent
+ * "regardless of result", with "config fields zeroed or holding the prior known-good
+ * config" -- this IS that prior known-good config, never the rejected request itself
+ * (plan step 3: "never from the requested candidate"). Zero-initialized (matches "config
+ * fields zeroed") until the first successful read. */
+static rs_ranging_readback_t g_ranging_last_readback = { 0 };
+
+/* Last SET_MANUAL_PARAMS candidate the sensor actually accepted, and whether one exists
+ * yet. SET_RANGING_PROFILE's MANUAL (3) reapplies this; rs_handle_command() rejects MANUAL
+ * with BAD_PARAM until g_ranging_have_manual is true (docs/protocol.md cmd 8). */
+static rs_ranging_profile_t g_ranging_last_manual;
+static bool g_ranging_have_manual = false;
 
 /* Pack a vl53l9_status_t (vl53l9.h:124) into one u32 for the ACK's `applied` field on a
  * SENSOR_ERROR result (docs/protocol.md: "applied = status word"): fsm state in the top
@@ -898,7 +935,13 @@ static int rs_sensor_reinit(vl53l9_device_t *p_dev, uint8_t *calib_data) {
         return ret;
     }
 
-    ret = vl53l9_utils_set_profile(p_dev, &g_active_profile);
+    /* Task 4: rs_ranging_write_profile() applies g_active_profile's vendor fields via
+     * vl53l9_utils_set_profile() AND its DSS state via rs_ranging_apply_dss() -- both are
+     * needed to reproduce the pre-reset config exactly (vl53l9_set_binning(), called from
+     * vl53l9_utils_set_profile(), ALWAYS re-enables DSS, so without the second step a
+     * REINIT/hard-standby-wake while a >60fps DSS-off profile was active would silently
+     * turn DSS back on -- plan step 6). */
+    ret = rs_ranging_write_profile(p_dev, &g_active_profile);
     if (ret) {
         return ret;
     }
@@ -985,7 +1028,7 @@ static int rs_recover(void) {
              * sensor's counter restarts across the reset); the last captured seq is the
              * spec-consistent stand-in, same as EVENT frames use. */
             uint8_t w = 0, h = 0;
-            vl53l9_utils_get_resolution(g_active_profile.binning, &w, &h);
+            vl53l9_utils_get_resolution(g_active_profile.vendor.binning, &w, &h);
             rs_send_frame_cdc(RS_STREAM_CALIB, g_last_seq, 0u, calib_data,
                               VL53L9_CALIB_DATA_SIZE, w, h);
             return 0;
@@ -1010,8 +1053,14 @@ static int rs_recover(void) {
  * this early would race those steps and risk an unwanted second trigger once the main
  * loop seeds frame 1 itself. This function leaves the sensor in STANDBY, matching
  * exactly what the original inline boot sequence did (out_calib_data is written in
- * place, as before). */
-static int rs_boot_bringup(vl53l9_device_t *p_dev, uint8_t *out_calib_data, vl53l9_profile_t *p_profile) {
+ * place, as before).
+ *
+ * Task 4: `profile` is now an rs_ranging_profile_t (vendor fields + DSS state), applied
+ * via rs_ranging_write_profile() so this function's callers -- the raw-only build's
+ * initial cold boot AND the hard-standby wake path inside rs_apply_pending_config() --
+ * both reproduce DSS correctly, not just the vendor fields (plan step 6). */
+static int rs_boot_bringup(vl53l9_device_t *p_dev, uint8_t *out_calib_data,
+                           const rs_ranging_profile_t *profile) {
     platform_power_reset(CONF_DEVICE_ID);
     if (p_dev->bus_type & PLATFORM_BUS_I3C) {
         int daa_ret = rs_assign_dynamic_addresses();
@@ -1030,7 +1079,7 @@ static int rs_boot_bringup(vl53l9_device_t *p_dev, uint8_t *out_calib_data, vl53
         return ret;
     }
 
-    ret = vl53l9_utils_set_profile(p_dev, p_profile);
+    ret = rs_ranging_write_profile(p_dev, profile);
     if (ret) {
         return ret;
     }
@@ -1077,8 +1126,14 @@ static void rs_send_ack_ranging_config(uint32_t token, uint32_t cmd, uint32_t re
     (void)rs_send_generic_cdc(RS_FRAME_ACK, 0u, token, 0u, payload, sizeof(payload), 0u, 0u);
 }
 
+/* `manual` is non-NULL only when the wire frame that produced this dispatch decoded as
+ * RS_PARSED_CMD_MANUAL (rs_protocol.h) -- i.e. only ever for a genuine 12-byte
+ * SET_MANUAL_PARAMS payload; every other cmd value ignores it. `transport` records which
+ * transport this command arrived on (Task 4: stored on rs_pending for Task 6; not yet used
+ * to route the ACK -- see rs_pending_cmd_t's comment). */
 static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, const uint8_t *calib_data,
-                              uint16_t out_width, uint16_t out_height, uint32_t seq_for_calib) {
+                              uint16_t out_width, uint16_t out_height, uint32_t seq_for_calib,
+                              rs_cmd_transport_t transport, const rs_ranging_manual_params_t *manual) {
     switch (cmd) {
     case RS_CMD_PING:
         rs_send_ack(token, cmd, RS_RESULT_OK, RS_PROTO_VERSION);
@@ -1122,7 +1177,8 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
             rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u);
             break;
         }
-        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token };
+        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token,
+                                         .transport = transport };
         break;
     case RS_CMD_SET_FRAME_PERIOD_US:
         /* Same bounds vl53l9_set_frame_period() itself enforces (vl53l9.c:402): 10 ms -
@@ -1136,7 +1192,8 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
             rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u);
             break;
         }
-        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token };
+        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token,
+                                         .transport = transport };
         break;
     case RS_CMD_SET_EXPOSURE_MS:
         /* Same bounds vl53l9_set_exposure() itself enforces (vl53l9.c:550): 1-30 ms
@@ -1150,14 +1207,16 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
             rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u);
             break;
         }
-        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token };
+        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token,
+                                         .transport = transport };
         break;
     case RS_CMD_REINIT:
         if (rs_pending.pending) {
             rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u);
             break;
         }
-        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = 0u, .token = token };
+        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = 0u, .token = token,
+                                         .transport = transport };
         break;
     case RS_CMD_SET_STANDBY:
         /* Validate the level without touching the sensor (same precedence as the SET_*
@@ -1173,25 +1232,75 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
             rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u);
             break;
         }
-        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token };
+        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token,
+                                         .transport = transport };
         break;
-    /* Protocol v2 registry (commands 8-12, docs/protocol.md): codec/registry only in this
-     * commit -- rs_parse_command decodes them cleanly (legacy or manual shape) and they get
-     * a well-formed ACK in their command's registered shape, but nothing is applied to the
-     * sensor yet. Real profile application (Task 4) and IMU/env rate decoupling (Task 7)
-     * replace these stub cases; until then every one of them acks UNKNOWN_CMD. */
+    /* Protocol v2 registry (commands 8-12, docs/protocol.md). Task 4 wires real
+     * application for 8 (SET_RANGING_PROFILE), 9 (SET_MANUAL_PARAMS), and
+     * 10 (GET_RANGING_CONFIG) -- see rs_ranging.h/.c and rs_apply_pending_config() below.
+     * 11/12 (SET_IMU_ENV_RATE/GET_IMU_ENV_RATE) remain codec-only stubs; IMU/env rate
+     * decoupling is Task 7. */
     case RS_CMD_SET_RANGING_PROFILE:
+        /* Same precedence as every other SET_* case: validate without touching the
+         * sensor, BEFORE the pending/BUSY check. */
+        if (param > RS_PROFILE_MANUAL) {
+            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, param);
+            break;
+        }
+        if (param == RS_PROFILE_MANUAL && !g_ranging_have_manual) {
+            /* docs/protocol.md cmd 8: "MANUAL (3) reapplies the last accepted
+             * SET_MANUAL_PARAMS candidate and is rejected until one exists." */
+            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, param);
+            break;
+        }
+        if (rs_pending.pending) {
+            rs_send_ack(token, cmd, RS_RESULT_BUSY, 0u);
+            break;
+        }
+        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token,
+                                         .transport = transport };
+        break;
+    case RS_CMD_GET_RANGING_CONFIG:
+        /* Read-only, but still routed through the one-pending-slot/safe-point discipline
+         * (plan step 4) so its I3C reads never race the acquisition loop's own bus use --
+         * rs_apply_pending_config() special-cases it (no stop/start, see there). */
+        if (rs_pending.pending) {
+            rs_send_ack_ranging_config(token, cmd, RS_RESULT_BUSY, g_ranging_last_readback.ranging_mode,
+                                       g_ranging_last_readback.frame_period_us,
+                                       g_ranging_last_readback.exposure_ms,
+                                       g_ranging_last_readback.power_mode);
+            break;
+        }
+        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = 0u, .token = token,
+                                         .transport = transport };
+        break;
+    case RS_CMD_SET_MANUAL_PARAMS: {
+        /* `manual` is NULL only if a malformed/adversarial frame claimed cmd=9 in the
+         * LEGACY 8-byte shape (rs_parse_command's `kind` is derived from payload_len, not
+         * from `cmd`) -- treat that the same as any other invalid candidate. */
+        uint32_t vr = manual ? rs_ranging_validate_manual(manual) : RS_RESULT_BAD_PARAM;
+        if (vr != RS_RESULT_OK) {
+            rs_send_ack_ranging_config(token, cmd, vr, g_ranging_last_readback.ranging_mode,
+                                       g_ranging_last_readback.frame_period_us,
+                                       g_ranging_last_readback.exposure_ms,
+                                       g_ranging_last_readback.power_mode);
+            break;
+        }
+        if (rs_pending.pending) {
+            rs_send_ack_ranging_config(token, cmd, RS_RESULT_BUSY, g_ranging_last_readback.ranging_mode,
+                                       g_ranging_last_readback.frame_period_us,
+                                       g_ranging_last_readback.exposure_ms,
+                                       g_ranging_last_readback.power_mode);
+            break;
+        }
+        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .token = token,
+                                         .transport = transport, .manual = *manual };
+        break;
+    }
     case RS_CMD_SET_IMU_ENV_RATE:
     case RS_CMD_GET_IMU_ENV_RATE:
-        /* Legacy cmd+param ACK shape (RS_ACK_PAYLOAD_LEN) -- same as commands 1-8. */
+        /* Legacy cmd+param ACK shape (RS_ACK_PAYLOAD_LEN) -- same as commands 1-8. Task 7. */
         rs_send_ack(token, cmd, RS_RESULT_UNKNOWN_CMD, 0u);
-        break;
-    case RS_CMD_SET_MANUAL_PARAMS:
-    case RS_CMD_GET_RANGING_CONFIG:
-        /* Extended ranging-config ACK shape (RS_ACK_RANGING_CONFIG_LEN) -- see
-         * rs_send_ack_ranging_config's contract: sent even for a non-OK result so the
-         * ACK's wire shape depends only on which command it answers, never on outcome. */
-        rs_send_ack_ranging_config(token, cmd, RS_RESULT_UNKNOWN_CMD, 0u, 0u, 0u, 0u);
         break;
     default:
         rs_send_ack(token, cmd, RS_RESULT_UNKNOWN_CMD, 0u);
@@ -1226,6 +1335,9 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
     uint32_t cmd = rs_pending.cmd;
     uint32_t param = rs_pending.param;
     uint32_t token = rs_pending.token;
+    rs_ranging_manual_params_t manual = rs_pending.manual; /* only meaningful when
+                                                              * cmd == RS_CMD_SET_MANUAL_PARAMS;
+                                                              * copied before freeing the slot */
     rs_pending.pending = false; /* single in-flight slot: free it before any hardware call below */
 
     if (cmd == RS_CMD_REINIT) {
@@ -1353,19 +1465,74 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
         return false;
     }
 
-    /* SET_USECASE / SET_FRAME_PERIOD_US / SET_EXPOSURE_MS: build a candidate profile
-     * (never mutating g_active_profile or the shared g_ranging_profiles[] table until
+    if (cmd == RS_CMD_GET_RANGING_CONFIG) {
+        /* Read-only: never stops the sensor, so (unlike every other pending command)
+         * this iteration's normal trigger-for-N+1 must still happen here explicitly --
+         * the caller (vl53l9_app()'s main loop) unconditionally skips its own
+         * rs_trigger_next() call whenever ANY command was pending, on the assumption
+         * that whichever branch handled it already triggered as part of its own
+         * stop/restart sequence. This branch never stops the sensor, so it must
+         * trigger too. */
+        rs_ranging_readback_t rb = { 0 };
+        if (rs_ranging_read_config(p_dev, &rb) == 0) {
+            g_ranging_last_readback = rb;
+            rs_send_ack_ranging_config(token, cmd, RS_RESULT_OK, rb.ranging_mode, rb.frame_period_us,
+                                       rb.exposure_ms, rb.power_mode);
+        } else {
+            /* Transient I3C read failure: nothing was written, so there is nothing to
+             * restore -- report SENSOR_ERROR with the last known-good readback rather
+             * than invoking bounded recovery for a read-only command. */
+            rs_send_ack_ranging_config(token, cmd, RS_RESULT_SENSOR_ERROR,
+                                       g_ranging_last_readback.ranging_mode,
+                                       g_ranging_last_readback.frame_period_us,
+                                       g_ranging_last_readback.exposure_ms,
+                                       g_ranging_last_readback.power_mode);
+        }
+        if (rs_trigger_next(p_dev)) {
+            handle_error();
+            return true;
+        }
+        return false;
+    }
+
+    /* SET_USECASE / SET_FRAME_PERIOD_US / SET_EXPOSURE_MS (legacy, deprecated
+     * diagnostics -- control.py keeps them for one release) / SET_RANGING_PROFILE /
+     * SET_MANUAL_PARAMS: build a whole candidate rs_ranging_profile_t (never mutating
+     * g_active_profile, g_ranging_profiles[], or rs_ranging's own preset table until
      * the sensor has actually accepted it), stop -> apply -> restart. */
-    vl53l9_profile_t candidate = g_active_profile;
+    rs_ranging_profile_t candidate = g_active_profile;
     if (cmd == RS_CMD_SET_USECASE) {
         /* param already bounds- and binning-checked in rs_handle_command; re-reading
          * g_ranging_profiles[param] here (rather than caching it at validation time)
-         * costs nothing and keeps the two checks visibly in sync. */
-        candidate = g_ranging_profiles[param];
+         * costs nothing and keeps the two checks visibly in sync. Legacy path: it
+         * predates DSS-awareness, and vl53l9_set_binning() (inside
+         * vl53l9_utils_set_profile()) always re-enabled DSS regardless -- forcing it on
+         * here keeps this deprecated action byte-identical to its pre-Task-4 behavior
+         * (profile_id is left whatever it was: neither this ACK nor GET_RANGING_CONFIG's
+         * wire shape carries profile_id, so a stale value here is inert bookkeeping, not
+         * a protocol-visible regression). */
+        candidate.vendor = g_ranging_profiles[param];
+        candidate.dss_enabled = 1u;
     } else if (cmd == RS_CMD_SET_FRAME_PERIOD_US) {
-        candidate.frame_period_us = param;
+        candidate.vendor.frame_period_us = param;
+        candidate.dss_enabled = 1u;
     } else if (cmd == RS_CMD_SET_EXPOSURE_MS) {
-        candidate.exposure_ms = (uint16_t)param;
+        candidate.vendor.exposure_ms = (uint16_t)param;
+        candidate.dss_enabled = 1u;
+    } else if (cmd == RS_CMD_SET_RANGING_PROFILE) {
+        if (param == RS_PROFILE_MANUAL) {
+            /* rs_handle_command already rejected this with BAD_PARAM if no manual
+             * candidate had ever been accepted -- reaching here means one exists. */
+            candidate = g_ranging_last_manual;
+        } else {
+            /* param already bounds-checked (0..RS_PROFILE_HIGH_FRAMERATE) in
+             * rs_handle_command. */
+            (void)rs_ranging_preset(param, &candidate);
+        }
+    } else if (cmd == RS_CMD_SET_MANUAL_PARAMS) {
+        /* rs_handle_command already ran rs_ranging_validate_manual() before stashing
+         * this candidate as pending -- not re-validated here. */
+        rs_ranging_manual_candidate(&manual, &candidate);
     }
 
     /* vl53l9_utils_set_profile()'s setters all reject anything but FSM_STATE_STANDBY
@@ -1387,36 +1554,55 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
          * (Task 5 upgrades it). */
         vl53l9_status_t status = { 0 };
         vl53l9_get_status(p_dev, &status);
-        rs_send_ack(token, cmd, RS_RESULT_SENSOR_ERROR, rs_pack_status(&status));
+        if (cmd == RS_CMD_SET_MANUAL_PARAMS) {
+            /* ranging-config ACK shape has no room for a packed status word -- report
+             * the last known-good (pre-request) readback instead, same convention as
+             * every other never-touched-hardware SET_MANUAL_PARAMS rejection. */
+            rs_send_ack_ranging_config(token, cmd, RS_RESULT_SENSOR_ERROR,
+                                       g_ranging_last_readback.ranging_mode,
+                                       g_ranging_last_readback.frame_period_us,
+                                       g_ranging_last_readback.exposure_ms,
+                                       g_ranging_last_readback.power_mode);
+        } else {
+            rs_send_ack(token, cmd, RS_RESULT_SENSOR_ERROR, rs_pack_status(&status));
+        }
         if (rs_sensor_reinit(p_dev, calib_data)) {
             /* the direct best-effort reinit above also failed: hand off to
              * handle_error()'s own (fresh) bounded recovery loop */
             handle_error();
             return true;
         }
-        /* recovered: sensor streaming again on the old profile, frame 1 triggered
-         * inside rs_sensor_reinit; calib may have changed across the reset */
+        /* recovered: sensor streaming again on the old profile (DSS included --
+         * rs_sensor_reinit() now applies it via rs_ranging_write_profile()), frame 1
+         * triggered inside rs_sensor_reinit; calib may have changed across the reset */
         rs_send_frame_cdc(RS_STREAM_CALIB, seq_for_calib, 0u, calib_data, VL53L9_CALIB_DATA_SIZE, out_width,
                           out_height);
         return false;
     }
 
-    ret = vl53l9_utils_set_profile(p_dev, &candidate);
+    ret = rs_ranging_write_profile(p_dev, &candidate);
     bool applied_ok = (ret == 0);
-    if (!applied_ok) {
-        /* restore the previous (known-good) profile before leaving standby */
-        int restore_ret = vl53l9_utils_set_profile(p_dev, &g_active_profile);
+    rs_ranging_readback_t rb = { 0 };
+    int rb_ret;
+    if (applied_ok) {
+        /* Still in standby (vl53l9_start() below hasn't run yet) -- the plan's "read
+         * back... while the device is in standby" point. */
+        rb_ret = rs_ranging_read_config(p_dev, &rb);
+    } else {
+        /* restore the previous (known-good) profile, DSS included, before leaving standby */
+        int restore_ret = rs_ranging_write_profile(p_dev, &g_active_profile);
         if (restore_ret) {
             /* double failure: no known-good profile could be re-applied.
              * handle_error()'s bounded recovery is the only way back. */
             handle_error();
             return true;
         }
+        rb_ret = rs_ranging_read_config(p_dev, &rb);
     }
 
     /* Re-assert manual sync after EVERY profile application, success or restore (both
-     * paths just wrote .sync = VL53L9_SYNC_AUTONOMOUS via vl53l9_utils_set_profile) --
-     * same reasoning as rs_sensor_reinit() above. */
+     * paths just wrote .sync via rs_ranging_write_profile()) -- same reasoning as
+     * rs_sensor_reinit() above. */
     int sync_ret = vl53l9_set_sync_mode(p_dev, VL53L9_SYNC_MANUAL);
     int start_ret = vl53l9_start(p_dev);
     if (sync_ret || start_ret) {
@@ -1440,32 +1626,52 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
         return true;
     }
 
+    if (rb_ret == 0) {
+        /* a genuine readback succeeded -- best-effort: a readback failure alone never
+         * demotes a successful write, it just leaves the ACK's config fields (and the
+         * shadow) at their prior/zeroed values, matching the documented "config fields
+         * zeroed... per the firmware's implementation" ACK convention. */
+        g_ranging_last_readback = rb;
+    }
+
     if (!applied_ok) {
-        vl53l9_status_t status = { 0 };
-        vl53l9_get_status(p_dev, &status);
-        rs_send_ack(token, cmd, RS_RESULT_SENSOR_ERROR, rs_pack_status(&status));
+        if (cmd == RS_CMD_SET_MANUAL_PARAMS) {
+            rs_send_ack_ranging_config(token, cmd, RS_RESULT_SENSOR_ERROR, rb.ranging_mode,
+                                       rb.frame_period_us, rb.exposure_ms, rb.power_mode);
+        } else {
+            /* legacy shape (usecase/period/exposure/profile): applied = packed status
+             * word on SENSOR_ERROR, matching docs/protocol.md's general convention --
+             * NOT the rejected candidate's id/value. */
+            vl53l9_status_t status = { 0 };
+            vl53l9_get_status(p_dev, &status);
+            rs_send_ack(token, cmd, RS_RESULT_SENSOR_ERROR, rs_pack_status(&status));
+        }
         return false;
     }
 
     g_active_profile = candidate; /* adopt only now that the sensor has accepted it */
 
-    /* applied = the value actually in effect (docs/protocol.md): usecase has no
-     * driver-side clamping to observe, so echo the id; period/exposure are read back in
-     * case the driver clamped (vl53l9_set_frame_period/vl53l9_set_exposure do bounds
-     * validation and reject out-of-range instead of clamping -- vl53l9.c:402,550 -- so
-     * in practice these will equal param, but reading back reports reality either way,
-     * per the brief). */
-    uint32_t applied = param;
-    if (cmd == RS_CMD_SET_FRAME_PERIOD_US) {
-        uint32_t readback = param;
-        (void)vl53l9_get_frame_period(p_dev, &readback);
-        applied = readback;
-    } else if (cmd == RS_CMD_SET_EXPOSURE_MS) {
-        uint16_t readback = (uint16_t)param;
-        (void)vl53l9_get_exposure(p_dev, candidate.context, &readback);
-        applied = readback;
+    if (cmd == RS_CMD_SET_RANGING_PROFILE) {
+        rs_send_ack(token, cmd, RS_RESULT_OK, candidate.profile_id);
+    } else if (cmd == RS_CMD_SET_MANUAL_PARAMS) {
+        g_ranging_last_manual = candidate;
+        g_ranging_have_manual = true;
+        rs_send_ack_ranging_config(token, cmd, RS_RESULT_OK, rb.ranging_mode, rb.frame_period_us,
+                                   rb.exposure_ms, rb.power_mode);
+    } else {
+        /* legacy usecase/period/exposure: applied = the value actually in effect
+         * (docs/protocol.md) -- usecase has no driver-side clamping to observe, so echo
+         * the id; period/exposure come from the readback just taken above (equivalent to
+         * the pre-Task-4 direct vl53l9_get_frame_period/vl53l9_get_exposure calls, now
+         * folded into rs_ranging_read_config()). */
+        uint32_t applied = param;
+        if (cmd == RS_CMD_SET_FRAME_PERIOD_US) {
+            applied = rb.frame_period_us;
+        } else if (cmd == RS_CMD_SET_EXPOSURE_MS) {
+            applied = rb.exposure_ms;
+        }
+        rs_send_ack(token, cmd, RS_RESULT_OK, applied);
     }
-    rs_send_ack(token, cmd, RS_RESULT_OK, applied);
     return false;
 }
 
@@ -1487,7 +1693,8 @@ static uint32_t rs_eth_read_cmd(uint8_t *dst, uint32_t max) {
  * partial frame straddling two polls survives; `read_fn` is the only per-transport part. */
 static void rs_poll_commands_from(rs_cmd_read_fn read_fn, uint8_t *rx_buf, uint32_t *p_rx_len,
                                   const uint8_t *calib_data, uint16_t out_width,
-                                  uint16_t out_height, uint32_t seq_for_calib) {
+                                  uint16_t out_height, uint32_t seq_for_calib,
+                                  rs_cmd_transport_t transport) {
     uint32_t dispatched = 0;
 
     /* Parse-while-draining: after every chunk read from the source, the parse loop runs
@@ -1527,13 +1734,23 @@ static void rs_poll_commands_from(rs_cmd_read_fn read_fn, uint8_t *rx_buf, uint3
                 progressed = true;
             }
             if (r > 0) {
-                /* rs_handle_command's dispatch is still scalar cmd+param (Task 2 is
-                 * codec/registry only -- SET_MANUAL_PARAMS's decoded fields are unused
-                 * until Task 4 wires real application, so pass 0 for its "param"; every
-                 * other command uses the legacy shape's param directly). */
-                uint32_t param = (pc.kind == RS_PARSED_CMD_LEGACY) ? pc.u.legacy.param : 0u;
-                rs_handle_command(pc.cmd, param, pc.token, calib_data, out_width, out_height,
-                                  seq_for_calib);
+                /* Legacy shape: pass the scalar param through as before. Manual shape
+                 * (Task 4): build the decoded rs_ranging_manual_params_t and pass its
+                 * address instead -- rs_handle_command's SET_MANUAL_PARAMS case is the
+                 * only one that reads it (every other cmd value ignores the pointer). */
+                if (pc.kind == RS_PARSED_CMD_MANUAL) {
+                    rs_ranging_manual_params_t m = {
+                        .ranging_mode = pc.u.manual.ranging_mode,
+                        .frame_period_us = pc.u.manual.frame_period_us,
+                        .exposure_ms = pc.u.manual.exposure_ms,
+                        .power_mode = pc.u.manual.power_mode,
+                    };
+                    rs_handle_command(pc.cmd, 0u, pc.token, calib_data, out_width, out_height,
+                                      seq_for_calib, transport, &m);
+                } else {
+                    rs_handle_command(pc.cmd, pc.u.legacy.param, pc.token, calib_data, out_width,
+                                      out_height, seq_for_calib, transport, NULL);
+                }
                 dispatched++;
             } else {
                 rs_malformed_cmd_count++;
@@ -1571,7 +1788,7 @@ static void rs_poll_commands(const uint8_t *calib_data, uint16_t out_width, uint
     static uint8_t rx_buf[RS_CMD_RX_BUFSIZE];
     static uint32_t rx_len = 0;
     rs_poll_commands_from(rs_cdc_read_cmd, rx_buf, &rx_len, calib_data, out_width, out_height,
-                          seq_for_calib);
+                          seq_for_calib, RS_CMD_TRANSPORT_CDC);
 }
 
 /* Ethernet UDP command poll: drains the eth_cmd_buf the udp_recv callback fills. A
@@ -1582,7 +1799,7 @@ static void rs_poll_eth_commands(const uint8_t *calib_data, uint16_t out_width, 
     static uint8_t rx_buf[RS_CMD_RX_BUFSIZE];
     static uint32_t rx_len = 0;
     rs_poll_commands_from(rs_eth_read_cmd, rx_buf, &rx_len, calib_data, out_width, out_height,
-                          seq_for_calib);
+                          seq_for_calib, RS_CMD_TRANSPORT_ETH);
 }
 #endif /* !CONF_TRANSFORM_ONBOARD */
 
@@ -1637,7 +1854,22 @@ void vl53l9_app() {
 
     /* NOTE: g_ranging_profiles[] (vl53l9_utils.c, read-only reference) already sets
      * frame_period_us = FPS_TO_FRAME_PERIOD(30) for every usecase, AR_PRECISION included --
-     * the sensor has been on a 30 fps profile all along. No override needed here. */
+     * the sensor has been on a 30 fps profile all along. No override needed here.
+     * `p_profile` (CONF_USECASE) remains the on-board-transform golden path's own profile
+     * source below (#else branch, unchanged) and feeds the buffer-sizing calls just below
+     * (binning is 2 for every rs_ranging preset too, so this is never a size mismatch). */
+
+    /* Task 4: Room Mapping is the boot default (plan step 6), independent of CONF_USECASE.
+     * Seeded here (file-scope g_active_profile, before the raw-only build's boot sequence)
+     * so the raw-only build's cold-boot rs_boot_bringup() call below actually configures the
+     * sensor for Room Mapping from power-up, not AR_PRECISION-then-reseeded -- a shadow
+     * update alone would leave g_active_profile disagreeing with the hardware until the
+     * first reconfig command. g_active_profile/rs_ranging exist only in the raw-only build
+     * (the on-board-transform build has no command channel at all -- plan step 8, "by
+     * construction" -- so it has nothing to reject high-rate/DSS-off commands FROM). */
+#if !CONF_TRANSFORM_ONBOARD
+    rs_ranging_boot_default(&g_active_profile);
+#endif
     uint16_t raw_buffer_size = 0; /* bytes */
     uint8_t out_width = 0, out_height = 0; /* pixels */
 #if CONF_TRANSFORM_ONBOARD
@@ -1663,10 +1895,10 @@ void vl53l9_app() {
     } else {
         /* Unsupported binning: effectively unreachable (CONF_USECASE is compile-time and
          * every table profile is binning 2 or 4). NOTE (raw-only builds): handle_error()'s
-         * recovery here runs with g_active_profile still uninitialized (it is seeded just
-         * before the raw-only loop) and is guaranteed to fail into the terminal spin
-         * ~3 s later -- acceptable for a can't-happen site, documented so it isn't
-         * mistaken for a real recovery path. */
+         * recovery here runs before the sensor has ever been brought up (g_active_profile
+         * is already seeded, above, but nothing has been written to hardware yet) and is
+         * guaranteed to fail into the terminal spin ~3 s later -- acceptable for a
+         * can't-happen site, documented so it isn't mistaken for a real recovery path. */
         handle_error();
     }
 
@@ -1681,7 +1913,7 @@ void vl53l9_app() {
     {
         int boot_ret = -1;
         for (int attempt = 1; attempt <= 5; attempt++) {
-            boot_ret = rs_boot_bringup(p_dev, calib_data, p_profile);
+            boot_ret = rs_boot_bringup(p_dev, calib_data, &g_active_profile);
             if (boot_ret == 0) {
                 break;
             }
@@ -1709,6 +1941,13 @@ void vl53l9_app() {
         /* LSM6DSV16X (IKS4A1 HUB1) is at 0x50 now -- bring up SFLP/sensor-hub. Optional:
          * a failure just means no IMU/env streams; the ToF stream is never blocked. */
         g_lsm_ok = (rs_lsm_init() == 0) ? 1u : 0u;
+
+        /* Seed the ranging-config shadow (best-effort) so a GET_RANGING_CONFIG or a
+         * BAD_PARAM/BUSY rejection arriving before any command has ever succeeded reports
+         * the sensor's real boot config instead of an all-zero readback. I3C bus is idle
+         * here (nothing else runs between boot bring-up and tusb_init()/tud_connect()
+         * below); a failure just leaves the shadow zeroed, same as before this call. */
+        (void)rs_ranging_read_config(p_dev, &g_ranging_last_readback);
     }
 #else
     platform_power_reset(CONF_DEVICE_ID);
@@ -2088,11 +2327,10 @@ void vl53l9_app() {
      * No CONF_STREAM_BINARY/CONF_STREAM_RAW guards inside this loop: the #error at the
      * top of the file guarantees both are 1 whenever CONF_TRANSFORM_ONBOARD is 0. */
 
-    /* Seed the runtime-reconfig baseline from the profile this build actually started
-     * with (CONF_USECASE) -- a plain struct copy, so later SET_USECASE/PERIOD/EXPOSURE
-     * commands only ever mutate this local copy, never g_ranging_profiles[] itself. */
-    g_active_profile = *p_profile;
-
+    /* g_active_profile is already Room Mapping, live on the sensor (rs_ranging_boot_default()
+     * + rs_boot_bringup(), above) -- no re-seed needed here. Later SET_USECASE/PERIOD/
+     * EXPOSURE/SET_RANGING_PROFILE/SET_MANUAL_PARAMS commands mutate this copy, never
+     * g_ranging_profiles[]/rs_ranging's own preset table. */
     if (rs_trigger_next(p_dev)) { /* seed trigger for frame 1 */
         handle_error(); /* recovers (re-triggers frame 1 itself) or never returns */
     }
