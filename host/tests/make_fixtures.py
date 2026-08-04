@@ -110,6 +110,42 @@ def golden_imu_sync() -> bytes:
     return header + payload + zlib.crc32(header + payload).to_bytes(4, "little")
 
 
+def golden_tx_queue_stats() -> bytes:
+    """One EVENT (frame_type=2) code 7 TX_QUEUE_STATS frame (Task 6,
+    docs/protocol.md "TX_QUEUE_STATS (EVENT code 7) payload layout"; firmware
+    rs_send_tx_queue_stats_event() in firmware/scanner-stream/Src/vl53l9_app.c).
+
+    Payload (20 B, <IIIII> LE): code(7), packed `detail` (queue_high_water @
+    bits 0-7, active_transport @ bits 8-15, pending_fragments @ bits 16-31),
+    enqueue_drops, stack_stalls, emitted_bytes. Values are picked to exercise
+    every field distinctly and to NOT be all-zero/all-equal (a transposition
+    of two same-width fields must be detectable):
+      queue_high_water   = 200   (0xC8, near the u8 ceiling)
+      active_transport   = 2     (udp)
+      pending_fragments  = 1000  (0x3E8, exercises the 16-bit sub-field)
+      enqueue_drops      = 7
+      stack_stalls       = 3
+      emitted_bytes      = 123_456_789
+    detail = 200 | (2 << 8) | (1000 << 16) = 0x03E802C8 (65_536_712).
+
+    EVENT frames carry stream_id=0, width=height=0, and `seq` = the last
+    captured frame's counter (not incremented by the EVENT itself, per
+    docs/protocol.md's EVENT section) -- 4096 here (a 64-frame-cadence
+    multiple, matching the real emission cadence).
+    """
+    high_water, active_transport, pending = 200, 2, 1000
+    enqueue_drops, stack_stalls, emitted_bytes = 7, 3, 123_456_789
+    detail = (high_water & 0xFF) | ((active_transport & 0xFF) << 8) | ((pending & 0xFFFF) << 16)
+    assert detail == 0x03E802C8
+    payload = struct.pack("<IIIII", 7, detail, enqueue_drops, stack_stalls, emitted_bytes)
+    assert len(payload) == 20
+    # header: EVENT(2), stream_id=0, seq=4096 (last captured frame's counter),
+    # t_us=987_654_321, width=height=0
+    header = struct.pack("<4sBBBBIQHHII", b"RSCN", 2, 2, 0, 0, 4096, 987_654_321,
+                         0, 0, len(payload), 0)
+    return header + payload + zlib.crc32(header + payload).to_bytes(4, "little")
+
+
 def build_sensors_snippet(path):
     """A tiny capture: CALIB, then N (RAW, IMU_QUAT, ENV) triples with a rotating quaternion."""
     import numpy as np
@@ -142,5 +178,6 @@ if __name__ == "__main__":
     (FIXTURES / "golden_imu_raw.bin").write_bytes(golden_imu_raw())
     (FIXTURES / "golden_imu_cal.bin").write_bytes(golden_imu_cal())
     (FIXTURES / "golden_imu_sync.bin").write_bytes(golden_imu_sync())
+    (FIXTURES / "golden_tx_queue_stats.bin").write_bytes(golden_tx_queue_stats())
     build_sensors_snippet(FIXTURES / "golden_sensors_snippet.bin")
     print("fixtures written")

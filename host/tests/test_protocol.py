@@ -136,6 +136,99 @@ def test_parse_event_rejects_short_payload():
         parse_event(b"\x01\x00\x00")
 
 
+# --- EVENT code 7 (TX_QUEUE_STATS) -------------------------------------------------------
+#
+# Unlike codes 1-6, this one is NOT decoded through parse_event() (its payload past
+# code+detail is three packed binary counters, not an ASCII message) -- see
+# parse_tx_queue_stats_event() and docs/protocol.md's "TX_QUEUE_STATS (EVENT code 7)
+# payload layout". golden_tx_queue_stats.bin is a full wire frame (header + payload + CRC),
+# hand-packed independently of roomscan.protocol by make_fixtures.py -- the golden-vector
+# discipline the protocol-change skill requires for every new wire shape.
+
+def test_parse_tx_queue_stats_event_fields():
+    from roomscan.protocol import EventCode, parse_tx_queue_stats_event
+    high_water, active_transport, pending = 200, 2, 1000
+    detail = (high_water & 0xFF) | ((active_transport & 0xFF) << 8) | ((pending & 0xFFFF) << 16)
+    payload = struct.pack("<IIIII", EventCode.TX_QUEUE_STATS, detail, 7, 3, 123_456_789)
+    ev = parse_tx_queue_stats_event(payload)
+    assert ev.queue_high_water == 200
+    assert ev.active_transport == "udp"
+    assert ev.pending_fragments == 1000
+    assert ev.enqueue_drops == 7
+    assert ev.stack_stalls == 3
+    assert ev.emitted_bytes == 123_456_789
+
+
+def test_parse_tx_queue_stats_event_rejects_bad_length():
+    from roomscan.protocol import parse_tx_queue_stats_event
+    with pytest.raises(ProtocolError):
+        parse_tx_queue_stats_event(struct.pack("<II", 7, 0))  # 8 bytes, not 20
+
+
+def test_parse_tx_queue_stats_event_rejects_wrong_code():
+    from roomscan.protocol import parse_tx_queue_stats_event
+    payload = struct.pack("<IIIII", 5, 0, 0, 0, 0)  # TX_OVERFLOW's code, not TX_QUEUE_STATS
+    with pytest.raises(ProtocolError):
+        parse_tx_queue_stats_event(payload)
+
+
+def test_parse_tx_queue_stats_event_unknown_transport_id_falls_back_to_none():
+    """active_transport is a 2-bit-wide firmware hint (0/1/2 documented); any other value
+    on the wire must not raise -- it degrades to the same "none" the firmware itself sends
+    when nothing is connected, rather than crashing a host mid-stream on a future firmware
+    build that adds a transport id this host doesn't know about yet."""
+    from roomscan.protocol import parse_tx_queue_stats_event
+    detail = (0) | ((99 & 0xFF) << 8) | (0 << 16)
+    payload = struct.pack("<IIIII", 7, detail, 0, 0, 0)
+    ev = parse_tx_queue_stats_event(payload)
+    assert ev.active_transport == "none"
+
+
+def test_golden_tx_queue_stats_fixture_matches_decoder():
+    """Cross-check: the fixture is built by make_fixtures.py from raw struct/zlib calls,
+    independently of protocol.py's codec (same discipline as golden_imu_sync etc.)."""
+    golden = (FIXTURES / "golden_tx_queue_stats.bin").read_bytes()
+    assert zlib.crc32(golden[:-4]) == int.from_bytes(golden[-4:], "little")
+    header = FrameHeader.unpack(golden[:HEADER_SIZE])
+    assert header.frame_type == FrameType.EVENT
+    assert header.stream_id == 0
+    assert header.width == 0 and header.height == 0
+    assert header.seq == 4096          # last-captured-frame's counter (EVENT convention)
+    assert header.t_us == 987_654_321
+    assert header.payload_len == 20
+
+    from roomscan.protocol import parse_tx_queue_stats_event
+    payload = golden[HEADER_SIZE:HEADER_SIZE + header.payload_len]
+    ev = parse_tx_queue_stats_event(payload)
+    assert ev.queue_high_water == 200
+    assert ev.active_transport == "udp"
+    assert ev.pending_fragments == 1000
+    assert ev.enqueue_drops == 7
+    assert ev.stack_stalls == 3
+    assert ev.emitted_bytes == 123_456_789
+
+
+def test_golden_tx_queue_stats_fixture_is_reproducible():
+    from make_fixtures import golden_tx_queue_stats
+    golden = (FIXTURES / "golden_tx_queue_stats.bin").read_bytes()
+    assert golden_tx_queue_stats() == golden
+
+
+def test_golden_tx_queue_stats_fixture_can_fail():
+    """Fail-proof: perturbing one payload byte must flip a decoded field -- pinning bytes
+    that merely "parse" would not catch a shifted/swapped field (protocol-change skill:
+    'assert VALUES not shapes')."""
+    from roomscan.protocol import parse_tx_queue_stats_event
+    golden = (FIXTURES / "golden_tx_queue_stats.bin").read_bytes()
+    payload = bytearray(golden[HEADER_SIZE:HEADER_SIZE + 20])
+    ev_before = parse_tx_queue_stats_event(bytes(payload))
+    assert ev_before.enqueue_drops == 7
+    payload[8] ^= 0x01   # low byte of enqueue_drops (offset 8 in the 20-byte payload)
+    ev_after = parse_tx_queue_stats_event(bytes(payload))
+    assert ev_after.enqueue_drops != ev_before.enqueue_drops
+    assert ev_after.enqueue_drops == 6
+
+
 def test_raw_and_calib_stream_ids():
     from roomscan.protocol import CALIB_SIZE, RAW_3DMD_SIZE_BIN2, StreamId
     assert StreamId.RAW_3DMD == 7

@@ -431,7 +431,20 @@ specced with the Phase 4 transport work).
   telemetry, high-framerate plan Task 6). Unlike codes 1–6 it carries a 20-byte payload (layout in
   the EVENT table above); emitted on the 64-frame CALIB cadence by raw-only builds. Hosts that
   treat EVENT payloads as a bare detail word skip it harmlessly (tolerant-skip convention). No
-  layout change to any existing frame; no version bump.
+  layout change to any existing frame; no version bump. **Golden vector closed 2026-08-03**:
+  `golden_tx_queue_stats.bin` (a full EVENT frame, hand-packed independently of `protocol.py` by
+  `host/tests/make_fixtures.py`'s `golden_tx_queue_stats()`), cross-checked in
+  `host/tests/test_protocol.py` (byte-for-byte fixture match + decode + a deliberate one-byte
+  perturbation proving the check is discriminating). Because this EVENT is firmware-encoded and
+  host-decoded only (no Python-side encoder to feed the C parser, unlike the COMMAND cross-checks
+  below), `host/tests/test_protocol_c_crosscheck.py` instead cross-checks the ENCODE side directly:
+  it calls the real, non-static `rs_write_header()`/`rs_crc32()`/`rs_put_u32()` from
+  `rs_protocol.c` via `ctypes` (the exact primitives `rs_send_generic_cdc()` and
+  `rs_send_tx_queue_stats_event()` in `vl53l9_app.c` call) to build the same frame and checks it
+  byte-for-byte against `golden_tx_queue_stats.bin`. The one thing that check cannot reach is the
+  `detail`-word bit-packing formula, which is inline in `vl53l9_app.c` (not HAL-free, not
+  host-compilable); that formula was instead verified by direct source reading and matches
+  Python's decode bit-for-bit (`detail = high_water | (transport << 8) | (pending << 16)`).
 - **v2** (2026-08-03): **layout change — version bump.** Five new command codes (8-12,
   `docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md` Task 2):
   `SET_RANGING_PROFILE` (8), `SET_MANUAL_PARAMS` (9), `GET_RANGING_CONFIG` (10),

@@ -329,6 +329,115 @@ def test_c_parser_does_not_overread_on_truncated_manual_frame(rs_parser_lib):
         assert ret <= 0, f"cutoff={cutoff} must not report a successful parse"
 
 
+# --- EVENT code 7 (TX_QUEUE_STATS) encoder cross-check --------------------------------------
+#
+# Every cross-check above exercises the DECODE direction: a Python-built COMMAND vector fed
+# to the real C rs_parse_command(). TX_QUEUE_STATS runs the other way -- firmware ENCODES
+# it (rs_send_tx_queue_stats_event() + rs_send_generic_cdc() in
+# firmware/scanner-stream/Src/vl53l9_app.c), the host only ever DECODES it
+# (roomscan.protocol.parse_tx_queue_stats_event) -- so there is no Python-side encoder to
+# feed the C parser. What CAN be cross-checked without pulling in vl53l9_app.c's TinyUSB/
+# lwIP dependencies (it is not HAL-free) is the byte-level construction: rs_write_header(),
+# rs_crc32(), and rs_put_u32() are the exact three primitives rs_send_generic_cdc() and
+# rs_send_tx_queue_stats_event() call to build the frame, they are non-static and declared
+# in rs_protocol.h, and they are already linked into rs_parser_lib's .so -- so this test
+# calls the REAL compiled functions (not a reimplementation) to build the same frame the
+# firmware would, and checks it byte-for-byte against golden_tx_queue_stats.bin (which
+# make_fixtures.py built independently via raw struct/zlib) and against what
+# parse_tx_queue_stats_event() decodes. The one thing this does NOT reach is the bit-
+# packing formula inline in rs_send_tx_queue_stats_event() itself (that line lives in
+# vl53l9_app.c, not rs_protocol.c) -- that formula is instead verified by direct reading
+# (docs/protocol.md's EVENT table, the firmware source, and protocol.py's decode formula
+# all agree: detail = high_water | (transport << 8) | (pending << 16)).
+
+@pytest.fixture(scope="module")
+def rs_protocol_primitives(rs_parser_lib):
+    """Bind the real rs_write_header/rs_crc32/rs_put_u32 symbols (already compiled into
+    rs_parser_lib's .so, since they are non-static functions in rs_protocol.c) for direct
+    ctypes calls -- no shim needed, these are the firmware's actual encoder primitives."""
+    lib = rs_parser_lib
+    lib.rs_put_u32.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32]
+    lib.rs_put_u32.restype = None
+    lib.rs_write_header.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8,
+        ctypes.c_uint32, ctypes.c_uint64, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint32,
+    ]
+    lib.rs_write_header.restype = None
+    lib.rs_crc32.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
+    lib.rs_crc32.restype = ctypes.c_uint32
+    return lib
+
+
+def _u8p(buf: "ctypes.Array[ctypes.c_uint8]", offset: int = 0) -> ctypes.POINTER:
+    return ctypes.cast(ctypes.addressof(buf) + offset, ctypes.POINTER(ctypes.c_uint8))
+
+
+def test_c_encoder_builds_tx_queue_stats_frame_matching_golden(rs_protocol_primitives):
+    lib = rs_protocol_primitives
+
+    # Same values as make_fixtures.golden_tx_queue_stats() / docs/protocol.md's worked
+    # example, packed the same way rs_send_tx_queue_stats_event() packs `detail`.
+    high_water, active_transport, pending = 200, 2, 1000
+    enqueue_drops, stack_stalls, emitted_bytes = 7, 3, 123_456_789
+    detail = (high_water & 0xFF) | ((active_transport & 0xFF) << 8) | ((pending & 0xFFFF) << 16)
+    assert detail == 0x03E802C8
+
+    # Payload: 5 x rs_put_u32 at offsets 0/4/8/12/16, exactly as
+    # rs_send_tx_queue_stats_event() writes it.
+    payload_buf = (ctypes.c_uint8 * 20)()
+    lib.rs_put_u32(_u8p(payload_buf, 0), 7)  # RS_EVT_TX_QUEUE_STATS
+    lib.rs_put_u32(_u8p(payload_buf, 4), detail)
+    lib.rs_put_u32(_u8p(payload_buf, 8), enqueue_drops)
+    lib.rs_put_u32(_u8p(payload_buf, 12), stack_stalls)
+    lib.rs_put_u32(_u8p(payload_buf, 16), emitted_bytes)
+    payload_bytes = bytes(payload_buf)
+
+    # Header + CRC: exactly rs_send_generic_cdc()'s construction -- rs_write_header(),
+    # then rs_crc32() chained over header then payload.
+    hdr_buf = (ctypes.c_uint8 * HEADER_SIZE)()
+    lib.rs_write_header(_u8p(hdr_buf), 2, 0, 0, 4096, 987_654_321, 0, 0, 20)  # frame_type=EVENT(2)
+    header_bytes = bytes(hdr_buf)
+
+    crc = lib.rs_crc32(0, _u8p(hdr_buf), HEADER_SIZE)
+    crc = lib.rs_crc32(crc, _u8p(payload_buf), 20)
+    tail_buf = (ctypes.c_uint8 * 4)()
+    lib.rs_put_u32(_u8p(tail_buf), crc)
+    tail_bytes = bytes(tail_buf)
+
+    c_frame = header_bytes + payload_bytes + tail_bytes
+
+    golden = (Path(__file__).parent / "fixtures" / "golden_tx_queue_stats.bin").read_bytes()
+    assert c_frame == golden, "C-built frame (real rs_write_header/rs_crc32/rs_put_u32) must match the golden fixture byte-for-byte"
+
+    from roomscan.protocol import parse_tx_queue_stats_event
+    ev = parse_tx_queue_stats_event(payload_bytes)
+    assert ev.queue_high_water == 200
+    assert ev.active_transport == "udp"
+    assert ev.pending_fragments == 1000
+    assert ev.enqueue_drops == 7
+    assert ev.stack_stalls == 3
+    assert ev.emitted_bytes == 123_456_789
+
+
+def test_c_encoder_tx_queue_stats_detail_packing_disagreement_would_be_caught(rs_protocol_primitives):
+    """Fail-proof for the encoder cross-check itself: corrupt one field going into the C
+    build (as if the C packing formula had drifted from Python's) and confirm the byte
+    comparison against the golden fixture goes red, not green."""
+    lib = rs_protocol_primitives
+    detail = (200 & 0xFF) | ((2 & 0xFF) << 8) | ((999 & 0xFFFF) << 16)  # pending off by one
+    payload_buf = (ctypes.c_uint8 * 20)()
+    lib.rs_put_u32(_u8p(payload_buf, 0), 7)
+    lib.rs_put_u32(_u8p(payload_buf, 4), detail)
+    lib.rs_put_u32(_u8p(payload_buf, 8), 7)
+    lib.rs_put_u32(_u8p(payload_buf, 12), 3)
+    lib.rs_put_u32(_u8p(payload_buf, 16), 123_456_789)
+    payload_bytes = bytes(payload_buf)
+
+    golden = (Path(__file__).parent / "fixtures" / "golden_tx_queue_stats.bin").read_bytes()
+    golden_payload = golden[HEADER_SIZE:HEADER_SIZE + 20]
+    assert payload_bytes != golden_payload  # proves the comparison above is discriminating
+
+
 def test_python_is_independent_of_c_source_availability(monkeypatch):
     """Sanity: the Python-side codec functions used above import and work even without a
     C compiler present (skip-guarded above) -- this test has no rs_parser_lib dependency
