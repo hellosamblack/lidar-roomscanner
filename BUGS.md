@@ -3481,3 +3481,40 @@ Mapping) at **85.20 Hz** (streams 9/11) on the pre-fix `3f4b307` firmware. Post-
 **77.2 Hz**, so the abortable-drain fix costs ~8 Hz (~9%) at the 90 Hz request on ambient profiles.
 That is the accepted trade — ToF cadence is the priority — but it is a measured before/after, not an
 unexplained observation. Requested-30 Hz combos hold 29.8–29.9 Hz, unaffected.
+
+## BUG-078 — no build-time knob selects `CONF_TRANSFORM_ONBOARD`; a CMake `-D` override is a silent no-op
+
+**Status:** open (documentation/plan-accuracy gap, not a blocker) · **Area:** firmware/build ·
+**Found by:** Task 12 of the high-frame-rate/manual-ranging plan, end-to-end validation pass,
+2026-08-04 — plan step 2 assumed a build-time knob selects between the production raw-only and
+onboard-transform firmware configs.
+
+`CONF_TRANSFORM_ONBOARD` (`firmware/scanner-stream/Src/vl53l9_app.c`, ~line 36) is a plain
+`#define CONF_TRANSFORM_ONBOARD (0)`, not a CMake cache variable — `CMakeLists.txt` has no
+`target_compile_definitions`/preset wiring for it, and no preset targets the onboard-transform
+config. Passing `-DCONF_TRANSFORM_ONBOARD=1` on the `cmake` command line is therefore a silent
+no-op: the macro is whatever the source line says regardless of the command line, and only the
+production raw-only config is buildable without editing that line by hand. The raw-only Debug
+build itself is unaffected and verified clean (`.bin` 166,107 B; text 152,868 / data 13,235 /
+bss 175,288). If the onboard-transform config is needed again (golden-vector regeneration,
+DSS-off validation per Task 4 step 7), either wire a real `option()` +
+`target_compile_definitions(... PRIVATE CONF_TRANSFORM_ONBOARD=$<BOOL:...>)` path, or flip the
+`#define` by hand and say so explicitly in the commit that does it.
+
+## BUG-079 — Manual ranging fps/exposure UI inputs revert before they can be applied (debounce race)
+
+**Status:** open · **Area:** host/web UI (`controls.js` / `web.py`) · **Found by:** Task 12 browser-UI
+visual pass, 2026-08-04.
+
+The Manual ranging-mode number/slider inputs cannot reliably apply a changed value. `controls.js`
+debounces manual-parameter edits for `MANUAL_DEBOUNCE_MS = 300` ms (`controls.js:50`), but `web.py`
+re-broadcasts the `ranging` message every `METRICS_INTERVAL = 250` ms (`web.py:138`), and the
+client's `ranging` handler unconditionally resets the manual fps/exposure `<input>.value` back to the
+applied config whenever nothing is server-pending (`controls.js` ~195–233). Because 300 ms > 250 ms,
+the periodic resync always lands inside the debounce window and reverts the field before the edit is
+sent — reproduced deterministically (a 90 fps edit reverts within ~130 ms). Only the Manual
+number/slider widgets are affected: the four preset segments, the IMU/env poll-rate control, and
+sending `set_manual_params` directly over `/ws` all work. Fix direction: track a client-side "dirty
+since last user edit" flag and suppress the periodic field-resync while a local edit is in flight (or
+send-on-input rather than debouncing against a faster external resync). Raising the debounce below
+250 ms does not help — it still races the resync.

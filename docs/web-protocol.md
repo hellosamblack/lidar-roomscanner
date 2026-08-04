@@ -506,12 +506,16 @@ period-multiples, and `validate_manual_params` now folds a WARNING about exactly
 dedicated field/row). `measured_fps` is the actual observed device cadence, independent of both.
 The Manual FPS slider must never silently apply the request without this consequence being visible.
 
-*Honest with today's firmware.* Commands 11/12 (`SET_IMU_ENV_RATE`/`GET_IMU_ENV_RATE`) parse on the
-current firmware build but ACK `UNKNOWN_CMD` (Task 7 lands them later). `ImuEnvRateState` reports
-that as `error`, leaves `initialized: false`, and — critically — never adopts the requested rate
-into `applied_rate_hz` as if it had been confirmed; the UI shows the honest error and stays
-"coupled" (see `test_set_imu_env_rate_unknown_cmd_reports_error_and_stays_coupled` in
-`test_web.py`).
+*Honest with today's firmware.* Commands 11/12 (`SET_IMU_ENV_RATE`/`GET_IMU_ENV_RATE`) are live as
+of Task 7 (`3f4b307`, hardware-gated 2026-08-04): coupled mode (rate 0, the default) is
+byte-identical to pre-feature firmware, and a decoupled rate is genuinely applied on its own
+TIM2-paced service tick independent of the concurrent ToF profile. `ImuEnvRateState` still commits
+`applied_rate_hz` only from a real device readback, never optimistically — against any firmware that
+still ACKs `UNKNOWN_CMD` for these commands (e.g. a device not yet reflashed past Task 7), it reports
+that as `error`, leaves `initialized: false`, and stays "coupled" rather than adopting the request as
+if confirmed (this fallback path stays regression-covered by
+`test_set_imu_env_rate_unknown_cmd_reports_error_and_stays_coupled` in `test_web.py`, which now
+exercises the pre-Task-7-firmware case rather than the everyday one).
 
 *One-way flow, same rule as every other segmented control.* The four-way profile selector's active
 segment and the Coupled/Explicit toggle's `coupled` half are driven **entirely** by the `ranging`
@@ -592,7 +596,7 @@ The rest of the table below is `/ws` only:
 | `set_elevation_datum` | `on` (**bool, strictly**) | capture the current **smoothed** elevation into `UiState.elevation_datum_ft` (`on: true`) so the Sensors card reads change-since instead of absolute height, or clear it (`on: false`); persisted to `[viewer] elevation_datum_ft` → echo `state`. A non-bool `on` is rejected+logged with **no mutation** (a truthy string must not set a datum, and a falsy one must not clear an existing one). With no barometer reading yet it refuses with a bus line rather than capturing a datum of 0 ft. Smoothed, not raw, on purpose: a datum taken from one sample would bake ~1.2 ft of noise in as a constant offset for the whole session — the same mistake BUG-037 found in the SLAM height datum | `web.py` |
 | `set_profile` | `profile`(room_mapping\|precision\|high_framerate\|manual) | one atomic `SET_RANGING_PROFILE` (cmd 8), off the event loop; on success chains one `GET_RANGING_CONFIG` readback (cmd 8's own ACK has no config fields) → echo `ranging`. Unknown profile name: rejected+logged, no device round-trip. `manual` reapplies the device's last accepted `SET_MANUAL_PARAMS` candidate — rejected `BAD_PARAM` by the device until one exists this session. Rejected client-**and**-server-side (no-op, logged) while another ranging command is already `pending` | `web._set_profile` |
 | `set_manual_params` | `ranging_mode`(ambient\|precision), `fps`(1-100), `exposure_ms`(1-16), `power_mode`(ulp\|lp\|regular) | validated through `roomscan.profiles.validate_manual_params` FIRST (a rejected request never touches the device); on success, the WHOLE candidate goes as **one** atomic `SET_MANUAL_PARAMS` (cmd 9) — never four independent operations — and commits `applied_*` straight from that ACK (already the readback) → echo `ranging`. Same pending-rejection rule as `set_profile` | `web._set_manual_params` |
-| `set_imu_env_rate` | `rate_hz`(0 = coupled, else 1-480) | independent pending command from ranging (own `ImuEnvRateState.pending`): validated through `profiles.validate_imu_env_rate` (reports, doesn't silently drop, a requested rate above the 60 Hz sensor-hub cycle — stream 10/env will sub-sample), then one `SET_IMU_ENV_RATE` (cmd 11) off the event loop → echo `ranging`. **Today's firmware ACKs `UNKNOWN_CMD`** (Task 7 not yet landed): reported as `imu_env.error`, `applied_rate_hz` is left untouched — never adopts the request as if confirmed | `web._set_imu_env_rate` |
+| `set_imu_env_rate` | `rate_hz`(0 = coupled, else 1-480) | independent pending command from ranging (own `ImuEnvRateState.pending`): validated through `profiles.validate_imu_env_rate` (reports, doesn't silently drop, a requested rate above the 60 Hz sensor-hub cycle — stream 10/env will sub-sample), then one `SET_IMU_ENV_RATE` (cmd 11) off the event loop → echo `ranging`. **Live as of Task 7** (`3f4b307`, hardware-gated): the ACK's own `applied` field is the readback, and `applied_rate_hz` is committed only from that ACK — a device still on pre-Task-7 firmware (`UNKNOWN_CMD`) reports it as `imu_env.error` and leaves `applied_rate_hz` untouched rather than adopting the request as if confirmed | `web._set_imu_env_rate` |
 
 `view_colormap` is presentation state for every 3D display: Point cloud, SLAM,
 and Detailed. SLAM/Detailed re-map their already-shaded mesh scalar in the

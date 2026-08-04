@@ -562,13 +562,17 @@ reflectance super-resolution / sensor-fusion-overlay work (both scoped, not yet 
 > `VL53L9_SYNC_AUTONOMOUS` (a bigger, unattempted change) to actually govern fps. `SET_EXPOSURE_MS` *does*
 > change fps measurably (5 ms → 28.6 fps, 15 ms → 25.6 fps).
 >
-> **High-rate/manual ranging — IN PROGRESS, Task 6 of 12 done (2026-08-04).** The reviewed
+> **High-rate/manual ranging — IN PROGRESS, Tasks 1–11 of 12 done (2026-08-04); Task 12 (final:
+> validation/docs/land/retro) in progress.**
+> The reviewed
 > [implementation plan](docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md)
-> is being executed; Tasks 1–6, 9, 10 are on `main` (`d2c4148` profiles contract, `2b8a9ee` protocol
+> is being executed; Tasks 1–11 are on `main` (`d2c4148` profiles contract, `2b8a9ee` protocol
 > v2 cmds 8–12, `414adaa` typed control, `7598fde` atomic firmware profiles, `b10f44d` autonomous
 > sync + BUG-072, `5c23270` SLAM-ingest split, `8cc9239` web ranging UI, `896c7a8` model refinement,
 > `5c90da6` Task 6 pacing/telemetry firmware+host, `10966c5` EVENT 7 golden vector,
-> `91a5dfe` web queue telemetry, `56ee9ba` analyze_capture v2 fix). **The headline changed at Task
+> `91a5dfe` web queue telemetry, `56ee9ba` analyze_capture v2 fix, `3f4b307` Task 7 IMU/env decoupled
+> poll rate + BUG-074 fix, `d732f3a` Task 8 rate-aware filters, `17a27d8` BUG-077 fix, `1663556`
+> Task 11 MCP ranging control, `a418131` ProfileTuning comparison). **The headline changed at Task
 > 5's stop point:** with applied periods readback-exact, the sensor quantizes any shorter-than-floor
 > period to integer multiples (90 Hz request → 44.85 fps at 2×), and the floor is sensor-intrinsic —
 > measured brackets 20.0/21.74/23.53 ms at ≤2/4/8 ms exposure. Per the plan's own rule the spec was
@@ -582,10 +586,16 @@ reflectance super-resolution / sensor-fusion-overlay work (both scoped, not yet 
 > ranging-quality knob only, and our hardware beats ST's own planning model (flat 26.9 ms) at every
 > tested exposure. Same pass corrected `I3C_XFER_MS` to the documented 10 Mbps effective (11.87 ms —
 > the 12.5 MHz-clock figure understated bus use ~25%) and replaced the fitted power model with the
-> decompiled tool's exact equations (validated 5/5 owner anchors within 0.01%). **⚠ That DSS
-> conclusion is now CONTESTED** by a concurrent investigation into the vendored driver's CSI-2 path —
-> see the handoff doc; it is a blocking open question for Task 12, not settled fact, and nothing
-> above should be treated as final until it is adjudicated.
+> decompiled tool's exact equations (validated 5/5 owner anchors within 0.01%). **DSS: RESOLVED
+> 2026-08-04, Position A upheld** (was briefly contested by a concurrent investigation) — the
+> vendored driver's `platform_start/stop_csi_pipe` are `return -1` stubs never called, the board
+> schematic has zero CSI/MIPI occurrences, no DSS-off-specific input shape exists anywhere on the
+> transform library's interface, AN6522 ties >100 fps explicitly to "using a MIPI interface" and
+> never mentions DSS, and Task 4/5 already toggled the real DSS register on hardware with no change
+> to frame size or ceiling. The "CSI-2 supports DSS-off" framing traced to a transcript-summary
+> mischaracterization — the concurrent session's own uncommitted notes concluded the same as
+> Position A. The 46 Hz ceiling stands as final; see the handoff doc (rev 4) for the full
+> adjudication.
 >
 > **Task 6 (Ethernet high-rate pacing, queue telemetry, CDC isolation) — code + hardware gate
 > complete (2026-08-04), with two caveats.** Firmware built and flashed (165,259 B .bin;
@@ -617,13 +627,83 @@ reflectance super-resolution / sensor-fusion-overlay work (both scoped, not yet 
 > silently zeroed forensics on every protocol-v2 capture since `2b8a9ee`; see BUGS.md for the
 > "second parser drifts silently" lesson.
 >
-> **Remaining:** Task 7 (IMU/env decoupled poll rate, cmds 11/12 firmware — protocol/host/UI
-> already landed; includes the BUG-074 wake-path check), Task 8 (rate-aware filter time constants),
-> Task 11 (MCP `rig_profile`/`rig_imu_env_rate`), Task 12 (end-to-end validation incl. Task 10's
-> deferred visual pass, **adjudicating the contested DSS finding before writing any ceiling number**,
-> status-sync, milestone-retro). Open bugs from this push: BUG-073 (reconfig-before-settle can drop
-> an ACK), BUG-074 (SET_STANDBY wake shadow, unconfirmed), BUG-075 (open, above). Full resume state:
-> `docs/superpowers/plans/2026-08-03-high-framerate-implementation-handoff.md` (rev 3).
+> **Task 7 (IMU/env decoupled poll rate) — done (`3f4b307`, gate + BUG-077 fix `17a27d8`).** Shared
+> `rs_lsm_service_tick()`, firmware cmds 11/12, decoupled TIM2-paced drains (frozen `seq`, stream 13
+> only on coincident FRAME_READY), `skew_check` N:1 grouping. Bridge-measured gate passed: coupled
+> mode byte-identical to Task 6's baseline; idle regression held exactly 18.182 Hz; decoupled 30 Hz
+> held across Room Mapping/Precision/High Frame-Rate; decoupled 90 Hz landed 85.2 Hz with stream 10
+> sub-sampled to 56.4 Hz as designed. **BUG-077 found and fixed in the same commit:** the off-cycle
+> IMU/env drain ran before checking FRAME_READY, and each FIFO word is a blocking I3C transaction on
+> the shared bus, so it doubled ToF frame intervals under short-margin ranging modes (Precision/30
+> +4.91%, HFR/30 +14.94%; Ambient unaffected — its longer period absorbs the margin). Fixed by
+> returning on FRAME_READY-first with a per-word abortable drain; re-gated at Precision/30 0.09%,
+> HFR/30 0.88%. Honest residual trade: decoupled-90 IMU/env now costs Room Mapping's 90 Hz point
+> ~9% (85.2 → 77.2 Hz); 30 Hz combos are unaffected. BUG-074's wake path sanity-passed via a natural
+> auto-idle cycle; a full fault-injection retest is still outstanding. **Task 8 (rate-aware filters)
+> — done (`d732f3a`, host-only, no hardware gate needed):** applied IMU/env rate now flows
+> web → worker → `Mapper.set_imu_rate_hz`; `baro_tau_frames` is pinned in real seconds (900 @ 30 Hz /
+> 2700 @ 90 Hz); `ImuFusion`'s yaw crossover takes an explicit reference-rate input instead of an
+> inert constant; coupled-30 Hz behavior stays bit-identical; replay always uses each stream's own
+> measured cadence, never an assumed 30 Hz.
+>
+> **Task 11 (MCP ranging control) — done (`1663556`).** `rig_profile()`/`rig_imu_env_rate()` verify by
+> effect, waiting for their own half of the `ranging` broadcast to go pending and then settle onto the
+> requested config — that message also rides the ~4 Hz metrics tick, so a merely newly-arrived one
+> proves nothing, and the two halves are independent commands sharing one message. `ok=false` for
+> busy/replay/validation failure/device error/unsupported CDC rate/applied mismatch, with `force=True`
+> and `require_full_env=True` as the two deliberate escape hatches. Offline `profile_estimate()` shares
+> the model, and the JSON vocabulary + `estimate_to_json` moved into `roomscan.profiles` so browser and
+> agent cannot be told different things about one config. Verified live: High Frame-Rate read back
+> 46/4 ms at 45.35 fps, restored to Room Mapping at 29.9 fps, IMU/env decoupled to 30 Hz and recoupled.
+> Codex's ProfileTuning comparison landed beside it (`a418131`) with two integration fixes — a dead
+> `ambient_lux` knob and a second spelling of the estimate shape.
+>
+> **Task 12 — IN PROGRESS (2026-08-04): end-to-end validation, docs status-sync, and landing.**
+> Full host suite **1895 passed / 1 skipped** (the 1 skip is the expected Windows-only
+> `test_logfilter` case); `ruff check` reports 4 findings, all pre-existing and in `host/tools/`,
+> unrelated to this feature (`headless_doctor.py` unused import, `query_mdns.py` unused import +
+> f-string-without-placeholder, `test_send.py` multi-import line). Firmware production raw-only
+> Debug build is clean (`.bin` 166,107 B; text 152,868 / data 13,235 / bss 175,288).
+> **Finding (plan-accuracy gap, not a blocker):** Task 12 step 2 assumes a build-time knob selects
+> the onboard-transform config; no such CMake knob exists — `CONF_TRANSFORM_ONBOARD` is an
+> unguarded `#define ... (0)` in `firmware/scanner-stream/Src/vl53l9_app.c` (~line 36) with no
+> `target_compile_definitions`/preset wiring, so a `-D` override on the command line is a silent
+> no-op and only the raw-only config is buildable without a source edit. Filed as **BUG-078**.
+> **De-scoped by owner directive (2026-08-04):** *"we will never use ethernet or CDC for data
+> transfer"* — read as never a physically wired link in production. The plan's **wired-Ethernet
+> release gate** (Task 6 step 6) and **CDC-isolation hardware proof** (Task 6 steps 3/4) are
+> therefore DE-SCOPED, not outstanding. The Wi-Fi bridge IS the production transport and it is
+> proven: four 60 s Task 6 captures ran 0 CRC / 0 seq gaps / 0 incomplete frames / 0 firmware TX
+> drops at 30/46/50/90-oversubscribed Hz, peaking ~9.9 Mbit/s against the 100 Mbit/s port (~10x
+> headroom) — bandwidth is definitively not the bottleneck and a wired confirmation run would prove
+> nothing new. **Still genuinely outstanding** (open bugs, not failures): BUG-073
+> (reconfig-before-settle can drop an ACK), BUG-074 (SET_STANDBY wake shadow fixed in `3f4b307`,
+> live fault-injection retest still outstanding), BUG-075 (open, 50 Hz/2 ms bimodal cadence, root
+> cause unresolved). BUG-077 fixed (`17a27d8`). **Live rig sweep and browser-UI visual pass:**
+> Live rig sweep (over the Wi-Fi bridge; device restored to boot default afterward): all four presets
+> and manual 60/61/90/100 fps verified — Room Mapping 29.8 fps, Precision 29.9 fps
+> (precision/30/10 ms/ulp), High Frame-Rate 45.4 fps (46 preset, precision/46/4 ms/regular), and
+> every over-ceiling manual request ACKed but delivered a truthful period-multiple (60→29.9,
+> 61→30.4, 90→44.8, 100→49.2 fps), each within ~1.5% of the model's `expected_delivered_fps`; 0 CRC
+> across all; DSS auto-disables at fps≥61; I3C airtime reaches 100% at 90/100. IMU/env decoupling
+> verified: 30 Hz and 90 Hz both apply, 90 Hz warns and sub-samples env to 53.5 Hz while quat/raw run
+> 76.7 Hz, stream-13 coincidence per design (39% at 30/30 unlocked, 100% at 90/30); restored to
+> coupled. The 30 Hz default matches the documented baseline `captures/web_20260803_121735.bin`
+> within ±2% — no regression. 3–4 initial SET_* commands returned SENSOR_ERROR and cleared on a
+> single retry (BUG-073). Browser-UI visual pass: four-way selector, preset apply with one-way
+> (non-optimistic) state flow, manual-panel disclosure, invalid-combo rejection (validation error
+> shown, no bad command sent), the "ToF bus airtime" I3C bar with three-state color escalation
+> (blue→amber→red/100%), the >60 fps quantization-consequence warning, the IMU/env poll-rate control
+> with its >60 Hz env-sub-sampling warning, and title-tooltip coverage on every new control all PASS;
+> server-side second-client sync-on-connect verified. Two checks were tool-limited and honestly not
+> performed: a truly rendered second tab, and a narrow-viewport resize (the ui_* screenshot tool
+> would not change the viewport; narrow-width has a prior verification in
+> `docs/web-ui-testing.md`). **One real defect found by the pass and filed as BUG-079:** the Manual
+> fps/exposure number/slider widgets cannot apply a changed value — `web.py`'s 250 ms periodic
+> `ranging` re-broadcast outruns `controls.js`'s 300 ms `MANUAL_DEBOUNCE_MS` and reverts the field
+> before it sends (presets, the IMU/env control, and `set_manual_params` over `/ws` are all
+> unaffected). Full resume state:
+> `docs/superpowers/plans/2026-08-03-high-framerate-implementation-handoff.md` (rev 5).
 >
 > **Device robustness** (Task 5): `rs_send_event()` emits EVENT frames
 > (`SENSOR_INIT_FAIL`/`TRIGGER_TIMEOUT`/`DMA_TIMEOUT`/`SENSOR_ERROR_STATUS`) on every fault path,

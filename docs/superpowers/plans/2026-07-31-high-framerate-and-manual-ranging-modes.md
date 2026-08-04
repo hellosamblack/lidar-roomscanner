@@ -1,7 +1,8 @@
 # High Frame-Rate Ranging Profiles & Manual Sensor Control — Implementation Plan
 
-> **STATUS (2026-08-04): in progress — Tasks 1–6, 9, 10 landed; Tasks 7, 8, 11, 12 not started.**
-> Task 5 hit its designed stop point: the sensor's frame floor is intrinsic (measured
+> **STATUS (2026-08-04): in progress — Tasks 1–11 landed; Task 12 (final validation, docs
+> status-sync, landing, retro) IN PROGRESS.** Task 5 hit its
+> designed stop point: the sensor's frame floor is intrinsic (measured
 > 20.0/21.74/23.53 ms at ≤2/4/8 ms exposure; shorter periods deliver integer multiples), so per this
 > plan's own rule the spec was **amended to the measured ceiling** — the High Frame-Rate preset is
 > now **46 Hz** (hardware-confirmed 45.86 fps, 0 loss), and every "90 Hz" gate below should be read
@@ -9,11 +10,37 @@
 > ran 2026-08-04 and PASSED, but bridge-measured, not wired** — the plan's release gate below (step 6,
 > "wired-Ethernet") was not available and remains outstanding; see the Task 6 section below and the
 > handoff doc for the four measured operating points, the zero-drop proof, and the CDC-isolation
-> untested-with-reason statement. **⚠ The handoff doc's "DSS story (settled)" finding is now
-> CONTESTED by a concurrent investigation — this is a blocking open item for Task 12, read the
-> handoff doc's warning before writing any ceiling number.** See
-> `docs/superpowers/plans/2026-08-03-high-framerate-implementation-handoff.md` (rev 3) for per-task
-> commits, the DSS/ProfileTuning findings, and precise resume instructions starting at Task 7.
+> untested-with-reason statement. **Task 7's hardware gate ran 2026-08-04 and PASSED** after fixing
+> BUG-077 (an off-cycle IMU/env drain that ran before checking FRAME_READY doubled ToF frame
+> intervals under short-margin ranging modes — see the Task 7 section's gate annotation below).
+> **Task 8 landed host-only, no hardware gate required.** **The DSS finding, briefly CONTESTED by a
+> concurrent investigation, is now RESOLVED — Position A upheld** (our `STANDBY_DSS_MODE` toggle is
+> ranging-quality only; ST's 100+ fps mode is unreachable on this hardware/transform path; the 46 Hz
+> ceiling stands). Task 12 is unblocked. See
+> `docs/superpowers/plans/2026-08-03-high-framerate-implementation-handoff.md` (rev 5) for per-task
+> commits, the DSS adjudication, and precise resume instructions. **Task 11 landed 2026-08-04**
+> (`rig_profile`/`rig_imu_env_rate`/`profile_estimate`, verified-readback waits, live round trips on
+> the rig). **Task 12 is IN PROGRESS:** full host suite 1895 passed / 1 skipped (expected
+> `test_logfilter` skip), `ruff` clean apart from 4 pre-existing `host/tools/` findings unrelated to
+> this feature, production raw-only firmware builds clean (166,107 B). **Finding:** step 2's assumed
+> build-time onboard-transform knob does not exist as a CMake option — `CONF_TRANSFORM_ONBOARD` is
+> an unguarded source `#define`, so a `-D` override is a silent no-op (filed as BUG-078; no blocker,
+> the raw-only production build is unaffected). **De-scoped by owner directive (2026-08-04):** the
+> wired-Ethernet release gate (step 6) and the CDC-isolation hardware proof (steps 3/4) — *"we will
+> never use ethernet or CDC for [a wired] data transfer [link]"*; the Wi-Fi bridge is the production
+> transport and its four Task 6 operating points already proved 0 CRC/gaps/drops with ~10x bandwidth
+> headroom, so a wired confirmation run would prove nothing new. Live rig sweep + browser visual
+> pass: Live rig sweep PASSED (bridge; device restored to boot default): all four presets + manual
+> 60/61/90/100 fps behaved correctly — High Frame-Rate 45.4 fps, and over-ceiling manual requests ACK
+> but deliver truthful period-multiples (90→44.8, 100→49.2 fps) within ~1.5% of
+> `expected_delivered_fps`, 0 CRC; IMU/env decoupled 30/90 Hz apply with the >60 Hz env-sub-sample
+> warning; 30 Hz default matches the documented baseline within ±2% (no regression). Browser-UI
+> visual pass PASSED for the selector, non-optimistic preset apply, invalid-combo rejection, the
+> "ToF bus airtime" bar's color escalation, the >60 fps quantization warning, the IMU/env control,
+> and tooltip coverage; two checks were tool-limited (true second tab, narrow-viewport resize).
+> **BUG-079 filed:** the Manual fps/exposure widgets can't apply a changed value (a 250 ms periodic
+> `ranging` re-broadcast outruns the 300 ms UI debounce and reverts the field); presets/IMU-env/
+> `set_manual_params`-over-wire are unaffected.
 
 > **Source specification:** `docs/superpowers/specs/2026-07-31-high-framerate-and-manual-ranging-modes.md`
 >
@@ -519,6 +546,23 @@ ToF rate in all combinations above, with zero silently-dropped `skew_check`
 samples, stream 13 correctly absent off-edge, and no measurable perturbation of
 ToF frame cadence.
 
+> **Gate outcome (2026-08-04): PASSED, after fixing BUG-077 found by this same gate.** Coupled-mode
+> regression PASS (29.89 fps, intervals matched Task 6's baseline to 0.01 ms, `n_imu_raw_sends=1`,
+> stream 13 every frame). Idle regression PASS (exactly 18.182 Hz IMU/IMUraw/Env with ToF parked).
+> Decoupled independence PASS (30 Hz held across Room Mapping/Precision/HFR; 90 Hz landed 85.2 Hz
+> with stream 10 sub-sampled to 56.4 Hz, as the readback warns it will). Stream-13 discipline PASS
+> (100% coverage at 90/30, ~3 sends per ToF frame, frozen `seq` verified). Cmds 11/12 live with
+> truthful readback. BUG-074's wake path sanity-passed via a natural auto-idle cycle (a full
+> fault-injection retest is still outstanding). **Item 5 ("no measurable perturbation of ToF frame
+> cadence") initially FAILED — filed as BUG-077**: the off-cycle drain ran before checking
+> FRAME_READY, and each FIFO word is a blocking I3C transaction on the shared bus, so it doubled ToF
+> frame intervals under short-margin ranging modes (Precision/30 +4.91%, HFR/30 +14.94%; Ambient
+> unaffected because its longer period absorbs the margin). Fixed by returning on FRAME_READY-first
+> with a per-word abortable drain; re-gate: Precision/30 0.09%, HFR/30 0.88%, all within ~0.3 points
+> of the coupled controls. Honest residual trade, not fully eliminated: decoupled-90 IMU/env on Room
+> Mapping still costs ~9% (85.2 → 77.2 Hz); 30 Hz combos are unaffected. Fix landed in the same
+> commit as the feature, `3f4b307`; gate captures `web_20260804_085237.bin`–`090419.bin`.
+
 **Commit:** `feat(firmware): decouple IMU/env poll rate from ToF acquisition cadence`
 
 ---
@@ -698,6 +742,26 @@ ToF frame cadence.
 ---
 
 ### Task 12: End-to-end validation, documentation, and landing **[HW]**
+
+> **STATUS: IN PROGRESS (2026-08-04).** Host suite 1895 passed / 1 skipped; ruff has 4 pre-existing,
+> unrelated `host/tools/` findings. Firmware production raw-only Debug build clean (166,107 B).
+> Step 2's assumed onboard-transform build knob does not exist (BUG-078; not a blocker — the
+> production build is unaffected). Steps 3/4's wired-Ethernet gate and CDC-isolation proof are
+> **de-scoped** by owner directive (2026-08-04, no wired link in production) rather than
+> outstanding — see ROADMAP.md's high-frame-rate status block and the handoff doc (rev 5). Still
+> genuinely open: BUG-073, BUG-074's fault-injection retest, BUG-075's root cause. Remaining before
+> this task can close: the live rig sweep across every listed operating point, and the browser-UI
+> visual pass — Live rig sweep PASSED (bridge; device restored to boot default): all four presets +
+> manual 60/61/90/100 fps behaved correctly — High Frame-Rate 45.4 fps, and over-ceiling manual
+> requests ACK but deliver truthful period-multiples (90→44.8, 100→49.2 fps) within ~1.5% of
+> `expected_delivered_fps`, 0 CRC; IMU/env decoupled 30/90 Hz apply with the >60 Hz env-sub-sample
+> warning; 30 Hz default matches the documented baseline within ±2% (no regression). Browser-UI
+> visual pass PASSED for the selector, non-optimistic preset apply, invalid-combo rejection, the
+> "ToF bus airtime" bar's color escalation, the >60 fps quantization warning, the IMU/env control,
+> and tooltip coverage; two checks were tool-limited (true second tab, narrow-viewport resize).
+> **BUG-079 filed:** the Manual fps/exposure widgets can't apply a changed value (a 250 ms periodic
+> `ranging` re-broadcast outruns the 300 ms UI debounce and reverts the field); presets/IMU-env/
+> `set_manual_params`-over-wire are unaffected. — then `status-sync`, land, and `milestone-retro`.
 
 **Files:**
 

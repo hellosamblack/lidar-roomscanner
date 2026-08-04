@@ -299,12 +299,15 @@ direction — both estimates share the quaternion and the calibration, so a rota
 `docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md` —
 `roomscan.profiles` says what a requested configuration should do, this says what a
 recorded capture actually did. `fps_within_tolerance` applies the plan's own +/-2%
-acceptance gate to the measured vs. requested rate; `stream_pairing` assumes today's
-coupled 1:1 emission and is a lower bound once Task 7 ships decoupled IMU/env
-draining. **UDP fragment health cannot be recovered from the capture file** — a
-datagram that lost a fragment is dropped before the recorder ever sees it — so pass
-`udp_stats` from `rig_status()`'s own metrics if that field matters; omitted, it
-reports `None` rather than a guess.
+acceptance gate to the measured vs. requested rate; `stream_pairing` still assumes
+coupled 1:1 emission (a seq-keyed set intersection in `host/tools/profile_probe.py`) and is a
+**known lower bound now that Task 7 has shipped decoupled IMU/env draining** — unlike
+`skew_check.py`'s `collect_frames()`, which Task 7 explicitly reworked to retain every send
+sharing one frozen `seq` instead of last-write-wins, `profile_probe.py`'s `stream_pairing` was not
+reworked, so its paired-percentage figure undercounts a decoupled capture's true sample count.
+**UDP fragment health cannot be recovered from the capture file** — a datagram that lost a
+fragment is dropped before the recorder ever sees it — so pass `udp_stats` from `rig_status()`'s
+own metrics if that field matters; omitted, it reports `None` rather than a guess.
 
 **build** — `fw_build()`, `fw_flash()`, `run_tests()`. These encode the host facts
 that bite every session: Ninja comes from the venv, the packaged stlink 1.8.0 cannot
