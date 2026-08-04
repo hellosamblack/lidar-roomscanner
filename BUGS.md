@@ -3290,3 +3290,40 @@ BUG-072 repaired the `rs_standby_level` shadow on the profile-apply stop-failure
 the SET_STANDBY wake path appears not to have the same repair — matching the observed "wake times out,
 REINIT recovers" signature. Check and fix alongside Task 7's work in `vl53l9_app.c` (same file), with a
 wake-after-desync hardware test.
+
+## BUG-075 — 50 Hz/2 ms manual request delivers a near-even bimodal 20/40 ms alternation, not a clean floor
+
+**Status:** open · **Area:** firmware/scanner-stream (ranging engine) · **Found by:** the 2026-08-04
+Task 6 hardware gate, four 60 s bridge-measured operating points at 30/46/50/90(oversubscribed) Hz.
+
+Requesting `precision/50fps/2ms/regular` (applied-period readback: a clean 20 ms, matching the
+measured ≤2 ms-exposure floor) does not deliver a steady 20.0 ms cadence. It alternates near-evenly
+between the 20.0 ms floor and 40.0 ms (2×) — 1211 vs 1146 intervals over the 60 s run — averaging
+33.52 fps against both the applied-period readback and `profiles.py`'s `expected_delivered_fps`
+quantization model, which agree the request should be a clean 1× 50 fps. Not a TX-pacing defect:
+zero `fw_tx_enqueue_drops`/`fw_tx_stack_stalls` and zero whole-group loss throughout (RAW fragment
+loss tracked the bridge's independent, fps-independent `frags_lost` rate). By contrast, operating
+point (d) — same 2 ms exposure, `precision/90fps/2ms/regular` (oversubscribed 1× request quantized
+to 2×) — delivers a rock-steady 22.30 ms with essentially zero spread. **The mechanism is
+unexplained, and a simple "DSS costs time" story does not fit either**: (d)'s steady 22.30 ms never
+touches the 20.0 ms floor that (c) hits half the time, so whatever makes (c) bimodal is not simply
+DSS overhead re-appearing at this exposure. Consequence: `profiles.py`'s `expected_delivered_fps`
+quantization model (introduced `91b9eac`) is wrong for this combination — treat any UI or doc figure
+derived from it for short-period/short-exposure combos as unreliable until this is root-caused.
+
+## BUG-076 — `analyze_capture` hardcoded `ver != 1`, silently blinding forensics on every v2 capture (fixed)
+
+**Status:** fixed (`56ee9ba`, 2026-08-04) · **Area:** host/tools · **Found by:** the 2026-08-04 Task 6
+hardware-gate write-up, when the forensics scanner reported `frames_decoded=0` on a fresh v2 bridge
+capture.
+
+`host/tools/analyze_capture.py` (and the `capture_analyze` MCP tool built on it) hardcoded a version
+check that rejected anything but protocol v1, so every protocol-v2 capture since `2b8a9ee` (the Task 2
+v2 cutover) produced `frames_decoded=0` and a whole-file SKIP_RUN. It survived undetected because the
+real streaming decoder (`protocol.py`) was never affected — only this second, independently-maintained
+forensics parser — so the tool's failure mode looked exactly like "corrupt capture" rather than
+"broken tool", and nobody had reason to doubt a SKIP_RUN on a capture that streamed and played back
+fine. Fixed by accepting v2 in the version check. **Lesson:** a second parser of the same wire format
+drifts silently the moment the first one changes and it isn't exercised by the same tests — the
+golden-vector/cross-check discipline `protocol.py` already has (`protocol-change` skill) should extend
+to any other code that independently parses the wire format, not just the shipped decoder.

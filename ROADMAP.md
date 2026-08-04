@@ -562,13 +562,68 @@ reflectance super-resolution / sensor-fusion-overlay work (both scoped, not yet 
 > `VL53L9_SYNC_AUTONOMOUS` (a bigger, unattempted change) to actually govern fps. `SET_EXPOSURE_MS` *does*
 > change fps measurably (5 ms → 28.6 fps, 15 ms → 25.6 fps).
 >
-> **Planned 2026-07-31 follow-up — high-rate/manual ranging:** The reviewed
+> **High-rate/manual ranging — IN PROGRESS, Task 6 of 12 done (2026-08-04).** The reviewed
 > [implementation plan](docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md)
-> turns that autonomous-sync requirement into a gated firmware/protocol/host/UI/MCP sequence. It is
-> **not implemented**: work begins by reconciling the source spec's inconsistent power/range anchors,
-> proving exposure granularity and fixed-map DSS-off transform compatibility, and recording the current
-> 30 Hz hardware baseline. The manual payload requires protocol v2; 90 Hz is accepted only after a
-> 60-second full-stream Ethernet soak with zero CRC, sequence, reassembly, or firmware-queue loss.
+> is being executed; Tasks 1–6, 9, 10 are on `main` (`d2c4148` profiles contract, `2b8a9ee` protocol
+> v2 cmds 8–12, `414adaa` typed control, `7598fde` atomic firmware profiles, `b10f44d` autonomous
+> sync + BUG-072, `5c23270` SLAM-ingest split, `8cc9239` web ranging UI, `896c7a8` model refinement,
+> `5c90da6` Task 6 pacing/telemetry firmware+host, `10966c5` EVENT 7 golden vector,
+> `91a5dfe` web queue telemetry, `56ee9ba` analyze_capture v2 fix). **The headline changed at Task
+> 5's stop point:** with applied periods readback-exact, the sensor quantizes any shorter-than-floor
+> period to integer multiples (90 Hz request → 44.85 fps at 2×), and the floor is sensor-intrinsic —
+> measured brackets 20.0/21.74/23.53 ms at ≤2/4/8 ms exposure. Per the plan's own rule the spec was
+> **amended to the measured ceiling** (`91b9eac`): High Frame-Rate preset = **46 Hz / 4 ms /
+> Precision / Regular / DSS on**, hardware-confirmed at 45.86 fps with 0 frame loss;
+> `ProfileEstimate.expected_delivered_fps` models the quantization and manual requests above the 1×
+> ceiling warn-not-reject. The mystery of DS14879's 100 fps anchor is solved (`896c7a8`, via AN6522 +
+> a decompile of ST's support-gated ProfileTuning tool, whose model reproduces the owner's tool runs
+> bit-exactly): ST's "DSS Disable" is a ~106-byte status-only output mode the vendored I3C driver
+> never implements and the 14,842-byte transform pipeline cannot consume; our DSS toggle is a
+> ranging-quality knob only, and our hardware beats ST's own planning model (flat 26.9 ms) at every
+> tested exposure. Same pass corrected `I3C_XFER_MS` to the documented 10 Mbps effective (11.87 ms —
+> the 12.5 MHz-clock figure understated bus use ~25%) and replaced the fitted power model with the
+> decompiled tool's exact equations (validated 5/5 owner anchors within 0.01%). **⚠ That DSS
+> conclusion is now CONTESTED** by a concurrent investigation into the vendored driver's CSI-2 path —
+> see the handoff doc; it is a blocking open question for Task 12, not settled fact, and nothing
+> above should be treated as final until it is adjudicated.
+>
+> **Task 6 (Ethernet high-rate pacing, queue telemetry, CDC isolation) — code + hardware gate
+> complete (2026-08-04), with two caveats.** Firmware built and flashed (165,259 B .bin;
+> text 152,020 / data 13,235 / bss 177,328 — first binary on hardware, no prior build retained for a
+> delta). Four 60 s operating points, **all measured over the FileHub Wi-Fi bridge — the plan's
+> release gate is WIRED Ethernet, which was not available this session, so that gate is NOT
+> satisfied**; every number below is bridge-measured, not a sensor or pacer ceiling:
+>
+> | Op point | Applied readback | fps (bridge) | interval median/p05/p95 (ms) | CRC | frag loss |
+> |---|---|---|---|---|---|
+> | 30 Hz Room Mapping | ambient/30fps/6ms/ULP | 29.88 | 33.45 / 33.44 / 33.46 | 0 | 0.042% |
+> | 46 Hz HFR preset | precision/46fps/4ms/regular | 45.56 | 21.81 / 21.80 / 21.82 | 0 | 0.11% |
+> | 50 Hz manual, 2 ms | precision/50fps/2ms/regular | 33.52 | 22.48 / 20.05 / 40.15 (bimodal, see BUG-075) | 0 | 0.08% |
+> | 90 Hz oversubscribed, 2 ms | precision/90fps/2ms/regular | 44.79 | 22.30 / 22.29 / 22.30 | 0 | 0.086% |
+>
+> **Zero-drop gate: PASS.** `fw_tx_enqueue_drops`/`fw_tx_stack_stalls` were 0 at both start and end of
+> all four runs (cumulative-since-boot counters, never reset per-run — zero-at-start-and-end is the
+> correct proof); `fw_tx_queue_high_water` stayed 5–7; `fw_tx_emitted_bytes` climbed monotonically
+> every poll. All fragment loss tracked the cumulative UDP `frags_lost` at ~1/70 s independent of fps
+> — bridge-layer loss, not a rate-dependent firmware drop. **CDC isolation: untested, with reason** —
+> this host has no privileged ST-Link VCOM access and the rig runs untethered with no USB cable
+> attached, so Task 6's DATA-to-Ethernet-only-above-60-fps path and ACK-to-originating-transport
+> routing are unverified on hardware; recorded as untested, not passed. Two bugs filed from this
+> pass: **BUG-075** (open) — 50 Hz/2 ms manual bimodally alternates the 20.0 ms floor and its 2×
+> (1211 vs 1146 intervals) instead of holding a clean 1× floor, while the profile model and readback
+> both say 1×, and 90 Hz/2 ms holds a rock-steady 22.30 ms that never touches that same 20.0 ms
+> floor — mechanism unexplained, `expected_delivered_fps` is unreliable for short-period/short-exposure
+> combos until resolved. **BUG-076** (fixed, `56ee9ba`) — `analyze_capture`'s hardcoded `ver != 1`
+> silently zeroed forensics on every protocol-v2 capture since `2b8a9ee`; see BUGS.md for the
+> "second parser drifts silently" lesson.
+>
+> **Remaining:** Task 7 (IMU/env decoupled poll rate, cmds 11/12 firmware — protocol/host/UI
+> already landed; includes the BUG-074 wake-path check), Task 8 (rate-aware filter time constants),
+> Task 11 (MCP `rig_profile`/`rig_imu_env_rate`), Task 12 (end-to-end validation incl. Task 10's
+> deferred visual pass, **adjudicating the contested DSS finding before writing any ceiling number**,
+> status-sync, milestone-retro). Open bugs from this push: BUG-073 (reconfig-before-settle can drop
+> an ACK), BUG-074 (SET_STANDBY wake shadow, unconfirmed), BUG-075 (open, above). Full resume state:
+> `docs/superpowers/plans/2026-08-03-high-framerate-implementation-handoff.md` (rev 3).
 >
 > **Device robustness** (Task 5): `rs_send_event()` emits EVENT frames
 > (`SENSOR_INIT_FAIL`/`TRIGGER_TIMEOUT`/`DMA_TIMEOUT`/`SENSOR_ERROR_STATUS`) on every fault path,

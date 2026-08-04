@@ -1,5 +1,20 @@
 # High Frame-Rate Ranging Profiles & Manual Sensor Control — Implementation Plan
 
+> **STATUS (2026-08-04): in progress — Tasks 1–6, 9, 10 landed; Tasks 7, 8, 11, 12 not started.**
+> Task 5 hit its designed stop point: the sensor's frame floor is intrinsic (measured
+> 20.0/21.74/23.53 ms at ≤2/4/8 ms exposure; shorter periods deliver integer multiples), so per this
+> plan's own rule the spec was **amended to the measured ceiling** — the High Frame-Rate preset is
+> now **46 Hz** (hardware-confirmed 45.86 fps, 0 loss), and every "90 Hz" gate below should be read
+> as the amended-ceiling gate (30/46/~50 fps + one oversubscribed request). **Task 6's hardware gate
+> ran 2026-08-04 and PASSED, but bridge-measured, not wired** — the plan's release gate below (step 6,
+> "wired-Ethernet") was not available and remains outstanding; see the Task 6 section below and the
+> handoff doc for the four measured operating points, the zero-drop proof, and the CDC-isolation
+> untested-with-reason statement. **⚠ The handoff doc's "DSS story (settled)" finding is now
+> CONTESTED by a concurrent investigation — this is a blocking open item for Task 12, read the
+> handoff doc's warning before writing any ceiling number.** See
+> `docs/superpowers/plans/2026-08-03-high-framerate-implementation-handoff.md` (rev 3) for per-task
+> commits, the DSS/ProfileTuning findings, and precise resume instructions starting at Task 7.
+
 > **Source specification:** `docs/superpowers/specs/2026-07-31-high-framerate-and-manual-ranging-modes.md`
 >
 > **Required project skills while executing:** `protocol-change` for Tasks 2–3,
@@ -374,6 +389,19 @@ supported.
 
 ### Task 6: Ethernet high-rate pacing, queue telemetry, and CDC isolation **[HW]**
 
+> **DONE (2026-08-04), with two caveats — see the handoff doc (rev 3) for the full measured table.**
+> Steps 1–5 landed in `5c90da6`/`91a5dfe`/`10966c5`; the hardware gate ran four 60 s operating
+> points (30/46/50/90-oversubscribed Hz) with `fw_tx_enqueue_drops`/`fw_tx_stack_stalls` at 0
+> throughout (zero-drop gate: PASS). **Caveat 1 — bridge, not wired:** step 6 below asks for
+> wired-Ethernet 60/90/100 Hz plus a bridge repeat at 90 Hz; no wired link was available this
+> session, so **every** operating point is bridge-measured and the wired release gate below remains
+> unsatisfied. **Caveat 2 — step 6's 60/90/100 Hz targets are superseded** by the `91b9eac` ceiling
+> amendment (the sensor tops out ~46 Hz; the shipped preset is 46 Hz, not 90/100) — the operating
+> points actually run (30 Room Mapping / 46 HFR preset / 50 manual / 90-oversubscribed) supersede the
+> plan's original list rather than leaving it unmet. **CDC isolation (step 3/4's on-hardware proof)
+> is untested, with reason** — no privileged VCOM access and no USB cable attached to the untethered
+> rig; recorded as untested, not passed. BUG-075 (50 Hz/2 ms bimodal cadence) filed from this pass.
+
 **Files:**
 
 - Modify: `firmware/scanner-stream/Src/ethernet_transport.c`
@@ -401,12 +429,19 @@ supported.
    browser JavaScript.
 5. Extend UDP source metrics with the firmware queue counters and total link rate when
    available. Keep fragment reassembly compatible with reordered datagrams.
-6. Run wired-Ethernet 60 s captures at 60, 90, and 100 Hz, then repeat 90 Hz through the
-   actual Wi-Fi bridge. The release gate is wired Ethernet; bridge loss is reported
-   separately rather than allowed to masquerade as a sensor ceiling.
+6. ~~Run wired-Ethernet 60 s captures at 60, 90, and 100 Hz, then repeat 90 Hz through the
+   actual Wi-Fi bridge.~~ **Superseded by the `91b9eac` ceiling amendment** (written before that
+   amendment; the sensor tops out ~46 Hz, so 60/90/100 Hz targets are no longer the shipped
+   operating points) **and run bridge-only, not wired** (no wired link was available 2026-08-04) —
+   actually run: 30 Hz Room Mapping, 46 Hz HFR preset, 50 Hz manual (2 ms), and 90 Hz oversubscribed
+   (2 ms), all over the FileHub bridge, all 60 s. The release gate is wired Ethernet; bridge loss is
+   reported separately rather than allowed to masquerade as a sensor ceiling — **the wired gate
+   itself remains outstanding.**
 
 **Hardware gate:** 90 Hz satisfies the global gate and an attached/open CDC port does not
-change Ethernet cadence, gaps, or TX queue health.
+change Ethernet cadence, gaps, or TX queue health. **Result (2026-08-04): zero-drop gate PASS on
+all four bridge-measured operating points (see above); CDC-port-attached comparison untested, with
+reason (no VCOM access, no USB cable on the untethered rig).**
 
 **Commit:** `feat(transport): pace full-rate sensor streams over Ethernet`
 
