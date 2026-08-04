@@ -15,7 +15,8 @@ def test_quad_shapes():
 
 def test_quad_is_planar():
     v, _, _ = camera_locked_quad([0, 0, 0], [0, 0, 1], _WORLD_UP, 55.0, 42.0, 1.0)
-    n = np.cross(v[1] - v[0], v[2] - v[0]); n /= np.linalg.norm(n)
+    n = np.cross(v[1] - v[0], v[2] - v[0])
+    n /= np.linalg.norm(n)
     assert abs(np.dot(v[3] - v[0], n)) < 1e-9
 
 
@@ -30,7 +31,8 @@ def test_quad_faces_the_eye():
     # The quad normal should point back toward the eye (dot with forward < 0
     # or > 0 consistently) -- i.e. the ray from center to eye is ~antiparallel
     # to forward.
-    eye = np.array([0.0, 0.0, 0.0]); fwd = np.array([0.0, 0.0, 1.0])
+    eye = np.array([0.0, 0.0, 0.0])
+    fwd = np.array([0.0, 0.0, 1.0])
     v, _, _ = camera_locked_quad(eye, fwd, _WORLD_UP, 55.0, 42.0, 1.0)
     center = v.mean(axis=0)
     to_eye = eye - center

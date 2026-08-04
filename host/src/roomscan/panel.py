@@ -55,7 +55,7 @@ from .native import Transform
 from . import portguard
 from .flatfield import FlatField
 from .pipeline import TransformStage
-from .protocol import HEADER_SIZE, CommandCode, FrameType, ProtocolError, parse_event
+from .protocol import CommandCode
 from .reader import (  # neutral reader loop + follow-camera math (Web Phase 5 hoist)
     _FOLLOW_BACK_OFF_M,
     _FOLLOW_LOOK_AHEAD_M,
@@ -71,12 +71,11 @@ from .sensors import (
     YawFusion,
     absolute_heading,
     gizmo_pose,
-    tilt_compensated_heading,
 )
 from .sensors_widgets import render_compass, render_sparkline, render_sensors_overlay
 from .shading import MODES as _NEAR_MODES
 from .shading import cloud_colors
-from .sources import FileSource, Recorder, SerialSource, UdpSource, get_best_source, pump
+from .sources import FileSource, Recorder, SerialSource, UdpSource, get_best_source
 from .surface import grid_triangles, grid_triangles_3d
 from . import theme
 from .viewer import Stats, _build_arg_parser
@@ -1441,7 +1440,6 @@ class ControlPanel:
         (Phase 1 DEPTH_ZF32 passthrough, or no transform DLL), exactly
         `Mapper.step`'s pre-existing default."""
         if self.slam_worker is None:
-            from .slam.worker import SlamWorker
             from .slam.config import preferred_device
             from .slam.backend import make_slam_worker
             from .slam.meshprep import MeshPrep
@@ -2043,7 +2041,6 @@ class ControlPanel:
         planes to `submit()` -- see `_render_slam_frame`'s docstring for why
         that's already enough (no extra transform call needed). Issue #2:
         updates the faint FoV indicator from this step's pose."""
-        from .slam.worker import SlamWorker
         from .slam.config import preferred_device
         from .slam.backend import make_slam_worker
         if self._showcase_preview_worker is None:
@@ -2674,7 +2671,6 @@ class ControlPanel:
         if the click was consumed (so _on_mouse doesn't also orbit the camera).
         _set_mode/_set_camera/_do_action/_toggle_ir_overlay/_set_ir_opacity are
         Task-9 stubs here; Tasks 10/11 wire the real mode/camera/action behavior."""
-        import traceback
         try:
             from . import hud as h    # module (not self._hud): headless-callable on a stand-in
             if hit.control == h.MODE_SWITCH:

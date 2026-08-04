@@ -15,7 +15,6 @@ import types
 
 import numpy as np
 import open3d.visualization.gui as gui
-import pytest
 
 import roomscan.panel as panel_mod
 from roomscan.logbus import LogBus

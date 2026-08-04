@@ -4,7 +4,7 @@ import pytest
 pytest.importorskip("open3d")
 import open3d as o3d
 
-from roomscan.slam.meshprep import MeshPacket, prepare_packet, _submesh_arrays
+from roomscan.slam.meshprep import MeshPacket, MeshPrep, prepare_packet, _submesh_arrays
 
 
 def _corner_tensor_mesh():
@@ -29,8 +29,12 @@ def _grid_tensor_mesh(n=40):
     tris = []
     for r in range(n - 1):
         for c in range(n - 1):
-            a = r * n + c; b = a + 1; d = a + n; e = d + 1
-            tris.append([a, b, d]); tris.append([b, e, d])
+            a = r * n + c
+            b = a + 1
+            d = a + n
+            e = d + 1
+            tris.append([a, b, d])
+            tris.append([b, e, d])
     m = o3d.t.geometry.TriangleMesh()
     m.vertex.positions = o3d.core.Tensor(verts)
     m.triangle.indices = o3d.core.Tensor(np.asarray(tris, np.int32))
@@ -128,9 +132,6 @@ def test_glow_origin_changes_colors():
     glowed = prepare_packet(m, wall_mode="solid", glow_origin=np.array([0.0, 0.0, 0.0]),
                             mesh_seq=0, vertex_budget=10_000, decimate=False)
     assert not np.allclose(base.non_wall_colors, glowed.non_wall_colors)
-
-
-from roomscan.slam.meshprep import MeshPrep
 
 
 def test_meshprep_run_once_publishes_packet_and_consumes_input():

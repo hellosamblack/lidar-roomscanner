@@ -1,4 +1,5 @@
-import io, socket, threading
+import socket
+import threading
 import numpy as np
 import pytest
 from roomscan.slam import wire
@@ -33,7 +34,8 @@ def test_send_recv_over_socketpair():
     t.join()
     assert got["fid"] == 3
     np.testing.assert_array_equal(got["pose"], np.eye(4, dtype=np.float32))
-    a.close(); b.close()
+    a.close()
+    b.close()
 
 
 def test_recv_message_returns_none_on_eof():

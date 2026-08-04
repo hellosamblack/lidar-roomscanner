@@ -2,6 +2,7 @@
 import numpy as np
 
 from roomscan import hud, instrument
+from roomscan.hud import ControlHit, HudLayout
 
 
 def _accent_pixels(img):
@@ -57,9 +58,6 @@ def test_renders_have_transparent_margin():
     img = hud.render_mode_switch("slam")
     # top-left corner pixel is in the 1px transparent margin
     assert img[0, 0, 3] == 0
-
-
-from roomscan.hud import ControlHit, HudLayout
 
 
 def test_layout_rects_present_for_slam():

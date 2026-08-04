@@ -163,7 +163,8 @@ class RemoteSlamWorker:
             with self._in_lock:
                 msg, self._in_slot = self._in_slot, None
             if msg is None:
-                time.sleep(_IDLE_SLEEP_S); continue
+                time.sleep(_IDLE_SLEEP_S)
+                continue
             try:
                 wire.send_message(self._sock, msg)
             except OSError:

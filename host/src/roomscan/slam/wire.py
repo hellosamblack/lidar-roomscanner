@@ -54,7 +54,8 @@ def _recv_exactly(sock, n: int) -> bytes | None:
         chunk = sock.recv(n - got)
         if not chunk:
             return None
-        chunks.append(chunk); got += len(chunk)
+        chunks.append(chunk)
+        got += len(chunk)
     return b"".join(chunks)
 
 

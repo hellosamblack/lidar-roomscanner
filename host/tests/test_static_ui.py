@@ -62,7 +62,7 @@ def test_every_button_has_a_tooltip():
     ]
     assert not missing, (
         "buttons without a title= tooltip (docs/engineering-practices.md "
-        f"'Web UI'):\n  " + "\n  ".join(missing)
+        "'Web UI'):\n  " + "\n  ".join(missing)
     )
 
 

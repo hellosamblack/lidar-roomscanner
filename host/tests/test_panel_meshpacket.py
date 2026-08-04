@@ -67,7 +67,8 @@ def _split_packet(wall_mode="translucent"):
     nwv = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
     wv = np.array([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
     tri = np.array([[0, 1, 2]], np.int32)
-    grey = lambda n: np.tile([0.5, 0.5, 0.5], (n, 1))
+    def grey(n):
+        return np.tile([0.5, 0.5, 0.5], (n, 1))
     return MeshPacket(
         non_wall_verts=nwv, non_wall_colors=grey(3), non_wall_tris=tri,
         wall_verts=wv, wall_colors=grey(3), wall_tris=tri,

@@ -84,8 +84,6 @@ from .protocol import (
 from .sensors import (
     AXIS_CONVENTION,
     SensorState,
-    T_CV_TO_BODY,
-    T_WORLD_TO_CV,
     YawFusion,
     absolute_heading,
     boresight_view_deg,

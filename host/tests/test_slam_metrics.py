@@ -5,7 +5,9 @@ from roomscan.slam import metrics
 from roomscan.slam.metrics import trajectory_stats, timing_stats, write_tum, compare_kiss
 
 def _pose(t):
-    T = np.eye(4); T[:3, 3] = t; return T
+    T = np.eye(4)
+    T[:3, 3] = t
+    return T
 
 def test_trajectory_stats():
     poses = [_pose([0, 0, 0]), _pose([0, 0, 1]), _pose([0, 0, 1.5])]
@@ -33,7 +35,7 @@ def test_write_tum_roundtrip(tmp_path):
 
 def test_compare_kiss_optional(monkeypatch):
     # if kiss-icp missing, returns None gracefully (does not raise)
-    import builtins, importlib
+    import builtins
     real = builtins.__import__
     def fake(name, *a, **k):
         if name.startswith("kiss_icp"):

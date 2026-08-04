@@ -146,7 +146,8 @@ class HudLayout:
 
     def rects(self):
         top = self.y + MARGIN
-        bottom = lambda ch: self.y + self.h - MARGIN - SIZES[ch][1]
+        def bottom(ch):
+            return self.y + self.h - MARGIN - SIZES[ch][1]
         mw, mh = SIZES[MODE_SWITCH]
         vw, vh = SIZES[VIEW_TOGGLE]
         sw, sh = SIZES[STATUS_CHIP]

@@ -1,4 +1,5 @@
-import socket, threading
+import socket
+import threading
 import numpy as np
 import pytest
 from roomscan.slam import wire, service
@@ -46,16 +47,20 @@ def _synthetic_frame(fid):
 
 def test_service_sends_pose_per_frame_and_mesh_when_ready():
     srv = SlamService(device="CPU:0", fov_h=55.0, fov_v=42.0)
-    lsock = socket.socket(); lsock.bind(("127.0.0.1", 0)); lsock.listen(1)
+    lsock = socket.socket()
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(1)
     port = lsock.getsockname()[1]
 
     def accept_once():
         conn, _ = lsock.accept()
         srv.serve_client(conn)
         conn.close()
-    th = threading.Thread(target=accept_once, daemon=True); th.start()
+    th = threading.Thread(target=accept_once, daemon=True)
+    th.start()
 
-    cli = socket.create_connection(("127.0.0.1", port)); cli.settimeout(5)
+    cli = socket.create_connection(("127.0.0.1", port))
+    cli.settimeout(5)
 
     def drain_until_pose():
         """Read messages until a pose arrives; collect any mesh seen first/after."""
@@ -76,7 +81,9 @@ def test_service_sends_pose_per_frame_and_mesh_when_ready():
         mesh_seen += len(meshes)
         for mm in meshes:
             assert "mesh_v" in mm and mm["mesh_seq"] >= 1
-    cli.close(); lsock.close(); th.join(timeout=2)
+    cli.close()
+    lsock.close()
+    th.join(timeout=2)
 
     assert [p["fid"] for p in poses] == list(range(8))
     for p in poses:
@@ -93,16 +100,20 @@ def test_pose_messages_carry_the_services_own_device():
     on the wire. Assert every pose message from this service says "CPU:0",
     the device it was explicitly constructed with here."""
     srv = SlamService(device="CPU:0", fov_h=55.0, fov_v=42.0)
-    lsock = socket.socket(); lsock.bind(("127.0.0.1", 0)); lsock.listen(1)
+    lsock = socket.socket()
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(1)
     port = lsock.getsockname()[1]
 
     def accept_once():
         conn, _ = lsock.accept()
         srv.serve_client(conn)
         conn.close()
-    th = threading.Thread(target=accept_once, daemon=True); th.start()
+    th = threading.Thread(target=accept_once, daemon=True)
+    th.start()
 
-    cli = socket.create_connection(("127.0.0.1", port)); cli.settimeout(5)
+    cli = socket.create_connection(("127.0.0.1", port))
+    cli.settimeout(5)
 
     def drain_until_pose():
         while True:
@@ -121,7 +132,9 @@ def test_pose_messages_carry_the_services_own_device():
     wire.send_message(cli, _synthetic_frame(1))
     m = drain_until_pose()
     assert m["device"] == "CPU:0"
-    cli.close(); lsock.close(); th.join(timeout=2)
+    cli.close()
+    lsock.close()
+    th.join(timeout=2)
 
 
 def test_serve_client_forwards_imu_rate_hz_to_worker_submit(monkeypatch):
@@ -231,7 +244,9 @@ def test_serve_survives_bad_client_and_keeps_serving():
     """A malformed frame (missing 'depth') raises inside serve_client; the
     real serve() accept loop must catch it, close that connection, and keep
     serving the next client rather than crashing the process."""
-    lsock = socket.socket(); lsock.bind(("127.0.0.1", 0)); lsock.listen(1)
+    lsock = socket.socket()
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(1)
     port = lsock.getsockname()[1]
 
     th = threading.Thread(

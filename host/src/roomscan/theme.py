@@ -99,11 +99,13 @@ def floor_grid_lines(min_bound, max_bound, up=None, spacing: float = 0.5,
 
     for u in us:                                     # lines parallel to axis ax[1]
         i = len(pts)
-        pts.append(_pt(u, a1lo)); pts.append(_pt(u, a1hi))
+        pts.append(_pt(u, a1lo))
+        pts.append(_pt(u, a1hi))
         lines.append([i, i + 1])
     for v in vs:                                     # lines parallel to axis ax[0]
         i = len(pts)
-        pts.append(_pt(a0lo, v)); pts.append(_pt(a0hi, v))
+        pts.append(_pt(a0lo, v))
+        pts.append(_pt(a0hi, v))
         lines.append([i, i + 1])
     return np.asarray(pts, dtype=np.float64), np.asarray(lines, dtype=np.int64)
 

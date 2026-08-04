@@ -1,4 +1,6 @@
-import socket, threading, time
+import socket
+import threading
+import time
 import numpy as np
 import pytest
 from roomscan.slam.remote import RemoteSlamWorker
@@ -12,7 +14,9 @@ H, W = 42, 54
 
 def _serve_on_ephemeral(device="CPU:0"):
     srv = SlamService(device=device, fov_h=55.0, fov_v=42.0)
-    lsock = socket.socket(); lsock.bind(("127.0.0.1", 0)); lsock.listen(1)
+    lsock = socket.socket()
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(1)
     port = lsock.getsockname()[1]
 
     def loop():
@@ -23,7 +27,8 @@ def _serve_on_ephemeral(device="CPU:0"):
             pass
         finally:
             conn.close()
-    th = threading.Thread(target=loop, daemon=True); th.start()
+    th = threading.Thread(target=loop, daemon=True)
+    th.start()
     return port, lsock, th, srv
 
 
@@ -41,7 +46,9 @@ def test_remote_worker_publishes_results():
         got = rw.latest()
         if got is not None:
             break
-    rw.stop(); lsock.close(); th.join(timeout=2)
+    rw.stop()
+    lsock.close()
+    th.join(timeout=2)
     assert got is not None
     mesh, traj, step = got
     assert step.pose.shape == (4, 4)
@@ -81,7 +88,9 @@ def test_remote_worker_forwards_client_mapper_cfg_to_service():
         got = rw.latest()
         if got is not None:
             break
-    rw.stop(); lsock.close(); th.join(timeout=2)
+    rw.stop()
+    lsock.close()
+    th.join(timeout=2)
     assert got is not None
 
     # The server must have built its lazily-created worker with the client's
@@ -115,7 +124,8 @@ def test_start_is_idempotent_and_stop_start_cycle_is_clean():
     assert rw._threads == []
     assert rw._sock is None
 
-    lsock.close(); th.join(timeout=2)
+    lsock.close()
+    th.join(timeout=2)
 
 
 def test_remote_worker_accumulates_trajectory_from_pose_deltas():
@@ -135,7 +145,9 @@ def test_remote_worker_accumulates_trajectory_from_pose_deltas():
             last_len = len(traj)
             if last_len >= 3:                  # trajectory grew from >=3 pose deltas
                 break
-    rw.stop(); lsock.close(); th.join(timeout=2)
+    rw.stop()
+    lsock.close()
+    th.join(timeout=2)
     assert last_len >= 3
 
 
@@ -153,7 +165,9 @@ def _serve_legacy_untagged_on_ephemeral():
     m.vertex["positions"] = o3d.core.Tensor(v)
     m.triangle["indices"] = o3d.core.Tensor(t)
 
-    lsock = socket.socket(); lsock.bind(("127.0.0.1", 0)); lsock.listen(1)
+    lsock = socket.socket()
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(1)
     port = lsock.getsockname()[1]
 
     def loop():
@@ -181,7 +195,8 @@ def _serve_legacy_untagged_on_ephemeral():
             pass
         finally:
             conn.close()
-    th = threading.Thread(target=loop, daemon=True); th.start()
+    th = threading.Thread(target=loop, daemon=True)
+    th.start()
     return port, lsock, th
 
 
@@ -201,7 +216,9 @@ def test_remote_worker_backward_compatible_with_legacy_untagged_service():
         if got is not None and got[0] is not None:   # a non-None mesh recovered
             got_mesh = True
             break
-    rw.stop(); lsock.close(); th.join(timeout=2)
+    rw.stop()
+    lsock.close()
+    th.join(timeout=2)
     assert got_mesh, ("client must recover the inline mesh from a legacy "
                       "untagged service (container built before the split)")
 
@@ -234,7 +251,9 @@ def test_remote_worker_reports_the_services_own_device_not_a_host_guess():
         time.sleep(0.01)
         if rw.device is not None:
             break
-    rw.stop(); lsock.close(); th.join(timeout=2)
+    rw.stop()
+    lsock.close()
+    th.join(timeout=2)
     assert rw.device == "CPU:0"
 
 
@@ -283,6 +302,8 @@ def test_remote_worker_frames_processed_counts_pose_responses():
         time.sleep(0.01)
         if rw.frames_processed > 0:
             break
-    rw.stop(); lsock.close(); th.join(timeout=2)
+    rw.stop()
+    lsock.close()
+    th.join(timeout=2)
     assert rw.frames_processed > 0
     assert rw.frames_submitted >= rw.frames_processed

@@ -88,7 +88,8 @@ def serve(host="0.0.0.0", port=5555, device="CUDA:0", *, _sock=None, **mapper_kw
     else:
         lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        lsock.bind((host, port)); lsock.listen(1)
+        lsock.bind((host, port))
+        lsock.listen(1)
     print(f"[slam-service] listening on {host}:{port} device={device}", flush=True)
     while True:
         try:

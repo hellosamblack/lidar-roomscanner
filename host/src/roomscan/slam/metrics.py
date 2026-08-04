@@ -107,16 +107,22 @@ def _mat_to_quat(R: np.ndarray) -> tuple[float, float, float, float]:
         qz = (m[1, 0] - m[0, 1]) / s
     elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
         s = np.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2
-        qw = (m[2, 1] - m[1, 2]) / s; qx = 0.25 * s
-        qy = (m[0, 1] + m[1, 0]) / s; qz = (m[0, 2] + m[2, 0]) / s
+        qw = (m[2, 1] - m[1, 2]) / s
+        qx = 0.25 * s
+        qy = (m[0, 1] + m[1, 0]) / s
+        qz = (m[0, 2] + m[2, 0]) / s
     elif m[1, 1] > m[2, 2]:
         s = np.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2
-        qw = (m[0, 2] - m[2, 0]) / s; qx = (m[0, 1] + m[1, 0]) / s
-        qy = 0.25 * s; qz = (m[1, 2] + m[2, 1]) / s
+        qw = (m[0, 2] - m[2, 0]) / s
+        qx = (m[0, 1] + m[1, 0]) / s
+        qy = 0.25 * s
+        qz = (m[1, 2] + m[2, 1]) / s
     else:
         s = np.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2
-        qw = (m[1, 0] - m[0, 1]) / s; qx = (m[0, 2] + m[2, 0]) / s
-        qy = (m[1, 2] + m[2, 1]) / s; qz = 0.25 * s
+        qw = (m[1, 0] - m[0, 1]) / s
+        qx = (m[0, 2] + m[2, 0]) / s
+        qy = (m[1, 2] + m[2, 1]) / s
+        qz = 0.25 * s
     return float(qx), float(qy), float(qz), float(qw)
 
 

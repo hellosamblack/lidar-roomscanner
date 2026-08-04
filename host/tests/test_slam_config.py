@@ -1,7 +1,5 @@
 """Tests for SlamConfig: read-only config from [slam] table of roomscan.toml."""
-from pathlib import Path
 
-import pytest
 
 from roomscan.slam.config import SlamConfig, preferred_device
 

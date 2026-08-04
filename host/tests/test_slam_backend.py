@@ -1,4 +1,3 @@
-import numpy as np
 import pytest
 from roomscan.slam.config import SlamConfig
 from roomscan.slam.backend import make_slam_worker

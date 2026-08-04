@@ -3,7 +3,6 @@
 with automatic fallback to local when the service is unreachable."""
 from __future__ import annotations
 
-import sys
 
 from .config import SlamConfig
 from .worker import SlamWorker

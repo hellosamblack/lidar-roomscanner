@@ -107,12 +107,15 @@ def test_bookends_and_fast_events_are_reported(tmp_path):
     t = 0
     ang = 0.0
     for _ in range(60):                       # 2 s still
-        samples.append((t, _yaw_quat(ang))); t += 33_000
+        samples.append((t, _yaw_quat(ang)))
+        t += 33_000
     for _ in range(30):                       # ~1 s pan at ~150 deg/s
         ang += 5.0
-        samples.append((t, _yaw_quat(ang))); t += 33_000
+        samples.append((t, _yaw_quat(ang)))
+        t += 33_000
     for _ in range(60):                       # 2 s still
-        samples.append((t, _yaw_quat(ang))); t += 33_000
+        samples.append((t, _yaw_quat(ang)))
+        t += 33_000
     path = _write(tmp_path, samples)
 
     r = describe(path, min_hold_s=1.0, fast_deg_s=100.0)

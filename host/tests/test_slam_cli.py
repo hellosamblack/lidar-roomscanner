@@ -1,5 +1,4 @@
 import numpy as np
-from pathlib import Path
 from roomscan.slam.cli import main
 from roomscan.slam import cli as slamcli
 from roomscan.slam.mapper import Mapper

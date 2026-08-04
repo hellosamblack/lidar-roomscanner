@@ -66,7 +66,6 @@ def test_fit_degenerate_planar_raises():
     # Points confined to the z=0 plane make the shape matrix rank-deficient
     # (singular Q / non-positive-definite), exercising the degenerate-math
     # guards rather than the <20-point shape guard.
-    rng = np.random.default_rng(3)
     theta = np.linspace(0.0, 2.0 * np.pi, 200, endpoint=False)
     planar = np.column_stack([45.0 * np.cos(theta) + 5.0,
                               45.0 * np.sin(theta) - 3.0,

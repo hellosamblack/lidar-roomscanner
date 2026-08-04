@@ -3,7 +3,7 @@ import struct
 import time
 
 from roomscan.config import ViewerConfig
-from roomscan.protocol import CommandCode, FrameHeader, FrameType, ResultCode, StreamId, pack_frame
+from roomscan.protocol import CommandCode, FrameHeader, FrameType, ResultCode, pack_frame
 from roomscan.viewer import CommandKeyState, _reader, resolve_args
 
 

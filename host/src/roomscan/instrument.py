@@ -51,7 +51,10 @@ def tracked_text(draw, xy, text, font, fill, spacing=3) -> float:
 
 
 def corner_ticks(d, x0, y0, x1, y1, color, ln=11, inset=6, width=2) -> None:
-    x0 += inset; y0 += inset; x1 -= inset; y1 -= inset
+    x0 += inset
+    y0 += inset
+    x1 -= inset
+    y1 -= inset
     for cx, cy, dx, dy in ((x0, y0, 1, 1), (x1, y0, -1, 1), (x0, y1, 1, -1), (x1, y1, -1, -1)):
         d.line([cx, cy, cx + dx * ln, cy], fill=color, width=width)
         d.line([cx, cy, cx, cy + dy * ln], fill=color, width=width)

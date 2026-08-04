@@ -49,6 +49,14 @@ from roomscan.sensors import (
 )
 from roomscan.sources import FileSource
 from roomscan.viewer import Stats
+import os as _os
+
+from roomscan.sources import Recorder
+from roomscan.decoder import StreamDecoder as _StreamDecoder
+from roomscan.metrics import MetricsRegistry as _MetricsRegistry
+from roomscan.logbus import LogBus as _LogBus
+from roomscan.slam.meshprep import MeshPacket as _MeshPacket
+from roomscan.slam.mapper import FrameStep as _FrameStep
 
 
 # =============================================================================
@@ -1787,12 +1795,6 @@ def test_metrics_broadcast_reports_reader_drops_and_gaps(tmp_path):
 # =============================================================================
 # 9. Recording & playback (Web Phase 3)
 # =============================================================================
-import os as _os
-
-from roomscan.sources import Recorder
-from roomscan.decoder import StreamDecoder as _StreamDecoder
-from roomscan.metrics import MetricsRegistry as _MetricsRegistry
-from roomscan.logbus import LogBus as _LogBus
 
 
 def _make_depth_capture_flat(path: Path, n_frames: int, base: float,
@@ -2230,8 +2232,6 @@ def test_controller_seek_sets_offset_and_resumes(tmp_path):
 # --- Web Phase 4: SLAM mode ---------------------------------------------------
 # The protocol/plumbing is exercised with fake worker/meshprep (no Open3D/GPU);
 # save uses a real tiny Open3D mesh so the write path is genuinely covered.
-from roomscan.slam.meshprep import MeshPacket as _MeshPacket
-from roomscan.slam.mapper import FrameStep as _FrameStep
 
 
 def _synthetic_mesh_packet(*, mesh_seq=3, walls="split", decimated=False):
@@ -2260,9 +2260,12 @@ def test_pack_mesh_roundtrip():
     assert (nwv, nwt) == (4, 2)
     assert (nfp, nfl) == (3, 2)
     off = 36                                   # 9 * u32
-    nw_pos = np.frombuffer(buf, "<f4", 3 * nnwv, off); off += 4 * 3 * nnwv
-    nw_col = np.frombuffer(buf, "<f4", 3 * nnwv, off); off += 4 * 3 * nnwv
-    nw_idx = np.frombuffer(buf, "<u4", 3 * nnwt, off); off += 4 * 3 * nnwt
+    nw_pos = np.frombuffer(buf, "<f4", 3 * nnwv, off)
+    off += 4 * 3 * nnwv
+    nw_col = np.frombuffer(buf, "<f4", 3 * nnwv, off)
+    off += 4 * 3 * nnwv
+    nw_idx = np.frombuffer(buf, "<u4", 3 * nnwt, off)
+    off += 4 * 3 * nnwt
     np.testing.assert_allclose(nw_pos.reshape(-1, 3), pkt.non_wall_verts, atol=1e-6)
     np.testing.assert_allclose(nw_col.reshape(-1, 3), pkt.non_wall_colors, atol=1e-6)
     np.testing.assert_array_equal(nw_idx.reshape(-1, 3), pkt.non_wall_tris)
@@ -2322,8 +2325,12 @@ def test_sanitize_result_name(tmp_path):
 
 
 def test_list_results_newest_first(tmp_path):
-    a = tmp_path / "a.ply"; a.write_bytes(b"1"); _os.utime(a, (1000, 1000))
-    b = tmp_path / "b.ply"; b.write_bytes(b"22"); _os.utime(b, (2000, 2000))
+    a = tmp_path / "a.ply"
+    a.write_bytes(b"1")
+    _os.utime(a, (1000, 1000))
+    b = tmp_path / "b.ply"
+    b.write_bytes(b"22")
+    _os.utime(b, (2000, 2000))
     (tmp_path / "notes.txt").write_text("ignored")
     items = web.list_results(tmp_path)
     assert [it["name"] for it in items] == ["b.ply", "a.ply"]
@@ -2349,7 +2356,9 @@ class _FakeWorker:
 
 
 class _FakeMeshPrep:
-    def __init__(self, *a, **k): self.started = self.stopped = False; self.subs = []
+    def __init__(self, *a, **k):
+        self.started = self.stopped = False
+        self.subs = []
     def start(self): self.started = True
     def stop(self): self.stopped = True
     def submit(self, mesh, *, mesh_seq, glow_origin, wall_mode):
@@ -2363,7 +2372,9 @@ def _fake_slam(monkeypatch):
     import roomscan.slam.meshprep as meshprep
     made = {}
     def _mk(w, h, **k):
-        made["worker"] = _FakeWorker(); made["wh"] = (w, h); return made["worker"]
+        made["worker"] = _FakeWorker()
+        made["wh"] = (w, h)
+        return made["worker"]
     monkeypatch.setattr(backend, "make_slam_worker", _mk)
     monkeypatch.setattr(meshprep, "MeshPrep", lambda *a, **k: made.setdefault("mp", _FakeMeshPrep()))
     return made
@@ -3101,10 +3112,13 @@ def test_admin_endpoints_are_post_only():
 def test_transport_counters_none_when_not_udp():
     """Replay and serial sources have no fragment layer; the field must be null
     rather than fabricated zeros, which would read as a healthy UDP link."""
-    class _S: pass
-    s = _S(); s.controller = None
+    class _S:
+        pass
+    s = _S()
+    s.controller = None
     assert web.transport_counters(s) is None
-    s.controller = _S(); s.controller._live_underlying = object()
+    s.controller = _S()
+    s.controller._live_underlying = object()
     assert web.transport_counters(s) is None
 
 
@@ -3137,8 +3151,11 @@ def test_transport_counters_reports_udp_fragment_health(monkeypatch):
     split that makes "did the pacer help?" answerable at all (BUG-042)."""
     udp = _FakeUdp(frames_incomplete=2, frags_lost=3, frags_reordered=11,
                   frags_duplicate=1, frags_invalid=0)
-    class _S: pass
-    s = _S(); s.controller = _S(); s.controller._live_underlying = udp
+    class _S:
+        pass
+    s = _S()
+    s.controller = _S()
+    s.controller._live_underlying = udp
     got = web.transport_counters(s)
     assert got["frames_incomplete"] == 2 and got["frags_lost"] == 3
     assert got["frags_reordered"] == 11 and got["frags_duplicate"] == 1
@@ -3150,8 +3167,11 @@ def test_transport_counters_firmware_fields_null_before_first_event():
     or a capture predating this feature) -- every firmware/link-rate field
     must be null, never a fabricated 0 that would read as a healthy link."""
     udp = _FakeUdp(frames_incomplete=0, frags_lost=0)
-    class _S: pass
-    s = _S(); s.controller = _S(); s.controller._live_underlying = udp
+    class _S:
+        pass
+    s = _S()
+    s.controller = _S()
+    s.controller._live_underlying = udp
     got = web.transport_counters(s)
     assert got["link_bytes_per_s"] is None
     assert got["fw_tx_queue_high_water"] is None
@@ -3173,8 +3193,11 @@ def test_transport_counters_reports_firmware_queue_stats_when_available():
                   fw_tx_stack_stalls=12, fw_tx_emitted_bytes=987654,
                   fw_active_transport="udp",
                   fw_stats_updated_at=time.time() - stale_by)
-    class _S: pass
-    s = _S(); s.controller = _S(); s.controller._live_underlying = udp
+    class _S:
+        pass
+    s = _S()
+    s.controller = _S()
+    s.controller._live_underlying = udp
     got = web.transport_counters(s)
     assert got["link_bytes_per_s"] == pytest.approx(123456.0)
     assert got["fw_tx_queue_high_water"] == 6
@@ -3228,7 +3251,8 @@ def test_state_echo_keeps_capability_context_on_an_unrelated_control():
     to True -- would silently re-enable the SLAM segments on a stream-9-less
     capture and clear the Detailed badge.
     """
-    import asyncio, json
+    import asyncio
+    import json
     ui = web.UiState(source="view", display="point_cloud", selected_capture="old.bin")
     ctrl = _FakeCtrl(has_stream_9=False)
     state, _ = _inbound_state(ui, ctrl)
@@ -3772,7 +3796,6 @@ def test_set_elevation_datum_echoes_state():
 
 
 def test_set_elevation_datum_persists(tmp_path):
-    import types
     import roomscan.config as config_mod
     p = tmp_path / "roomscan.toml"
     state, _ = _elev_state(smoothed_ft=935.2, config=ViewerConfig())
@@ -4858,7 +4881,9 @@ def test_slam_config_carries_a_live_mesh_byte_budget():
 
 class _ConsumeOncePrep:
     """MeshPrep's real contract: `latest()` yields a packet once per submit."""
-    def __init__(self): self.subs = []; self._out = None
+    def __init__(self):
+        self.subs = []
+        self._out = None
     def submit(self, mesh, *, mesh_seq, glow_origin, wall_mode):
         self.subs.append(mesh_seq)
         self._out = _synthetic_mesh_packet(mesh_seq=mesh_seq)
@@ -5659,7 +5684,8 @@ def test_live_slam_forwards_every_configured_mapper_knob(monkeypatch):
     monkeypatch.setattr(SlamConfig, "load", classmethod(lambda cls, *a, **k: cfg))
     seen = {}
     def _mk(w, h, **kw):
-        seen.update(kw); return _FakeWorker()
+        seen.update(kw)
+        return _FakeWorker()
     monkeypatch.setattr(backend, "make_slam_worker", _mk)
     monkeypatch.setattr(meshprep, "MeshPrep", lambda *a, **k: _FakeMeshPrep())
 
@@ -5681,7 +5707,8 @@ def test_live_slam_fov_and_device_override_the_config(monkeypatch):
                         classmethod(lambda cls, *a, **k: SlamConfig(fov_h=1.0, fov_v=2.0)))
     seen = {}
     def _mk(w, h, **kw):
-        seen.update(kw); return _FakeWorker()
+        seen.update(kw)
+        return _FakeWorker()
     monkeypatch.setattr(backend, "make_slam_worker", _mk)
     monkeypatch.setattr(meshprep, "MeshPrep", lambda *a, **k: _FakeMeshPrep())
 

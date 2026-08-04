@@ -1,5 +1,10 @@
 """Pure state-model predicates for the two-mode / two-camera panel redesign."""
+import types
+
+import numpy as np
+
 import roomscan.panel as p
+import roomscan.panel as panel_mod
 
 
 def test_follow_active_only_slam_first_person():
@@ -25,12 +30,6 @@ def test_load_kind_by_suffix():
     assert p.load_kind("foo.txt") == "unknown"
 
 
-import types
-
-import numpy as np
-import roomscan.panel as panel_mod
-
-
 class _FakeSetModePanel:
     """Stand-in exercising the real _set_mode wiring (which toggle it arms)."""
     def __init__(self, mode):
@@ -41,8 +40,12 @@ class _FakeSetModePanel:
         self.window = types.SimpleNamespace(set_needs_layout=lambda: None)
         self.bus = types.SimpleNamespace(publish=lambda m: None)
 
-    def _on_showcase_toggle(self, c): self.calls.append(("showcase", c)); self.showcase_enabled = c
-    def _on_slam_toggle(self, c): self.calls.append(("slam", c)); self.slam_enabled = c
+    def _on_showcase_toggle(self, c):
+        self.calls.append(("showcase", c))
+        self.showcase_enabled = c
+    def _on_slam_toggle(self, c):
+        self.calls.append(("slam", c))
+        self.slam_enabled = c
     def _apply_camera_mode(self): self.calls.append("camera_mode")
 
 
@@ -205,7 +208,7 @@ class _FakeGizmoPanel:
 
 
 def test_gizmo_not_added_in_first_person():
-    pytest_o3d = __import__("pytest").importorskip("open3d")
+    __import__("pytest").importorskip("open3d")
     fake = _FakeGizmoPanel(panel_mod.CAM_FIRST_PERSON)
     quat = (1.0, 0.0, 0.0, 0.0)
     panel_mod.ControlPanel._update_camera_gizmo(fake, quat)
@@ -230,8 +233,12 @@ class _FakeHudPanel:
         self._cam_calls = []
 
     # stubs the dispatch calls into (Task 10 supplies the real ones)
-    def _set_mode(self, m): self.mode = m; self._mode_calls.append(m)
-    def _set_camera(self, c): self.camera_mode = c; self._cam_calls.append(c)
+    def _set_mode(self, m):
+        self.mode = m
+        self._mode_calls.append(m)
+    def _set_camera(self, c):
+        self.camera_mode = c
+        self._cam_calls.append(c)
     def _do_action(self, seg): pass
     def _toggle_ir_overlay(self): self.ir_overlay_enabled = not self.ir_overlay_enabled
     def _set_ir_opacity(self, f): self.ir_opacity = f
@@ -321,7 +328,6 @@ def test_load_dialog_dispatches_by_kind(monkeypatch):
 
 def test_ir_overlay_builds_and_removes_geometry():
     __import__("pytest").importorskip("open3d")
-    import numpy as np
     import open3d as o3d
 
     class _Scene:
@@ -362,7 +368,6 @@ def test_ir_overlay_sized_from_true_sensor_apex_not_the_offset_eye():
     IR content ends up dwarfed inside an oversized billboard.
     `_update_ir_overlay` must reconstruct the true apex first."""
     __import__("pytest").importorskip("open3d")
-    import numpy as np
     import open3d as o3d
 
     class _Scene:

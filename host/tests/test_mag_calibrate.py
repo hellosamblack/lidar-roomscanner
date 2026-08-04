@@ -1,7 +1,6 @@
 import struct
 
 import numpy as np
-import pytest
 
 from roomscan.protocol import Frame, FrameHeader, FrameType, StreamId
 from tools.mag_calibrate import collect_mag_from_frames, calibrate

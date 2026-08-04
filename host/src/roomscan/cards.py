@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import theme
 from .instrument import (
     ACCENT_U8 as _ACCENT,
     HAIR as _HAIR,
@@ -26,7 +25,6 @@ from .instrument import (
     fmt_count,
     load_font as _font,
     tracked_text as _tracked,
-    u8 as _u8,
 )
 
 
