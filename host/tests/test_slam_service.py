@@ -124,6 +124,109 @@ def test_pose_messages_carry_the_services_own_device():
     cli.close(); lsock.close(); th.join(timeout=2)
 
 
+def test_serve_client_forwards_imu_rate_hz_to_worker_submit(monkeypatch):
+    """Task 8 step 2: the client's applied IMU/env rate must reach the
+    container's own SlamWorker.submit -- the same call the LOCAL backend
+    takes -- so local and remote backends match."""
+    captured = []
+    real_submit = service.SlamWorker.submit
+
+    def spy_submit(self, *a, **kw):
+        captured.append(kw.get("imu_rate_hz"))
+        return real_submit(self, *a, **kw)
+
+    monkeypatch.setattr(service.SlamWorker, "submit", spy_submit)
+
+    srv = SlamService(device="CPU:0", fov_h=55.0, fov_v=42.0)
+    lsock = socket.socket()
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(1)
+    port = lsock.getsockname()[1]
+
+    def accept_once():
+        conn, _ = lsock.accept()
+        srv.serve_client(conn)
+        conn.close()
+    th = threading.Thread(target=accept_once, daemon=True)
+    th.start()
+
+    def _drain_until_pose():
+        while True:
+            m = wire.recv_message(cli)
+            assert m is not None
+            if m["type"] == wire.POSE:
+                return
+
+    cli = socket.create_connection(("127.0.0.1", port))
+    cli.settimeout(5)
+    frame = _synthetic_frame(0)
+    frame["imu_rate_hz"] = 90.0
+    wire.send_message(cli, frame)
+    _drain_until_pose()
+    # Frame 0 triggers a mesh extraction (worker.py extracts on the first
+    # successful integration) that arrives AFTER frame 0's own pose -- still
+    # unread at this point. Frame 1 does not (frames_integrated=2,
+    # mesh_every=5), so draining both leaves nothing pending when this test
+    # closes the socket (same pattern as
+    # test_pose_messages_carry_the_services_own_device -- otherwise the
+    # leftover bytes turn into a spurious ECONNRESET on the server side).
+    wire.send_message(cli, _synthetic_frame(1))
+    _drain_until_pose()
+    cli.close()
+    lsock.close()
+    th.join(timeout=2)
+
+    assert captured == [90.0, None]
+
+
+def test_serve_client_defaults_imu_rate_hz_to_none_for_an_older_client():
+    """A message with no "imu_rate_hz" key at all (an older client) must not
+    KeyError -- msg.get() returns None, which Mapper.set_imu_rate_hz treats
+    as a no-op."""
+    captured = []
+    real_submit = service.SlamWorker.submit
+
+    def spy_submit(self, *a, **kw):
+        captured.append(kw.get("imu_rate_hz"))
+        return real_submit(self, *a, **kw)
+
+    from unittest.mock import patch
+    with patch.object(service.SlamWorker, "submit", spy_submit):
+        srv = SlamService(device="CPU:0", fov_h=55.0, fov_v=42.0)
+        lsock = socket.socket()
+        lsock.bind(("127.0.0.1", 0))
+        lsock.listen(1)
+        port = lsock.getsockname()[1]
+
+        def accept_once():
+            conn, _ = lsock.accept()
+            srv.serve_client(conn)
+            conn.close()
+        th = threading.Thread(target=accept_once, daemon=True)
+        th.start()
+
+        def _drain_until_pose():
+            while True:
+                m = wire.recv_message(cli)
+                assert m is not None
+                if m["type"] == wire.POSE:
+                    return
+
+        cli = socket.create_connection(("127.0.0.1", port))
+        cli.settimeout(5)
+        wire.send_message(cli, _synthetic_frame(0))   # no imu_rate_hz key at all
+        _drain_until_pose()
+        # See the sibling test above: frame 0's mesh trails its pose and is
+        # only drained by reading through frame 1's response.
+        wire.send_message(cli, _synthetic_frame(1))
+        _drain_until_pose()
+        cli.close()
+        lsock.close()
+        th.join(timeout=2)
+
+    assert captured == [None, None]
+
+
 def test_serve_survives_bad_client_and_keeps_serving():
     """A malformed frame (missing 'depth') raises inside serve_client; the
     real serve() accept loop must catch it, close that connection, and keep

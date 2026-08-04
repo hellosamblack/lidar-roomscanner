@@ -16,7 +16,9 @@ import pytest
 
 from roomscan.imufusion import (
     ACCEL_GATE_FRAC,
+    QUAT_REF_RATE_HZ,
     TAU_TILT_S,
+    TAU_YAW_S,
     ImuFusion,
     quat_from_gravity,
 )
@@ -378,6 +380,94 @@ def test_yaw_axis_fix_is_a_no_op_far_from_gimbal_lock(monkeypatch):
     legacy = _heading_errors(level, seed=12)
     assert float(np.percentile(fixed, 95)) == pytest.approx(
         float(np.percentile(legacy, 95)), abs=0.005)
+
+
+# --------------------------------------------------- rate-aware yaw crossover (Task 8)
+def test_quat_ref_rate_hz_default_reproduces_shipped_tau_yaw_exactly():
+    """The default is the coupled 30 Hz case: `tau_yaw_s` must come out
+    EXACTLY equal to the shipped `TAU_YAW_S` constant (sqrt(30/30) == 1.0
+    exactly in floating point), i.e. this is a no-op at the shipped
+    configuration."""
+    f = ImuFusion()
+    assert f.quat_ref_rate_hz == QUAT_REF_RATE_HZ
+    assert f.tau_yaw_s == TAU_YAW_S
+
+
+def test_explicit_default_rate_matches_the_implicit_default():
+    f_implicit = ImuFusion()
+    f_explicit = ImuFusion(quat_ref_rate_hz=QUAT_REF_RATE_HZ)
+    assert f_explicit.tau_yaw_s == f_implicit.tau_yaw_s == TAU_YAW_S
+
+
+def test_higher_reference_rate_shrinks_tau_yaw():
+    """A reference that arrives faster gets more independent samples to
+    average over the same real-time window, so the noise-optimal crossover
+    (tau* ~ 1/sqrt(f_ref)) shrinks -- the loop can afford to trust the gyro
+    for less real time and still land at the same noise floor."""
+    f = ImuFusion(quat_ref_rate_hz=90.0)
+    expected = TAU_YAW_S * math.sqrt(QUAT_REF_RATE_HZ / 90.0)
+    assert f.tau_yaw_s == pytest.approx(expected, rel=1e-9)
+    assert f.tau_yaw_s < TAU_YAW_S
+
+
+def test_lower_reference_rate_grows_tau_yaw():
+    f = ImuFusion(quat_ref_rate_hz=10.0)
+    expected = TAU_YAW_S * math.sqrt(QUAT_REF_RATE_HZ / 10.0)
+    assert f.tau_yaw_s == pytest.approx(expected, rel=1e-9)
+    assert f.tau_yaw_s > TAU_YAW_S
+
+
+def test_set_quat_ref_rate_hz_live_update_does_not_reset_filter_state():
+    """A live IMU/env rate change (Task 7) must recompute ONLY `tau_yaw_s` --
+    the estimate, status and sample/batch counters are untouched. A rate
+    change is not a reset."""
+    f = _seeded()
+    before_q = f.fused_quat()
+    before_status = f.status
+    before_samples = f.samples
+    before_batches = f.batches
+
+    f.set_quat_ref_rate_hz(90.0)
+
+    assert f.quat_ref_rate_hz == 90.0
+    assert f.tau_yaw_s == pytest.approx(TAU_YAW_S * math.sqrt(QUAT_REF_RATE_HZ / 90.0),
+                                        rel=1e-9)
+    assert f.fused_quat() == before_q
+    assert f.status == before_status
+    assert f.samples == before_samples
+    assert f.batches == before_batches
+
+
+def test_yaw_gain_reproduces_shipped_convergence_at_default_rate_but_differs_at_higher_rate():
+    """Step 4's headline claim: the effective yaw gain changes with the
+    reference rate (a real behavioral difference, not just a different
+    number sitting unused), while the coupled-30 Hz path stays numerically
+    unchanged (proven separately by the bit-identical tests above).
+
+    The FIRST batch seeds directly from `yaw_ref` (see `ImuFusion._seed`),
+    which would make any single-reference comparison bit-identical
+    regardless of `tau_yaw_s` -- so this seeds from GRAVITY ONLY (no
+    reference on frame 0, leaving yaw arbitrary) and only starts feeding
+    `ref` from the second batch on, which is what actually exercises the
+    crossover gain."""
+    ref = graft_yaw(NEAR_LOCK_Q, 30.0)
+
+    def converge(quat_ref_rate_hz):
+        f = ImuFusion(quat_ref_rate_hz=quat_ref_rate_hz)
+        f.update(make_batch(gyro_dps=np.zeros((8, 3)),
+                            gravity_g=np.tile(body_up(NEAR_LOCK_Q), (8, 1)),
+                            ticks=np.arange(0, 8) * TICKS_PER_SAMPLE))   # gravity-only seed
+        err = None
+        for k in range(8, 160, 8):
+            f.update(make_batch(gyro_dps=np.zeros((8, 3)),
+                                gravity_g=np.tile(body_up(NEAR_LOCK_Q), (8, 1)),
+                                ticks=np.arange(k, k + 8) * TICKS_PER_SAMPLE), yaw_ref=ref)
+            err = abs(graft_yaw_error_deg(ref, f.fused_quat()))
+        return err
+
+    err_30 = converge(30.0)
+    err_90 = converge(90.0)
+    assert err_90 < err_30 * 0.9      # meaningfully faster convergence at the higher rate
 
 
 def test_tracks_known_rotation_one_to_one():

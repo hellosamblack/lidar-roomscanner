@@ -1758,6 +1758,13 @@ class ImuEnvRateState:
     pending: bool = False
     warning: str | None = None
     error: str | None = None
+    # Task 8: stream 9 (IMU_QUAT)'s OWN measured cadence (metrics.py
+    # `device_hz`, from capture timestamps -- true whether live or replayed).
+    # This is the "replay truthfulness" fallback for `_applied_imu_env_rate_hz`
+    # when there is no live profile target at all (a replay, or before the
+    # device's first readback) -- never assume the ToF rate, and never assume
+    # 30 Hz, for a recording that may have been made at a different rate.
+    measured_quat_hz: float | None = None
 
 
 def _transport_kind(ctrl) -> str:
@@ -2873,7 +2880,8 @@ class SlamRunner:
                         pass
 
     # ---- feed (reader thread) + poll (broadcaster) --------------------------
-    def submit(self, depth, quat, pressure, reflectance=None, confidence=None) -> None:
+    def submit(self, depth, quat, pressure, reflectance=None, confidence=None,
+               imu_rate_hz=None) -> None:
         """Forward the newest frame to the worker (latest-wins drop). No-op when
         inactive or when there is no orientation prior yet (SLAM needs the quat;
         without it the mapper loses tracking immediately -- see the 07-08
@@ -2883,7 +2891,12 @@ class SlamRunner:
         anything slow: the first frame after arming kicks an async build and is
         itself dropped, and every frame until that build lands is dropped too.
         That costs the map its first ~second of frames, which is the same cost
-        the old inline build paid -- but pays it without stalling the reader."""
+        the old inline build paid -- but pays it without stalling the reader.
+
+        `imu_rate_hz` (Task 8): the applied IMU/env poll rate concurrent with
+        this frame (`web._applied_imu_env_rate_hz`), forwarded unchanged to
+        `worker.submit` so `Mapper.set_imu_rate_hz` rescales `baro_tau_frames`
+        on the worker thread -- see `SlamWorker.run_once`."""
         if quat is None:
             return
         with self._lock:
@@ -2898,7 +2911,8 @@ class SlamRunner:
                                      args=(w, h, self._generation),
                                      daemon=True).start()
                 return
-        worker.submit(depth, quat, pressure, reflectance=reflectance, confidence=confidence)
+        worker.submit(depth, quat, pressure, reflectance=reflectance, confidence=confidence,
+                      imu_rate_hz=imu_rate_hz)
 
     def poll(self, wall_mode: str) -> tuple[dict | None, bytes | None]:
         """Latest (`slam` message, MESH bytes-or-None). MESH is emitted only when
@@ -3301,6 +3315,40 @@ class DetailedRunner:
                     pass
 
 
+def _applied_imu_env_rate_hz(state) -> float | None:
+    """The IMU/env poll rate actually driving streams 9/10/11 right now, for
+    `Mapper.set_imu_rate_hz()` (Task 8) -- never the ToF target FPS.
+
+    Precedence:
+      1. Task 7's decoupled rate readback (`ImuEnvRateState.applied_rate_hz`),
+         when it reports a real, nonzero, device-confirmed rate.
+      2. Coupled mode (rate 0/None) with a genuine LIVE profile target: streams
+         9/10/11 arrive once per ToF trigger by definition, so the ToF rate IS
+         the IMU/env rate here -- "as before" Task 7. Prefers the measured
+         cadence, falling back to the applied target if metrics hasn't ticked
+         yet.
+      3. No live profile target at all (a replay, or before the device's first
+         readback): the ToF rate is not known to describe streams 9/10/11 --
+         measure stream 9's OWN capture-timestamp cadence
+         (`ImuEnvRateState.measured_quat_hz`) instead of assuming 30 Hz for
+         what might be a 90 Hz recording.
+      4. `None` when nothing above is known yet.
+    """
+    rs = getattr(state, "ranging_state", None)
+    ie = getattr(state, "imu_env_state", None)
+    if ie is not None and ie.applied_rate_hz:
+        return float(ie.applied_rate_hz)
+    live_profile = rs is not None and rs.initialized and rs.transport != "replay"
+    if live_profile:
+        if rs.measured_fps:
+            return float(rs.measured_fps)
+        if rs.applied_fps:
+            return float(rs.applied_fps)
+    if ie is not None and ie.measured_quat_hz:
+        return float(ie.measured_quat_hz)
+    return None
+
+
 def make_slam_feed(state):
     """Reader-thread tap that feeds the SLAM mapper at the STREAM's rate.
 
@@ -3327,7 +3375,8 @@ def make_slam_feed(state):
         slam.submit(depth, sensor.fused_quat(),
                     env.pressure_pa if env is not None else None,
                     reflectance=outputs.get("reflectance"),
-                    confidence=outputs.get("confidence"))
+                    confidence=outputs.get("confidence"),
+                    imu_rate_hz=_applied_imu_env_rate_hz(state))
     return _feed
 
 
@@ -5065,6 +5114,16 @@ async def _broadcaster() -> None:
                                    if s.stream_id in (StreamId.RAW_3DMD, StreamId.DEPTH_ZF32)), None)
                 rs.measured_fps = tof_stream.device_hz if tof_stream is not None else None
                 rs.transport = _transport_kind(ctrl)
+                # Task 8: stream 9's own measured cadence -- see
+                # ImuEnvRateState.measured_quat_hz's docstring. Computed the
+                # same way as `rs.measured_fps` above (this snapshot's
+                # per-stream device_hz), so it costs nothing extra and is
+                # truthful on a replay of any recorded rate.
+                ie = getattr(state, "imu_env_state", None)
+                if ie is not None:
+                    quat_stream = next((s for s in snap.streams
+                                        if s.stream_id == StreamId.IMU_QUAT), None)
+                    ie.measured_quat_hz = quat_stream.device_hz if quat_stream is not None else None
                 await _broadcast_ranging(state)
 
 

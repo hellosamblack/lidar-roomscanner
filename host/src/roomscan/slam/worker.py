@@ -32,12 +32,15 @@ _IDLE_SLEEP_S = 0.005     # poll interval when the submit slot is empty
 class SlamWorker:
     """Owns a `Mapper` and runs it off the GUI/reader threads.
 
-    `submit(depth, quat, pressure, reflectance=None, confidence=None)` stores
-    the latest input (dropping any older, unprocessed one) -- reflectance/
-    confidence are optional (Task 13) and simply forwarded to `Mapper.step`;
-    the live panel does not yet supply them (a follow-up task wires that), so
-    today they default to None and the live preview stays uncolored/
-    ungated, unchanged from before this task. `run_once()` pops it, steps the
+    `submit(depth, quat, pressure, reflectance=None, confidence=None,
+    imu_rate_hz=None)` stores the latest input (dropping any older,
+    unprocessed one) -- reflectance/confidence are optional (Task 13) and
+    simply forwarded to `Mapper.step`; the live panel does not yet supply
+    them (a follow-up task wires that), so today they default to None and
+    the live preview stays uncolored/ungated. `imu_rate_hz` (Task 8) is the
+    applied IMU/env poll rate concurrent with this frame; `run_once()`
+    applies it to the mapper (`Mapper.set_imu_rate_hz`) on the WORKER
+    thread, never on submit()'s caller thread. `run_once()` pops it, steps the
     mapper, and publishes `(mesh, trajectory, FrameStep)` to `latest()` --
     TWICE, if extraction runs: once immediately with the *previous* mesh
     (fresh pose, stale mesh, so a caller is never held up by extraction) and
@@ -83,12 +86,17 @@ class SlamWorker:
         self._stop_evt = threading.Event()
 
     # ---- producer side (GUI/reader thread) ----------------------------------
-    def submit(self, depth, quat, pressure, reflectance=None, confidence=None) -> None:
+    def submit(self, depth, quat, pressure, reflectance=None, confidence=None,
+               imu_rate_hz=None) -> None:
+        """`imu_rate_hz` (Task 8): the applied IMU/env poll rate concurrent
+        with this frame -- the caller resolves coupled/decoupled mode to a
+        concrete Hz value (or leaves it `None` if unknown); `run_once()`
+        applies it to the mapper on the WORKER thread, never here."""
         with self._in_lock:
             self._frames_submitted += 1
             if self._in_slot is not None:
                 self._frames_overwritten += 1
-            self._in_slot = (depth, quat, pressure, reflectance, confidence)
+            self._in_slot = (depth, quat, pressure, reflectance, confidence, imu_rate_hz)
 
     # ---- worker side ---------------------------------------------------------
     def run_once(self) -> bool:
@@ -99,7 +107,11 @@ class SlamWorker:
             item, self._in_slot = self._in_slot, None
         if item is None:
             return False
-        depth, quat, pressure, reflectance, confidence = item
+        depth, quat, pressure, reflectance, confidence, imu_rate_hz = item
+        # Task 8 step 2: applied here, on the worker thread, between step()
+        # calls -- never from submit()'s producer thread. A no-op when
+        # `imu_rate_hz` is None/0 (see Mapper.set_imu_rate_hz's docstring).
+        self._mapper.set_imu_rate_hz(imu_rate_hz)
         step = self._mapper.step(depth, quat, pressure, reflectance=reflectance, confidence=confidence)
         self._frames_processed += 1
         trajectory = list(self._mapper.trajectory)   # copy: caller must not see it mutate later

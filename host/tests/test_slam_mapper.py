@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import open3d as o3d
 import pytest
@@ -395,6 +397,107 @@ def test_baro_longer_tau_rejects_more_noise():
     _, s_short = _drive_baro(short, noisy)
     _, s_long = _drive_baro(long_, noisy)
     assert s_long.std() < s_short.std() / 10.0
+
+
+# --- Task 8: rate-aware IMU/env behavior (baro_tau_frames tracks the APPLIED
+# IMU/env poll rate, never the ToF target FPS) -------------------------------
+
+def test_set_imu_rate_hz_pins_the_formula():
+    """`baro_tau_frames = round(30 * imu_rate_hz)` -- the exact numeric
+    equivalence the plan pins: 900 @ 30 Hz, 2700 @ 90 Hz."""
+    m = Mapper(W, H, voxel_size=0.02)
+    m.set_imu_rate_hz(30.0)
+    assert m.baro_tau_frames == 900
+    m.set_imu_rate_hz(90.0)
+    assert m.baro_tau_frames == 2700
+
+
+def test_set_imu_rate_hz_none_or_zero_is_a_noop():
+    """Coupled mode's "unknown yet"/legacy-caller case: `baro_tau_frames` must
+    keep whatever it was constructed with (BUG-062's "verify the knob took
+    effect" -- a caller that never calls this at all must see byte-identical
+    behavior)."""
+    m = Mapper(W, H, voxel_size=0.02, baro_tau_frames=555)
+    m.set_imu_rate_hz(None)
+    assert m.baro_tau_frames == 555
+    m.set_imu_rate_hz(0)
+    assert m.baro_tau_frames == 555
+
+
+def test_live_rate_change_does_not_reset_baro_state_or_trajectory():
+    """A live IMU/env rate change (Task 7) must not reset the low-pass state,
+    the barometer's own datum, or introduce a correction step -- only future
+    samples are averaged differently."""
+    ref = 101325.0
+    m = Mapper(W, H, voxel_size=0.02, baro_authority=0.05, baro_tau_frames=900)
+    m.set_imu_rate_hz(30.0)
+    _drive_baro(m, [ref] * 90 + [ref - 5.0] * 200)   # warm-up + real settling
+
+    before_correction = m.baro_correction_m
+    before_lp = m._baro_lp
+    before_ref_pa = m._ref_pa
+    before_traj_len = len(m.trajectory)
+
+    m.set_imu_rate_hz(90.0)
+
+    assert m.baro_tau_frames == 2700
+    assert m.baro_correction_m == before_correction     # no correction step introduced
+    assert m._baro_lp == before_lp
+    assert m._ref_pa == before_ref_pa
+    assert len(m.trajectory) == before_traj_len         # map/trajectory untouched
+
+
+def test_baro_time_constant_equivalent_in_real_seconds_at_30_and_90_hz():
+    """THE equivalence test (plan step 1/5): a 30-second barometer time
+    constant, sized from the APPLIED IMU/env rate, must settle to the SAME
+    fraction of a sustained disagreement after 30 REAL SECONDS whether the
+    applied rate -- and hence `baro_tau_frames` -- is 30 Hz (900) or 90 Hz
+    (2700). Compared in seconds, not frames, per step 5: each rate drives
+    its OWN sample count for the same 30 s window (900 vs 2700), and an EMA's
+    exact settling fraction after k == tau_frames steps is
+    1 - (1 - 1/tau_frames)**tau_frames --> 1/e, regardless of tau_frames, so
+    equal REAL TIME must give equal settling regardless of which of the two
+    rates was in force."""
+    from roomscan.slam.frames import baro_height_m
+    ref = 101325.0
+    off = ref - 5.0                      # a sustained disagreement, no noise
+    frac_after_one_tau = 1.0 - math.exp(-1.0)
+    results = {}
+    for rate_hz, tau_frames in ((30.0, 900), (90.0, 2700)):
+        m = Mapper(W, H, voxel_size=0.02, baro_authority=0.05, baro_tau_frames=1)
+        m.set_imu_rate_hz(rate_hz)
+        assert m.baro_tau_frames == tau_frames        # the exact pinned values
+        n_warm = 90
+        n_settle = int(round(rate_hz * 30.0))          # 30 REAL seconds at THIS rate
+        heights, _ = _drive_baro(m, [ref] * n_warm + [off] * n_settle)
+        results[rate_hz] = heights[-1]
+    target = 0.05 * baro_height_m(off, ref)
+    for rate_hz, height in results.items():
+        assert height == pytest.approx(frac_after_one_tau * target, rel=0.02), rate_hz
+    # and the two rates agree with EACH OTHER, not just with the analytic target
+    assert results[30.0] == pytest.approx(results[90.0], rel=0.02)
+
+
+def test_baro_tau_equivalence_holds_with_the_concurrent_tof_rate_mismatched():
+    """The applied IMU/env rate is what matters, not whatever the concurrent
+    ToF profile happens to be running -- `Mapper` takes no ToF-rate argument
+    at all, so a caller resolving a genuinely decoupled combination (e.g. a
+    90 Hz ToF profile with a 30 Hz IMU/env rate, or vice versa) gets the SAME
+    settling behavior as the coupled case above as long as it passes the
+    correct applied IMU/env rate -- proving `set_imu_rate_hz` is driven only
+    by its own argument."""
+    from roomscan.slam.frames import baro_height_m
+    ref = 101325.0
+    off = ref - 5.0
+    frac_after_one_tau = 1.0 - math.exp(-1.0)
+    # A 30 Hz IMU/env rate while some unrelated (and irrelevant, since Mapper
+    # never sees it) 90 Hz ToF profile is concurrently running.
+    m = Mapper(W, H, voxel_size=0.02, baro_authority=0.05, baro_tau_frames=1)
+    m.set_imu_rate_hz(30.0)
+    assert m.baro_tau_frames == 900
+    heights, _ = _drive_baro(m, [ref] * 90 + [off] * 900)
+    target = 0.05 * baro_height_m(off, ref)
+    assert heights[-1] == pytest.approx(frac_after_one_tau * target, rel=0.02)
 
 
 # --- TSDF block-grid gauge (BUG-035, owner ask 2026-07-31) -----------------

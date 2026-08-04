@@ -78,7 +78,13 @@ class RemoteSlamWorker:
             self._sock = None
             return False
 
-    def submit(self, depth, quat, pressure, reflectance=None, confidence=None) -> None:
+    def submit(self, depth, quat, pressure, reflectance=None, confidence=None,
+               imu_rate_hz=None) -> None:
+        """`imu_rate_hz` (Task 8): carried in the message so the container's
+        own Mapper rescales `baro_tau_frames` identically to the local
+        backend (see `SlamService.serve_client`). Omitted from the message
+        entirely when `None`, so an older service (that never looks for the
+        key) is unaffected -- same shape as reflectance/confidence above."""
         with self._in_lock:
             self._fid += 1
             msg = {"fid": self._fid,
@@ -90,6 +96,8 @@ class RemoteSlamWorker:
                 msg["reflectance"] = np.asarray(reflectance, np.float32)
             if confidence is not None:
                 msg["confidence"] = np.asarray(confidence, np.float32)
+            if imu_rate_hz is not None:
+                msg["imu_rate_hz"] = float(imu_rate_hz)
             self._frames_submitted += 1
             if self._in_slot is not None:
                 self._frames_overwritten += 1

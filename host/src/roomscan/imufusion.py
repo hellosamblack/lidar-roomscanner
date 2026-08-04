@@ -47,6 +47,19 @@ it was. Only when an `ImuFusion` is explicitly attached *and* it has converged d
 display-only `OrientationSmoother`, or `display_rotation` is touched by this module;
 integration and the on-rig A/B are deliberately separate work.
 
+RATE AWARENESS (2026-08-04, Task 8)
+------------------------------------
+`quat_ref_rate_hz` (constructor kwarg, default `QUAT_REF_RATE_HZ` = 30.0) is the
+actual arrival rate of the yaw reference (stream 9 / `YawFusion`'s output) a caller
+is feeding through `yaw_ref=`. Task 7 lets that rate diverge from the ToF frame rate
+(decoupled IMU/env poll rate), so it is now an explicit input rather than the
+derivation-only comment constant it used to be -- see `_rate_scaled_tau_yaw_s`. It
+recomputes ONLY the yaw crossover (`tau_yaw_s`); `tau_tilt_s` stays pinned to the
+gyro's own fixed 480 Hz ODR (`GYRO_RATE_HZ`, unrelated to the decoupled rate) and
+every propagation/gain calculation elsewhere stays in real seconds, unchanged. At
+the default rate this is an identity (nothing here changes coupled-30 Hz behavior).
+`set_quat_ref_rate_hz()` updates it live, without resetting the filter's state.
+
 Frames and conventions are `docs/coordinate-frames.md`'s, unchanged: the state
 quaternion is the same **body -> SFLP-world** rotation stream 9 emits, SFLP world is
 Z-up, and the display path stays `T_WORLD_TO_CV @ R @ T_CV_TO_BODY`.
@@ -227,9 +240,20 @@ class ImuFusion:
     def __init__(self, tau_tilt_s: float = TAU_TILT_S, tau_yaw_s: float = TAU_YAW_S,
                  accel_gate_frac: float = ACCEL_GATE_FRAC,
                  nominal_rate_hz: float = GYRO_RATE_HZ,
-                 gravity_sign: float = GRAVITY_SIGN):
+                 gravity_sign: float = GRAVITY_SIGN,
+                 quat_ref_rate_hz: float = QUAT_REF_RATE_HZ):
         self.tau_tilt_s = float(tau_tilt_s)
-        self.tau_yaw_s = float(tau_yaw_s)
+        # `tau_yaw_s` as passed in is the crossover value AT `quat_ref_rate_hz`
+        # (the coupled 30 Hz default unless a caller overrides both together).
+        # The gain actually used is `self.tau_yaw_s`, recomputed by
+        # `_rate_scaled_tau_yaw_s()` below -- see the module docstring's RATE
+        # AWARENESS section and that method's own docstring for the
+        # 1/sqrt(rate) derivation. At the default rate this is an identity
+        # (sqrt(30/30) == 1.0 exactly), so this is a no-op change at the
+        # shipped coupled-30 Hz configuration.
+        self._tau_yaw_base_s = float(tau_yaw_s)
+        self._quat_ref_rate_hz = float(quat_ref_rate_hz)
+        self.tau_yaw_s = self._rate_scaled_tau_yaw_s()
         self.accel_gate_frac = float(accel_gate_frac)
         self.nominal_dt_s = 1.0 / float(nominal_rate_hz)
         self.gravity_sign = float(gravity_sign)
@@ -258,6 +282,50 @@ class ImuFusion:
     def fused_quat(self) -> tuple[float, float, float, float] | None:
         """Current estimate, or None before the filter has been seeded."""
         return self._q
+
+    @property
+    def quat_ref_rate_hz(self) -> float:
+        """The yaw-reference update rate (Hz) `tau_yaw_s` is currently scaled
+        for -- Task 7's applied/decoupled IMU/env rate, sourced by the caller
+        and never re-derived here (see the module docstring's RATE AWARENESS
+        section)."""
+        return self._quat_ref_rate_hz
+
+    def _rate_scaled_tau_yaw_s(self) -> float:
+        """The ONE rate-derived quantity in this filter (Task 8 step 4): the
+        yaw crossover time constant, recomputed from `_quat_ref_rate_hz`.
+
+        Module docstring's "How these were derived", YAW section: the
+        noise-optimal tau solves
+
+            sigma_ref / sqrt(2 * tau * f_ref) == ARW * sqrt(tau)
+
+        i.e. tau* is proportional to 1/sqrt(f_ref) -- a reference that arrives
+        more often gives the loop more independent samples to average over the
+        same real-time window, so it can afford to trust the gyro for a
+        SHORTER time and still land at the same steady-state noise floor.
+        `_tau_yaw_base_s` is the shipped constant (`TAU_YAW_S`) AT
+        `QUAT_REF_RATE_HZ` (30 Hz, the historical coupled default) -- scaling
+        by sqrt(QUAT_REF_RATE_HZ / f_ref) reproduces it EXACTLY when
+        `f_ref == QUAT_REF_RATE_HZ` (coupled 30 Hz, byte-identical to before
+        this method existed) and only changes it when the caller's actual
+        reference rate differs.
+
+        Deliberately the ONLY rate-derived term: `TAU_TILT_S` is referenced to
+        the fixed 480 Hz gyro ODR (`GYRO_RATE_HZ`), not to the decoupled
+        IMU/env poll rate, and every dt-based propagation/gain elsewhere
+        already runs in real seconds off the LSM's own TIMESTAMP words."""
+        if self._quat_ref_rate_hz <= 0:
+            return self._tau_yaw_base_s
+        return self._tau_yaw_base_s * math.sqrt(QUAT_REF_RATE_HZ / self._quat_ref_rate_hz)
+
+    def set_quat_ref_rate_hz(self, rate_hz: float) -> None:
+        """Live update of the yaw-reference rate (Task 7's decoupled IMU/env
+        rate can change mid-stream). Recomputes ONLY `tau_yaw_s` -- `_q`,
+        `status`, `samples`, `batches` and every other piece of filter state
+        are untouched. A rate change is not a reset."""
+        self._quat_ref_rate_hz = float(rate_hz)
+        self.tau_yaw_s = self._rate_scaled_tau_yaw_s()
 
     def update(self, batch: ImuRawBatch, yaw_ref=None) -> None:
         """Fold one stream-11 batch in. Never raises on odd input - a short, empty,

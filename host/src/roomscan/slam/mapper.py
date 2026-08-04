@@ -251,6 +251,34 @@ class Mapper:
         resolved per call rather than frozen in `__init__`."""
         return self._icp_device if self.icp_mode == "translation" else self._device
 
+    def set_imu_rate_hz(self, imu_rate_hz: float | None) -> None:
+        """Live IMU/env poll-rate update (Task 7's decoupled rate; Task 8).
+
+        Recomputes `baro_tau_frames` to hold the barometer low-pass's ~30
+        SECOND time constant at whatever rate is actually driving pressure
+        readings: ``baro_tau_frames = round(30 * imu_rate_hz)``, so 900 @
+        30 Hz and 2700 @ 90 Hz are the SAME 30 s of averaging at each rate's
+        own cadence (see test_slam_mapper.py's equivalence tests). Callers
+        resolve coupled mode (the applied IMU/env rate equals the concurrent
+        ToF rate, as before Task 7) to a concrete Hz value themselves before
+        calling this -- `Mapper` has no notion of "ToF rate" at all.
+
+        Intended to be called from the WORKER thread (`SlamWorker.run_once`
+        / the container's worker via `SlamService`), never from `submit()`'s
+        producer thread, so a rate change lands cleanly between `step()`
+        calls, never mid-step.
+
+        `None` or `0` (no rate known yet, or a caller that never calls this
+        at all) is a deliberate no-op: `baro_tau_frames` keeps whatever it
+        was constructed with or last set to, so existing callers that never
+        touch this see byte-identical behavior. This never resets
+        `_baro_lp`, `baro_correction_m`, `_ref_pa`/`_ref_acc`/`_ref_n`, the
+        trajectory, or the map -- a rate change changes only how fast
+        FUTURE samples are averaged, not what has already been integrated."""
+        if not imu_rate_hz:
+            return
+        self.baro_tau_frames = max(1, round(30.0 * float(imu_rate_hz)))
+
     def _apply_baro_z(self, pose: np.ndarray, pressure_pa: float | None) -> np.ndarray:
         """Barometric height as a bounded, low-passed complementary correction
         (BUG-037). The cumulative correction ever applied is exactly

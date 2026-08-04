@@ -53,9 +53,15 @@ class SlamService:
             pressure = msg.get("pressure")
             refl = msg.get("reflectance")
             conf = msg.get("confidence")
+            # Task 8 step 2: forward the client's applied IMU/env rate through
+            # to the SAME SlamWorker.submit()/run_once() path the local
+            # backend uses, so local and remote backends rescale
+            # `baro_tau_frames` identically. Absent (older client) -> None,
+            # which Mapper.set_imu_rate_hz treats as a no-op.
             worker.submit(depth, quat, pressure,
                           reflectance=None if refl is None else np.asarray(refl, np.float32),
-                          confidence=None if conf is None else np.asarray(conf, np.float32))
+                          confidence=None if conf is None else np.asarray(conf, np.float32),
+                          imu_rate_hz=msg.get("imu_rate_hz"))
             worker.run_once()
             mesh, _traj, step = worker.latest()
 

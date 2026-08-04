@@ -110,6 +110,25 @@ def test_mesh_extract_ms_is_zero_before_first_extraction_then_measured():
     assert w.mesh_extract_ms == w.mesh_extract_ms  # not NaN
 
 
+def test_run_once_applies_imu_rate_hz_to_the_mapper_under_the_worker_thread():
+    """Task 8 step 2: baro_tau_frames must be updated by run_once() (the
+    worker thread), never by submit() (the reader/producer thread)."""
+    w = SlamWorker(W, H, voxel_size=0.02, baro_tau_frames=555)
+    w.submit(_wall(), (1.0, 0.0, 0.0, 0.0), 101325.0, imu_rate_hz=90.0)
+    assert w._mapper.baro_tau_frames == 555     # not yet applied -- still queued
+    assert w.run_once() is True
+    assert w._mapper.baro_tau_frames == 2700    # applied once the worker thread popped it
+
+
+def test_run_once_without_imu_rate_hz_leaves_baro_tau_frames_untouched():
+    """Backward compatible: an existing caller that never passes imu_rate_hz
+    (default None) must see byte-identical behavior."""
+    w = SlamWorker(W, H, voxel_size=0.02, baro_tau_frames=555)
+    w.submit(_wall(), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert w.run_once() is True
+    assert w._mapper.baro_tau_frames == 555
+
+
 def test_mesh_extract_ms_reflects_a_slow_mesh_call(monkeypatch):
     """Strong version of the timer test: patch Mapper.mesh to sleep a known
     amount and assert the reported time is at least that long. A counter

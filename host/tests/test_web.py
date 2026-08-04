@@ -2414,6 +2414,19 @@ def test_slamrunner_lazy_build_and_poll(_fake_slam):
     assert tag == web.TAG_MESH and seq == 1              # first new mesh -> seq 1
 
 
+def test_slamrunner_submit_forwards_imu_rate_hz_to_the_worker(_fake_slam):
+    """Task 8 step 2: `SlamRunner.submit`'s `imu_rate_hz` must reach
+    `worker.submit` unchanged, whichever backend (local/remote) it is."""
+    r = web.SlamRunner(bus=LogBus())
+    r.set_active(True)
+    depth = np.zeros((6, 8), np.float32)
+    r.submit(depth, (1, 0, 0, 0), 101325.0, imu_rate_hz=90.0)   # kicks the async build
+    _await_build(r, _fake_slam)
+    r.submit(depth, (1, 0, 0, 0), 101325.0, imu_rate_hz=90.0)
+    (_a, kw) = _fake_slam["worker"].submitted[0]
+    assert kw["imu_rate_hz"] == 90.0
+
+
 def test_slamrunner_set_active_false_tears_down(_fake_slam):
     r = web.SlamRunner(bus=LogBus())
     r.set_active(True)
@@ -4953,6 +4966,80 @@ def test_slam_feed_tolerates_a_frame_with_no_depth():
     state, submitted = _feed_state("slam")
     web.make_slam_feed(state)(SimpleNamespace(seq=1), {"reflectance": None})
     assert submitted == []
+
+
+# --- Task 8: applied IMU/env rate reaches the SLAM submission ---------------
+
+def test_applied_imu_env_rate_prefers_decoupled_readback():
+    state = SimpleNamespace(
+        ranging_state=web.RangingState(initialized=True, transport="udp",
+                                       applied_fps=30, measured_fps=29.9),
+        imu_env_state=web.ImuEnvRateState(applied_rate_hz=90))
+    assert web._applied_imu_env_rate_hz(state) == 90.0
+
+
+def test_applied_imu_env_rate_coupled_falls_back_to_measured_tof_rate():
+    """Coupled mode (rate 0/None): the ToF rate IS the IMU/env rate, as
+    before Task 7."""
+    state = SimpleNamespace(
+        ranging_state=web.RangingState(initialized=True, transport="udp",
+                                       applied_fps=46, measured_fps=45.7),
+        imu_env_state=web.ImuEnvRateState(applied_rate_hz=None))
+    assert web._applied_imu_env_rate_hz(state) == 45.7
+
+
+def test_applied_imu_env_rate_coupled_falls_back_to_applied_fps_before_first_metrics_tick():
+    state = SimpleNamespace(
+        ranging_state=web.RangingState(initialized=True, transport="udp",
+                                       applied_fps=46, measured_fps=None),
+        imu_env_state=web.ImuEnvRateState(applied_rate_hz=0))
+    assert web._applied_imu_env_rate_hz(state) == 46.0
+
+
+def test_applied_imu_env_rate_replay_uses_streams_own_measured_rate_not_tof():
+    """Step 3: never assume the ToF rate for streams 9/10/11 during a replay
+    -- even if a stale rs.applied_fps/measured_fps happens to be populated
+    (left over from before the source swapped to replay), a "replay"
+    transport must fall through to the stream's OWN measured cadence, never
+    assuming 30 Hz for what might be a 90 Hz recording."""
+    state = SimpleNamespace(
+        ranging_state=web.RangingState(initialized=True, transport="replay",
+                                       applied_fps=30, measured_fps=30.0),
+        imu_env_state=web.ImuEnvRateState(applied_rate_hz=None, measured_quat_hz=89.7))
+    assert web._applied_imu_env_rate_hz(state) == 89.7
+
+
+def test_applied_imu_env_rate_no_live_profile_at_all_uses_measured_quat_hz():
+    state = SimpleNamespace(ranging_state=None,
+                            imu_env_state=web.ImuEnvRateState(measured_quat_hz=44.6))
+    assert web._applied_imu_env_rate_hz(state) == 44.6
+
+
+def test_applied_imu_env_rate_none_when_nothing_known():
+    state = SimpleNamespace(ranging_state=None, imu_env_state=None)
+    assert web._applied_imu_env_rate_hz(state) is None
+
+
+def test_slam_feed_forwards_the_applied_imu_env_rate():
+    state, submitted = _feed_state("slam", env=SimpleNamespace(pressure_pa=98000.0))
+    state.ranging_state = web.RangingState(initialized=True, transport="udp",
+                                           applied_fps=30, measured_fps=29.9)
+    state.imu_env_state = web.ImuEnvRateState(applied_rate_hz=90)
+    feed = web.make_slam_feed(state)
+    feed(SimpleNamespace(seq=1), {"depth": np.zeros((4, 4), np.float32)})
+    (_depth, _quat, _pressure), kw = submitted[0]
+    assert kw["imu_rate_hz"] == 90.0
+
+
+def test_slam_feed_imu_rate_is_none_with_no_ranging_state_at_all():
+    """The pre-Task-8 `_feed_state` shape (no ranging_state/imu_env_state
+    attributes at all) must not raise -- `_applied_imu_env_rate_hz` degrades
+    to None via getattr, matching a state built before Task 7/10 landed."""
+    state, submitted = _feed_state("slam", env=SimpleNamespace(pressure_pa=98000.0))
+    feed = web.make_slam_feed(state)
+    feed(SimpleNamespace(seq=1), {"depth": np.zeros((4, 4), np.float32)})
+    (_depth, _quat, _pressure), kw = submitted[0]
+    assert kw["imu_rate_hz"] is None
 
 
 def test_broadcaster_no_longer_feeds_slam():

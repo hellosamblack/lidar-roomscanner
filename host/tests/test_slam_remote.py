@@ -238,6 +238,25 @@ def test_remote_worker_reports_the_services_own_device_not_a_host_guess():
     assert rw.device == "CPU:0"
 
 
+def test_remote_worker_submit_includes_imu_rate_hz_in_the_message():
+    """Task 8 step 2: the applied IMU/env rate must travel in the wire
+    message so the container's own Mapper rescales identically."""
+    rw = RemoteSlamWorker(W, H, addr="127.0.0.1:1")
+    depth = np.full((H, W), 500.0, np.float32)
+    quat = np.array([1.0, 0.0, 0.0, 0.0], np.float32)
+    rw.submit(depth, quat, None, imu_rate_hz=90.0)
+    assert rw._in_slot["imu_rate_hz"] == 90.0
+
+
+def test_remote_worker_submit_omits_imu_rate_hz_when_not_given():
+    """Backward compatible with an older service that never looks for the key."""
+    rw = RemoteSlamWorker(W, H, addr="127.0.0.1:1")
+    depth = np.full((H, W), 500.0, np.float32)
+    quat = np.array([1.0, 0.0, 0.0, 0.0], np.float32)
+    rw.submit(depth, quat, None)
+    assert "imu_rate_hz" not in rw._in_slot
+
+
 def test_remote_worker_submit_overwrite_counters():
     """Same latest-wins slot shape as SlamWorker, but measured on the client's
     SEND side: with no server ever draining it (bogus address), N submits
