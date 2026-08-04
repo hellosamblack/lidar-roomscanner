@@ -42,6 +42,14 @@ MAGIC = b"RSCN"
 HEADER_SIZE = 32
 _HEADER = struct.Struct("<4sBBBBIQHHII")  # magic, ver, type, stream, flags, seq, t_us, w, h, plen, reserved
 MAX_PAYLOAD = 1 << 20  # decoder policy (docs/protocol.md)
+# Mirrors roomscan.protocol.SUPPORTED_VERSIONS (not imported -- this tool is
+# deliberately pure stdlib). BUG found 2026-08-04: this hardcoded `ver != 1`
+# check silently treated every byte of a protocol-v2 capture as garbage
+# (frames_decoded=0, whole file one SKIP_RUN) from the moment the wire format
+# bumped to v2 (2b8a9ee) -- the real decoder (roomscan.protocol) accepted v2
+# all along, so only this standalone forensics script (and the capture_analyze
+# MCP tool wrapping it) was blind, on every v2 capture since.
+SUPPORTED_VERSIONS = (1, 2)
 
 FRAME_TYPES = {1: "DATA", 2: "EVENT", 3: "COMMAND", 4: "ACK"}
 STREAMS = {0: "DEPTH_ZF32", 1: "DEPTH_ZAPC", 2: "AMBIENT", 3: "AMPLITUDE", 4: "CONFIDENCE",
@@ -246,7 +254,7 @@ def scan(path: str, *, min_zero_run: int = 50, zero_scan_frames: int = 8,
             break
         magic, ver, ftype, stream, flags, seq, t_us, w, h, plen, _res = _HEADER.unpack(
             data[pos:pos + HEADER_SIZE])
-        if ver != 1 or plen > MAX_PAYLOAD:
+        if ver not in SUPPORTED_VERSIONS or plen > MAX_PAYLOAD:
             mark_skip(pos, 1)
             pos += 1
             continue
