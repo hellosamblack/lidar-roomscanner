@@ -1,0 +1,14 @@
+{
+  "source": "roomscan MCP capture_analyze + capture_profile_probe + capture_motion + capture_skew",
+  "captures": [
+    {"file":"4msExpPrecision55inchFlatField.bin","clean":true,"crc_failures":0,"device_fps":29.93,"saved_fps":29.91,"raw_missing":1,"raw_loss_pct":0.076,"whole_group_lost":0,"tilt_range_deg":0.0,"sync_rms_us":18.1,"sync_p95_us":36.1},
+    {"file":"8msExpPrecision55inchFlatField.bin","clean":true,"crc_failures":0,"device_fps":29.94,"saved_fps":29.94,"raw_missing":0,"raw_loss_pct":0.0,"whole_group_lost":0,"tilt_range_deg":0.0,"sync_rms_us":15.2,"sync_p95_us":29.1},
+    {"file":"8msExpPrecision60hzEnv55inchFlatField.bin","clean":true,"crc_failures":0,"device_fps":29.94,"saved_fps":29.94,"raw_missing":0,"raw_loss_pct":0.0,"whole_group_lost":0,"tilt_range_deg":0.0,"sync_rms_us":19.5,"sync_p95_us":37.8,"note":"additional IMU/ENV cadence; old coupled pairing probe is not applicable"},
+    {"file":"Reg16msExpAmbient55inchFlatField.bin","clean":true,"crc_failures":0,"device_fps":29.86,"saved_fps":29.86,"raw_missing":0,"raw_loss_pct":0.0,"whole_group_lost":0,"tilt_range_deg":0.0,"sync_rms_us":16.7,"sync_p95_us":31.9},
+    {"file":"Reg16msExpPrecision55inchFlatField.bin","clean":true,"crc_failures":0,"device_fps":24.98,"saved_fps":24.96,"raw_missing":1,"raw_loss_pct":0.098,"whole_group_lost":0,"tilt_range_deg":0.0,"sync_rms_us":18.2,"sync_p95_us":37.1},
+    {"file":"ULP16msExpAmbient55inchFlatField.bin","clean":true,"crc_failures":0,"device_fps":14.98,"saved_fps":14.98,"raw_missing":0,"raw_loss_pct":0.0,"whole_group_lost":0,"tilt_range_deg":0.0,"sync_rms_us":18.8,"sync_p95_us":33.7},
+    {"file":"ULP16msExpPrecision55inchFlatField.bin","clean":true,"crc_failures":0,"device_fps":14.98,"saved_fps":14.98,"raw_missing":0,"raw_loss_pct":0.0,"whole_group_lost":0,"tilt_range_deg":0.0,"sync_rms_us":14.3,"sync_p95_us":27.3},
+    {"file":"hfr55inchFlatField.bin","clean":true,"crc_failures":0,"device_fps":45.54,"saved_fps":42.60,"raw_missing":124,"raw_loss_pct":6.472,"whole_group_lost":75,"tilt_range_deg":0.1,"sync_rms_us":16.4,"sync_p95_us":30.9,"note":"transport-incomplete; device rate is not the saved rate"},
+    {"file":"precision55inchFlatField.bin","clean":true,"crc_failures":0,"device_fps":29.90,"saved_fps":29.88,"raw_missing":1,"raw_loss_pct":0.082,"whole_group_lost":0,"tilt_range_deg":0.0,"sync_rms_us":17.4,"sync_p95_us":35.8}
+  ]
+}

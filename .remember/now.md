@@ -26,6 +26,7 @@
   the viewport progress bar. The live Ethernet/UDP viewer was restored after the wrap-up.
 
 # Next steps
+- **2026-08-04 flat-field study complete:** `calibration/flatfield/2026-08-04/analysis_20260804_report.md` reports nine stationary 55 in ceiling captures. Z bias is −3.3 to −7.2 mm; slower Precision is most repeatable (~0.35 mm per-zone σ). Precision reflectance FPN is 6.6% and Ambient is 3.7%; held-out static maps reduce those to ~1.5% and ~1.8%, but cross-family maps fail (~6% residual). Do not enable one global map; add mode-aware selection and still collect the required slow-pan matte-wall reference.
 - **Re-score DC-E's heading clause** (`captures/DebugCapE.bin`) now that BUG-051's singularity fix has
   landed — ROADMAP's DC-E row was explicitly waiting on it before sizing DT0103's accelerometer-assisted
   magnetometer fit. The tilt-ramp clause (1.72×) is immune to the bug and still fails.

@@ -1,4 +1,5 @@
 # Recent Milestones
+- Archived the 2026-08-04 stationary flat-field study under `calibration/flatfield/2026-08-04`; all nine raw captures are checksum-verified, and the mode-specific correction maps remain engineering candidates pending the panned-wall calibration.
 - Phase 5 (Transport cutover to Ethernet) completed.
 - Implemented robust Ethernet hot-plug recovery, ensuring that cable replugs gracefully restart DHCP and mDNS without firmware hard-faults.
 - Host logic updated to actively resolve mDNS rather than failing back to broadcasts that don't route.
