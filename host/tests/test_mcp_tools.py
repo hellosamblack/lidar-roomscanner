@@ -483,3 +483,500 @@ def test_rig_session_stays_functional_when_ws_mesh_is_unavailable(monkeypatch):
         await rig.close()
 
     asyncio.run(run())
+
+
+# --- rig_profile / rig_imu_env_rate (plan Task 11) ---------------------------
+#
+# Every test here drives the real tool against a scripted `ranging` stream,
+# because the whole point of these two tools is WHICH broadcast they are willing
+# to accept as proof. The server re-broadcasts `ranging` on its ~4 Hz metrics
+# tick, so "a message arrived saying the right thing" is not evidence that the
+# command did anything -- these pin that distinction rather than the happy path.
+
+class _FakeRig:
+    """A scripted `RigSession`: `wait_for("ranging")` walks a list of broadcasts.
+
+    `latest` is seeded independently so a test can pre-load a cached message the
+    tool must refuse to count (`rig.latest` is exactly the stale-proof trap).
+    """
+
+    def __init__(self, script, latest=None):
+        self.script = list(script)
+        self.sent: list[dict] = []
+        self.latest: dict[str, dict] = dict(latest or {})
+        self.binary_counts: dict[int, int] = {}
+        self.connected = True
+
+    async def connect(self, timeout=10.0):
+        return True
+
+    async def send(self, message):
+        self.sent.append(message)
+
+    async def wait_for(self, type_, timeout=5.0):
+        if self.script and self.script[0].get("type") == type_:
+            msg = self.script.pop(0)
+            self.latest[type_] = msg
+            return msg
+        return None
+
+
+def _imu_env(rate_hz=0, *, pending=False, error=None, warning=None, initialized=True):
+    return {"initialized": initialized, "applied_rate_hz": rate_hz,
+            "coupled": rate_hz in (None, 0), "requested_rate_hz": None,
+            "pending": pending, "warning": warning, "error": error}
+
+
+def _applied(profile="precision", ranging_mode="precision", fps=30, exposure_ms=10,
+             power_mode="ulp"):
+    return {"profile": profile, "ranging_mode": ranging_mode, "fps": fps,
+            "exposure_ms": exposure_ms, "power_mode": power_mode}
+
+
+def _preset_applied(name):
+    from roomscan import profiles
+
+    cfg = profiles.PRESETS[profiles.STR_TO_PROFILE_ID[name]]
+    return _applied(name, profiles.RANGING_MODE_TO_STR[cfg.ranging_mode], cfg.fps,
+                    cfg.exposure_ms, profiles.POWER_MODE_TO_STR[cfg.power_mode])
+
+
+def _ranging(applied=None, *, pending=False, error=None, transport="udp",
+             measured_fps=29.9, imu_env=None, estimate=None):
+    return {"type": "ranging", "transport": transport, "initialized": applied is not None,
+            "applied": applied, "measured_fps": measured_fps,
+            "estimate": estimate if estimate is not None else {"expected_delivered_fps": 30.0,
+                                                               "warnings": [],
+                                                               "transport_warning": None},
+            "requested": {"kind": None, "profile": None, "manual": None},
+            "pending": pending, "error": error,
+            "imu_env": imu_env if imu_env is not None else _imu_env()}
+
+
+def _run_profile(monkeypatch, script, latest=None, **kwargs):
+    import asyncio
+
+    from roomscan.mcp_server import tools_rig
+
+    fake = _FakeRig(script, latest=latest)
+    monkeypatch.setattr(tools_rig, "rig", fake)
+    kwargs.setdefault("timeout", 2.0)
+    return asyncio.run(tools_rig.rig_profile(**kwargs)), fake
+
+
+def _run_rate(monkeypatch, script, latest=None, **kwargs):
+    import asyncio
+
+    from roomscan.mcp_server import tools_rig
+
+    fake = _FakeRig(script, latest=latest)
+    monkeypatch.setattr(tools_rig, "rig", fake)
+    kwargs.setdefault("timeout", 2.0)
+    return asyncio.run(tools_rig.rig_imu_env_rate(**kwargs)), fake
+
+
+def test_rig_profile_confirms_an_exact_device_readback(monkeypatch):
+    hfr = _preset_applied("high_framerate")
+    r, fake = _run_profile(monkeypatch, [
+        _ranging(_preset_applied("room_mapping")),          # pre-flight
+        _ranging(_preset_applied("room_mapping"), pending=True),
+        _ranging(hfr, measured_fps=45.6),
+    ], profile="high_framerate")
+
+    assert r["ok"] is True, r
+    assert fake.sent == [{"type": "set_profile", "profile": "high_framerate"}]
+    assert r["applied"] == hfr
+    assert r["measured_fps"] == 45.6
+    assert r["transport"] == "udp"
+    assert r["requested"]["fps"] == 46, "the preset's own fps must be reported, not guessed"
+
+
+def test_rig_profile_does_not_accept_a_stale_cached_broadcast(monkeypatch):
+    """The cached `ranging` can already say the right thing and mean nothing.
+
+    Seeded here with the exact config being requested: if the tool ever counted
+    `rig.latest` as proof, this would report a successful profile change that the
+    device never made.
+    """
+    target = _preset_applied("high_framerate")
+    r, fake = _run_profile(monkeypatch,
+                           [_ranging(_preset_applied("room_mapping"))],
+                           latest={"ranging": _ranging(target)},
+                           profile="high_framerate")
+
+    assert r["ok"] is False
+    assert "no confirmed readback" in r["error"]
+    assert fake.sent, "the command itself must still have been sent"
+
+
+def test_rig_profile_times_out_when_the_command_never_settles(monkeypatch):
+    r, _ = _run_profile(monkeypatch, [
+        _ranging(_preset_applied("room_mapping")),
+        _ranging(_preset_applied("room_mapping"), pending=True),
+        _ranging(_preset_applied("room_mapping"), pending=True),
+    ], profile="precision")
+
+    assert r["ok"] is False
+    assert "no confirmed readback" in r["error"]
+    assert r["applied"] == _preset_applied("room_mapping")
+
+
+def test_rig_profile_reports_a_device_error(monkeypatch):
+    r, _ = _run_profile(monkeypatch, [
+        _ranging(_preset_applied("room_mapping")),
+        _ranging(_preset_applied("room_mapping"), pending=True),
+        _ranging(_preset_applied("room_mapping"), error="SET_RANGING_PROFILE -> BUSY"),
+    ], profile="precision")
+
+    assert r["ok"] is False
+    assert r["error"] == "SET_RANGING_PROFILE -> BUSY"
+
+
+def test_rig_profile_ignores_a_previous_commands_error_that_predates_the_send(monkeypatch):
+    """A metrics-tick broadcast can slip in between the send and the server
+    acting on it, still carrying the LAST command's error. Reporting that as
+    this command's result would be a lie -- and a self-fulfilling one, since the
+    tool would stop waiting for the real answer."""
+    stale = "SET_RANGING_PROFILE timeout: no ACK"
+    r, _ = _run_profile(monkeypatch, [
+        _ranging(_preset_applied("room_mapping"), error=stale),        # pre-flight
+        _ranging(_preset_applied("room_mapping"), error=stale),        # tick, still stale
+        _ranging(_preset_applied("room_mapping"), pending=True),
+        _ranging(_preset_applied("precision")),
+    ], profile="precision")
+
+    assert r["ok"] is True, r
+    assert r.get("error") is None
+
+
+def test_rig_profile_refuses_while_another_command_is_pending(monkeypatch):
+    r, fake = _run_profile(monkeypatch,
+                           [_ranging(_preset_applied("room_mapping"), pending=True)],
+                           profile="precision")
+
+    assert r["ok"] is False
+    assert "busy" in r["error"]
+    assert fake.sent == [], "a busy server must not be sent a second command"
+
+
+def test_rig_profile_refuses_on_a_replay_source(monkeypatch):
+    r, fake = _run_profile(monkeypatch,
+                           [_ranging(_preset_applied("room_mapping"), transport="replay")],
+                           profile="precision")
+
+    assert r["ok"] is False
+    assert "replay" in r["error"]
+    assert fake.sent == []
+
+
+def test_rig_profile_rejects_invalid_manual_params_before_the_device(monkeypatch):
+    """16 ms of exposure cannot fit a 90 fps (11111 us) frame period. The host
+    model knows that, so the device must never be asked."""
+    r, fake = _run_profile(monkeypatch, [_ranging(_preset_applied("room_mapping"))],
+                           ranging_mode="precision", fps=90, exposure_ms=16,
+                           power_mode="regular")
+
+    assert r["ok"] is False
+    assert "does not fit" in r["error"]
+    assert fake.sent == []
+
+
+def test_rig_profile_refuses_an_unsupported_cdc_rate_but_force_sends_it(monkeypatch):
+    from roomscan import profiles
+
+    over = profiles.TRANSPORT_CDC_FPS_CEILING + 30
+    args = dict(ranging_mode="precision", fps=over, exposure_ms=2, power_mode="regular")
+
+    refused, fake = _run_profile(monkeypatch,
+                                 [_ranging(_preset_applied("room_mapping"), transport="cdc")],
+                                 **args)
+    assert refused["ok"] is False
+    assert "USB CDC" in refused["error"] and "force=True" in refused["error"]
+    assert refused["warnings"], "the CDC warning itself must be returned, not just refused"
+    assert fake.sent == []
+
+    applied = _applied("manual", "precision", over, 2, "regular")
+    forced, fake2 = _run_profile(monkeypatch, [
+        _ranging(_preset_applied("room_mapping"), transport="cdc"),
+        _ranging(_preset_applied("room_mapping"), transport="cdc", pending=True),
+        _ranging(applied, transport="cdc"),
+    ], force=True, **args)
+    assert forced["ok"] is True, forced
+    assert fake2.sent[0]["type"] == "set_manual_params"
+
+
+def test_rig_profile_reports_an_applied_mismatch_rather_than_the_request(monkeypatch):
+    """The device is free to apply something else; that is a failure, and the
+    result must show what it actually did."""
+    other = _applied("manual", "precision", 45, 4, "regular")
+    r, _ = _run_profile(monkeypatch, [
+        _ranging(_preset_applied("room_mapping")),
+        _ranging(_preset_applied("room_mapping"), pending=True),
+        _ranging(other),
+    ], ranging_mode="precision", fps=50, exposure_ms=4, power_mode="regular")
+
+    assert r["ok"] is False
+    assert r["applied"] == other
+    assert r["requested"]["fps"] == 50
+
+
+def test_rig_profile_applies_two_sequential_manual_changes(monkeypatch):
+    for fps, exposure in ((40, 4), (25, 8)):
+        applied = _applied("manual", "precision", fps, exposure, "regular")
+        r, fake = _run_profile(monkeypatch, [
+            _ranging(_preset_applied("room_mapping")),
+            _ranging(_preset_applied("room_mapping"), pending=True),
+            _ranging(applied),
+        ], ranging_mode="precision", fps=fps, exposure_ms=exposure, power_mode="regular")
+
+        assert r["ok"] is True, r
+        assert fake.sent == [{"type": "set_manual_params", "ranging_mode": "precision",
+                              "fps": fps, "exposure_ms": exposure, "power_mode": "regular"}]
+        assert r["applied"]["fps"] == fps
+
+
+def test_rig_profile_query_returns_state_without_sending_anything(monkeypatch):
+    r, fake = _run_profile(monkeypatch, [_ranging(_preset_applied("precision"))])
+
+    assert r["ok"] is True
+    assert r["requested"] == {"kind": "query"}
+    assert r["applied"] == _preset_applied("precision")
+    assert fake.sent == []
+
+
+def test_rig_profile_query_is_not_ok_before_the_first_device_readback(monkeypatch):
+    r, _ = _run_profile(monkeypatch, [_ranging(None)])
+
+    assert r["ok"] is False
+    assert "initialized" in r["error"]
+
+
+def test_rig_profile_rejects_a_preset_name_mixed_with_manual_fields(monkeypatch):
+    r, fake = _run_profile(monkeypatch, [], profile="precision", fps=44)
+
+    assert r["ok"] is False and fake.sent == []
+
+
+def test_rig_imu_env_rate_confirms_the_applied_rate(monkeypatch):
+    r, fake = _run_rate(monkeypatch, [
+        _ranging(_preset_applied("precision")),
+        _ranging(_preset_applied("precision"), imu_env=_imu_env(0, pending=True)),
+        _ranging(_preset_applied("precision"), imu_env=_imu_env(90)),
+    ], rate_hz=90)
+
+    assert r["ok"] is True, r
+    assert fake.sent == [{"type": "set_imu_env_rate", "rate_hz": 90}]
+    assert r["imu_env"]["applied_rate_hz"] == 90
+    assert any("sensor-hub" in w for w in r["warnings"]), \
+        "90 Hz sub-samples stream 10; that must be reported, not swallowed"
+
+
+def test_rig_imu_env_rate_recouples(monkeypatch):
+    r, fake = _run_rate(monkeypatch, [
+        _ranging(_preset_applied("precision"), imu_env=_imu_env(90)),
+        _ranging(_preset_applied("precision"), imu_env=_imu_env(90, pending=True)),
+        _ranging(_preset_applied("precision"), imu_env=_imu_env(0)),
+    ], coupled=True)
+
+    assert r["ok"] is True, r
+    assert fake.sent == [{"type": "set_imu_env_rate", "rate_hz": 0}]
+    assert r["imu_env"]["coupled"] is True
+
+
+def test_rig_imu_env_rate_rejects_an_out_of_range_rate(monkeypatch):
+    from roomscan import profiles
+
+    r, fake = _run_rate(monkeypatch, [], rate_hz=profiles.IMU_ENV_RATE_MAX_HZ + 1)
+
+    assert r["ok"] is False
+    assert str(profiles.IMU_ENV_RATE_MAX_HZ) in r["error"]
+    assert fake.sent == []
+
+
+def test_rig_imu_env_rate_refuses_above_the_hub_cycle_when_full_env_is_required(monkeypatch):
+    r, fake = _run_rate(monkeypatch, [], rate_hz=120, require_full_env=True)
+
+    assert r["ok"] is False
+    assert "sub-sampled" in r["error"]
+    assert fake.sent == [], "an unreachable requirement must not reach the device"
+
+
+def test_rig_imu_env_rate_does_not_accept_a_stale_cached_broadcast(monkeypatch):
+    r, fake = _run_rate(monkeypatch,
+                        [_ranging(_preset_applied("precision"), imu_env=_imu_env(0))],
+                        latest={"ranging": _ranging(_preset_applied("precision"),
+                                                    imu_env=_imu_env(30))},
+                        rate_hz=30)
+
+    assert r["ok"] is False
+    assert "no confirmed readback" in r["error"]
+    assert fake.sent
+
+
+def test_rig_imu_env_rate_refuses_while_a_rate_command_is_pending(monkeypatch):
+    r, fake = _run_rate(monkeypatch,
+                        [_ranging(_preset_applied("precision"),
+                                  imu_env=_imu_env(0, pending=True))],
+                        rate_hz=30)
+
+    assert r["ok"] is False and "busy" in r["error"] and fake.sent == []
+
+
+def test_rig_imu_env_rate_refuses_on_a_replay_source(monkeypatch):
+    r, fake = _run_rate(monkeypatch,
+                        [_ranging(_preset_applied("precision"), transport="replay")],
+                        rate_hz=30)
+
+    assert r["ok"] is False and "replay" in r["error"] and fake.sent == []
+
+
+def test_rig_imu_env_rate_reports_a_device_error(monkeypatch):
+    r, _ = _run_rate(monkeypatch, [
+        _ranging(_preset_applied("precision")),
+        _ranging(_preset_applied("precision"), imu_env=_imu_env(0, pending=True)),
+        _ranging(_preset_applied("precision"),
+                 imu_env=_imu_env(0, error="SET_IMU_ENV_RATE -> UNKNOWN_CMD")),
+    ], rate_hz=30)
+
+    assert r["ok"] is False
+    assert r["error"] == "SET_IMU_ENV_RATE -> UNKNOWN_CMD"
+
+
+def test_rig_imu_env_rate_applies_two_sequential_changes(monkeypatch):
+    for rate in (30, 90):
+        r, fake = _run_rate(monkeypatch, [
+            _ranging(_preset_applied("precision")),
+            _ranging(_preset_applied("precision"), imu_env=_imu_env(0, pending=True)),
+            _ranging(_preset_applied("precision"), imu_env=_imu_env(rate)),
+        ], rate_hz=rate)
+
+        assert r["ok"] is True, r
+        assert fake.sent == [{"type": "set_imu_env_rate", "rate_hz": rate}]
+
+
+# -- interleaving: the two commands share ONE `ranging` message but are two
+#    independent pending commands. Each waiter must read only its own half --
+#    otherwise the other control's error fails a healthy command, and the other
+#    control's settle "confirms" one that never landed.
+
+def test_a_profile_change_is_not_failed_by_an_imu_env_error_landing_mid_flight(monkeypatch):
+    r, _ = _run_profile(monkeypatch, [
+        _ranging(_preset_applied("room_mapping")),
+        _ranging(_preset_applied("room_mapping"), pending=True),
+        _ranging(_preset_applied("room_mapping"), pending=True,
+                 imu_env=_imu_env(0, error="SET_IMU_ENV_RATE -> BUSY")),
+        _ranging(_preset_applied("precision"),
+                 imu_env=_imu_env(0, error="SET_IMU_ENV_RATE -> BUSY")),
+    ], profile="precision")
+
+    assert r["ok"] is True, r
+    assert r["imu_env"]["error"] == "SET_IMU_ENV_RATE -> BUSY", \
+        "the other half's error is still reported, just not as this command's verdict"
+
+
+def test_an_imu_env_change_is_not_failed_or_confirmed_by_the_ranging_half(monkeypatch):
+    r, _ = _run_rate(monkeypatch, [
+        _ranging(_preset_applied("room_mapping")),
+        _ranging(_preset_applied("room_mapping"), imu_env=_imu_env(0, pending=True)),
+        # A profile command lands (and fails) while ours is still in flight:
+        # neither its settle nor its error may decide this tool's verdict.
+        _ranging(_preset_applied("precision"), error="SET_RANGING_PROFILE -> BAD_PARAM",
+                 imu_env=_imu_env(0, pending=True)),
+        _ranging(_preset_applied("precision"), error="SET_RANGING_PROFILE -> BAD_PARAM",
+                 imu_env=_imu_env(45)),
+    ], rate_hz=45)
+
+    assert r["ok"] is True, r
+    assert r["imu_env"]["applied_rate_hz"] == 45
+
+
+def test_rig_status_reports_the_ranging_state(monkeypatch):
+    import asyncio
+
+    from roomscan.mcp_server import tools_rig
+
+    fake = _FakeRig([], latest={
+        "ranging": _ranging(_preset_applied("high_framerate"), measured_fps=45.6,
+                            imu_env=_imu_env(90)),
+        "state": {"type": "state"}, "metrics": {"type": "metrics"},
+        "session": {"type": "session"}})
+    monkeypatch.setattr(tools_rig, "rig", fake)
+    monkeypatch.setattr(tools_rig, "_http_ok", lambda timeout=2.0: True)
+    monkeypatch.setattr(tools_rig, "_server_procs", lambda: [])
+
+    r = asyncio.run(tools_rig.rig_status(reconnect=False))
+
+    assert r["ranging_profile"] == "high_framerate"
+    assert r["ranging_measured_fps"] == 45.6
+    assert r["imu_env_rate_hz"] == 90
+    assert r["imu_env_coupled"] is False
+    assert r["ranging"]["applied"]["fps"] == 46
+
+
+# --- profile_estimate (the offline half) -------------------------------------
+
+def test_profile_estimate_matches_the_profiles_model_for_a_preset():
+    from roomscan import profiles
+    from roomscan.mcp_server.tools_data import profile_estimate
+
+    r = profile_estimate(profile="high_framerate")
+    expected = profiles.estimate_to_json(
+        profiles.estimate_preset(profiles.ProfileId.HIGH_FRAMERATE))
+
+    assert r["ok"] is True
+    assert r["estimate"] == expected
+    assert r["estimate"]["fps"] == 46
+
+
+def test_profile_estimate_reports_the_delivered_rate_not_the_requested_one():
+    """A 90 fps request at 2 ms exposure is really ~45 fps (measured 2026-08-03).
+    An estimate that echoed the request would hide exactly that."""
+    from roomscan.mcp_server.tools_data import profile_estimate
+
+    r = profile_estimate(ranging_mode="precision", fps=90, exposure_ms=2,
+                            power_mode="regular")
+
+    assert r["ok"] is True
+    assert r["estimate"]["fps"] == 90
+    assert r["estimate"]["expected_delivered_fps"] < 50
+    assert any("ceiling" in w for w in r["warnings"])
+
+
+def test_profile_estimate_rejects_an_invalid_manual_candidate():
+    from roomscan.mcp_server.tools_data import profile_estimate
+
+    r = profile_estimate(ranging_mode="ambient", fps=90, exposure_ms=4,
+                            power_mode="regular")
+
+    assert r["ok"] is False
+    assert any("DSS" in e for e in r["errors"])
+
+
+def test_profile_estimate_with_no_arguments_describes_every_preset():
+    from roomscan import profiles
+    from roomscan.mcp_server.tools_data import profile_estimate
+
+    r = profile_estimate()
+
+    assert set(r["presets"]) == {profiles.PROFILE_ID_TO_STR[p] for p in profiles.PRESETS}
+    assert r["presets"]["room_mapping"]["fps"] == 30
+
+
+def test_profile_estimate_names_the_cdc_ceiling_only_on_cdc():
+    from roomscan.mcp_server.tools_data import profile_estimate
+
+    args = dict(ranging_mode="precision", fps=90, exposure_ms=2, power_mode="regular")
+    on_cdc = profile_estimate(transport="cdc", **args)
+    on_eth = profile_estimate(transport="ethernet", **args)
+
+    assert "CDC" in (on_cdc["estimate"]["transport_warning"] or "")
+    assert on_eth["estimate"]["transport_warning"] is None
+
+
+def test_profile_estimate_requires_a_whole_manual_candidate():
+    from roomscan.mcp_server.tools_data import profile_estimate
+
+    r = profile_estimate(ranging_mode="precision", fps=45)
+
+    assert r["ok"] is False
+    assert "exposure_ms" in r["errors"][0]

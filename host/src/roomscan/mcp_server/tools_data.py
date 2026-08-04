@@ -415,6 +415,95 @@ def capture_profile_probe(path: str, requested_fps: float = 0.0,
     return rep
 
 
+
+
+def _estimate_config(profile: str, ranging_mode: str, fps: int, exposure_ms: int,
+                     power_mode: str, imu_env_rate_hz: int, transport: str) -> dict:
+    """Pure half of `profile_estimate` -- resolve names, then hand the whole
+    thing to `roomscan.profiles`, which owns every number in the answer."""
+    from roomscan import profiles
+
+    manual_fields = {"ranging_mode": ranging_mode, "fps": fps,
+                     "exposure_ms": exposure_ms, "power_mode": power_mode}
+    given = {k: v for k, v in manual_fields.items() if v}
+
+    if not profile and not given:
+        # No arguments at all: describe every preset button, which is the
+        # question "what do the four profiles actually do?" in one call.
+        return {"ok": True, "transport": transport, "presets": {
+            profiles.PROFILE_ID_TO_STR[pid]: profiles.estimate_to_json(
+                profiles.estimate_preset(pid, transport=transport,
+                                         imu_env_rate_hz=imu_env_rate_hz or None))
+            for pid in profiles.PRESETS}}
+
+    if profile and profile not in profiles.STR_TO_PROFILE_ID:
+        return {"ok": False, "errors": [
+            f"unknown profile {profile!r}; expected one of "
+            f"{sorted(profiles.STR_TO_PROFILE_ID)}"]}
+
+    pid = profiles.STR_TO_PROFILE_ID.get(profile)
+    if pid is not None and pid is not profiles.ProfileId.MANUAL and not given:
+        est = profiles.estimate_preset(pid, transport=transport,
+                                       imu_env_rate_hz=imu_env_rate_hz or None)
+        return {"ok": est.ok, "kind": "preset", "profile": profile,
+                "transport": transport, "estimate": profiles.estimate_to_json(est),
+                "errors": list(est.errors), "warnings": list(est.warnings)}
+
+    # Manual: every field is required, because an estimate over a config the
+    # caller only half specified would be an estimate of a config nobody asked
+    # for. (A preset name plus overrides is deliberately NOT supported --
+    # `rig_profile` cannot send that either; the device takes whole candidates.)
+    missing = [k for k, v in manual_fields.items() if not v]
+    if missing:
+        return {"ok": False, "errors": [
+            f"manual estimate needs all of ranging_mode/fps/exposure_ms/power_mode; "
+            f"missing {missing}"]}
+    rm = profiles.STR_TO_RANGING_MODE.get(ranging_mode)
+    pm = profiles.STR_TO_POWER_MODE.get(power_mode)
+    if rm is None or pm is None:
+        return {"ok": False, "errors": [
+            f"ranging_mode must be one of {sorted(profiles.STR_TO_RANGING_MODE)} and "
+            f"power_mode one of {sorted(profiles.STR_TO_POWER_MODE)}; "
+            f"got {ranging_mode!r}/{power_mode!r}"]}
+
+    params = profiles.ManualParams(rm, int(fps), int(exposure_ms), pm,
+                                   imu_env_rate_hz or None)
+    est = profiles.estimate_manual(params, transport=transport)
+    return {"ok": est.ok, "kind": "manual", "profile": "manual", "transport": transport,
+            "estimate": profiles.estimate_to_json(est),
+            "errors": list(est.errors), "warnings": list(est.warnings)}
+
+
+@mcp.tool()
+def profile_estimate(profile: str = "", ranging_mode: str = "", fps: int = 0,
+                     exposure_ms: int = 0, power_mode: str = "",
+                     imu_env_rate_hz: int = 0, transport: str = "ethernet") -> dict:
+    """Predict what a ranging configuration would do, without touching the device.
+
+    The offline half of `rig_profile()`: same `roomscan.profiles` model the
+    server and the web UI use, so what this predicts is exactly what the Device
+    card would show. Call it BEFORE applying a config to see whether it is even
+    valid and what it costs.
+
+    Pass `profile` (room_mapping|precision|high_framerate) for a preset, or all
+    four manual fields — `ranging_mode` (ambient|precision), `fps` 1-100,
+    `exposure_ms` 1-16, `power_mode` (ulp|lp|regular) — for a candidate. With no
+    arguments it estimates every preset at once. `imu_env_rate_hz` is 0/omitted
+    for coupled-to-ToF, else 1-480. `transport` is ethernet|cdc|replay and only
+    feeds the non-blocking CDC-above-60-fps warning.
+
+    Read `estimate.expected_delivered_fps`, not `fps`: above an exposure's
+    measured 1x ceiling the sensor ACCEPTS the request and then delivers
+    period-multiples (measured 2026-08-03), so a 90 fps request at 2 ms is
+    really ~45 fps. `errors` mean the config is invalid and would be refused
+    host-side; `warnings` mean it is applicable but will not do what it looks
+    like it does. What a recording ACTUALLY delivered is a different question --
+    that is `capture_profile_probe()`.
+    """
+    return _estimate_config(profile, ranging_mode, fps, exposure_ms, power_mode,
+                            imu_env_rate_hz, transport)
+
+
 @mcp.tool()
 def doctor(build: bool = False, net: bool = True) -> dict:
     """Run the headless-host bring-up checks and return each verdict.

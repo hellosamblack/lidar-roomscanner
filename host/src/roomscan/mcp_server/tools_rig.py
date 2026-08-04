@@ -89,6 +89,11 @@ async def rig_status(reconnect: bool = True) -> dict:
     state, metrics = rig.latest.get("state", {}), rig.latest.get("metrics", {})
     session = rig.latest.get("session", {})
     playback = session.get("playback") or {}
+    # Ranging profile + IMU/env poll rate: what the sensor is actually configured
+    # to do is part of "what is this rig doing right now", so it belongs here
+    # rather than only in rig_profile()/rig_imu_env_rate().
+    ranging = rig.latest.get("ranging") or {}
+    imu_env = ranging.get("imu_env") or {}
     out.update({
         "mode": state.get("mode"),
         "color": state.get("color_mode"),
@@ -103,6 +108,12 @@ async def rig_status(reconnect: bool = True) -> dict:
         "paused": playback.get("paused"),
         "recording": (session.get("recording") or {}).get("active"),
         "render_fps": metrics.get("render_fps"),
+        # `applied` is null until a real device readback -- never a guessed default.
+        "ranging_profile": (ranging.get("applied") or {}).get("profile"),
+        "ranging_measured_fps": ranging.get("measured_fps"),
+        "imu_env_rate_hz": imu_env.get("applied_rate_hz"),
+        "imu_env_coupled": imu_env.get("coupled"),
+        "ranging": ranging or None,
         "state": state or None,
         "metrics": metrics or None,
         "session": session or None,
@@ -316,6 +327,352 @@ async def _await_session(matches, timeout: float) -> dict | None:
         if session is None:
             break
     return session or rig.latest.get("session")
+
+
+# --- ranging profile / IMU-env poll rate (plan Task 11) ----------------------
+#
+# Both halves ride ONE outbound message (`ranging`, docs/web-protocol.md), which
+# the server also re-broadcasts on its ~4 Hz metrics tick. So the same trap
+# `_await_state` documents applies twice over: the cached `ranging`, and even a
+# freshly-arrived one, can predate the command. Verification here is therefore
+# "saw our half go pending, then saw it settle onto the config we asked for" --
+# never "a message arrived", and never the log line the UI prints.
+
+_APPLIED_FIELDS = ("ranging_mode", "fps", "exposure_ms", "power_mode")
+
+
+def _ranging_half(msg: dict, half: str) -> tuple[bool, str | None]:
+    """(pending, error) for `half` -- "profile" or "imu_env" -- of one `ranging`
+    message. The two are INDEPENDENT pending commands, so a waiter that read the
+    whole message would settle on the other control's echo."""
+    if half == "imu_env":
+        ie = msg.get("imu_env") or {}
+        return bool(ie.get("pending")), ie.get("error")
+    return bool(msg.get("pending")), msg.get("error")
+
+
+async def _await_ranging(half: str, matches, timeout: float,
+                         prior_error: str | None) -> tuple[dict | None, str]:
+    """Wait for `half` to go pending and then settle, returning (message, verdict).
+
+    `verdict` is "ok" (settled onto a config `matches` accepted), "error" (the
+    server/device reported a failure for this half), or "timeout".
+
+    `prior_error` is that half's error BEFORE the command was sent: a metrics-tick
+    broadcast can slip between the send and the server acting on it, carrying the
+    previous command's error, and reporting that as this command's result would be
+    a lie. An unchanged error string is therefore ignored until the pending echo
+    proves the server has started our command.
+    """
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    saw_pending = False
+    last: dict | None = None
+    while loop.time() < deadline:
+        msg = await rig.wait_for("ranging", timeout=max(0.1, deadline - loop.time()))
+        if msg is None:
+            break
+        last = msg
+        pending, error = _ranging_half(msg, half)
+        if error and (saw_pending or error != prior_error):
+            return msg, "error"
+        if pending:
+            saw_pending = True
+            continue
+        if saw_pending and matches(msg):
+            return msg, "ok"
+    return last, "timeout"
+
+
+def _ranging_result(msg: dict | None, requested: dict) -> dict:
+    """The common answer shape: what was asked for, what the DEVICE says is
+    applied, what the model predicts, and what is actually being measured."""
+    msg = msg or {}
+    estimate = msg.get("estimate") or {}
+    warnings = list(estimate.get("warnings") or [])
+    if estimate.get("transport_warning") and estimate["transport_warning"] not in warnings:
+        warnings.append(estimate["transport_warning"])
+    imu_env = msg.get("imu_env") or {}
+    if imu_env.get("warning"):
+        warnings.append(imu_env["warning"])
+    return {
+        "requested": requested,
+        "applied": msg.get("applied"),
+        "imu_env": imu_env or None,
+        "estimate": estimate or None,
+        # The honest rate: what the model says this config DELIVERS (not what it
+        # was asked for), beside what the link is actually seeing right now.
+        "expected_delivered_fps": estimate.get("expected_delivered_fps"),
+        "measured_fps": msg.get("measured_fps"),
+        "transport": msg.get("transport"),
+        "warnings": warnings,
+        "initialized": msg.get("initialized"),
+        "ranging": msg or None,
+    }
+
+
+async def _ranging_preflight(half: str, timeout: float = 5.0) -> tuple[dict | None, str | None]:
+    """A FRESH `ranging` message plus the reason not to send, if there is one.
+
+    Fresh, not cached: the cached message can be arbitrarily old, and "is another
+    command already in flight?" is exactly the question a stale answer gets wrong.
+    """
+    if not await rig.connect():
+        return None, "cannot reach roomscan-web — call rig_status()/rig_up() first"
+    msg = await rig.wait_for("ranging", timeout=timeout)
+    if msg is None:
+        return None, ("no `ranging` broadcast within "
+                      f"{timeout}s — is roomscan-web running with a device?")
+    if msg.get("transport") == "replay":
+        return msg, "ranging control is unavailable in replay — rig_playback('go_live') first"
+    pending, _error = _ranging_half(msg, half)
+    if pending:
+        return msg, (f"busy: a {half} command is already pending on the server "
+                     "(wait for it, then retry)")
+    return msg, None
+
+
+@mcp.tool()
+async def rig_profile(profile: str = "", ranging_mode: str = "", fps: int = 0,
+                      exposure_ms: int = 0, power_mode: str = "", force: bool = False,
+                      timeout: float = 20.0) -> dict:
+    """Read or set the ranging profile, verified against the device's own readback.
+
+    With no arguments this QUERIES: it returns the server's current ranging state
+    (applied config, model estimate, measured fps, transport, IMU/env rate).
+
+    To set, pass either `profile` — room_mapping|precision|high_framerate, or
+    `manual` to reapply the device's last accepted manual candidate — or all four
+    manual fields: `ranging_mode` (ambient|precision), `fps` 1-100, `exposure_ms`
+    1-16, `power_mode` (ulp|lp|regular). Manual candidates are validated
+    host-side first, so an invalid one never reaches the device.
+
+    `ok=true` means the DEVICE read back the configuration that was asked for --
+    this waits for the `ranging` echo to go pending and then settle onto a
+    matching `applied`, because that message is also re-broadcast on a timer and
+    a merely newly-arrived one proves nothing. `ok=false` covers a busy server, a
+    replay source, host-side validation failure, a device error (BUSY, BAD_PARAM,
+    a timeout), an unsupported CDC rate, and an applied-vs-requested mismatch.
+
+    Above 60 fps over USB CDC is refused before the device is touched; pass
+    `force=True` to send it anyway (Task 12 exercises exactly that case) and the
+    warning comes back in `warnings`. Leave ≥2 s between reconfigurations: a
+    faster one can produce no ACK at all (BUG-073).
+
+    Read `expected_delivered_fps` rather than the requested `fps` — above an
+    exposure's measured 1x ceiling the sensor accepts the request and delivers
+    period-multiples. `profile_estimate()` answers the same question offline.
+    """
+    from roomscan import profiles
+
+    manual_given = {"ranging_mode": ranging_mode, "fps": fps,
+                    "exposure_ms": exposure_ms, "power_mode": power_mode}
+    given = {k: v for k, v in manual_given.items() if v}
+
+    # -- query
+    if not profile and not given:
+        if not await rig.connect():
+            return {"ok": False, "error": "cannot reach roomscan-web — call rig_up() first"}
+        msg = await rig.wait_for("ranging", timeout=5.0) or rig.latest.get("ranging")
+        if msg is None:
+            return {"ok": False, "error": "no `ranging` state from the server"}
+        out = _ranging_result(msg, {"kind": "query"})
+        out["ok"] = bool(msg.get("initialized"))
+        if not out["ok"]:
+            out["error"] = ("the server has no device readback yet (`initialized: false`) — "
+                            "it never guesses a firmware default")
+        return out
+
+    if profile and profile not in profiles.STR_TO_PROFILE_ID:
+        return {"ok": False, "error": f"unknown profile {profile!r}; expected one of "
+                                      f"{sorted(profiles.STR_TO_PROFILE_ID)}"}
+    if given and profile and profile != "manual":
+        return {"ok": False, "error": f"profile={profile!r} is a preset; drop the manual "
+                                      "fields, or pass profile='' with all four of them"}
+
+    is_manual_params = bool(given)
+    if is_manual_params:
+        missing = [k for k, v in manual_given.items() if not v]
+        if missing:
+            return {"ok": False, "error": "a manual change needs all four of "
+                                          f"ranging_mode/fps/exposure_ms/power_mode; missing {missing}"}
+        rm = profiles.STR_TO_RANGING_MODE.get(ranging_mode)
+        pm = profiles.STR_TO_POWER_MODE.get(power_mode)
+        if rm is None or pm is None:
+            return {"ok": False, "error":
+                    f"ranging_mode must be one of {sorted(profiles.STR_TO_RANGING_MODE)} and "
+                    f"power_mode one of {sorted(profiles.STR_TO_POWER_MODE)}; "
+                    f"got {ranging_mode!r}/{power_mode!r}"}
+        requested = {"kind": "manual", "ranging_mode": ranging_mode, "fps": int(fps),
+                     "exposure_ms": int(exposure_ms), "power_mode": power_mode}
+        expected = dict(requested)
+        expected.pop("kind")
+        target_fps: int | None = int(fps)
+    else:
+        pid = profiles.STR_TO_PROFILE_ID[profile]
+        requested = {"kind": "profile", "profile": profile}
+        if pid is profiles.ProfileId.MANUAL:
+            # Reapplies whatever candidate the device last accepted, which the
+            # host does not know -- so the readback IS the expectation here.
+            expected, target_fps = None, None
+        else:
+            preset = profiles.PRESETS[pid]
+            expected = {"ranging_mode": profiles.RANGING_MODE_TO_STR[preset.ranging_mode],
+                        "fps": preset.fps, "exposure_ms": preset.exposure_ms,
+                        "power_mode": profiles.POWER_MODE_TO_STR[preset.power_mode]}
+            target_fps = preset.fps
+            requested.update(expected)
+
+    pre, blocked = await _ranging_preflight("profile")
+    if blocked:
+        out = _ranging_result(pre, requested)
+        out.update({"ok": False, "error": blocked, "sent": None})
+        return out
+    transport = (pre or {}).get("transport") or "none"
+
+    # Host-side validation BEFORE the device is touched -- a request this model
+    # rejects should never have been sent (and the device would reject it too).
+    if is_manual_params:
+        params = profiles.ManualParams(rm, int(fps), int(exposure_ms), pm)
+        validation = profiles.validate_manual_params(params)
+        if not validation.ok:
+            out = _ranging_result(pre, requested)
+            out.update({"ok": False, "sent": None, "error": "; ".join(validation.errors),
+                        "warnings": list(validation.warnings)})
+            return out
+
+    if target_fps is not None and not force:
+        tw = profiles.transport_warning_message(transport, target_fps)
+        if tw:
+            out = _ranging_result(pre, requested)
+            out.update({"ok": False, "sent": None, "error": tw + " Pass force=True to "
+                        "apply it anyway.", "warnings": [tw]})
+            return out
+
+    if is_manual_params:
+        sent = {"type": "set_manual_params", "ranging_mode": ranging_mode, "fps": int(fps),
+                "exposure_ms": int(exposure_ms), "power_mode": power_mode}
+    else:
+        sent = {"type": "set_profile", "profile": profile}
+
+    def matches(msg: dict) -> bool:
+        applied = msg.get("applied")
+        if applied is None:
+            return False
+        if expected is None:
+            return True     # MANUAL reapply: the device chose; the readback is the answer
+        return all(applied.get(f) == expected[f] for f in _APPLIED_FIELDS)
+
+    prior_error = (pre or {}).get("error")
+    await rig.send(sent)
+    msg, verdict = await _await_ranging("profile", matches, timeout, prior_error)
+
+    out = _ranging_result(msg, requested)
+    out["sent"] = sent
+    out["ok"] = verdict == "ok"
+    if verdict == "error":
+        out["error"] = _ranging_half(msg or {}, "profile")[1]
+    elif verdict == "timeout":
+        applied = (msg or {}).get("applied")
+        out["error"] = (f"no confirmed readback within {timeout}s "
+                        f"(last applied: {applied}); the command may still be in flight, "
+                        "or another one was already pending")
+        last_error = _ranging_half(msg or {}, "profile")[1]
+        if last_error:
+            out["last_error"] = last_error
+    elif expected is None:
+        out["note"] = ("profile='manual' reapplies the device's last accepted candidate, "
+                       "which the host does not know — `applied` is the device's own "
+                       "readback, not a match against a requested config")
+    return out
+
+
+@mcp.tool()
+async def rig_imu_env_rate(rate_hz: int | None = None, coupled: bool = False,
+                           require_full_env: bool = False, timeout: float = 20.0) -> dict:
+    """Read or set the IMU/env poll rate, verified against the device's readback.
+
+    Streams 9 (quat), 10 (env) and 11 (raw IMU) are drained at this rate. It is a
+    SECOND, independent command from `rig_profile()` — neither blocks the other,
+    and each is verified only against its own half of the `ranging` echo.
+
+    With no arguments this QUERIES. `coupled=True` returns the streams to the ToF
+    trigger (the default: one sample per depth frame); `rate_hz` 1-480 decouples
+    them at an explicit rate. Above the 60 Hz sensor-hub cycle, stream 10 (env)
+    sub-samples while 9 and 11 keep the full rate — that is reported as a warning,
+    not refused, unless you pass `require_full_env=True`, which makes it an error
+    before anything is sent.
+
+    `ok=true` means the device read the rate back — this waits for `imu_env` to go
+    pending and then settle on the applied value, never on a log line or a merely
+    newly-arrived broadcast. `ok=false` covers busy, replay, a rate outside 1-480,
+    an unreachable-for-your-requirement rate, a device error, and a timeout.
+    """
+    from roomscan import profiles
+
+    if not await rig.connect():
+        return {"ok": False, "error": "cannot reach roomscan-web — call rig_up() first"}
+
+    if rate_hz is None and not coupled:
+        msg = await rig.wait_for("ranging", timeout=5.0) or rig.latest.get("ranging")
+        if msg is None:
+            return {"ok": False, "error": "no `ranging` state from the server"}
+        out = _ranging_result(msg, {"kind": "query"})
+        ie = msg.get("imu_env") or {}
+        out["ok"] = bool(ie.get("initialized"))
+        if not out["ok"]:
+            out["error"] = ("the server has no IMU/env rate readback yet "
+                            "(`imu_env.initialized: false`) — it never guesses one")
+        return out
+
+    if rate_hz is not None and coupled and rate_hz != 0:
+        return {"ok": False, "error": f"pass coupled=True or rate_hz={rate_hz}, not both"}
+
+    wanted = 0 if coupled else int(rate_hz or 0)
+    requested = {"kind": "imu_env_rate", "rate_hz": wanted, "coupled": wanted == 0}
+
+    validation = profiles.validate_imu_env_rate(wanted or None)
+    if not validation.ok:
+        return {"ok": False, "requested": requested, "sent": None,
+                "error": "; ".join(validation.errors)}
+    warnings = list(validation.warnings)
+    if require_full_env and wanted > profiles.IMU_ENV_HUB_CYCLE_HZ:
+        return {"ok": False, "requested": requested, "sent": None, "warnings": warnings,
+                "error": (f"rate_hz={wanted} cannot deliver un-sub-sampled env: stream 10 "
+                          f"rides the {profiles.IMU_ENV_HUB_CYCLE_HZ} Hz sensor-hub cycle. "
+                          "Drop require_full_env to accept sub-sampled env.")}
+
+    pre, blocked = await _ranging_preflight("imu_env")
+    if blocked:
+        out = _ranging_result(pre, requested)
+        out.update({"ok": False, "error": blocked, "sent": None})
+        return out
+
+    sent = {"type": "set_imu_env_rate", "rate_hz": wanted}
+    prior_error = ((pre or {}).get("imu_env") or {}).get("error")
+
+    def matches(msg: dict) -> bool:
+        ie = msg.get("imu_env") or {}
+        return bool(ie.get("initialized")) and ie.get("applied_rate_hz") == wanted
+
+    await rig.send(sent)
+    msg, verdict = await _await_ranging("imu_env", matches, timeout, prior_error)
+
+    out = _ranging_result(msg, requested)
+    out["sent"] = sent
+    out["ok"] = verdict == "ok"
+    out["warnings"] = list(dict.fromkeys(warnings + out["warnings"]))
+    if verdict == "error":
+        out["error"] = _ranging_half(msg or {}, "imu_env")[1]
+    elif verdict == "timeout":
+        applied = ((msg or {}).get("imu_env") or {}).get("applied_rate_hz")
+        out["error"] = (f"no confirmed readback within {timeout}s (last applied rate: "
+                        f"{applied}); the command may still be in flight, or another "
+                        "IMU/env rate change was already pending")
+        last_error = _ranging_half(msg or {}, "imu_env")[1]
+        if last_error:
+            out["last_error"] = last_error
+    return out
 
 
 @mcp.tool()

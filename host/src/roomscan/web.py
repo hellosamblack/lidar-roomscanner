@@ -1695,25 +1695,15 @@ _WIRE_TO_PROFILE_POWER_MODE: dict[int, profiles.PowerMode] = {
 # JSON vocabulary for the `ranging` message -- deliberately the same tokens
 # `roomscan-ctl`'s CLI already uses (ambient/precision, ulp/lp/regular), not
 # `IntEnum.name.lower()` (which would say "ultra_low" for power, disagreeing
-# with the CLI's "ulp" for the identical value).
-_PROFILE_ID_TO_STR: dict[profiles.ProfileId, str] = {
-    profiles.ProfileId.ROOM_MAPPING: "room_mapping",
-    profiles.ProfileId.PRECISION: "precision",
-    profiles.ProfileId.HIGH_FRAMERATE: "high_framerate",
-    profiles.ProfileId.MANUAL: "manual",
-}
-_STR_TO_PROFILE_ID: dict[str, profiles.ProfileId] = {v: k for k, v in _PROFILE_ID_TO_STR.items()}
-_RANGING_MODE_TO_STR: dict[profiles.RangingMode, str] = {
-    profiles.RangingMode.AMBIENT: "ambient",
-    profiles.RangingMode.PRECISION: "precision",
-}
-_STR_TO_RANGING_MODE: dict[str, profiles.RangingMode] = {v: k for k, v in _RANGING_MODE_TO_STR.items()}
-_POWER_MODE_TO_STR: dict[profiles.PowerMode, str] = {
-    profiles.PowerMode.ULTRA_LOW: "ulp",
-    profiles.PowerMode.LOW: "lp",
-    profiles.PowerMode.REGULAR: "regular",
-}
-_STR_TO_POWER_MODE: dict[str, profiles.PowerMode] = {v: k for k, v in _POWER_MODE_TO_STR.items()}
+# with the CLI's "ulp" for the identical value). Owned by `roomscan.profiles`
+# so the browser and the MCP tools cannot drift apart; aliased here because
+# this module's readers know these names.
+_PROFILE_ID_TO_STR = profiles.PROFILE_ID_TO_STR
+_STR_TO_PROFILE_ID = profiles.STR_TO_PROFILE_ID
+_RANGING_MODE_TO_STR = profiles.RANGING_MODE_TO_STR
+_STR_TO_RANGING_MODE = profiles.STR_TO_RANGING_MODE
+_POWER_MODE_TO_STR = profiles.POWER_MODE_TO_STR
+_STR_TO_POWER_MODE = profiles.STR_TO_POWER_MODE
 
 
 @dataclass
@@ -1805,34 +1795,10 @@ def _profile_config_from_ack(ack: RangingConfigAck, imu_env_rate_hz: int | None)
                                   power_mode, imu_env_rate_hz)
 
 
-def _estimate_to_json(est: profiles.ProfileEstimate) -> dict:
-    return {
-        "profile": _PROFILE_ID_TO_STR.get(profiles.ProfileId(est.profile_id)),
-        "ranging_mode": _RANGING_MODE_TO_STR.get(profiles.RangingMode(est.ranging_mode)),
-        "fps": est.fps,
-        "exposure_ms": est.exposure_ms,
-        "power_mode": _POWER_MODE_TO_STR.get(profiles.PowerMode(est.power_mode)),
-        "dss_enabled": est.dss_enabled,
-        "frame_period_us": est.frame_period_us,
-        "i3c_xfer_ms": est.i3c_xfer_ms,
-        "i3c_bus_utilization_pct": est.i3c_bus_utilization_pct,
-        "i3c_airtime_left_pct": est.i3c_airtime_left_pct,
-        "power_mw": est.power_mw,
-        "max_range_m": est.max_range_m,
-        "min_distance_mm": est.min_distance_mm,
-        "transport_warning": est.transport_warning,
-        "imu_env_rate_hz": est.imu_env_rate_hz,
-        "imu_env_coupled": est.imu_env_coupled,
-        # Honest expected delivery rate (2026-08-03 measured hardware ceiling,
-        # `profiles.expected_delivered_fps`): equals `fps` exactly at/below the
-        # exposure's measured 1x ceiling; above it, the sensor still ACCEPTS the
-        # request but delivers period-multiples, and this is what it actually
-        # delivers -- callers must show THIS, never just echo the request.
-        "expected_delivered_fps": est.expected_delivered_fps,
-        "warnings": list(est.warnings),
-        "errors": list(est.errors),
-        "ok": est.ok,
-    }
+# The estimate's JSON shape is owned by `roomscan.profiles` too, so `ranging`
+# (browser) and `profile_estimate()`/`rig_profile()` (MCP) cannot describe the
+# same configuration differently.
+_estimate_to_json = profiles.estimate_to_json
 
 
 def _recompute_ranging_estimate(state) -> None:

@@ -333,6 +333,37 @@ class PowerMode(IntEnum):
     ULTRA_LOW = 2
 
 
+# --- JSON vocabulary ----------------------------------------------------------------
+#
+# The names the `/ws` `ranging` message, the web UI and the MCP tools all speak.
+# They live HERE rather than in whichever module happened to need them first, so
+# there is exactly one owner: a second, independently-maintained spelling of the
+# same vocabulary drifts silently (BUG-076's lesson, applied before it can happen
+# again). Note these are NOT the wire enum values -- those are the IntEnum members
+# above, and the two are mapped BY NAME (`control._manual_params_to_wire`).
+
+PROFILE_ID_TO_STR: dict[ProfileId, str] = {
+    ProfileId.ROOM_MAPPING: "room_mapping",
+    ProfileId.PRECISION: "precision",
+    ProfileId.HIGH_FRAMERATE: "high_framerate",
+    ProfileId.MANUAL: "manual",
+}
+STR_TO_PROFILE_ID: dict[str, ProfileId] = {v: k for k, v in PROFILE_ID_TO_STR.items()}
+
+RANGING_MODE_TO_STR: dict[RangingMode, str] = {
+    RangingMode.AMBIENT: "ambient",
+    RangingMode.PRECISION: "precision",
+}
+STR_TO_RANGING_MODE: dict[str, RangingMode] = {v: k for k, v in RANGING_MODE_TO_STR.items()}
+
+POWER_MODE_TO_STR: dict[PowerMode, str] = {
+    PowerMode.ULTRA_LOW: "ulp",
+    PowerMode.LOW: "lp",
+    PowerMode.REGULAR: "regular",
+}
+STR_TO_POWER_MODE: dict[str, PowerMode] = {v: k for k, v in POWER_MODE_TO_STR.items()}
+
+
 # --- FPS <-> frame period -----------------------------------------------------------
 
 FPS_MIN = 1
@@ -814,3 +845,36 @@ def estimate_preset(profile_id: ProfileId, transport: str = "ethernet",
 
 def estimate_manual(params: ManualParams, transport: str = "ethernet") -> ProfileEstimate:
     return estimate_profile(manual_profile_config(params), transport=transport)
+
+
+def estimate_to_json(est: ProfileEstimate) -> dict:
+    """The JSON shape of an estimate, as the `/ws` `ranging` message and the MCP
+    `profile_estimate()`/`rig_profile()` tools both emit it -- one owner, so a
+    browser and an agent can never be told different things about one config."""
+    return {
+        "profile": PROFILE_ID_TO_STR.get(ProfileId(est.profile_id)),
+        "ranging_mode": RANGING_MODE_TO_STR.get(RangingMode(est.ranging_mode)),
+        "fps": est.fps,
+        "exposure_ms": est.exposure_ms,
+        "power_mode": POWER_MODE_TO_STR.get(PowerMode(est.power_mode)),
+        "dss_enabled": est.dss_enabled,
+        "frame_period_us": est.frame_period_us,
+        "i3c_xfer_ms": est.i3c_xfer_ms,
+        "i3c_bus_utilization_pct": est.i3c_bus_utilization_pct,
+        "i3c_airtime_left_pct": est.i3c_airtime_left_pct,
+        "power_mw": est.power_mw,
+        "max_range_m": est.max_range_m,
+        "min_distance_mm": est.min_distance_mm,
+        "transport_warning": est.transport_warning,
+        "imu_env_rate_hz": est.imu_env_rate_hz,
+        "imu_env_coupled": est.imu_env_coupled,
+        # Honest expected delivery rate (2026-08-03 measured hardware ceiling,
+        # `expected_delivered_fps`): equals `fps` exactly at/below the exposure's
+        # measured 1x ceiling; above it, the sensor still ACCEPTS the request but
+        # delivers period-multiples, and this is what it actually delivers --
+        # callers must show THIS, never just echo the request.
+        "expected_delivered_fps": est.expected_delivered_fps,
+        "warnings": list(est.warnings),
+        "errors": list(est.errors),
+        "ok": est.ok,
+    }

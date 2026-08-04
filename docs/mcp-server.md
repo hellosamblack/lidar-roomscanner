@@ -71,6 +71,8 @@ the MCP surface catches up on the next server start. Same failure shape as a sta
 | `rig_record(on)` | records via the server, returning the capture path |
 | `rig_set(...)` | legacy display options; verifies the echo before reporting success |
 | `rig_view(source?, display?, regenerate?)` | authoritative Live/View and Point cloud/Preview/SLAM/Detailed control |
+| `rig_profile(profile?, ranging_mode?, fps?, exposure_ms?, power_mode?, force?)` | read or set the ranging profile; `ok=true` only once the **device** reads back the requested config (see below) |
+| `rig_imu_env_rate(rate_hz?, coupled?, require_full_env?)` | read or set the IMU/env poll rate (streams 9/10/11) — a second, independent command from `rig_profile` |
 | `rig_playback(action, value?)` | `go_live` / `load_capture` / transport |
 | `rig_save()` | export the **Live** SLAM map (`.ply` + `.tum`). Live SLAM only — a live scan is unrepeatable, so its one-shot export stays; for a recorded capture the persistent artifact is the sidecar from `rig_view(display="detailed", regenerate=True)` |
 | `rig_ws_probe(seconds?, url?)` | splits "nothing rendered" into server-computing / transport-delivering / payload-well-formed. Acks every mesh (`/ws-mesh` is credit-gated, so a silent client sees one mesh then a 1-per-5-s trickle) and re-parses one MESH with `slam.js`'s exact layout — `slack_bytes != 0` means packer and reader have drifted. Keep `seconds` small: connection count is a performance variable here (BUG-060/061) |
@@ -88,6 +90,37 @@ Useful readouts: `#pos-status` ("frame N / total", replay only), `#hud-view-fps`
 `#hud-device-fps`, `#record-status`, `#ir-frame`, `#slam-frames`. Element ids live in
 `host/src/roomscan/static/index.html`. `window.__diag` is the page's *logging sink
 function*, not a state object -- read what it logged via `ui_screenshot`'s tail.
+
+### Ranging control is effect-verified, not fire-and-forget
+
+`profile_estimate(profile?, ranging_mode?, fps?, exposure_ms?, power_mode?, imu_env_rate_hz?, transport?)`,
+`rig_profile()` and `rig_imu_env_rate()` change what the sensor physically does, so
+neither reports success on anything less than the device's own readback. Both wait for
+their half of the `ranging` broadcast to go **pending and then settle onto the requested
+configuration** — the server re-broadcasts that message on its ~4 Hz metrics tick, so a
+merely newly-arrived one (never mind the cached one, or the log line the UI prints) is
+compatible with nothing having happened at all. They are **two independent pending
+commands sharing one message**: each waiter reads only its own half, so a profile change
+in flight is neither failed by an IMU-rate error nor confirmed by an IMU-rate settle.
+
+`ok=false` covers a busy server, a replay source, host-side validation failure, a device
+error (BUSY/BAD_PARAM/timeout), an unsupported CDC rate, and an applied-vs-requested
+mismatch — and the result still carries what the device *actually* has applied. Requests
+the host model rejects never reach the device. Two deliberate refusals with escape
+hatches: above 60 fps over USB CDC needs `force=True`, and `require_full_env=True` makes
+an IMU/env rate above the 60 Hz sensor-hub cycle an error rather than a warning (stream
+10 sub-samples there; 9 and 11 do not). Leave ≥2 s between reconfigurations — a faster
+one can produce no ACK at all (BUG-073).
+
+Three tools, three different questions, all over one `roomscan.profiles` model:
+`profile_estimate()` is offline — what a configuration *would* do, safe to call with no
+rig at all; `rig_profile()` is what the device *is* doing now; `capture_profile_probe()`
+is what a recording *actually delivered*.
+
+Read `expected_delivered_fps`, never the requested `fps`: above an exposure's measured
+1× ceiling the sensor accepts the request and delivers period-multiples. `rig_status()`
+carries the same ranging state (`ranging_profile`, `ranging_measured_fps`,
+`imu_env_rate_hz`, `imu_env_coupled`, plus the whole `ranging` message).
 
 **data** — `capture_list()` (includes `has_stream_9`, which SLAM and orientation work
 ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, compare?)`,
