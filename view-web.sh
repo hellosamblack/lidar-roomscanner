@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# view-web.sh — start the roomscan WEB viewer and open it in a browser (Linux/macOS).
+# view-web.sh — start the roomscan WEB viewer (Linux/macOS).
 # Serves the live 3D point cloud over a local WebSocket to a Three.js page at
-# http://localhost:8000/static/index.html (the app opens your browser for you
-# once the server is listening). Auto-finds the scanner's USB CDC port
+# http://localhost:8000/static/index.html. Auto-finds the scanner's USB CDC port
 # (VID:PID CAFE:4001). Bootstraps the Python venv/dependencies on first run
 # (needs Python 3.11 or 3.12).
 # Extra args pass through, e.g.:  ./view-web.sh --color reflectance
@@ -64,5 +63,5 @@ check_and_handle_existing_server() {
 check_and_handle_existing_server
 
 echo "[run] Starting web viewer on http://localhost:8000/static/index.html"
-echo "[tip] Your browser opens automatically once the server is up. Press Ctrl+C here to stop."
-exec "$VENV_PY" -m roomscan.web "$@"
+echo "[tip] Open the URL above in a browser if desired. Press Ctrl+C here to stop."
+ROOMSCAN_NO_BROWSER=1 exec "$VENV_PY" -m roomscan.web "$@"
