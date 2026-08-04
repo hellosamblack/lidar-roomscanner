@@ -129,7 +129,12 @@ DSS-off row assumes a 106-byte frame our I3C path has never been shown to produc
 four report an estimate in the same shape, so they can be compared field by field.
 
 Read `expected_delivered_fps`, never the requested `fps`: above an exposure's measured
-1× ceiling the sensor accepts the request and delivers period-multiples. `rig_status()`
+1× ceiling the sensor accepts the request and delivers period-multiples. **It is a model
+output, and the model has a known hole** — BUG-075: a 50 Hz / 2 ms request delivers a
+near-even bimodal 20/40 ms alternation instead of a clean multiple, so for
+short-period/short-exposure combinations treat the number as indicative and measure the
+capture (`capture_profile_probe()`) before quoting a rate. `measured_fps` on the same
+result is the link's own observation and carries no such caveat. `rig_status()`
 carries the same ranging state (`ranging_profile`, `ranging_measured_fps`,
 `imu_env_rate_hz`, `imu_env_coupled`, plus the whole `ranging` message).
 
