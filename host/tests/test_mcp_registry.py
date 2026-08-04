@@ -33,6 +33,7 @@ EXPOSED: dict[str, tuple[str, ...]] = {
     "mag_check.py": ("capture_magcheck",),
     "orientation_probe.py": ("orientation_probe",),
     "profile_probe.py": ("capture_profile_probe",),
+    "profile_tuning.py": ("profile_tuning",),
     "skew_check.py": ("capture_skew",),
     "slam_ensemble.py": ("slam_ensemble",),
     "slam_icp_bench.py": ("slam_icp_bench",),

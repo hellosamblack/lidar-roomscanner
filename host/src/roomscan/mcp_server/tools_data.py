@@ -415,10 +415,34 @@ def capture_profile_probe(path: str, requested_fps: float = 0.0,
     return rep
 
 
+@mcp.tool()
+def profile_tuning(ranging_mode: str = "Precision", power_config: str = "Regular",
+                   resolution: str = "54x42", dss: bool = True,
+                   output_interface: str = "I3C", fps: int = 30,
+                   exposure_ms: int = 10, ambient_lux: float = 100.0) -> dict:
+    """Compare ST's ProfileTuning estimate with the rig's full-map measured model.
+
+    Returns both sources separately and names every disagreement, including the
+    unverified DSS-off I3C frame-layout assumption. It is offline only; use
+    capture_profile_probe() to report what a recording actually delivered.
+
+    `ranging_mode` is Precision|Ambient, `power_config` Regular|Low Power|Ultralow
+    Power, `output_interface` I3C|CSI2|I2C_FM+|I2C_FM (only I3C is a rig
+    prediction — the others are ST planning estimates for hardware paths this
+    board does not wire). `ambient_lux` feeds the power model only.
+    `roomscanner_full_map` is the same estimate shape `profile_estimate()`
+    returns; where the two sources disagree, the measured one wins.
+    """
+    from tools.profile_tuning import analyze_profile
+    return analyze_profile(ranging_mode=ranging_mode, power_config=power_config,
+                           resolution=resolution, dss=dss,
+                           output_interface=output_interface, fps=fps,
+                           exposure_ms=exposure_ms, ambient_lux=ambient_lux)
 
 
 def _estimate_config(profile: str, ranging_mode: str, fps: int, exposure_ms: int,
-                     power_mode: str, imu_env_rate_hz: int, transport: str) -> dict:
+                     power_mode: str, imu_env_rate_hz: int, transport: str,
+                     ambient_lux: float) -> dict:
     """Pure half of `profile_estimate` -- resolve names, then hand the whole
     thing to `roomscan.profiles`, which owns every number in the answer."""
     from roomscan import profiles
@@ -433,7 +457,8 @@ def _estimate_config(profile: str, ranging_mode: str, fps: int, exposure_ms: int
         return {"ok": True, "transport": transport, "presets": {
             profiles.PROFILE_ID_TO_STR[pid]: profiles.estimate_to_json(
                 profiles.estimate_preset(pid, transport=transport,
-                                         imu_env_rate_hz=imu_env_rate_hz or None))
+                                         imu_env_rate_hz=imu_env_rate_hz or None,
+                                         ambient_lux=ambient_lux))
             for pid in profiles.PRESETS}}
 
     if profile and profile not in profiles.STR_TO_PROFILE_ID:
@@ -444,7 +469,8 @@ def _estimate_config(profile: str, ranging_mode: str, fps: int, exposure_ms: int
     pid = profiles.STR_TO_PROFILE_ID.get(profile)
     if pid is not None and pid is not profiles.ProfileId.MANUAL and not given:
         est = profiles.estimate_preset(pid, transport=transport,
-                                       imu_env_rate_hz=imu_env_rate_hz or None)
+                                       imu_env_rate_hz=imu_env_rate_hz or None,
+                                       ambient_lux=ambient_lux)
         return {"ok": est.ok, "kind": "preset", "profile": profile,
                 "transport": transport, "estimate": profiles.estimate_to_json(est),
                 "errors": list(est.errors), "warnings": list(est.warnings)}
@@ -468,7 +494,7 @@ def _estimate_config(profile: str, ranging_mode: str, fps: int, exposure_ms: int
 
     params = profiles.ManualParams(rm, int(fps), int(exposure_ms), pm,
                                    imu_env_rate_hz or None)
-    est = profiles.estimate_manual(params, transport=transport)
+    est = profiles.estimate_manual(params, transport=transport, ambient_lux=ambient_lux)
     return {"ok": est.ok, "kind": "manual", "profile": "manual", "transport": transport,
             "estimate": profiles.estimate_to_json(est),
             "errors": list(est.errors), "warnings": list(est.warnings)}
@@ -477,7 +503,8 @@ def _estimate_config(profile: str, ranging_mode: str, fps: int, exposure_ms: int
 @mcp.tool()
 def profile_estimate(profile: str = "", ranging_mode: str = "", fps: int = 0,
                      exposure_ms: int = 0, power_mode: str = "",
-                     imu_env_rate_hz: int = 0, transport: str = "ethernet") -> dict:
+                     imu_env_rate_hz: int = 0, transport: str = "ethernet",
+                     ambient_lux: float = 100.0) -> dict:
     """Predict what a ranging configuration would do, without touching the device.
 
     The offline half of `rig_profile()`: same `roomscan.profiles` model the
@@ -490,7 +517,8 @@ def profile_estimate(profile: str = "", ranging_mode: str = "", fps: int = 0,
     `exposure_ms` 1-16, `power_mode` (ulp|lp|regular) — for a candidate. With no
     arguments it estimates every preset at once. `imu_env_rate_hz` is 0/omitted
     for coupled-to-ToF, else 1-480. `transport` is ethernet|cdc|replay and only
-    feeds the non-blocking CDC-above-60-fps warning.
+    feeds the non-blocking CDC-above-60-fps warning; `ambient_lux` feeds the
+    power model and nothing else.
 
     Read `estimate.expected_delivered_fps`, not `fps`: above an exposure's
     measured 1x ceiling the sensor ACCEPTS the request and then delivers
@@ -501,7 +529,7 @@ def profile_estimate(profile: str = "", ranging_mode: str = "", fps: int = 0,
     that is `capture_profile_probe()`.
     """
     return _estimate_config(profile, ranging_mode, fps, exposure_ms, power_mode,
-                            imu_env_rate_hz, transport)
+                            imu_env_rate_hz, transport, ambient_lux)
 
 
 @mcp.tool()

@@ -83,6 +83,12 @@ references/datasheets/NUCLEO-IKS4A1/schematic/x-nucleo-iks4a1-gerber/
 references/datasheets/NUCLEO-VL53L9CX/schematic/x-nucleo-53l9a1-gerber/
 # Duplicated datasheet PDFs under the KiCad model (originals live in references/datasheets/)
 references/kicad/roomscanner-stack/datasheets/
+# ST's support-gated 53L9A1 software package (89 MB, incl. ProfileTuning.exe --
+# the tool `host/tools/profile_tuning.py` models). Deliberately kept on disk and
+# out of git: it is not ours to redistribute, and the decompiled timing/power
+# equations we actually depend on live in `roomscan/profiles.py` with their
+# provenance. Fetch it again from ST if this working copy is lost.
+references/software/53L9A1/
 
 # Editor local-history cache
 .history/

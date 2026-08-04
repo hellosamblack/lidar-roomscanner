@@ -93,7 +93,6 @@ function*, not a state object -- read what it logged via `ui_screenshot`'s tail.
 
 ### Ranging control is effect-verified, not fire-and-forget
 
-`profile_estimate(profile?, ranging_mode?, fps?, exposure_ms?, power_mode?, imu_env_rate_hz?, transport?)`,
 `rig_profile()` and `rig_imu_env_rate()` change what the sensor physically does, so
 neither reports success on anything less than the device's own readback. Both wait for
 their half of the `ranging` broadcast to go **pending and then settle onto the requested
@@ -112,10 +111,14 @@ an IMU/env rate above the 60 Hz sensor-hub cycle an error rather than a warning 
 10 sub-samples there; 9 and 11 do not). Leave ≥2 s between reconfigurations — a faster
 one can produce no ACK at all (BUG-073).
 
-Three tools, three different questions, all over one `roomscan.profiles` model:
+Four tools, four different questions, all over one `roomscan.profiles` model:
 `profile_estimate()` is offline — what a configuration *would* do, safe to call with no
 rig at all; `rig_profile()` is what the device *is* doing now; `capture_profile_probe()`
-is what a recording *actually delivered*.
+is what a recording *actually delivered*; and `profile_tuning()` sets our model beside
+**ST's** ProfileTuning planning model and names every place they disagree rather than
+picking the friendlier number (ST's flat timing model under-rates this hardware, and its
+DSS-off row assumes a 106-byte frame our I3C path has never been shown to produce). All
+four report an estimate in the same shape, so they can be compared field by field.
 
 Read `expected_delivered_fps`, never the requested `fps`: above an exposure's measured
 1× ceiling the sensor accepts the request and delivers period-multiples. `rig_status()`
@@ -126,6 +129,8 @@ carries the same ranging state (`ranging_profile`, `ranging_measured_fps`,
 ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, compare?)`,
 `capture_skew(path, window_s?)`, `capture_motion(path)`, `capture_heading(path, cal_path?)`,
 `capture_profile_probe(path, requested_fps?, udp_stats?)`,
+`profile_estimate(profile?, ranging_mode?, fps?, exposure_ms?, power_mode?, imu_env_rate_hz?, transport?)`,
+`profile_tuning(ranging_mode?, power_config?, resolution?, dss?, output_interface?, fps?, exposure_ms?, ambient_lux?)`,
 `slam_rerender(capture, voxel_size?, block_count?, device?, max_frames?)`,
 `slam_ensemble(capture, n?, device?, voxel_size?, block_count?)`,
 `slam_stall_profile(capture, frames?, device?, decimate?)`,

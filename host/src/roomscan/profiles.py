@@ -791,10 +791,15 @@ class ProfileEstimate:
         return not self.errors
 
 
-def estimate_profile(config: ProfileConfig, transport: str = "ethernet") -> ProfileEstimate:
+def estimate_profile(config: ProfileConfig, transport: str = "ethernet",
+                     ambient_lux: float = AMBIENT_LUX_DEFAULT) -> ProfileEstimate:
     """Compute the full consequence estimate for a resolved (preset or manual)
     profile. `transport` is `"ethernet"`, `"cdc"`, or `"replay"` — it only feeds
     the non-blocking CDC-above-60-fps warning; range/power never depend on it.
+    `ambient_lux` reaches `estimate_power_mw` and nothing else (it is a real term
+    in ST's own power equations — the Vbat Rx branch scales with ambient light —
+    so a caller that offers the knob must actually pass it through, not accept
+    and drop it).
 
     Applies the SAME validation manual candidates get (Task 1 non-negotiable
     finding: this module is "the single host-side owner of range/power/bus
@@ -809,7 +814,7 @@ def estimate_profile(config: ProfileConfig, transport: str = "ethernet") -> Prof
     period_us = fps_to_period_us(config.fps) if FPS_MIN <= config.fps <= FPS_MAX else 0
     util_pct = i3c_bus_utilization_pct(config.fps)
     power_mw = estimate_power_mw(config.ranging_mode, config.power_mode,
-                                 config.exposure_ms, config.fps)
+                                 config.exposure_ms, config.fps, ambient_lux)
     max_range = MAX_RANGE_M.get((config.ranging_mode, dss), float("nan"))
     min_dist = estimate_min_distance_mm(config.ranging_mode)
     tw = transport_warning_message(transport, config.fps)
@@ -834,17 +839,20 @@ def estimate_profile(config: ProfileConfig, transport: str = "ethernet") -> Prof
 
 
 def estimate_preset(profile_id: ProfileId, transport: str = "ethernet",
-                    imu_env_rate_hz: int | None = None) -> ProfileEstimate:
+                    imu_env_rate_hz: int | None = None,
+                    ambient_lux: float = AMBIENT_LUX_DEFAULT) -> ProfileEstimate:
     if profile_id not in PRESETS:
         raise ValueError(f"{profile_id!r} is not a preset (use estimate_manual for MANUAL)")
     base = PRESETS[profile_id]
     config = ProfileConfig(base.profile_id, base.ranging_mode, base.fps, base.exposure_ms,
                           base.power_mode, imu_env_rate_hz)
-    return estimate_profile(config, transport=transport)
+    return estimate_profile(config, transport=transport, ambient_lux=ambient_lux)
 
 
-def estimate_manual(params: ManualParams, transport: str = "ethernet") -> ProfileEstimate:
-    return estimate_profile(manual_profile_config(params), transport=transport)
+def estimate_manual(params: ManualParams, transport: str = "ethernet",
+                    ambient_lux: float = AMBIENT_LUX_DEFAULT) -> ProfileEstimate:
+    return estimate_profile(manual_profile_config(params), transport=transport,
+                            ambient_lux=ambient_lux)
 
 
 def estimate_to_json(est: ProfileEstimate) -> dict:

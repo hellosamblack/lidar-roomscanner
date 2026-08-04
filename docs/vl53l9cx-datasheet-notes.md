@@ -158,6 +158,34 @@ What's explicitly pushed to **host/postprocessing**:
 
 ---
 
+## 7. DSS-off / I3C reconciliation (2026-08-03)
+
+Do not treat a ProfileTuning GUI result as a hardware observation. Its decompiled
+DSS-off calculation uses a **106-byte** frame size, and its displayed “Duty Cycle”
+is sensor active time (`max(1.15 × exposure + 2 ms, DSS window) / frame period`),
+not I3C bus airtime. At 10 ms and about 66 fps this explains an approximately 89%
+duty display while the tool's own 106-byte / 10 Mbps readout is only about 0.085 ms.
+
+That result cannot demonstrate 66 fps full-map I3C. The datasheet says I3C is a valid
+data-output interface, while AN6522 gives 11.8 ms as the 54×42 I3C readout estimate;
+it also says full-resolution rates above 100 fps require MIPI in Regular power mode.
+The vendor CSI validation path accepts DSS-off range/amplitude/ambient data
+(`54 × 42 × 6 = 13,608` bytes before status), whereas the current vendor I3C reader
+unconditionally fetches the DSS LUT. Therefore the verified I3C model keeps the
+14,842-byte 3DMD payload until a DSS-off full-map I3C layout and host transform are
+demonstrated on hardware.
+
+The sensor and this stack already run steady I3C push-pull at the VL53L9CX's supported
+12.5 MHz maximum; AN6522's 10 Mbps is effective payload throughput after protocol
+overhead. Increasing SCL beyond that is unsupported and risky on this shared bus: the
+IKS4A1's NXS0108 and the 53L9A1's PI4ULS3V204 are auto-direction I²C translators, and
+the NXS0108 already required a slow-push-pull ENTDAA workaround. Hardware measurements
+instead show a 1× ceiling of about 50 Hz at 1–2 ms exposure and 46 Hz at 4 ms; DSS
+on/off did not change that floor measurably. The calculator must report source
+disagreement, not pick the more optimistic number.
+
+---
+
 ## Page-reference quick index
 
 | Topic | Page(s) |

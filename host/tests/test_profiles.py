@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from roomscan.profiles import (BLANKING_MARGIN_US_PENDING_HW, DSS_FPS_CEILING,
+from roomscan.profiles import (AMBIENT_LUX_DEFAULT, BLANKING_MARGIN_US_PENDING_HW,
+                               DSS_FPS_CEILING,
                                EXPOSURE_MS_MAX, EXPOSURE_MS_MIN, FPS_MAX, FPS_MIN,
                                IMU_ENV_HUB_CYCLE_HZ, IMU_ENV_RATE_MAX_HZ,
                                MAX_RANGE_M, MIN_DISTANCE_MM, PRESETS,
@@ -175,6 +176,23 @@ def test_ambient_lux_is_a_genuine_power_input():
     bright = estimate_power_mw(RangingMode.AMBIENT, PowerMode.REGULAR, 6, 30,
                                ambient_lux=100000.0)
     assert bright > dark
+
+
+def test_ambient_lux_reaches_the_estimate_and_not_just_the_power_function():
+    """The knob existed on `estimate_power_mw` but no estimate could pass it, so
+    a caller offering an ambient-lux option (the ProfileTuning comparison CLI did)
+    silently dropped it and reported the default. Assert the value MOVES the
+    estimate, not merely that the parameter is accepted."""
+    params = ManualParams(RangingMode.AMBIENT, 30, 6, PowerMode.REGULAR)
+    dark = estimate_manual(params, ambient_lux=0.0)
+    bright = estimate_manual(params, ambient_lux=100000.0)
+    default = estimate_manual(params)
+
+    assert bright.power_mw > dark.power_mw
+    assert default.power_mw == pytest.approx(
+        estimate_manual(params, ambient_lux=AMBIENT_LUX_DEFAULT).power_mw)
+    assert (estimate_preset(ProfileId.ROOM_MAPPING, ambient_lux=100000.0).power_mw
+            > estimate_preset(ProfileId.ROOM_MAPPING).power_mw)
 
 
 # --- High Frame-Rate preset, amended 2026-08-03: measured hardware ceiling ---------
