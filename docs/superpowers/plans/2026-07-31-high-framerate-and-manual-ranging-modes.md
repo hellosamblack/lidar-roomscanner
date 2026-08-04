@@ -1,7 +1,8 @@
 # High Frame-Rate Ranging Profiles & Manual Sensor Control — Implementation Plan
 
-> **STATUS (2026-08-04): in progress — Tasks 1–11 landed; Task 12 (final validation, docs
-> status-sync, landing, retro) IN PROGRESS.** Task 5 hit its
+> **STATUS (2026-08-04): ✅ COMPLETE — all 12 tasks landed and validated** (Task 12 validation,
+> docs status-sync, landing, and milestone-retro done; BUG-079 found by the UI pass and fixed the
+> same session). Task 5 hit its
 > designed stop point: the sensor's frame floor is intrinsic (measured
 > 20.0/21.74/23.53 ms at ≤2/4/8 ms exposure; shorter periods deliver integer multiples), so per this
 > plan's own rule the spec was **amended to the measured ceiling** — the High Frame-Rate preset is
@@ -20,7 +21,7 @@
 > `docs/superpowers/plans/2026-08-03-high-framerate-implementation-handoff.md` (rev 5) for per-task
 > commits, the DSS adjudication, and precise resume instructions. **Task 11 landed 2026-08-04**
 > (`rig_profile`/`rig_imu_env_rate`/`profile_estimate`, verified-readback waits, live round trips on
-> the rig). **Task 12 is IN PROGRESS:** full host suite 1895 passed / 1 skipped (expected
+> the rig). **Task 12 is COMPLETE:** full host suite 1895 passed / 1 skipped (expected
 > `test_logfilter` skip), `ruff` clean apart from 4 pre-existing `host/tools/` findings unrelated to
 > this feature, production raw-only firmware builds clean (166,107 B). **Finding:** step 2's assumed
 > build-time onboard-transform knob does not exist as a CMake option — `CONF_TRANSFORM_ONBOARD` is

@@ -58,6 +58,45 @@ major effort, before the next phase's plan executes.
   and a corrupted/malformed-input case exercised on hardware, not just a single well-formed sample
   (caught in Phase 3 Task 2's parse-while-draining rework).
 
+## Executed 2026-08-04 (High Frame-Rate & Manual Ranging Modes — 12-task milestone retro)
+
+Closes the 12-task high-frame-rate/manual-ranging plan. Multi-session; Task 12 (validation/docs/land)
+ran this session as an **orchestrator + Sonnet-subagents** push (owner directive: preserve usage —
+agents edit+test, the orchestrator verifies focused tests + ruff and commits per task). Most friction
+was already converted *during* the earlier tasks (new MCP tools `rig_profile`/`rig_imu_env_rate`/
+`profile_estimate`/`capture_profile_probe`/`profile_tuning`; instruments `slam_stall_profile`/
+`ws_probe`/`skew_check`; the `profiles.py` model). This retro's extractions are the two lessons Task 12
+itself produced, plus status truing:
+
+- **Pattern generalized — "a periodic/echo re-broadcast clobbers client-owned state" now has TWO
+  instances** ([[state-echo-clobbers-client-owned-state]] updated). BUG-079: the Manual fps/exposure
+  inputs are client-owned but the `ranging` handler re-seeded their `.value` on every echo, and
+  `web.py` re-broadcasts `ranging` every 250 ms — faster than the 300 ms manual debounce — so an edit
+  reverted before it could send. Same root cause as the oscillate-orbit case (the `state` echo), a
+  different surface (an in-flight input edit, not animation phase). Fix: a `manualDirty` flag set at
+  the single send choke-point and cleared only on a `pending` true→false transition. The tell for the
+  input variant is that the widget "works" only when set to the already-applied value; diagnose by
+  sampling `.value` at ~50 ms ticks and watching the snap-back. Found by the live UI pass, not by any
+  test — a debounce-vs-broadcast race is invisible to unit tests.
+- **Build-knob reality check — BUG-078** ([[firmware-build-on-linux]] updated). The plan's step 2
+  assumed a CMake knob selects the onboard-transform firmware config; none exists —
+  `CONF_TRANSFORM_ONBOARD` is an unguarded `#define ... (0)`, so `-DCONF_TRANSFORM_ONBOARD=1` is a
+  silent no-op (byte-identical binary; verify with md5). Rule: before a plan step depends on a
+  build-time switch, confirm it's actually wired — a `-D` that doesn't reach the compile fails silent.
+- **De-scope over "outstanding":** the wired-Ethernet release gate and CDC-isolation proof were
+  chased as blocking until the owner clarified neither transport is ever used in production. Before
+  treating a gate as blocking, confirm it measures the *actual* limiter — the sensor's ~46 Hz ceiling
+  is intrinsic and the bridge already carried the full stream at ~10× bandwidth headroom, so a wired
+  run could prove nothing. Recorded in ROADMAP + plan/handoff as de-scoped, not open.
+- **Status trued up:** ROADMAP high-rate block + CLAUDE.md bullet + plan STATUS header + handoff (rev 5)
+  all marked the milestone COMPLETE; BUGS.md carries BUG-078 (open) and BUG-079 (fixed).
+- **Deliberately skipped:** no new `host/tools`/MCP script (Task 12 drove the rig entirely through the
+  existing `rig_*`/`capture_*` tools — the surface was already sufficient, which is itself the sign the
+  earlier per-task conversion worked); no `protocol-change` edit (no wire change — the doc caveats were
+  status corrections for already-shipped, already-gated cmds 8-12). Noted-not-filed: `profile_probe.py`'s
+  `stream_pairing` still assumes coupled 1:1 and undercounts decoupled N:1 captures (parallel to the gap
+  Task 7 fixed in `skew_check.py`) — documented in `docs/mcp-server.md`, a candidate follow-up code task.
+
 ## Executed 2026-07-16 (Web Phase 5 — settings persistence + retire panel.py retro)
 
 The **final web phase**, closing the 5-phase `panel.py` replacement. Single-session, host-only (no

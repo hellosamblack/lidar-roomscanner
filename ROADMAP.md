@@ -562,8 +562,11 @@ reflectance super-resolution / sensor-fusion-overlay work (both scoped, not yet 
 > `VL53L9_SYNC_AUTONOMOUS` (a bigger, unattempted change) to actually govern fps. `SET_EXPOSURE_MS` *does*
 > change fps measurably (5 ms → 28.6 fps, 15 ms → 25.6 fps).
 >
-> **High-rate/manual ranging — IN PROGRESS, Tasks 1–11 of 12 done (2026-08-04); Task 12 (final:
-> validation/docs/land/retro) in progress.**
+> **High-rate/manual ranging — ✅ DONE (2026-08-04): all 12 tasks landed and validated.** Open items
+> documented below and in BUGS.md — BUG-073/075/078 and BUG-074's fault-injection retest remain open;
+> the wired-Ethernet release gate and CDC-isolation proof are DE-SCOPED (owner directive, no wired
+> data link in production). BUG-079 (manual UI edit revert) was found by the Task 12 UI pass and fixed
+> the same session.
 > The reviewed
 > [implementation plan](docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md)
 > is being executed; Tasks 1–11 are on `main` (`d2c4148` profiles contract, `2b8a9ee` protocol
@@ -658,7 +661,7 @@ reflectance super-resolution / sensor-fusion-overlay work (both scoped, not yet 
 > Codex's ProfileTuning comparison landed beside it (`a418131`) with two integration fixes — a dead
 > `ambient_lux` knob and a second spelling of the estimate shape.
 >
-> **Task 12 — IN PROGRESS (2026-08-04): end-to-end validation, docs status-sync, and landing.**
+> **Task 12 — ✅ DONE (2026-08-04): end-to-end validation, docs status-sync, landing, and milestone-retro.**
 > Full host suite **1895 passed / 1 skipped** (the 1 skip is the expected Windows-only
 > `test_logfilter` case); `ruff check` reports 4 findings, all pre-existing and in `host/tools/`,
 > unrelated to this feature (`headless_doctor.py` unused import, `query_mdns.py` unused import +

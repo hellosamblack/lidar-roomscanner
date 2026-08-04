@@ -6,8 +6,8 @@ header there summarizes; this doc is the authoritative resume state, superseding
 edit + test, never commit — the orchestrator verifies (focused tests + ruff on touched files) and
 commits per task. Continue that pattern.
 
-**Tasks 1–11 are ALL DONE.** **Task 12 (final: validation/docs/land/retro) is IN PROGRESS** as of
-this revision — see the new Task 12 section below. (Task 11 had been delegated to Codex; it had not
+**Tasks 1–12 are ALL DONE — the milestone is COMPLETE.** Task 12 (validation/docs/land/retro)
+finished this session; see the Task 12 section below. (Task 11 had been delegated to Codex; it had not
 landed by 2026-08-04, so a Claude session implemented it — see the Task 11 section.)
 
 ## DSS adjudication — RESOLVED, Position A upheld, HIGH confidence. Task 12 is UNBLOCKED.
@@ -166,7 +166,7 @@ Rig left in its documented end state. 32 new tests (suite 1889 passed / 1 skippe
 **Not done here:** the browser-side VISUAL pass and every hardware sweep stay Task 12's; these tools
 are what Task 12 should drive it with.
 
-## Task 12 — IN PROGRESS (2026-08-04): end-to-end validation, docs, landing, retro
+## Task 12 — ✅ DONE (2026-08-04): end-to-end validation, docs, landing, retro
 
 **Host suite:** 1895 passed / 1 skipped (the 1 skip is the expected Windows-only `test_logfilter`
 case — 2+ skips means the wrong interpreter, see the memory note on this). **ruff:** 4 findings, all
@@ -287,11 +287,13 @@ plan for the reasoning).
    `roomscanner_full_map` was `dataclasses.asdict`, emitting raw enum ints and silently dropping
    `ok`; it now uses `profiles.estimate_to_json` like the rest of the surface. ST's 89 MB
    support-gated package stays untracked, now with a `.gitignore` entry recording why.
-2. **Task 12** — end-to-end validation (incl. Task 10's deferred VISUAL pass: four profile buttons,
-   invalid manual combos, debounce/pending, bus-bar colors, CDC warning, second-tab sync, narrow-width
-   dock-band check), re-run the 30 Hz baseline vs `captures/web_20260803_121735.bin`, full docs
-   status-sync (incl. `protocol.md`'s stale cmd-8-12 caveat rows), land, then **milestone-retro**
-   (mandatory). DSS is resolved so it no longer blocks this task.
+2. **Task 12 — DONE (2026-08-04).** End-to-end validation ran (Task 10's deferred VISUAL pass: four
+   profile buttons, invalid manual combos, debounce/pending, bus-bar colors, second-tab sync — the
+   transport/CDC-warning readout and narrow-width/second-tab checks were tool-limited, reported not
+   fabricated), the 30 Hz baseline re-run matched `captures/web_20260803_121735.bin` within ±2%, docs
+   status-sync landed (`3b30359` docs incl. `protocol.md`'s cmd-8-12 rows; `6214e18` the BUG-079 fix),
+   and **milestone-retro** was executed. **BUG-079** (manual UI edit revert) was found by the visual
+   pass and fixed the same session.
 3. **De-scoped by owner directive (2026-08-04): "we will never use ethernet or CDC for [a wired]
    data transfer [link]."** The **wired-Ethernet release gate** (Task 6's bridge-only numbers
    needing a wired confirmation run) and the **CDC isolation test** (needs privileged VCOM or a
