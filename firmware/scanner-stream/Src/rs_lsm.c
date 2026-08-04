@@ -6,11 +6,14 @@
 #include "rs_lsm.h"
 
 #include <math.h>
+#include <stdbool.h>
 #include <string.h>
 
 #include "lsm6dsv16x_reg.h"
 #include "rs_protocol.h"
 #include "stm32h5xx_hal.h"
+#include "vl53l9_interface.h"  /* platform_get_event_status()/PLATFORM_GPIO_IT_EVT --
+                                 * BUG-077's abortable off-cycle drain, see below. */
 
 /* stream 11 puts an array of these straight on the wire — no padding allowed. */
 _Static_assert(sizeof(rs_lsm_raw_word_t) == RS_IMU_RAW_REC_SIZE, "IMU_RAW record must be 8 B");
@@ -568,8 +571,23 @@ int rs_lsm_read_timestamp(uint32_t *ticks) {
     return (lsm6dsv16x_timestamp_raw_get(&g_ctx, ticks) == 0) ? 0 : -1;
 }
 
-int rs_lsm_read_latest_raw(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_t raw_max,
-                           uint16_t *raw_count) {
+/* Shared implementation for rs_lsm_read_latest_raw() / rs_lsm_read_latest_raw_abortable()
+ * (BUG-077). `abortable`: when true, checks (once per FIFO word, before that word's I3C
+ * read) whether the ToF's FRAME_READY event has become pending and, if so, stops draining
+ * immediately -- leaving `level - i` words in the LSM's hardware FIFO for the NEXT drain
+ * (no data lost, just deferred; the check itself is a bare flag read, no bus traffic).
+ * This exists because each FIFO word costs its own blocking I3C register transaction
+ * (rs_lsm_read_latest_raw's own per-word loop), and a full drain (up to RS_LSM_RAW_FIFO_MAX
+ * words) can occupy the shared I3C1 bus for several ms -- long enough, on the tight-margin
+ * Precision/HFR ranging contexts, to delay the time-critical post-FRAME_READY DMA-readout
+ * kickoff past the sensor's internal re-arm deadline and cost a whole doubled ToF interval.
+ * `abortable=false` (the plain rs_lsm_read_latest_raw() below, and rs_lsm_read_latest())
+ * is BYTE-IDENTICAL to before this parameter existed -- used by the idle loop and the
+ * coupled/coincident per-ToF-frame drain, whose timing is untouched and must stay that
+ * way. Only the OFF-CYCLE decoupled drain (rs_wait_frame_ready_svc()'s call site in
+ * vl53l9_app.c) takes the abortable path. */
+static int rs_lsm_read_latest_raw_impl(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_t raw_max,
+                                        uint16_t *raw_count, bool abortable) {
     uint16_t raw_n = 0;
     out->have_quat = 0;
     out->have_env = 0;
@@ -607,6 +625,16 @@ int rs_lsm_read_latest_raw(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_
     }
     uint16_t level = status.fifo_level;
     for (uint16_t i = 0; i < level; i++) {
+        if (abortable) {
+            /* Flag read only -- no I3C traffic -- so this costs nothing on the non-abort
+             * path and never delays a genuinely off-cycle drain. See the BUG-077 comment
+             * above this function. */
+            bool frame_ready = false;
+            (void)platform_get_event_status(PLATFORM_GPIO_IT_EVT, &frame_ready);
+            if (frame_ready) {
+                break; /* remaining words stay queued in the LSM's hardware FIFO */
+            }
+        }
         lsm6dsv16x_fifo_out_raw_t word;
         if (lsm6dsv16x_fifo_out_raw_get(&g_ctx, &word) != 0) {
             break;
@@ -724,4 +752,14 @@ int rs_lsm_read_latest_raw(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_
         *raw_count = raw_n;
     }
     return (out->have_quat || out->have_env || raw_n != 0) ? 0 : -1;
+}
+
+int rs_lsm_read_latest_raw(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_t raw_max,
+                           uint16_t *raw_count) {
+    return rs_lsm_read_latest_raw_impl(out, raw, raw_max, raw_count, false);
+}
+
+int rs_lsm_read_latest_raw_abortable(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_t raw_max,
+                                      uint16_t *raw_count) {
+    return rs_lsm_read_latest_raw_impl(out, raw, raw_max, raw_count, true);
 }

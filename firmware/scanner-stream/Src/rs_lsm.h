@@ -62,6 +62,22 @@ int rs_lsm_read_latest(rs_lsm_sample_t *out);
 int rs_lsm_read_latest_raw(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_t raw_max,
                            uint16_t *raw_count);
 
+/* As rs_lsm_read_latest_raw, but bails out of the FIFO drain the instant the ToF's
+ * FRAME_READY event becomes pending (BUG-077), instead of draining the whole FIFO
+ * regardless. Each word costs its own blocking I3C register transaction, so a full
+ * drain can hold the shared I3C1 bus busy for several ms -- long enough, on the
+ * tight-margin Precision/High-Frame-Rate contexts, to delay the time-critical
+ * post-FRAME_READY DMA-readout kickoff past the sensor's internal re-arm deadline and
+ * cost a whole doubled ToF frame interval. Undrained words are left in the LSM's
+ * hardware FIFO -- nothing is lost, just deferred to the next drain (this call may
+ * therefore report less data than a full drain would have, or none at all).
+ * ONLY the off-cycle decoupled-rate drain (outside any ToF-frame-coincident point)
+ * should use this -- the coupled/coincident per-frame drain and the idle loop's own
+ * tick must keep calling plain rs_lsm_read_latest_raw(), whose timing this file
+ * guarantees is unaffected by this function's existence. */
+int rs_lsm_read_latest_raw_abortable(rs_lsm_sample_t *out, rs_lsm_raw_word_t *raw, uint16_t raw_max,
+                                      uint16_t *raw_count);
+
 /* Read the LSM timestamp counter (TIMESTAMP0..3) into *ticks. Returns 0 on success, <0 on a
  * bus/read failure. One 4-byte register read — cheap enough to issue at the ToF's FRAME_READY
  * edge, which is the point: it puts that edge on the LSM's clock directly instead of inferring

@@ -647,8 +647,17 @@ static bool rs_lsm_decoupled_due(void) {
  * for a caller that also needs to build stream 13 -- ALWAYS written when non-NULL, zeroed
  * on a failed/empty drain, matching rs_lsm_read_latest_raw()'s own contract for those two
  * fields. Returns 0 if anything was sent, <0 if the drain yielded nothing or the LSM
- * never came up (g_lsm_ok == 0). */
-static int rs_lsm_service_tick(uint32_t seq, uint32_t *out_quat_mid_ticks, uint16_t *out_quat_n) {
+ * never came up (g_lsm_ok == 0).
+ *
+ * `abortable` (BUG-077): when true, the underlying drain bails out the instant the
+ * ToF's FRAME_READY event becomes pending instead of draining the whole FIFO
+ * regardless (rs_lsm_read_latest_raw_abortable() -- see its own comment). ONLY
+ * rs_wait_frame_ready_svc()'s off-cycle call site below passes true: that is the one
+ * call that can otherwise hold the shared I3C bus busy long enough to delay the
+ * time-critical DMA-readout kickoff. The idle loop and the coupled/coincident
+ * per-ToF-frame call both pass false, unchanged. */
+static int rs_lsm_service_tick(uint32_t seq, uint32_t *out_quat_mid_ticks, uint16_t *out_quat_n,
+                                bool abortable) {
     if (out_quat_mid_ticks) { *out_quat_mid_ticks = 0u; }
     if (out_quat_n) { *out_quat_n = 0u; }
     if (!g_lsm_ok) {
@@ -660,7 +669,10 @@ static int rs_lsm_service_tick(uint32_t seq, uint32_t *out_quat_mid_ticks, uint1
      * the single main-loop thread -- never concurrent. */
     static rs_lsm_raw_word_t lsm_service_raw[RS_LSM_RAW_FIFO_MAX];
     uint16_t lsm_raw_n = 0;
-    int ret = rs_lsm_read_latest_raw(&lsm, lsm_service_raw, (uint16_t)RS_LSM_RAW_FIFO_MAX, &lsm_raw_n);
+    int ret = abortable
+                  ? rs_lsm_read_latest_raw_abortable(&lsm, lsm_service_raw, (uint16_t)RS_LSM_RAW_FIFO_MAX,
+                                                      &lsm_raw_n)
+                  : rs_lsm_read_latest_raw(&lsm, lsm_service_raw, (uint16_t)RS_LSM_RAW_FIFO_MAX, &lsm_raw_n);
     if (lsm.have_quat) {
         rs_send_frame_cdc(RS_STREAM_IMU_QUAT, seq, 0u, (const uint8_t *)lsm.quat, RS_IMU_QUAT_SIZE, 0u, 0u);
     }
@@ -799,7 +811,27 @@ static int rs_wait_event_usb(uint32_t evt, uint32_t timeout_ms) {
  * function rather than a parameter on rs_wait_event_usb: this decoupled service is specific
  * to the raw-only autonomous loop's own FRAME_READY wait (its call site below) -- the
  * DMA-readout wait and the on-board-transform build's own waits keep calling plain
- * rs_wait_event_usb(), unaffected. */
+ * rs_wait_event_usb(), unaffected.
+ *
+ * BUG-077 fix, two parts, both load-bearing:
+ * 1. `if (ret == 0) return 0;` now runs BEFORE the due-drain check, not after. The
+ *    previous ordering violated this very comment's "no coincident edge by construction"
+ *    claim: if a drain became due in the SAME 5 ms slice FRAME_READY was detected, the
+ *    old code ran the (multi-ms, blocking) drain anyway before returning to the caller --
+ *    directly delaying the caller's time-critical vl53l9_get_frame_async() kickoff by the
+ *    drain's full duration, on top of every other per-frame cost. Checking `ret == 0`
+ *    first means a coincident tick is never drained here at all -- it is left due, and
+ *    the per-ToF-frame point below (which runs AFTER this frame's own readout is fully
+ *    acked, i.e. genuinely idle bus, the same safe timing coupled mode already relies on)
+ *    picks it up instead, WITH correct stream-13 pairing since it is now genuinely
+ *    coincident rather than misclassified as off-cycle.
+ * 2. The remaining off-cycle drain call is now the ABORTABLE variant
+ *    (rs_lsm_service_tick(..., abortable=true)): if FRAME_READY becomes pending WHILE an
+ *    off-cycle drain that legitimately started earlier (this loop's `ret` was genuinely
+ *    non-zero at drain-start) is still running, the drain bails out word-by-word instead
+ *    of running to completion regardless -- bounding how much of the sensor's tight
+ *    Precision/HFR margin one drain can consume once the next frame is actually ready.
+ * See BUGS.md BUG-077 for the measured effect of both parts. */
 static int rs_wait_frame_ready_svc(uint32_t timeout_ms) {
     uint32_t waited = 0;
     for (;;) {
@@ -808,11 +840,11 @@ static int rs_wait_frame_ready_svc(uint32_t timeout_ms) {
             g_evt_stamp_us = rs_time_us();
         }
         tud_task(); ETH_Process();
-        if (rs_lsm_decoupled_due()) {
-            (void)rs_lsm_service_tick(g_last_seq, NULL, NULL);
-        }
         if (ret == 0) {
             return 0;
+        }
+        if (rs_lsm_decoupled_due()) {
+            (void)rs_lsm_service_tick(g_last_seq, NULL, NULL, true);
         }
         waited += 5;
         if (waited >= timeout_ms) {
@@ -2843,8 +2875,10 @@ void vl53l9_app() {
                 /* Task 7: shared with the active loop's per-frame/decoupled-off-cycle
                  * service (rs_lsm_service_tick()) -- identical drain + stream 9/10/11
                  * emit this used to duplicate inline. No coincident FRAME_READY edge
-                 * exists while idled, so no stream 13, exactly as before. */
-                (void)rs_lsm_service_tick(g_last_seq, NULL, NULL);
+                 * exists while idled, so no stream 13, exactly as before. abortable=false
+                 * (BUG-077): the ToF is stopped while idled, so there is no FRAME_READY
+                 * deadline to protect here -- unchanged, full drain every time. */
+                (void)rs_lsm_service_tick(g_last_seq, NULL, NULL, false);
 
                 if (!rs_pending.pending) {
                     uint8_t rs_wake_src = 0;
@@ -3126,7 +3160,11 @@ void vl53l9_app() {
             }
             uint32_t quat_mid_ticks = 0;
             uint16_t quat_n = 0;
-            (void)rs_lsm_service_tick(rs_counter, &quat_mid_ticks, &quat_n);
+            /* abortable=false (BUG-077): this point runs AFTER frame N's own DMA readout
+             * is fully acked -- the bus is genuinely idle and nothing time-critical is
+             * waiting behind this drain, so it keeps the full-drain guarantee unchanged
+             * (coupled mode's byte-identical contract depends on this). */
+            (void)rs_lsm_service_tick(rs_counter, &quat_mid_ticks, &quat_n, false);
             /* Stream 13: where this frame's FRAME_READY edge sits on the LSM clock. Sent last
              * in the group because drain_delay_us is only known once the drain above has run,
              * and still inside the armed g_frame_stamp_us window so it carries the SAME t_us
