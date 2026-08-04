@@ -3847,17 +3847,40 @@ def transport_counters(state) -> dict | None:
 
     Reported here rather than on a HUD row because it is a diagnostic surface
     (rig_status / MCP), and the left dock is already at its height budget.
+
+    Task 6 step 5 (2026-08-03) adds `link_bytes_per_s` (`UdpSource`'s own
+    rolling-window total, EVERY reassembled frame's wire bytes -- DATA+EVENT+ACK
+    -- unlike `metrics.link_bytes_per_s`, which sums only per-stream DATA meters)
+    and the firmware's own TX-pacer queue telemetry (EVENT 7 `TX_QUEUE_STATS`,
+    `UdpSource._maybe_capture_firmware_stats`): queue high-water, pending
+    fragments, cumulative enqueue drops / stack stalls / emitted bytes, and which
+    transport the firmware itself is actively sending DATA on. All of these are
+    `None` -- "when available", never a fabricated 0 -- until the first
+    TX_QUEUE_STATS event has actually arrived (older firmware, or a capture
+    predating this feature, never sends one). `fw_stats_age_s` is how stale that
+    last sample is, so a UI showing it can tell "healthy" from "the firmware
+    stopped talking" instead of silently repeating a frozen number.
     """
     controller = getattr(state, "controller", None)
     src = getattr(controller, "_live_underlying", None) if controller else None
     if not isinstance(src, UdpSource):
         return None
+    fw_stats_age_s = (time.time() - src.fw_stats_updated_at
+                      if src.fw_stats_updated_at is not None else None)
     return {
         "frames_incomplete": src.frames_incomplete,
         "frags_lost": src.frags_lost,
         "frags_reordered": src.frags_reordered,
         "frags_duplicate": src.frags_duplicate,
         "frags_invalid": src.frags_invalid,
+        "link_bytes_per_s": src.link_bytes_per_s,
+        "fw_tx_queue_high_water": src.fw_tx_queue_high_water,
+        "fw_tx_pending_fragments": src.fw_tx_pending_fragments,
+        "fw_tx_enqueue_drops": src.fw_tx_enqueue_drops,
+        "fw_tx_stack_stalls": src.fw_tx_stack_stalls,
+        "fw_tx_emitted_bytes": src.fw_tx_emitted_bytes,
+        "fw_active_transport": src.fw_active_transport,
+        "fw_stats_age_s": fw_stats_age_s,
     }
 
 

@@ -3095,23 +3095,83 @@ def test_transport_counters_none_when_not_udp():
     assert web.transport_counters(s) is None
 
 
+class _FakeUdp(web.UdpSource):
+    """Bypasses socket/mDNS setup so `transport_counters` tests can set every
+    attribute it reads directly, with no live network."""
+    def __init__(self, *, frames_incomplete=0, frags_lost=0, frags_reordered=0,
+                frags_duplicate=0, frags_invalid=0, link_bytes_per_s=None,
+                fw_tx_queue_high_water=None, fw_tx_pending_fragments=None,
+                fw_tx_enqueue_drops=None, fw_tx_stack_stalls=None,
+                fw_tx_emitted_bytes=None, fw_active_transport=None,
+                fw_stats_updated_at=None):
+        self.frames_incomplete = frames_incomplete
+        self.frags_lost = frags_lost
+        self.frags_reordered = frags_reordered
+        self.frags_duplicate = frags_duplicate
+        self.frags_invalid = frags_invalid
+        self.link_bytes_per_s = link_bytes_per_s
+        self.fw_tx_queue_high_water = fw_tx_queue_high_water
+        self.fw_tx_pending_fragments = fw_tx_pending_fragments
+        self.fw_tx_enqueue_drops = fw_tx_enqueue_drops
+        self.fw_tx_stack_stalls = fw_tx_stack_stalls
+        self.fw_tx_emitted_bytes = fw_tx_emitted_bytes
+        self.fw_active_transport = fw_active_transport
+        self.fw_stats_updated_at = fw_stats_updated_at
+
+
 def test_transport_counters_reports_udp_fragment_health(monkeypatch):
     """`gaps` says a frame vanished; these say why. reordered vs lost is the
     split that makes "did the pacer help?" answerable at all (BUG-042)."""
-    class _FakeUdp(web.UdpSource):
-        def __init__(self):   # bypass socket/mDNS setup
-            self.frames_incomplete = 2
-            self.frags_lost = 3
-            self.frags_reordered = 11
-            self.frags_duplicate = 1
-            self.frags_invalid = 0
-
+    udp = _FakeUdp(frames_incomplete=2, frags_lost=3, frags_reordered=11,
+                  frags_duplicate=1, frags_invalid=0)
     class _S: pass
-    s = _S(); s.controller = _S(); s.controller._live_underlying = _FakeUdp()
-    assert web.transport_counters(s) == {
-        "frames_incomplete": 2, "frags_lost": 3,
-        "frags_reordered": 11, "frags_duplicate": 1, "frags_invalid": 0,
-    }
+    s = _S(); s.controller = _S(); s.controller._live_underlying = udp
+    got = web.transport_counters(s)
+    assert got["frames_incomplete"] == 2 and got["frags_lost"] == 3
+    assert got["frags_reordered"] == 11 and got["frags_duplicate"] == 1
+    assert got["frags_invalid"] == 0
+
+
+def test_transport_counters_firmware_fields_null_before_first_event():
+    """Task 6 step 5: no TX_QUEUE_STATS event has arrived yet (older firmware,
+    or a capture predating this feature) -- every firmware/link-rate field
+    must be null, never a fabricated 0 that would read as a healthy link."""
+    udp = _FakeUdp(frames_incomplete=0, frags_lost=0)
+    class _S: pass
+    s = _S(); s.controller = _S(); s.controller._live_underlying = udp
+    got = web.transport_counters(s)
+    assert got["link_bytes_per_s"] is None
+    assert got["fw_tx_queue_high_water"] is None
+    assert got["fw_tx_pending_fragments"] is None
+    assert got["fw_tx_enqueue_drops"] is None
+    assert got["fw_tx_stack_stalls"] is None
+    assert got["fw_tx_emitted_bytes"] is None
+    assert got["fw_active_transport"] is None
+    assert got["fw_stats_age_s"] is None
+
+
+def test_transport_counters_reports_firmware_queue_stats_when_available():
+    """Task 6 step 5: the firmware's own TX-pacer queue telemetry (EVENT 7
+    TX_QUEUE_STATS) and the source's total link rate, surfaced with KNOWN
+    values -- not just "is a number"."""
+    stale_by = 2.5
+    udp = _FakeUdp(link_bytes_per_s=123456.0, fw_tx_queue_high_water=6,
+                  fw_tx_pending_fragments=37, fw_tx_enqueue_drops=3,
+                  fw_tx_stack_stalls=12, fw_tx_emitted_bytes=987654,
+                  fw_active_transport="udp",
+                  fw_stats_updated_at=time.time() - stale_by)
+    class _S: pass
+    s = _S(); s.controller = _S(); s.controller._live_underlying = udp
+    got = web.transport_counters(s)
+    assert got["link_bytes_per_s"] == pytest.approx(123456.0)
+    assert got["fw_tx_queue_high_water"] == 6
+    assert got["fw_tx_pending_fragments"] == 37
+    assert got["fw_tx_enqueue_drops"] == 3
+    assert got["fw_tx_stack_stalls"] == 12
+    assert got["fw_tx_emitted_bytes"] == 987654
+    assert got["fw_active_transport"] == "udp"
+    # age is measured against a KNOWN past timestamp, not merely "not None"
+    assert got["fw_stats_age_s"] == pytest.approx(stale_by, abs=0.5)
 
 
 # --- 14. Live/View source + display (2026-07-31) ----------------------------
