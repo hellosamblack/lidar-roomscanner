@@ -600,6 +600,86 @@ typedef struct {
 } rs_frame_sync_t;
 static rs_frame_sync_t g_frame_sync = { 0 };
 
+/* ---- Task 7: decoupled IMU/env poll rate (SET_IMU_ENV_RATE / GET_IMU_ENV_RATE) --------
+ *
+ * RS_IMU_ENV_RATE_COUPLED (0, the default): unchanged pre-Task-7 behavior -- the LSM is
+ * drained exactly once per ToF frame, at the existing per-frame point below, stream 13
+ * always paired with it. A non-zero rate decouples the LSM drain onto its own TIM2-paced
+ * schedule (docs/protocol.md cmd 11/12): the drain fires whenever `g_lsm_next_due_us` is
+ * reached, independent of the FRAME_READY wait, whether that happens to land at the
+ * per-ToF-frame point (a genuinely coincident FRAME_READY edge -- stream 13 IS sent,
+ * seq = the just-captured frame counter, same as coupled mode) or during the wait for the
+ * NEXT frame (no coincident edge -- stream 13 is skipped and seq is g_last_seq, frozen,
+ * exactly the idle loop's own convention). `rs_lsm_decoupled_due()` is the single place
+ * that consumes a due tick (advances the schedule), so whichever call site notices it
+ * first services it exactly once -- there is no double-draining and no missed tick. */
+static uint32_t g_imu_env_rate_hz = RS_IMU_ENV_RATE_COUPLED;
+static uint64_t g_lsm_next_due_us = 0;
+
+/* True iff a decoupled drain is due right now, and advances the schedule to the next
+ * period if so. Always false in coupled mode (rate 0): coupled mode's LSM drain lives
+ * entirely at the per-ToF-frame point below, unconditional, byte-identical to before this
+ * feature existed. Locks to whole periods (loops while behind) rather than a single
+ * `+= period_us`, so a stretch of lateness (e.g. a slow BUSY command dispatch) re-syncs
+ * to the schedule instead of firing a catch-up burst the next time the loop gets a
+ * chance to run. */
+static bool rs_lsm_decoupled_due(void) {
+    if (g_imu_env_rate_hz == RS_IMU_ENV_RATE_COUPLED) {
+        return false;
+    }
+    uint64_t now = rs_time_us();
+    if (now < g_lsm_next_due_us) {
+        return false;
+    }
+    uint32_t period_us = 1000000u / g_imu_env_rate_hz;
+    do {
+        g_lsm_next_due_us += (uint64_t)period_us;
+    } while (g_lsm_next_due_us <= now);
+    return true;
+}
+
+/* Shared LSM6DSV16X FIFO drain + stream 9/10/11 emit -- the logic the idle loop
+ * (rs_idle_lsm_tick, ~18.2 Hz) and the active loop's per-ToF-frame point used to
+ * duplicate verbatim (Task 7 plan step 1). `seq` is whatever the caller wants stamped on
+ * the emitted frames (the just-captured frame counter when this drain is coincident with
+ * a ToF frame, the frozen g_last_seq otherwise -- same convention EVENT frames already
+ * use). `out_quat_mid_ticks`/`out_quat_n` (NULL-able) receive the drained sample's fields
+ * for a caller that also needs to build stream 13 -- ALWAYS written when non-NULL, zeroed
+ * on a failed/empty drain, matching rs_lsm_read_latest_raw()'s own contract for those two
+ * fields. Returns 0 if anything was sent, <0 if the drain yielded nothing or the LSM
+ * never came up (g_lsm_ok == 0). */
+static int rs_lsm_service_tick(uint32_t seq, uint32_t *out_quat_mid_ticks, uint16_t *out_quat_n) {
+    if (out_quat_mid_ticks) { *out_quat_mid_ticks = 0u; }
+    if (out_quat_n) { *out_quat_n = 0u; }
+    if (!g_lsm_ok) {
+        return -1;
+    }
+    rs_lsm_sample_t lsm = { 0 };
+    /* One full FIFO's worth (256 words x 8 B = 2 KB); a drain can never yield more.
+     * Static, not stack: shared by every call site (idle/off-cycle/per-frame), all on
+     * the single main-loop thread -- never concurrent. */
+    static rs_lsm_raw_word_t lsm_service_raw[RS_LSM_RAW_FIFO_MAX];
+    uint16_t lsm_raw_n = 0;
+    int ret = rs_lsm_read_latest_raw(&lsm, lsm_service_raw, (uint16_t)RS_LSM_RAW_FIFO_MAX, &lsm_raw_n);
+    if (lsm.have_quat) {
+        rs_send_frame_cdc(RS_STREAM_IMU_QUAT, seq, 0u, (const uint8_t *)lsm.quat, RS_IMU_QUAT_SIZE, 0u, 0u);
+    }
+    if (lsm.have_env) {
+        uint8_t env[RS_ENV_SIZE];
+        memcpy(env + 0, &lsm.pressure_pa, 4);
+        memcpy(env + 4, lsm.mag_ut, 12);
+        memcpy(env + 16, &lsm.temp_c, 4);
+        rs_send_frame_cdc(RS_STREAM_ENV, seq, 0u, env, RS_ENV_SIZE, 0u, 0u);
+    }
+    if (lsm_raw_n != 0) {
+        rs_send_frame_cdc(RS_STREAM_IMU_RAW, seq, 0u, (const uint8_t *)lsm_service_raw,
+                          (uint32_t)lsm_raw_n * RS_IMU_RAW_REC_SIZE, lsm_raw_n, 0u);
+    }
+    if (out_quat_mid_ticks) { *out_quat_mid_ticks = lsm.quat_mid_ticks; }
+    if (out_quat_n) { *out_quat_n = lsm.quat_n; }
+    return ret;
+}
+
 /* Calibration blob buffer, per-device (VL53L9_CALIB_DATA_SIZE bytes). File-scope rather
  * than a vl53l9_app() stack local (as it was before Task 5) so handle_error()'s bounded
  * recovery (raw-only builds only, see handle_error()'s definition) can hand it straight
@@ -696,6 +776,41 @@ static int rs_wait_event_usb(uint32_t evt, uint32_t timeout_ms) {
             g_evt_stamp_us = rs_time_us();
         }
         tud_task(); ETH_Process();
+        if (ret == 0) {
+            return 0;
+        }
+        waited += 5;
+        if (waited >= timeout_ms) {
+            return ret;
+        }
+    }
+}
+
+/* As rs_wait_event_usb(PLATFORM_GPIO_IT_EVT, timeout_ms), but also services a decoupled
+ * IMU/env rate (Task 7) on each 5 ms slice -- this wait IS most of the gap between ToF
+ * frames, which a decoupled rate faster than the ToF's own cadence needs to drain into
+ * (the per-frame point below only fires once FRAME_READY actually lands). Coupled mode
+ * (the default, rate 0) takes an IDENTICAL path to rs_wait_event_usb: rs_lsm_decoupled_due()
+ * always returns false immediately, so this function's behavior -- including timing -- is
+ * unchanged from before this feature existed. Every off-cycle drain here uses
+ * seq = g_last_seq (frozen, no new frame exists yet) and never sends stream 13 -- same
+ * convention the idle loop already uses; this drain has no coincident FRAME_READY edge by
+ * construction (it only ever runs BETWEEN edges, never AT one). Deliberately a separate
+ * function rather than a parameter on rs_wait_event_usb: this decoupled service is specific
+ * to the raw-only autonomous loop's own FRAME_READY wait (its call site below) -- the
+ * DMA-readout wait and the on-board-transform build's own waits keep calling plain
+ * rs_wait_event_usb(), unaffected. */
+static int rs_wait_frame_ready_svc(uint32_t timeout_ms) {
+    uint32_t waited = 0;
+    for (;;) {
+        int ret = platform_wait_for_event(PLATFORM_GPIO_IT_EVT, 5);
+        if (ret == 0) {
+            g_evt_stamp_us = rs_time_us();
+        }
+        tud_task(); ETH_Process();
+        if (rs_lsm_decoupled_due()) {
+            (void)rs_lsm_service_tick(g_last_seq, NULL, NULL);
+        }
         if (ret == 0) {
             return 0;
         }
@@ -865,6 +980,28 @@ static bool g_ranging_have_manual = false;
  * ACK payload beyond its fixed 12 bytes. */
 static uint32_t rs_pack_status(const vl53l9_status_t *s) {
     return ((uint32_t)s->fsm << 24) | ((uint32_t)s->command << 16) | (uint32_t)s->firmware;
+}
+
+/* Task 7 plan step 6: the Ethernet TX pacer's drain deadline used to be derived solely
+ * from the applied ToF frame period (Task 6). A decoupled IMU/env rate (cmd 11) queues
+ * frames through the SAME firmware FIFO off its own cadence, so the deadline must be
+ * whichever period reloads the queue fastest -- mirrors
+ * roomscan.sources.eth_tx_window_ms()'s variadic "shortest of the governing periods"
+ * contract (host/tests/test_sources.py) exactly, just with a fixed arity of two instead
+ * of Python's *args. Call this instead of ETH_SetTxWindowMs(ETH_TxWindowMsForPeriod(...))
+ * directly at every call site that used to compute it from g_active_profile alone: the
+ * two existing ones (boot bring-up and every successful profile-apply) plus the new
+ * SET_IMU_ENV_RATE apply below -- whichever of the two periods just changed. */
+static void rs_update_eth_tx_window(void) {
+    uint32_t window_ms = ETH_TxWindowMsForPeriod(g_active_profile.vendor.frame_period_us);
+    if (g_imu_env_rate_hz != RS_IMU_ENV_RATE_COUPLED) {
+        uint32_t imu_period_us = 1000000u / g_imu_env_rate_hz;
+        uint32_t imu_window_ms = ETH_TxWindowMsForPeriod(imu_period_us);
+        if (imu_window_ms < window_ms) {
+            window_ms = imu_window_ms;
+        }
+    }
+    ETH_SetTxWindowMs(window_ms);
 }
 
 /* FSM_STATE_STANDBY's numeric value (vl53l9.c's private _fsm_state_t enum: NONE=0,
@@ -1411,8 +1548,7 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
     /* Protocol v2 registry (commands 8-12, docs/protocol.md). Task 4 wires real
      * application for 8 (SET_RANGING_PROFILE), 9 (SET_MANUAL_PARAMS), and
      * 10 (GET_RANGING_CONFIG) -- see rs_ranging.h/.c and rs_apply_pending_config() below.
-     * 11/12 (SET_IMU_ENV_RATE/GET_IMU_ENV_RATE) remain codec-only stubs; IMU/env rate
-     * decoupling is Task 7. */
+     * 11/12 (SET_IMU_ENV_RATE/GET_IMU_ENV_RATE) are wired in Task 7, just below. */
     case RS_CMD_SET_RANGING_PROFILE:
         /* Same precedence as every other SET_* case: validate without touching the
          * sensor, BEFORE the pending/BUSY check. */
@@ -1471,9 +1607,35 @@ static void rs_handle_command(uint32_t cmd, uint32_t param, uint32_t token, cons
         break;
     }
     case RS_CMD_SET_IMU_ENV_RATE:
+        /* Legacy cmd+param ACK shape (RS_ACK_PAYLOAD_LEN), `applied` = the accepted rate_hz
+         * -- same precedence as every other SET_* case: validate without touching anything
+         * (this command never touches the sensor at all, see rs_apply_pending_config()
+         * below), BEFORE the pending/BUSY check. 0 (coupled) is always valid; an explicit
+         * rate above RS_IMU_ENV_RATE_MAX_HZ (480, the XL/GY/SFLP ODR ceiling) is rejected --
+         * the >60 Hz sensor-hub-cycle mismatch (stream 10 sub-sampling) is reported, not
+         * rejected, by the host's own profiles.validate_imu_env_rate() (plan step 4: quat/
+         * raw can still hit the requested rate, only env sub-samples). */
+        if (param > RS_IMU_ENV_RATE_MAX_HZ) {
+            rs_send_ack(token, cmd, RS_RESULT_BAD_PARAM, g_imu_env_rate_hz, transport);
+            break;
+        }
+        if (rs_pending.pending) {
+            rs_send_ack(token, cmd, RS_RESULT_BUSY, g_imu_env_rate_hz, transport);
+            break;
+        }
+        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = param, .token = token,
+                                         .transport = transport };
+        break;
     case RS_CMD_GET_IMU_ENV_RATE:
-        /* Legacy cmd+param ACK shape (RS_ACK_PAYLOAD_LEN) -- same as commands 1-8. Task 7. */
-        rs_send_ack(token, cmd, RS_RESULT_UNKNOWN_CMD, 0u, transport);
+        /* Read-only, but still routed through the one-pending-slot/safe-point discipline
+         * (plan step 5), same reasoning as GET_RANGING_CONFIG above -- independent of any
+         * ranging-profile command sharing the same slot, never requiring one. */
+        if (rs_pending.pending) {
+            rs_send_ack(token, cmd, RS_RESULT_BUSY, g_imu_env_rate_hz, transport);
+            break;
+        }
+        rs_pending = (rs_pending_cmd_t){ .pending = true, .cmd = cmd, .param = 0u, .token = token,
+                                         .transport = transport };
         break;
     default:
         rs_send_ack(token, cmd, RS_RESULT_UNKNOWN_CMD, 0u, transport);
@@ -1576,8 +1738,34 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
                  * stale-event clear mirror the reconfig path's tail (cheap insurance even
                  * though a clean stop() left no reset edges). */
                 if (vl53l9_start(p_dev)) {
-                    handle_error();
-                    return true;
+                    /* BUG-074 investigation (2026-08-04): rs_standby_level is ALREADY
+                     * correct here (flipped above, before this call) -- this is NOT the
+                     * shadow-desync BUG-072 fixed (confirmed by reading the b10f44d diff:
+                     * this optimistic-set predates BUG-072 and its own writeup credits it
+                     * with incidentally repairing ANOTHER path's desync). The bug this
+                     * branch DID have: falling straight into handle_error()'s bounded
+                     * recovery with NO ack sent, unlike every sibling stop/start-failure
+                     * branch in this same function (the profile-apply path above, and the
+                     * to==SOFT/HARD arm below), which ack a SENSOR_ERROR BEFORE attempting
+                     * recovery. A silent failure here reproduces the observed symptom
+                     * exactly -- SET_STANDBY(wake=0) timing out with no ACK at all, up to
+                     * the host's full timeout, while REINIT (which also acks OK on success
+                     * but at least always tries the same recovery) "fixed" it because it
+                     * was issued as a fresh, separate command that got its OWN chance to
+                     * ack. Ack SENSOR_ERROR here too, matching the sibling idiom, then
+                     * best-effort recover via the heavier rs_sensor_reinit() (vl53l9_start()
+                     * alone already failed once, so escalate straight to the full
+                     * re-bring-up rather than retrying the same call). */
+                    vl53l9_status_t status = { 0 };
+                    vl53l9_get_status(p_dev, &status);
+                    rs_send_ack(token, cmd, RS_RESULT_SENSOR_ERROR, rs_pack_status(&status), transport);
+                    if (rs_sensor_reinit(p_dev, calib_data)) {
+                        handle_error();
+                        return true;
+                    }
+                    rs_send_frame_cdc(RS_STREAM_CALIB, seq_for_calib, 0u, calib_data,
+                                      VL53L9_CALIB_DATA_SIZE, out_width, out_height);
+                    return false; /* already acked above */
                 }
                 HAL_Delay(50);
                 platform_acknowledge_event(PLATFORM_GPIO_IT_EVT);
@@ -1589,6 +1777,13 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
                  * calib may have changed across the physical reset -- retransmit it, same
                  * as the REINIT path above. */
                 if (rs_sensor_reinit(p_dev, calib_data)) {
+                    /* Same BUG-074 fix as the SOFT arm above: ack before handle_error()'s
+                     * recovery instead of leaving the host to time out silently. This IS
+                     * already the heaviest recovery step, so there is no lighter fallback
+                     * to try first -- ack, then let handle_error() take it from here. */
+                    vl53l9_status_t status = { 0 };
+                    vl53l9_get_status(p_dev, &status);
+                    rs_send_ack(token, cmd, RS_RESULT_SENSOR_ERROR, rs_pack_status(&status), transport);
                     handle_error();
                     return true;
                 }
@@ -1670,6 +1865,33 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
                                        g_ranging_last_readback.exposure_ms,
                                        g_ranging_last_readback.power_mode, transport);
         }
+        return false;
+    }
+
+    if (cmd == RS_CMD_SET_IMU_ENV_RATE) {
+        /* Task 7 plan step 5: never touches the sensor at all -- the LSM's own ODRs
+         * (XL/GY/SFLP, rs_lsm.c's RS_LSM_* constants) are unaffected by this command;
+         * only the SOFTWARE drain cadence (rs_lsm_decoupled_due()'s schedule) changes.
+         * So, unlike every ranging-profile command above, there is no vl53l9_stop()/
+         * start() here and no way for this to fail -- it just adopts the
+         * already-validated param (rs_handle_command bounds-checked it 0..480) and
+         * re-arms the schedule to fire immediately rather than waiting out whatever
+         * was left of the OLD period. Still routed through the same pending-slot/
+         * safe-point discipline as everything else (plan step 5's "independent of
+         * ranging-profile changes" means neither requires the other, not that this
+         * skips the discipline). */
+        g_imu_env_rate_hz = param;
+        g_lsm_next_due_us = rs_time_us(); /* due immediately on the new schedule */
+        rs_update_eth_tx_window(); /* plan step 6: budget also depends on this rate now */
+        rs_send_ack(token, cmd, RS_RESULT_OK, g_imu_env_rate_hz, transport);
+        return false;
+    }
+
+    if (cmd == RS_CMD_GET_IMU_ENV_RATE) {
+        /* Read-only, no hardware touched -- g_imu_env_rate_hz IS the applied value,
+         * there is nothing to read back from the sensor (contrast GET_RANGING_CONFIG,
+         * which re-reads the ToF's own registers). */
+        rs_send_ack(token, cmd, RS_RESULT_OK, g_imu_env_rate_hz, transport);
         return false;
     }
 
@@ -1873,8 +2095,10 @@ static bool rs_apply_pending_config(vl53l9_device_t *p_dev, uint8_t *calib_data,
      * never the fixed 25/33 ms assumption this replaces (non-negotiable finding #6).
      * Legacy SET_USECASE/SET_FRAME_PERIOD_US/SET_EXPOSURE_MS reach here too (they edit
      * a copy of g_active_profile, same as every other candidate path), so the window
-     * tracks the period under every reconfig command, not only cmd 8/9. */
-    ETH_SetTxWindowMs(ETH_TxWindowMsForPeriod(g_active_profile.vendor.frame_period_us));
+     * tracks the period under every reconfig command, not only cmd 8/9. Task 7: folds in
+     * whatever decoupled IMU/env rate is ALSO in force (rs_update_eth_tx_window()) --
+     * see its own comment. */
+    rs_update_eth_tx_window();
 
     if (cmd == RS_CMD_SET_RANGING_PROFILE) {
         rs_send_ack(token, cmd, RS_RESULT_OK, candidate.profile_id, transport);
@@ -2096,8 +2320,10 @@ void vl53l9_app() {
     rs_ranging_boot_default(&g_active_profile);
     /* Task 6: seed the TX pacer's window before the acquisition loop (and hence
      * ETH_Process()/eth_tx_pump()) ever runs, so it is never left at
-     * ETH_TX_WINDOW_MS_DEFAULT's boot placeholder once real streaming starts. */
-    ETH_SetTxWindowMs(ETH_TxWindowMsForPeriod(g_active_profile.vendor.frame_period_us));
+     * ETH_TX_WINDOW_MS_DEFAULT's boot placeholder once real streaming starts. g_imu_env_rate_hz
+     * is still RS_IMU_ENV_RATE_COUPLED here (its static initializer, Task 7), so this is
+     * byte-identical to the plain ETH_TxWindowMsForPeriod() call it replaces. */
+    rs_update_eth_tx_window();
 #endif
     uint16_t raw_buffer_size = 0; /* bytes */
     uint8_t out_width = 0, out_height = 0; /* pixels */
@@ -2614,29 +2840,11 @@ void vl53l9_app() {
             if (g_lsm_ok && ++rs_idle_lsm_tick >= 17u) { /* ~34 ms at the 2 ms idle cadence below */
                 rs_idle_lsm_tick = 0;
 
-                rs_lsm_sample_t rs_idle_lsm = { 0 };
-                static rs_lsm_raw_word_t rs_idle_lsm_raw[RS_LSM_RAW_FIFO_MAX];
-                uint16_t rs_idle_lsm_raw_n = 0;
-                if (rs_lsm_read_latest_raw(&rs_idle_lsm, rs_idle_lsm_raw,
-                                           (uint16_t)RS_LSM_RAW_FIFO_MAX, &rs_idle_lsm_raw_n) == 0) {
-                    if (rs_idle_lsm.have_quat) {
-                        rs_send_frame_cdc(RS_STREAM_IMU_QUAT, g_last_seq, 0u,
-                                          (const uint8_t *)rs_idle_lsm.quat, RS_IMU_QUAT_SIZE, 0u, 0u);
-                    }
-                    if (rs_idle_lsm.have_env) {
-                        uint8_t rs_idle_env[RS_ENV_SIZE];
-                        memcpy(rs_idle_env + 0, &rs_idle_lsm.pressure_pa, 4);
-                        memcpy(rs_idle_env + 4, rs_idle_lsm.mag_ut, 12);
-                        memcpy(rs_idle_env + 16, &rs_idle_lsm.temp_c, 4);
-                        rs_send_frame_cdc(RS_STREAM_ENV, g_last_seq, 0u, rs_idle_env, RS_ENV_SIZE, 0u, 0u);
-                    }
-                    if (rs_idle_lsm_raw_n != 0) {
-                        rs_send_frame_cdc(RS_STREAM_IMU_RAW, g_last_seq, 0u,
-                                          (const uint8_t *)rs_idle_lsm_raw,
-                                          (uint32_t)rs_idle_lsm_raw_n * RS_IMU_RAW_REC_SIZE,
-                                          rs_idle_lsm_raw_n, 0u);
-                    }
-                }
+                /* Task 7: shared with the active loop's per-frame/decoupled-off-cycle
+                 * service (rs_lsm_service_tick()) -- identical drain + stream 9/10/11
+                 * emit this used to duplicate inline. No coincident FRAME_READY edge
+                 * exists while idled, so no stream 13, exactly as before. */
+                (void)rs_lsm_service_tick(g_last_seq, NULL, NULL);
 
                 if (!rs_pending.pending) {
                     uint8_t rs_wake_src = 0;
@@ -2691,7 +2899,10 @@ void vl53l9_app() {
         uint64_t rs_ready_us = 0;
         uint32_t rs_wait_timeout_ms = rs_ranging_frame_timeout_ms(g_active_profile.vendor.frame_period_us);
         for (;;) {
-            ret = rs_wait_event_usb(PLATFORM_GPIO_IT_EVT, rs_wait_timeout_ms);
+            /* rs_wait_frame_ready_svc(), not plain rs_wait_event_usb(): this wait is the
+             * gap a decoupled IMU/env rate (Task 7) needs to drain into off-cycle -- see
+             * that function's own comment. Coupled mode (the default) is unaffected. */
+            ret = rs_wait_frame_ready_svc(rs_wait_timeout_ms);
             rs_ready_us = g_evt_stamp_us; /* stamped inside the wait, at the interrupt */
             if (ret) {
                 uint8_t rs_is_ready = 0;
@@ -2892,14 +3103,19 @@ void vl53l9_app() {
                               raw_buffer_size, out_width, out_height);
         }
 
-        /* IMU orientation + env, paired with this ToF frame (LSM6DSV16X). Read failures
-         * skip this frame's IMU/env only -- the ToF stream above is already sent. */
-        if (g_lsm_ok) {
-            rs_lsm_sample_t lsm;
-            /* One full FIFO's worth (256 words x 8 B = 2 KB); a drain can never yield more.
-             * Static, not stack: the acquisition loop's frame is already deep. */
-            static rs_lsm_raw_word_t lsm_raw[RS_LSM_RAW_FIFO_MAX];
-            uint16_t lsm_raw_n = 0;
+        /* IMU orientation + env (LSM6DSV16X), via the shared rs_lsm_service_tick() (Task 7
+         * plan step 1). Coupled mode (the default, rate 0): drains here unconditionally,
+         * once per ToF frame, exactly as before this feature existed. Decoupled mode:
+         * drains HERE only when rs_lsm_decoupled_due() says the TIM2-paced schedule is due
+         * right now -- most decoupled drains instead happen off-cycle, inside the
+         * FRAME_READY wait (rs_wait_frame_ready_svc()), where there is no coincident edge
+         * and stream 13 is skipped (idle loop's own convention). When a decoupled drain
+         * DOES land here, it coincides with THIS frame's FRAME_READY edge exactly like
+         * coupled mode, so it gets stream 13 too. A read failure only skips this frame's
+         * IMU/env -- the ToF stream above is already sent. */
+        bool rs_lsm_service_now =
+            (g_imu_env_rate_hz == RS_IMU_ENV_RATE_COUPLED) || rs_lsm_decoupled_due();
+        if (g_lsm_ok && rs_lsm_service_now) {
             /* How far after FRAME_READY this drain actually happens -- the gap the host used
              * to have to guess at (BUG-031). Measured, shipped on stream 13, so the guess is
              * both unnecessary and checkable. */
@@ -2908,25 +3124,9 @@ void vl53l9_app() {
                 g_frame_sync.drain_delay_us =
                     (uint32_t)((t_drain > rs_ready_us) ? (t_drain - rs_ready_us) : 0u);
             }
-            if (rs_lsm_read_latest_raw(&lsm, lsm_raw, (uint16_t)RS_LSM_RAW_FIFO_MAX, &lsm_raw_n) == 0) {
-                if (lsm.have_quat) {
-                    rs_send_frame_cdc(RS_STREAM_IMU_QUAT, rs_counter, 0u,
-                                      (const uint8_t *)lsm.quat, RS_IMU_QUAT_SIZE, 0u, 0u);
-                }
-                if (lsm.have_env) {
-                    uint8_t env[RS_ENV_SIZE];
-                    memcpy(env + 0, &lsm.pressure_pa, 4);
-                    memcpy(env + 4, lsm.mag_ut, 12);
-                    memcpy(env + 16, &lsm.temp_c, 4);
-                    rs_send_frame_cdc(RS_STREAM_ENV, rs_counter, 0u, env, RS_ENV_SIZE, 0u, 0u);
-                }
-                /* Raw FIFO pass-through (stream 11): record count goes in `width`, `height` = 0
-                 * (docs/protocol.md). ~90-105 records/frame at 480 Hz batching = ~720-840 B. */
-                if (lsm_raw_n != 0) {
-                    rs_send_frame_cdc(RS_STREAM_IMU_RAW, rs_counter, 0u, (const uint8_t *)lsm_raw,
-                                      (uint32_t)lsm_raw_n * RS_IMU_RAW_REC_SIZE, lsm_raw_n, 0u);
-                }
-            }
+            uint32_t quat_mid_ticks = 0;
+            uint16_t quat_n = 0;
+            (void)rs_lsm_service_tick(rs_counter, &quat_mid_ticks, &quat_n);
             /* Stream 13: where this frame's FRAME_READY edge sits on the LSM clock. Sent last
              * in the group because drain_delay_us is only known once the drain above has run,
              * and still inside the armed g_frame_stamp_us window so it carries the SAME t_us
@@ -2936,11 +3136,11 @@ void vl53l9_app() {
                 rs_put_u32(sync + 0, g_frame_sync.lsm_ticks);
                 rs_put_u32(sync + 4, g_frame_sync.latch_delay_us);
                 rs_put_u32(sync + 8, g_frame_sync.drain_delay_us);
-                rs_put_u32(sync + 12, lsm.quat_mid_ticks);
+                rs_put_u32(sync + 12, quat_mid_ticks);
                 sync[16] = (uint8_t)(g_frame_sync.read_us & 0xFFu);
                 sync[17] = (uint8_t)(g_frame_sync.read_us >> 8);
-                sync[18] = (uint8_t)(lsm.quat_n & 0xFFu);
-                sync[19] = (uint8_t)(lsm.quat_n >> 8);
+                sync[18] = (uint8_t)(quat_n & 0xFFu);
+                sync[19] = (uint8_t)(quat_n >> 8);
                 sync[20] = 1u;   /* valid */
                 sync[21] = 0u;   /* reserved */
                 rs_send_frame_cdc(RS_STREAM_IMU_SYNC, rs_counter, 0u, sync,

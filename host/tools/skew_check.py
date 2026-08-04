@@ -153,6 +153,25 @@ def collect_frames(path: str | Path) -> tuple[list[dict], float, bool]:
     LSM clock), `n_ts`, `calib` (this frame also carried CALIB), and, when the
     capture has stream 13, `sync_us` / `latch_delay_us` / `drain_delay_us` /
     `read_us`.
+
+    IMU_RAW (stream 11) accumulates a LIST of payloads per seq, not a single
+    overwritten one (Task 7, high-framerate plan step 7): a decoupled IMU/env
+    rate (SET_IMU_ENV_RATE, cmd 11) can drain several times off its own TIM2-paced
+    schedule while one ToF seq is still current (`g_last_seq`, frozen — see
+    docs/protocol.md and rs_lsm_service_tick() in vl53l9_app.c), so more than one
+    IMU_RAW frame legitimately shares one seq. The old code kept `row["imu_raw"] =
+    frame.payload` — a plain overwrite — so every payload but the LAST one sharing
+    a seq was silently discarded (fine for coupled mode, where at most one ever
+    arrives per seq, but wrong the moment a decoupled rate is in force). All
+    payloads sharing a seq are now decoded and their TIMESTAMP words concatenated,
+    in arrival order (== chronological order: drains run to completion strictly
+    one at a time on the single-threaded firmware loop, so payload N's words
+    always predate payload N+1's) — `ts_last_us`/`n_ts` are computed from the
+    FULL concatenated series, not just the final payload. IMU_SYNC (stream 13)
+    stays a single scalar per seq on purpose: the firmware only ever sends it
+    from the one drain that is genuinely coincident with that seq's own
+    FRAME_READY edge (never from an off-cycle decoupled drain), so at most one
+    can exist per seq in EITHER mode.
     """
     src = FileSource(str(path))
     dec = StreamDecoder()
@@ -171,14 +190,14 @@ def collect_frames(path: str | Path) -> tuple[list[dict], float, bool]:
                 continue
             row = rows.get(h.seq)
             if row is None:
-                row = rows[h.seq] = {"seq": h.seq}
+                row = rows[h.seq] = {"seq": h.seq, "imu_raw_payloads": []}
                 order.append(h.seq)
             if h.stream_id == StreamId.RAW_3DMD:
                 row["t_us"] = h.t_us
             elif h.stream_id == StreamId.CALIB:
                 row["calib"] = True
             elif h.stream_id == StreamId.IMU_RAW:
-                row["imu_raw"] = frame.payload
+                row["imu_raw_payloads"].append(frame.payload)
             elif h.stream_id == StreamId.IMU_SYNC:
                 row["sync"] = decode_imu_sync(frame.payload)
     finally:
@@ -191,12 +210,18 @@ def collect_frames(path: str | Path) -> tuple[list[dict], float, bool]:
             continue
         rec: dict = {"seq": seq, "t_us": float(row["t_us"]),
                      "calib": bool(row.get("calib", False))}
-        payload = row.get("imu_raw")
-        if payload is not None:
-            batch = decode_imu_raw(payload, tick_us=tick_us)
-            if batch.timestamp_ticks.size:
-                rec["ts_last_us"] = float(batch.timestamp_ticks[-1]) * tick_us
-                rec["n_ts"] = int(batch.timestamp_ticks.size)
+        payloads = row.get("imu_raw_payloads") or []
+        if payloads:
+            rec["n_imu_raw_sends"] = len(payloads)  # >1 only under a decoupled rate
+            ticks_parts = []
+            for payload in payloads:
+                batch = decode_imu_raw(payload, tick_us=tick_us)
+                if batch.timestamp_ticks.size:
+                    ticks_parts.append(batch.timestamp_ticks)
+            if ticks_parts:
+                all_ticks = np.concatenate(ticks_parts)
+                rec["ts_last_us"] = float(all_ticks[-1]) * tick_us
+                rec["n_ts"] = int(all_ticks.size)
         sync = row.get("sync")
         if sync is not None and sync.valid:
             rec["sync_us"] = sync.frame_ready_ticks(tick_us) * tick_us

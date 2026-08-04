@@ -16,9 +16,11 @@ ones a before/after skew number depends on being true:
 import numpy as np
 import pytest
 
+from roomscan.protocol import FrameHeader, FrameType, ImuFifoTag, StreamId, pack_frame
 from tools.skew_check import (
     LSM_SAMPLE_PERIOD_US,
     _fit_residual,
+    collect_frames,
     summarize_us,
     windowed_residuals,
 )
@@ -107,3 +109,109 @@ def test_degenerate_inputs_do_not_raise():
         np.zeros(5), np.arange(5.0))[0] or True     # nan slope, no exception
     resid, slope, used = windowed_residuals(np.arange(3.0), np.arange(3.0), 20.0)
     assert resid.size == 0 and np.isnan(slope) and not used.any()
+
+
+# --- collect_frames(): Task 7 N:1 IMU_RAW-per-seq rework --------------------------------
+#
+# A decoupled IMU/env rate (SET_IMU_ENV_RATE, cmd 11) can drain the LSM FIFO several
+# times off its own schedule while one ToF seq is still current (g_last_seq frozen
+# between frames -- see rs_lsm_service_tick() in vl53l9_app.c and docs/protocol.md).
+# collect_frames() used to keep `row["imu_raw"] = frame.payload`, a plain overwrite --
+# every IMU_RAW payload but the last one sharing a seq was silently discarded. These
+# tests build tiny synthetic captures (no real device/hardware involved) directly out
+# of the wire protocol to pin that every payload sharing a seq now survives.
+
+def _imu_raw_payload(ticks: list[int]) -> bytes:
+    """One synthetic stream-11 payload: len(ticks) TIMESTAMP-tag (0x04) records, cnt=0,
+    each carrying one tick value in its 4-byte LE field (the other 2 data bytes and the
+    reserved byte are unused/zero -- decode_imu_raw never reads them for this tag)."""
+    tag_byte = int(ImuFifoTag.TIMESTAMP) << 3   # TAG_CNT=0, bit0 (not_used0) always 0
+    out = bytearray()
+    for t in ticks:
+        rec = bytearray(8)
+        rec[0] = tag_byte
+        rec[1:5] = int(t).to_bytes(4, "little")
+        out += rec
+    return bytes(out)
+
+
+def _wire_frame(frame_type: int, stream_id: int, seq: int, t_us: int, payload: bytes) -> bytes:
+    hdr = FrameHeader(frame_type, stream_id, 0, seq, t_us, 0, 0, len(payload))
+    return pack_frame(hdr, payload)
+
+
+def test_collect_frames_retains_all_imu_raw_sends_sharing_one_frozen_seq(tmp_path):
+    """The rework's whole point: 2+ decoupled IMU/env sends between two ToF frames
+    (sharing one frozen seq) must ALL be retained, not last-write-wins overwritten."""
+    seq = 42
+    raw1 = _imu_raw_payload([100, 200, 300])   # first off-cycle drain, 3 TIMESTAMP words
+    raw2 = _imu_raw_payload([400, 500])        # second off-cycle drain, 2 more
+    data = (_wire_frame(FrameType.DATA, StreamId.RAW_3DMD, seq, 1_000_000, b"\x00")
+           + _wire_frame(FrameType.DATA, StreamId.IMU_RAW, seq, 1_000_000, raw1)
+           + _wire_frame(FrameType.DATA, StreamId.IMU_RAW, seq, 1_000_000, raw2))
+    p = tmp_path / "cap.bin"
+    p.write_bytes(data)
+
+    rows, tick_us, _tick_from_device = collect_frames(p)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["seq"] == seq
+    assert row["n_imu_raw_sends"] == 2                       # both sends counted
+    assert row["n_ts"] == 5                                  # 3 + 2 -- NOT just raw2's 2
+    # last tick overall is raw2's last (500), not raw1's (300) -- arrival order preserved
+    assert row["ts_last_us"] == pytest.approx(500 * tick_us)
+
+
+def test_collect_frames_last_write_wins_would_have_lost_the_earlier_send():
+    """Pin the DEFECT this replaces: proves the new test above can actually fail --
+    a last-write-wins implementation (row["imu_raw"] = payload, no list) would report
+    n_ts=2 (only raw2's words) and silently drop raw1's 3 entirely. Reimplements just
+    enough of the old overwrite behavior in isolation (no capture I/O) to show the
+    numbers the fixed collect_frames() must NOT reproduce."""
+    from roomscan.protocol import decode_imu_raw
+    raw1 = _imu_raw_payload([100, 200, 300])
+    raw2 = _imu_raw_payload([400, 500])
+    old_style_row: dict = {}
+    for payload in (raw1, raw2):
+        old_style_row["imu_raw"] = payload   # last-write-wins, the pre-Task-7 behavior
+    batch = decode_imu_raw(old_style_row["imu_raw"], tick_us=21.7)
+    assert batch.timestamp_ticks.size == 2                   # would have lost raw1's 3
+    assert int(batch.timestamp_ticks.size) != 5               # != the correct total
+
+
+def test_collect_frames_single_imu_raw_send_is_unaffected_coupled_mode(tmp_path):
+    """Coupled mode (today's default, rate 0): exactly one IMU_RAW per seq, so the
+    rework changes nothing observable -- same n_ts/ts_last_us as a plain single decode."""
+    seq = 7
+    raw = _imu_raw_payload([10, 20, 30])
+    data = (_wire_frame(FrameType.DATA, StreamId.RAW_3DMD, seq, 500_000, b"\x00")
+           + _wire_frame(FrameType.DATA, StreamId.IMU_RAW, seq, 500_000, raw))
+    p = tmp_path / "cap.bin"
+    p.write_bytes(data)
+    rows, tick_us, _ = collect_frames(p)
+    assert len(rows) == 1
+    assert rows[0]["n_imu_raw_sends"] == 1
+    assert rows[0]["n_ts"] == 3
+    assert rows[0]["ts_last_us"] == pytest.approx(30 * tick_us)
+
+
+def test_collect_frames_two_tof_frames_each_keep_their_own_imu_raw_sends(tmp_path):
+    """Multiple seqs in one capture must not cross-contaminate each other's IMU_RAW
+    lists -- seq 1's two sends and seq 2's one send stay correctly partitioned."""
+    data = (
+        _wire_frame(FrameType.DATA, StreamId.RAW_3DMD, 1, 0, b"\x00")
+        + _wire_frame(FrameType.DATA, StreamId.IMU_RAW, 1, 0, _imu_raw_payload([1, 2]))
+        + _wire_frame(FrameType.DATA, StreamId.IMU_RAW, 1, 0, _imu_raw_payload([3]))
+        + _wire_frame(FrameType.DATA, StreamId.RAW_3DMD, 2, 33_000, b"\x00")
+        + _wire_frame(FrameType.DATA, StreamId.IMU_RAW, 2, 33_000, _imu_raw_payload([4, 5, 6]))
+    )
+    p = tmp_path / "cap.bin"
+    p.write_bytes(data)
+    rows, _tick_us, _ = collect_frames(p)
+    assert len(rows) == 2
+    by_seq = {r["seq"]: r for r in rows}
+    assert by_seq[1]["n_imu_raw_sends"] == 2
+    assert by_seq[1]["n_ts"] == 3
+    assert by_seq[2]["n_imu_raw_sends"] == 1
+    assert by_seq[2]["n_ts"] == 3

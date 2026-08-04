@@ -3282,14 +3282,36 @@ amendment (the shipped preset moves out of the 90–100 Hz band, but manual requ
 
 ## BUG-074 — SET_STANDBY wake path likely missing the BUG-072 standby-shadow repair
 
-**Status:** open, unconfirmed · **Area:** firmware/scanner-stream · **Found by:** same investigation —
-the ToF stream was found wedged at 0 Hz at session start (IMU/env still free-running ~18.2 Hz, PING
-fine) and `SET_STANDBY(wake=0)` timed out 3× (up to 20 s) while `REINIT` fixed it immediately.
+**Status:** investigated 2026-08-04 (Task 7) — **the shadow-desync hypothesis does NOT hold**; a
+related-but-different defect found and fixed instead (hardware wake-after-desync retest still
+outstanding) · **Area:** firmware/scanner-stream · **Found by:** same investigation — the ToF stream
+was found wedged at 0 Hz at session start (IMU/env still free-running ~18.2 Hz, PING fine) and
+`SET_STANDBY(wake=0)` timed out 3× (up to 20 s) while `REINIT` fixed it immediately.
 
-BUG-072 repaired the `rs_standby_level` shadow on the profile-apply stop-failure and REINIT paths, but
-the SET_STANDBY wake path appears not to have the same repair — matching the observed "wake times out,
-REINIT recovers" signature. Check and fix alongside Task 7's work in `vl53l9_app.c` (same file), with a
-wake-after-desync hardware test.
+**Determination (code + git-history reading, not yet hardware-retested):** the wake path
+(`rs_apply_pending_config`'s `cmd == RS_CMD_SET_STANDBY`, `to == RS_STANDBY_ACTIVE` arm) is NOT missing
+BUG-072's shadow repair. It sets `rs_standby_level = RS_STANDBY_ACTIVE` **optimistically, before** the
+`vl53l9_start()`/`rs_sensor_reinit()` hardware call — and `git show b10f44d` (BUG-072's own fix commit)
+shows that line and its block comment are UNCHANGED context, i.e. this pattern predates BUG-072
+entirely. BUG-072's own writeup even credits it: the profile-apply stop-failure desync it reproduced
+was, in one case, incidentally repaired by "an explicit `SET_STANDBY(ACTIVE)` command's OWN optimistic
+shadow-set-before-hardware-call." So the wake path was never the thing missing the fix — if anything it
+is the origin of the fix pattern BUG-072 copied elsewhere.
+
+**What was actually wrong, and fixed:** unlike its siblings in the same function (the profile-apply
+stop-failure path, and this same command's `to == SOFT/HARD` idle-direction arm), the wake path's own
+hardware-call failures (`vl53l9_start()` failing from SOFT, `rs_sensor_reinit()` failing from HARD) fell
+straight into `handle_error()`'s bounded recovery with **no ACK sent at all** — every sibling instead
+acks `SENSOR_ERROR` (with packed status) *before* attempting recovery, guaranteeing the host gets some
+response even when recovery itself is what eventually resolves things. A silent failure here reproduces
+the observed symptom exactly (timeout, not an error reply) — `REINIT` "fixing it" is consistent with
+being a fresh, separate command that got its own independent chance to ACK, not with it doing anything
+the wake path's own recovery couldn't. Fixed: both wake-path failure branches now ack `SENSOR_ERROR`
+before calling `rs_sensor_reinit()`/`handle_error()`, matching the established sibling idiom. The
+shadow itself needed no change. **Still outstanding:** an on-hardware wake-after-desync retest (this
+session could only read code, not drive the rig) to confirm the ack-before-recover fix actually
+resolves the timeout, since the root-cause chain above was reconstructed from source + git history
+rather than reproduced live.
 
 ## BUG-075 — 50 Hz/2 ms manual request delivers a near-even bimodal 20/40 ms alternation, not a clean floor
 
