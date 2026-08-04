@@ -58,6 +58,14 @@ writes a tool, drive it through its `host/tools/` CLI from Bash, and tell subage
 the MCP surface catches up on the next server start. Same failure shape as a stale `roomscan-web`
 (ROADMAP 6.D's "SLAM gave up", which was a process running week-old code).
 
+⚠ **The client's tool *list* can lag the server's code independently.** Observed 2026-08-04: after a
+restart, `rig_status()` returned fields that only exist in the newly-added code — so the server was
+demonstrably running it — while three tools added in the same commit were absent from the client's
+tool list and could not be called. Code freshness and surface freshness are two questions; a tool
+"not existing" is not evidence the server is stale. Check by calling a tool that already exists and
+looking for a field the new code adds, and drive the new one through its `host/tools/` CLI or an
+in-process call meanwhile.
+
 ## Tools
 
 **rig_\*** — control a running `roomscan-web` over `/ws` (`docs/web-protocol.md`).
