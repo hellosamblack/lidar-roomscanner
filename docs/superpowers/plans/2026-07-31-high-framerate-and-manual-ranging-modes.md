@@ -38,7 +38,8 @@
 > visual pass PASSED for the selector, non-optimistic preset apply, invalid-combo rejection, the
 > "ToF bus airtime" bar's color escalation, the >60 fps quantization warning, the IMU/env control,
 > and tooltip coverage; two checks were tool-limited (true second tab, narrow-viewport resize).
-> **BUG-079 filed:** the Manual fps/exposure widgets can't apply a changed value (a 250 ms periodic
+> **BUG-079 filed + fixed same session** (`controls.js` `manualDirty` guard, live-verified): the
+> Manual fps/exposure widgets could not apply a changed value (a 250 ms periodic
 > `ranging` re-broadcast outruns the 300 ms UI debounce and reverts the field); presets/IMU-env/
 > `set_manual_params`-over-wire are unaffected.
 
@@ -759,7 +760,8 @@ ToF frame cadence.
 > visual pass PASSED for the selector, non-optimistic preset apply, invalid-combo rejection, the
 > "ToF bus airtime" bar's color escalation, the >60 fps quantization warning, the IMU/env control,
 > and tooltip coverage; two checks were tool-limited (true second tab, narrow-viewport resize).
-> **BUG-079 filed:** the Manual fps/exposure widgets can't apply a changed value (a 250 ms periodic
+> **BUG-079 filed + fixed same session** (`controls.js` `manualDirty` guard, live-verified): the
+> Manual fps/exposure widgets could not apply a changed value (a 250 ms periodic
 > `ranging` re-broadcast outruns the 300 ms UI debounce and reverts the field); presets/IMU-env/
 > `set_manual_params`-over-wire are unaffected. — then `status-sync`, land, and `milestone-retro`.
 

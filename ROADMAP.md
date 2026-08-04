@@ -698,8 +698,10 @@ reflectance super-resolution / sensor-fusion-overlay work (both scoped, not yet 
 > server-side second-client sync-on-connect verified. Two checks were tool-limited and honestly not
 > performed: a truly rendered second tab, and a narrow-viewport resize (the ui_* screenshot tool
 > would not change the viewport; narrow-width has a prior verification in
-> `docs/web-ui-testing.md`). **One real defect found by the pass and filed as BUG-079:** the Manual
-> fps/exposure number/slider widgets cannot apply a changed value — `web.py`'s 250 ms periodic
+> `docs/web-ui-testing.md`). **One real defect found by the pass and filed + fixed same session as
+> BUG-079** (`controls.js` `manualDirty` guard, live-verified — a 45 fps edit held through a 700 ms
+> sample window and the full precision/45/4 ms/regular config round-tripped onto the device)**:** the
+> Manual fps/exposure number/slider widgets cannot apply a changed value — `web.py`'s 250 ms periodic
 > `ranging` re-broadcast outruns `controls.js`'s 300 ms `MANUAL_DEBOUNCE_MS` and reverts the field
 > before it sends (presets, the IMU/env control, and `set_manual_params` over `/ws` are all
 > unaffected). Full resume state:

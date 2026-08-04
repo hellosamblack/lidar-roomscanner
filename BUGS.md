@@ -3503,8 +3503,8 @@ DSS-off validation per Task 4 step 7), either wire a real `option()` +
 
 ## BUG-079 — Manual ranging fps/exposure UI inputs revert before they can be applied (debounce race)
 
-**Status:** open · **Area:** host/web UI (`controls.js` / `web.py`) · **Found by:** Task 12 browser-UI
-visual pass, 2026-08-04.
+**Status:** fixed (2026-08-04) · **Area:** host/web UI (`controls.js` / `web.py`) · **Found by:**
+Task 12 browser-UI visual pass, 2026-08-04.
 
 The Manual ranging-mode number/slider inputs cannot reliably apply a changed value. `controls.js`
 debounces manual-parameter edits for `MANUAL_DEBOUNCE_MS = 300` ms (`controls.js:50`), but `web.py`
@@ -3518,3 +3518,11 @@ sending `set_manual_params` directly over `/ws` all work. Fix direction: track a
 since last user edit" flag and suppress the periodic field-resync while a local edit is in flight (or
 send-on-input rather than debouncing against a faster external resync). Raising the debounce below
 250 ms does not help — it still races the resync.
+
+**Fixed 2026-08-04:** `controls.js` now carries a `manualDirty` flag set in `sendManualParamsDebounced()`
+(the single choke point every manual-edit handler calls) and cleared only on a command completing (a
+`ranging` `pending` true→false transition). The re-seed of the manual inputs from applied state is
+guarded by `!rangingPending && !manualDirty`, so a periodic echo can no longer revert an in-progress
+edit. Verified on the live rig: a 45 fps edit held for the full 700 ms sample window (no snap-back)
+and the full manual config (precision/45 fps/4 ms/regular) round-tripped and applied on the device
+(readback confirmed, measured 44.85 fps); presets and the IMU/env control regressed nothing.

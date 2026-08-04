@@ -86,6 +86,14 @@ export function createControls(hub) {
     let imuEnvMode = 'coupled';
     let manualDebounce = null;
     let imuEnvDebounce = null;
+    // A manual fps/exposure/mode edit is held locally until the device confirms it.
+    // The server re-broadcasts `ranging` every ~250ms (faster than MANUAL_DEBOUNCE_MS),
+    // so re-seeding the manual inputs from applied state on every echo would revert an
+    // in-progress edit before it is ever sent (BUG-079). `manualDirty` suppresses that
+    // re-seed while an edit is outstanding; it is cleared only when a command actually
+    // completes (a pending true -> false transition).
+    let manualDirty = false;
+    let prevRangingPending = false;
 
     function setSegActive(seg, attr, value) {
         if (!seg) return;
@@ -95,6 +103,7 @@ export function createControls(hub) {
     }
 
     function sendManualParamsDebounced() {
+        manualDirty = true;   // hold the local edit against the periodic re-seed (BUG-079)
         if (manualDebounce) clearTimeout(manualDebounce);
         manualDebounce = setTimeout(() => {
             manualDebounce = null;
@@ -194,6 +203,10 @@ export function createControls(hub) {
 
     hub.on('ranging', (msg) => {
         rangingPending = !!msg.pending;
+        // Clear the local manual edit only when a command completes (pending true -> false);
+        // until then, a periodic echo must not revert the in-progress edit (BUG-079).
+        if (prevRangingPending && !rangingPending) manualDirty = false;
+        prevRangingPending = rangingPending;
         setSegActive(segRangingProfile, 'profile', msg.applied ? msg.applied.profile : null);
         for (const b of (segRangingProfile ? segRangingProfile.querySelectorAll('button') : [])) {
             b.disabled = rangingPending;
@@ -215,7 +228,7 @@ export function createControls(hub) {
                 rangingAppliedVal.textContent =
                     `${PROFILE_LABELS[a.profile] || a.profile} (${a.ranging_mode}, ${a.fps} fps, ` +
                     `${a.exposure_ms} ms, ${a.power_mode})`;
-                if (!rangingPending) {
+                if (!rangingPending && !manualDirty) {
                     manualRangingMode = a.ranging_mode;
                     manualPowerMode = a.power_mode;
                     setSegActive(segManualRangingMode, 'rangingMode', manualRangingMode);
