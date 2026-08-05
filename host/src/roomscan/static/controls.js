@@ -72,6 +72,9 @@ export function createControls(hub) {
     const numManualExposure = $('num-manual-exposure');
     const manualExposureVal = $('manual-exposure-val');
 
+    const segCalibrated = $('seg-calibrated');
+    const calibratedNote = $('calibrated-note');
+
     const segImuEnvMode = $('seg-imu-env-mode');
     const slImuEnvRate = $('sl-imu-env-rate');
     const numImuEnvRate = $('num-imu-env-rate');
@@ -339,6 +342,12 @@ export function createControls(hub) {
         const btn = e.target.closest('button[data-mode]');
         if (btn) hub.send({ type: 'set_color', mode: btn.dataset.mode });
     });
+
+    // Device: reflectance flat-field calibration toggle (server-driven active).
+    segCalibrated?.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-calibrated]');
+        if (btn) hub.send({ type: 'set_calibrated', enabled: btn.dataset.calibrated === 'on' });
+    });
     $('btn-reset-cam')?.addEventListener('click', () => hub.emit('reset_camera'));
 
     // View: view mode, colormap, point size, render mode, surface settings
@@ -429,6 +438,13 @@ export function createControls(hub) {
     // --- server state echo drives active segments (§7.2) ---
     hub.on('state', (msg) => {
         setActive(segColor, 'mode', msg.color_mode);
+        // Device: Calibrated/Uncalibrated. Disable + explain when no map is configured.
+        setActive(segCalibrated, 'calibrated', msg.calibrated ? 'on' : 'off');
+        const calAvail = msg.calibration_available !== false;
+        if (segCalibrated) {
+            for (const b of segCalibrated.querySelectorAll('button')) b.disabled = !calAvail;
+        }
+        if (calibratedNote) calibratedNote.hidden = calAvail;
         // View: view mode, colormap, point size, render mode, surface
         setActive(segViewMode, 'viewmode', msg.view_mode);
         // World / FPV / Mirror is shared by Point cloud, Preview, SLAM and

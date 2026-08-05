@@ -2,10 +2,12 @@
 
 Read with ``tomllib`` (stdlib, Python >=3.11, matches ``pyproject.toml``'s
 floor). The stdlib has no TOML *writer*, and this project takes no
-third-party dependency for one -- ``save()`` hand-emits a minimal flat TOML
-(one ``[viewer]`` table, ``key = value`` lines) covering exactly the field
-set below. Do not grow this file's shape (nested tables, arrays, ...)
-without upgrading the writer to match.
+third-party dependency for one -- ``save()`` hand-emits a minimal flat TOML:
+a ``[viewer]`` table of display prefs plus a ``[calibration]`` table of
+host/sensor calibration (the fields in ``_CALIBRATION_FIELDS``), ``key =
+value`` lines covering exactly the field set below. Do not grow this file's
+shape further (more tables, arrays, nesting) without upgrading the writer to
+match.
 
 Priority for effective viewer settings is CLI flag > config file > built-in
 default; ``apply_config_defaults`` implements the CLI-over-config half here,
@@ -115,9 +117,24 @@ class ViewerConfig:
                                             # before the web UI parks itself ("Connection
                                             # idled" modal) and stops rendering/consuming
     yaw_fusion: bool = True                 # graft mag heading onto SFLP yaw
-    flatfield_path: Optional[str] = None    # path to a per-zone reflectance FPN
-                                            # correction (.npz from tools/build_flatfield.py);
-                                            # None disables correction (see flatfield.py)
+    # --- [calibration] table: HOST/SENSOR flat-field calibration ---------------
+    # These are host-owned SENSOR calibration, NOT viewer display prefs -- the
+    # per-zone reflectance FPN is calibrated to this specific sensor die, so they
+    # persist to a separate `[calibration]` TOML table (see `_CALIBRATION_FIELDS`
+    # + `save`/`load`). The FPN is mode-family-specific (2026-08-04 cross-room
+    # study: a Precision map leaves ~4% residual on Ambient and vice versa), so the
+    # active map is picked by the device's current ranging mode;
+    # `FlatFieldSet.load_configured` reads all three. `flatfield_path` is the
+    # legacy single-map fallback/default (also read from `[viewer]` for old files).
+    flatfield_path: Optional[str] = None
+    flatfield_precision_path: Optional[str] = None
+    flatfield_ambient_path: Optional[str] = None
+    flatfield_enabled: bool = True           # apply the configured map(s); the web
+                                            # "Calibrated / Uncalibrated" toggle drives this.
+                                            # No-op when no map is configured, so it defaults
+                                            # on and only bites once a path is set. Host-shared
+                                            # server state (one value for all clients), NOT a
+                                            # per-client preference.
     yaw_fusion_tau: float = 20.0            # complementary-filter time constant (s)
     mag_cal_path: str = "mag_cal.json"      # hard/soft-iron calibration JSON
     yaw_anomaly_frac: float = 0.3           # |mag| deviation from field to reject
@@ -181,16 +198,26 @@ class ViewerConfig:
             data = tomllib.loads(raw)
         except tomllib.TOMLDecodeError:
             return cls()
+        # `[viewer]` = display prefs, `[calibration]` = host/sensor calibration.
+        # Merge both; the `[calibration]` table wins for its own keys, and a legacy
+        # file that still carries a calibration key under `[viewer]` is honoured.
         viewer = data.get("viewer")
-        if not isinstance(viewer, dict):
+        calibration = data.get("calibration")
+        merged: dict = {}
+        if isinstance(viewer, dict):
+            merged.update(viewer)
+        if isinstance(calibration, dict):
+            merged.update(calibration)
+        if not merged:
             return cls()
         known = {f.name for f in fields(cls)}
-        kwargs = {k: v for k, v in viewer.items() if k in known}
+        kwargs = {k: v for k, v in merged.items() if k in known}
         # TOML has no null; `_toml_value` writes None as "" and these read it
         # back. `elevation_datum_ft` is a FLOAT here, not a string -- without
         # this line an unset datum would load as the string "" and every
         # consumer would have to defend against it.
-        for _optkey in ("port", "flatfield_path", "elevation_datum_ft"):
+        for _optkey in ("port", "flatfield_path", "flatfield_precision_path",
+                        "flatfield_ambient_path", "elevation_datum_ft"):
             if kwargs.get(_optkey) == "":
                 kwargs[_optkey] = None  # TOML has no null; empty string round-trips "unset"
         try:
@@ -201,11 +228,18 @@ class ViewerConfig:
     def save(self, path: Optional[Path] = None) -> Path:
         path = Path(path) if path is not None else config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        lines = ["[viewer]"]
+        viewer, calib = ["[viewer]"], ["[calibration]"]
         for f in fields(self):
-            lines.append(f"{f.name} = {_toml_value(getattr(self, f.name))}")
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            line = f"{f.name} = {_toml_value(getattr(self, f.name))}"
+            (calib if f.name in _CALIBRATION_FIELDS else viewer).append(line)
+        path.write_text("\n".join(viewer + [""] + calib) + "\n", encoding="utf-8")
         return path
+
+
+# Fields persisted to the `[calibration]` TOML table (host/sensor calibration)
+# rather than `[viewer]` (display prefs). `save`/`load` route by membership here.
+_CALIBRATION_FIELDS = ("flatfield_path", "flatfield_precision_path",
+                       "flatfield_ambient_path", "flatfield_enabled")
 
 
 def _toml_value(value) -> str:

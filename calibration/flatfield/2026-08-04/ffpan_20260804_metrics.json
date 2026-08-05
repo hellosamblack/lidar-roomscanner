@@ -1,0 +1,641 @@
+{
+  "warmup_frames": 30,
+  "near_object_mm": 100.0,
+  "captures": [
+    {
+      "file": "precisionRegular8msFFpan.bin",
+      "family": "precision",
+      "power": "regular",
+      "exp_claim": "8",
+      "raw_frames": 1200,
+      "settled_frames": 1170,
+      "depth": {
+        "accuracy_note": "no metrology target on a panned capture; distance varies by design",
+        "frame_median_mm": {
+          "n": 1170,
+          "median": 738.5400390625,
+          "mean": 762.6416704878848,
+          "p05": 434.13138275146486,
+          "p95": 1179.6106536865234,
+          "min": 408.7808837890625,
+          "max": 1194.9362182617188
+        },
+        "distance_bands": {
+          "centers_mm": [
+            461.67315324719584,
+            739.2673327387596,
+            1137.3029532937442
+          ],
+          "counts": [
+            389,
+            441,
+            340
+          ],
+          "spread_mm": 675.6298000465483
+        },
+        "plane_fit": {
+          "intercept_mm": 737.1800530441161,
+          "tilt_x_mm_per_m": 18.255764257727474,
+          "tilt_y_mm_per_m": -25.463208523937908,
+          "rms_mm": 4.055969207451036,
+          "abs_p95_mm": 7.671518815337111,
+          "abs_max_mm": 27.622084077351587
+        }
+      },
+      "reflectance": {
+        "raw_fpn_pct": 6.899359117817376,
+        "gain_min": 0.7841748595237732,
+        "gain_max": 1.193010926246643,
+        "gain_std_pct": 6.7646965980529785,
+        "gain_frac_outside_0p5_1p6_pct": 0.0,
+        "gain_frac_at_clip_pct": 0.0,
+        "gain_lowfreq_std_pct": 0.7519706419713055,
+        "builder_meta": {
+          "n_frames": 1170,
+          "smooth_sigma": 2.5,
+          "residual_pct": 6.899359117817376,
+          "note": "panned precisionRegular8msFFpan.bin"
+        }
+      },
+      "held_out_distance": {
+        "near_center_mm": 461.6071243286133,
+        "far_center_mm": 1127.0775756835938,
+        "far_raw_pct": 6.242963148712794,
+        "far_after_nearmap_pct": 7.212587081406268,
+        "near_raw_pct": 9.331656226304226,
+        "near_after_farmap_pct": 7.417744908771681,
+        "near_after_nearhalfmap_pct": 3.1647262738075046
+      },
+      "contamination": {
+        "plane_residual_abs_p99_mm": 13.398184502728105,
+        "plane_residual_abs_max_mm": 23.998012603847087,
+        "near_object_zones_per_frame": {
+          "n": 1170,
+          "median": 0.0,
+          "mean": 758.1162393162393,
+          "p05": 0.0,
+          "p95": 2268.0,
+          "min": 0.0,
+          "max": 2268.0
+        },
+        "near_object_worst_zone": {
+          "row": 28,
+          "col": 34,
+          "frac_frames": 0.3367521367521368
+        },
+        "frames_with_ge5_near_zones_pct": 33.589743589743584,
+        "reflectance_lowfreq_cv_pct": 9.623586390637186
+      },
+      "exposure_signal": {
+        "ambient_mean": 74165.51166660307,
+        "ambient_median": 83333.328125,
+        "reflectance_mean": 62.92810935920212,
+        "confidence_mean": 168.839458278988,
+        "zone_temporal_std_mm_median": 269.6638241879167
+      }
+    },
+    {
+      "file": "precisionULP8msFFpan.bin",
+      "family": "precision",
+      "power": "ulp",
+      "exp_claim": "8",
+      "raw_frames": 1208,
+      "settled_frames": 1178,
+      "depth": {
+        "accuracy_note": "no metrology target on a panned capture; distance varies by design",
+        "frame_median_mm": {
+          "n": 1178,
+          "median": 668.6298980712891,
+          "mean": 732.6957181402702,
+          "p05": 413.3368110656738,
+          "p95": 1152.639562988281,
+          "min": 402.54052734375,
+          "max": 1165.6233520507812
+        },
+        "distance_bands": {
+          "centers_mm": [
+            427.94328463218454,
+            676.9214236825545,
+            1125.7924779856924
+          ],
+          "counts": [
+            423,
+            374,
+            381
+          ],
+          "spread_mm": 697.8491933535079
+        },
+        "plane_fit": {
+          "intercept_mm": 667.7193112894003,
+          "tilt_x_mm_per_m": 6.682385985852119,
+          "tilt_y_mm_per_m": -27.99457313292919,
+          "rms_mm": 3.1311325777921013,
+          "abs_p95_mm": 6.013834758945024,
+          "abs_max_mm": 17.60730814432395
+        }
+      },
+      "reflectance": {
+        "raw_fpn_pct": 6.750613985974978,
+        "gain_min": 0.802163302898407,
+        "gain_max": 1.1831845045089722,
+        "gain_std_pct": 6.638596057891846,
+        "gain_frac_outside_0p5_1p6_pct": 0.0,
+        "gain_frac_at_clip_pct": 0.0,
+        "gain_lowfreq_std_pct": 0.7520713770809688,
+        "builder_meta": {
+          "n_frames": 1178,
+          "smooth_sigma": 2.5,
+          "residual_pct": 6.750613985974978,
+          "note": "panned precisionULP8msFFpan.bin"
+        }
+      },
+      "held_out_distance": {
+        "near_center_mm": 424.6291198730469,
+        "far_center_mm": 1137.0133666992188,
+        "far_raw_pct": 6.332079896525427,
+        "far_after_nearmap_pct": 7.947042969335897,
+        "near_raw_pct": 9.517314567266633,
+        "near_after_farmap_pct": 8.171844262675371,
+        "near_after_nearhalfmap_pct": 2.05252655274599
+      },
+      "contamination": {
+        "plane_residual_abs_p99_mm": 8.949160301090314,
+        "plane_residual_abs_max_mm": 18.487156752173064,
+        "near_object_zones_per_frame": {
+          "n": 1178,
+          "median": 0.0,
+          "mean": 816.6078098471986,
+          "p05": 0.0,
+          "p95": 2268.0,
+          "min": 0.0,
+          "max": 2268.0
+        },
+        "near_object_worst_zone": {
+          "row": 40,
+          "col": 53,
+          "frac_frames": 0.3709677419354839
+        },
+        "frames_with_ge5_near_zones_pct": 37.26655348047538,
+        "reflectance_lowfreq_cv_pct": 9.98701125864639
+      },
+      "exposure_signal": {
+        "ambient_mean": 68904.45790888804,
+        "ambient_median": 83333.328125,
+        "reflectance_mean": 62.1406683177688,
+        "confidence_mean": 168.27600742130733,
+        "zone_temporal_std_mm_median": 293.19259207836956
+      }
+    },
+    {
+      "file": "ambientRegular8msFFpan.bin",
+      "family": "ambient",
+      "power": "regular",
+      "exp_claim": "8",
+      "raw_frames": 848,
+      "settled_frames": 818,
+      "depth": {
+        "accuracy_note": "no metrology target on a panned capture; distance varies by design",
+        "frame_median_mm": {
+          "n": 818,
+          "median": 647.7412414550781,
+          "mean": 709.9337898758047,
+          "p05": 441.63388900756837,
+          "p95": 1151.709652709961,
+          "min": 435.94883728027344,
+          "max": 1158.3800659179688
+        },
+        "distance_bands": {
+          "centers_mm": [
+            467.20661170121826,
+            669.7507515253983,
+            1115.2445862891916
+          ],
+          "counts": [
+            337,
+            254,
+            227
+          ],
+          "spread_mm": 648.0379745879734
+        },
+        "plane_fit": {
+          "intercept_mm": 647.1256681946305,
+          "tilt_x_mm_per_m": -18.51702839872776,
+          "tilt_y_mm_per_m": -71.16507637611669,
+          "rms_mm": 6.770219622004784,
+          "abs_p95_mm": 12.668623707188187,
+          "abs_max_mm": 41.940255137251256
+        }
+      },
+      "reflectance": {
+        "raw_fpn_pct": 6.411449275804411,
+        "gain_min": 0.8064581751823425,
+        "gain_max": 1.1862561702728271,
+        "gain_std_pct": 6.286317825317383,
+        "gain_frac_outside_0p5_1p6_pct": 0.0,
+        "gain_frac_at_clip_pct": 0.0,
+        "gain_lowfreq_std_pct": 0.7466464334788099,
+        "builder_meta": {
+          "n_frames": 818,
+          "smooth_sigma": 2.5,
+          "residual_pct": 6.411449275804411,
+          "note": "panned ambientRegular8msFFpan.bin"
+        }
+      },
+      "held_out_distance": {
+        "near_center_mm": 458.8931350708008,
+        "far_center_mm": 1127.1901550292969,
+        "far_raw_pct": 6.392401134052228,
+        "far_after_nearmap_pct": 7.836590161689845,
+        "near_raw_pct": 8.843690740293333,
+        "near_after_farmap_pct": 7.991409453864986,
+        "near_after_nearhalfmap_pct": 2.3295247671389965
+      },
+      "contamination": {
+        "plane_residual_abs_p99_mm": 17.348845729749687,
+        "plane_residual_abs_max_mm": 40.30369257081486,
+        "near_object_zones_per_frame": {
+          "n": 818,
+          "median": 0.0,
+          "mean": 931.5733496332518,
+          "p05": 0.0,
+          "p95": 2268.0,
+          "min": 0.0,
+          "max": 2268.0
+        },
+        "near_object_worst_zone": {
+          "row": 0,
+          "col": 18,
+          "frac_frames": 0.45232273838630804
+        },
+        "frames_with_ge5_near_zones_pct": 42.665036674816626,
+        "reflectance_lowfreq_cv_pct": 9.825476125780002
+      },
+      "exposure_signal": {
+        "ambient_mean": 42536.74687065248,
+        "ambient_median": 0.0,
+        "reflectance_mean": 56.003516437972365,
+        "confidence_mean": 107.63424828081996,
+        "zone_temporal_std_mm_median": 267.8470754055118
+      }
+    },
+    {
+      "file": "ambientULP8msFFpan.bin",
+      "family": "ambient",
+      "power": "ulp",
+      "exp_claim": "8",
+      "raw_frames": 980,
+      "settled_frames": 950,
+      "depth": {
+        "accuracy_note": "no metrology target on a panned capture; distance varies by design",
+        "frame_median_mm": {
+          "n": 950,
+          "median": 619.3838348388672,
+          "mean": 691.594700702868,
+          "p05": 449.4355758666992,
+          "p95": 1077.0592315673828,
+          "min": 445.7877197265625,
+          "max": 1084.5382690429688
+        },
+        "distance_bands": {
+          "centers_mm": [
+            470.3651548468548,
+            646.5852805945524,
+            1048.10750215445
+          ],
+          "counts": [
+            368,
+            314,
+            268
+          ],
+          "spread_mm": 577.7423473075952
+        },
+        "plane_fit": {
+          "intercept_mm": 622.2884881629205,
+          "tilt_x_mm_per_m": 20.658552291473775,
+          "tilt_y_mm_per_m": -99.01647772453614,
+          "rms_mm": 10.52253543787021,
+          "abs_p95_mm": 17.892874897867877,
+          "abs_max_mm": 42.806459376377006
+        }
+      },
+      "reflectance": {
+        "raw_fpn_pct": 6.658713842897434,
+        "gain_min": 0.7817119359970093,
+        "gain_max": 1.2020782232284546,
+        "gain_std_pct": 6.508416652679443,
+        "gain_frac_outside_0p5_1p6_pct": 0.0,
+        "gain_frac_at_clip_pct": 0.0,
+        "gain_lowfreq_std_pct": 0.7643146910798143,
+        "builder_meta": {
+          "n_frames": 950,
+          "smooth_sigma": 2.5,
+          "residual_pct": 6.658713842897434,
+          "note": "panned ambientULP8msFFpan.bin"
+        }
+      },
+      "held_out_distance": {
+        "near_center_mm": 462.08495330810547,
+        "far_center_mm": 1057.4000854492188,
+        "far_raw_pct": 6.649861404049124,
+        "far_after_nearmap_pct": 7.571838547352671,
+        "near_raw_pct": 8.883247659723471,
+        "near_after_farmap_pct": 7.732600512256517,
+        "near_after_nearhalfmap_pct": 1.9599984729483186
+      },
+      "contamination": {
+        "plane_residual_abs_p99_mm": 27.70331991308121,
+        "plane_residual_abs_max_mm": 44.873892088945354,
+        "near_object_zones_per_frame": {
+          "n": 950,
+          "median": 0.0,
+          "mean": 833.7789473684211,
+          "p05": 0.0,
+          "p95": 2268.0,
+          "min": 0.0,
+          "max": 2268.0
+        },
+        "near_object_worst_zone": {
+          "row": 0,
+          "col": 26,
+          "frac_frames": 0.4126315789473684
+        },
+        "frames_with_ge5_near_zones_pct": 39.578947368421055,
+        "reflectance_lowfreq_cv_pct": 10.053331506100562
+      },
+      "exposure_signal": {
+        "ambient_mean": 31872.81370750009,
+        "ambient_median": 0.0,
+        "reflectance_mean": 55.563339518008206,
+        "confidence_mean": 110.69806794667967,
+        "zone_temporal_std_mm_median": 238.6401096170951
+      }
+    },
+    {
+      "file": "ambientRegular8or16msFFpan.bin",
+      "family": "ambient",
+      "power": "regular",
+      "exp_claim": "8or16",
+      "raw_frames": 1498,
+      "settled_frames": 1468,
+      "depth": {
+        "accuracy_note": "no metrology target on a panned capture; distance varies by design",
+        "frame_median_mm": {
+          "n": 1468,
+          "median": 626.9416809082031,
+          "mean": 685.5041904501434,
+          "p05": 417.94814987182616,
+          "p95": 1202.4246124267577,
+          "min": 411.31797790527344,
+          "max": 1254.2119140625
+        },
+        "distance_bands": {
+          "centers_mm": [
+            469.0344473354754,
+            702.8412262239068,
+            1186.2083156419837
+          ],
+          "counts": [
+            727,
+            442,
+            299
+          ],
+          "spread_mm": 717.1738683065083
+        },
+        "plane_fit": {
+          "intercept_mm": 627.2230754502762,
+          "tilt_x_mm_per_m": -39.61621447464565,
+          "tilt_y_mm_per_m": -18.0738596370702,
+          "rms_mm": 7.086339372936643,
+          "abs_p95_mm": 14.275947248100785,
+          "abs_max_mm": 28.98025391128374
+        }
+      },
+      "reflectance": {
+        "raw_fpn_pct": 11.43549487668523,
+        "gain_min": 0.6815785765647888,
+        "gain_max": 1.6306400299072266,
+        "gain_std_pct": 12.3291654586792,
+        "gain_frac_outside_0p5_1p6_pct": 0.04409171075837742,
+        "gain_frac_at_clip_pct": 0.0,
+        "gain_lowfreq_std_pct": 0.8650466786531412,
+        "builder_meta": {
+          "n_frames": 1468,
+          "smooth_sigma": 2.5,
+          "residual_pct": 11.43549487668523,
+          "note": "panned ambientRegular8or16msFFpan.bin"
+        }
+      },
+      "held_out_distance": {
+        "near_center_mm": 449.8292694091797,
+        "far_center_mm": 1176.6723022460938,
+        "far_raw_pct": 8.48548328703855,
+        "far_after_nearmap_pct": 29.20294907091953,
+        "near_raw_pct": 21.839033991052435,
+        "near_after_farmap_pct": 22.689725608833573,
+        "near_after_nearhalfmap_pct": 5.929628289454371
+      },
+      "contamination": {
+        "plane_residual_abs_p99_mm": 18.528443223986624,
+        "plane_residual_abs_max_mm": 24.81073879333792,
+        "near_object_zones_per_frame": {
+          "n": 1468,
+          "median": 0.0,
+          "mean": 981.474795640327,
+          "p05": 0.0,
+          "p95": 2264.0,
+          "min": 0.0,
+          "max": 2268.0
+        },
+        "near_object_worst_zone": {
+          "row": 35,
+          "col": 3,
+          "frac_frames": 0.47002724795640327
+        },
+        "frames_with_ge5_near_zones_pct": 47.275204359673026,
+        "reflectance_lowfreq_cv_pct": 8.537811781152822
+      },
+      "exposure_signal": {
+        "ambient_mean": 43087.44884208129,
+        "ambient_median": 46296.296875,
+        "reflectance_mean": 46.9875499357275,
+        "confidence_mean": 126.02215998181376,
+        "zone_temporal_std_mm_median": 275.9291424363224
+      }
+    },
+    {
+      "file": "ambientULP8or16msFFpan.bin",
+      "family": "ambient",
+      "power": "ulp",
+      "exp_claim": "8or16",
+      "raw_frames": 1197,
+      "settled_frames": 1167,
+      "depth": {
+        "accuracy_note": "no metrology target on a panned capture; distance varies by design",
+        "frame_median_mm": {
+          "n": 1167,
+          "median": 654.3189392089844,
+          "mean": 714.3111070569192,
+          "p05": 431.1034896850586,
+          "p95": 1146.1873718261718,
+          "min": 422.3162841796875,
+          "max": 1155.2318115234375
+        },
+        "distance_bands": {
+          "centers_mm": [
+            452.5830878728553,
+            667.8778690821688,
+            1130.1184460340871
+          ],
+          "counts": [
+            474,
+            355,
+            338
+          ],
+          "spread_mm": 677.5353581612319
+        },
+        "plane_fit": {
+          "intercept_mm": 654.7849340869266,
+          "tilt_x_mm_per_m": 9.325206667192578,
+          "tilt_y_mm_per_m": 20.406132086549178,
+          "rms_mm": 4.53878324052866,
+          "abs_p95_mm": 8.366545523799505,
+          "abs_max_mm": 43.744021490802766
+        }
+      },
+      "reflectance": {
+        "raw_fpn_pct": 6.2405351245046115,
+        "gain_min": 0.8184252977371216,
+        "gain_max": 1.1766784191131592,
+        "gain_std_pct": 6.130415916442871,
+        "gain_frac_outside_0p5_1p6_pct": 0.0,
+        "gain_frac_at_clip_pct": 0.0,
+        "gain_lowfreq_std_pct": 0.7309783890954473,
+        "builder_meta": {
+          "n_frames": 1167,
+          "smooth_sigma": 2.5,
+          "residual_pct": 6.2405351245046115,
+          "note": "panned ambientULP8or16msFFpan.bin"
+        }
+      },
+      "held_out_distance": {
+        "near_center_mm": 441.0965881347656,
+        "far_center_mm": 1134.3140869140625,
+        "far_raw_pct": 6.361917034978314,
+        "far_after_nearmap_pct": 8.130833526369607,
+        "near_raw_pct": 8.813970680748675,
+        "near_after_farmap_pct": 8.281817812584638,
+        "near_after_nearhalfmap_pct": 1.7031270540240548
+      },
+      "contamination": {
+        "plane_residual_abs_p99_mm": 10.341115203243803,
+        "plane_residual_abs_max_mm": 43.739506677248755,
+        "near_object_zones_per_frame": {
+          "n": 1167,
+          "median": 0.0,
+          "mean": 919.7300771208227,
+          "p05": 0.0,
+          "p95": 2268.0,
+          "min": 0.0,
+          "max": 2268.0
+        },
+        "near_object_worst_zone": {
+          "row": 0,
+          "col": 25,
+          "frac_frames": 0.4361610968294773
+        },
+        "frames_with_ge5_near_zones_pct": 41.131105398457585,
+        "reflectance_lowfreq_cv_pct": 9.709156869916958
+      },
+      "exposure_signal": {
+        "ambient_mean": 41525.78745154357,
+        "ambient_median": 0.0,
+        "reflectance_mean": 55.765401626686845,
+        "confidence_mean": 119.90293521486583,
+        "zone_temporal_std_mm_median": 282.0166795760481
+      }
+    }
+  ],
+  "exposure_calls": {
+    "ambientRegular8or16msFFpan.bin": {
+      "call": "8",
+      "vs_sibling": "ambientRegular8msFFpan.bin",
+      "ambient_ratio": 1.013,
+      "noise_ratio": 1.03,
+      "note": "ambient ~2x AND/OR noise ~0.71x => 16 ms; both ~1x => 8 ms"
+    },
+    "ambientULP8or16msFFpan.bin": {
+      "call": "8",
+      "vs_sibling": "ambientULP8msFFpan.bin",
+      "ambient_ratio": 1.303,
+      "noise_ratio": 1.182,
+      "note": "ambient ~2x AND/OR noise ~0.71x => 16 ms; both ~1x => 8 ms"
+    }
+  },
+  "gain_map_correlation": {
+    "precisionRegular8msFFpan.bin vs precisionULP8msFFpan.bin": 0.964,
+    "precisionRegular8msFFpan.bin vs ambientRegular8msFFpan.bin": 0.8611,
+    "precisionRegular8msFFpan.bin vs ambientULP8msFFpan.bin": 0.8338,
+    "precisionRegular8msFFpan.bin vs ambientRegular8or16msFFpan.bin": 0.4448,
+    "precisionRegular8msFFpan.bin vs ambientULP8or16msFFpan.bin": 0.8609,
+    "precisionULP8msFFpan.bin vs ambientRegular8msFFpan.bin": 0.8359,
+    "precisionULP8msFFpan.bin vs ambientULP8msFFpan.bin": 0.779,
+    "precisionULP8msFFpan.bin vs ambientRegular8or16msFFpan.bin": 0.398,
+    "precisionULP8msFFpan.bin vs ambientULP8or16msFFpan.bin": 0.8499,
+    "ambientRegular8msFFpan.bin vs ambientULP8msFFpan.bin": 0.9793,
+    "ambientRegular8msFFpan.bin vs ambientRegular8or16msFFpan.bin": 0.5997,
+    "ambientRegular8msFFpan.bin vs ambientULP8or16msFFpan.bin": 0.9887,
+    "ambientULP8msFFpan.bin vs ambientRegular8or16msFFpan.bin": 0.6296,
+    "ambientULP8msFFpan.bin vs ambientULP8or16msFFpan.bin": 0.9721,
+    "ambientRegular8or16msFFpan.bin vs ambientULP8or16msFFpan.bin": 0.5904
+  },
+  "cross_applied_fpn_pct": {
+    "precisionRegular8msFFpan.bin": {
+      "precisionRegular8msFFpan.bin": 1.321,
+      "precisionULP8msFFpan.bin": 2.236,
+      "ambientRegular8msFFpan.bin": 3.768,
+      "ambientULP8msFFpan.bin": 4.103,
+      "ambientRegular8or16msFFpan.bin": 10.821,
+      "ambientULP8or16msFFpan.bin": 3.757
+    },
+    "precisionULP8msFFpan.bin": {
+      "precisionRegular8msFFpan.bin": 2.248,
+      "precisionULP8msFFpan.bin": 1.329,
+      "ambientRegular8msFFpan.bin": 4.005,
+      "ambientULP8msFFpan.bin": 4.617,
+      "ambientRegular8or16msFFpan.bin": 11.194,
+      "ambientULP8or16msFFpan.bin": 3.83
+    },
+    "ambientRegular8msFFpan.bin": {
+      "precisionRegular8msFFpan.bin": 3.685,
+      "precisionULP8msFFpan.bin": 3.909,
+      "ambientRegular8msFFpan.bin": 1.276,
+      "ambientULP8msFFpan.bin": 1.836,
+      "ambientRegular8or16msFFpan.bin": 9.583,
+      "ambientULP8or16msFFpan.bin": 1.596
+    },
+    "ambientULP8msFFpan.bin": {
+      "precisionRegular8msFFpan.bin": 4.043,
+      "precisionULP8msFFpan.bin": 4.555,
+      "ambientRegular8msFFpan.bin": 1.848,
+      "ambientULP8msFFpan.bin": 1.285,
+      "ambientRegular8or16msFFpan.bin": 9.282,
+      "ambientULP8or16msFFpan.bin": 2.021
+    },
+    "ambientRegular8or16msFFpan.bin": {
+      "precisionRegular8msFFpan.bin": 10.233,
+      "precisionULP8msFFpan.bin": 10.516,
+      "ambientRegular8msFFpan.bin": 8.843,
+      "ambientULP8msFFpan.bin": 8.6,
+      "ambientRegular8or16msFFpan.bin": 1.353,
+      "ambientULP8or16msFFpan.bin": 8.927
+    },
+    "ambientULP8or16msFFpan.bin": {
+      "precisionRegular8msFFpan.bin": 3.643,
+      "precisionULP8msFFpan.bin": 3.706,
+      "ambientRegular8msFFpan.bin": 1.56,
+      "ambientULP8msFFpan.bin": 1.982,
+      "ambientRegular8or16msFFpan.bin": 9.697,
+      "ambientULP8or16msFFpan.bin": 1.259
+    }
+  }
+}

@@ -66,7 +66,7 @@ from .magsweep import (
     view_calibration,
 )
 from .metrics import MetricsRegistry, MetricsSnapshot, ResourceSampler
-from .flatfield import FlatField
+from .flatfield import FlatField, FlatFieldSet
 from .pipeline import TransformStage
 from .reader import _Pacer, _run_reader, follow_camera_target
 from .protocol import (
@@ -343,6 +343,15 @@ class UiState:
     ir_colormap: str = "gray"
     ir_freeze: bool = False
     ir_freeze_range: tuple[float, float] | None = None
+    # "Calibrated / Uncalibrated" toggle (Device card): apply the configured
+    # mode-aware flat-field reflectance correction, or show the raw sensor FPN.
+    # This is HOST-shared server state, not a per-client preference: there is one
+    # `UiState` and one `TransformStage` for all clients, so flipping it changes
+    # the host's output for everyone and persists once on the host (config
+    # `[calibration] flatfield_enabled`). The MAP is picked host-side by the
+    # current ranging mode; this only enables/disables applying it. No-op when no
+    # map is configured, hence default on. Drives `stage.flatfield_enabled`.
+    calibrated: bool = True
     # SLAM mode (web Phase 4). `mode` gates the whole SLAM pipeline: the worker
     # is only fed (and only constructed) while mode == "slam", so real-time mode
     # burns no GPU. The three display toggles ride the same one-way `state` echo
@@ -1833,6 +1842,11 @@ def _commit_ranging_ack(state, ack: RangingConfigAck) -> None:
     rs.applied_power_mode = int(config.power_mode)
     rs.initialized = True
     rs.error = None
+    # Point the mode-aware flat-field at the device's now-confirmed ranging mode,
+    # so Precision/Ambient get their own map. No-op for a single/legacy map.
+    st = getattr(state, "stage", None)
+    if st is not None:
+        st.set_ranging_mode(rs.applied_ranging_mode)
     _recompute_ranging_estimate(state)
 
 
@@ -2107,7 +2121,8 @@ async def _set_imu_env_rate(state, rate_hz: int) -> None:
     await _broadcast_ranging(state)
 
 
-def _state_message(ui: UiState, controller=None, detailed=None) -> dict:
+def _state_message(ui: UiState, controller=None, detailed=None,
+                   calibration_available: bool = False) -> dict:
     """Authoritative presentation state.
 
     ``mode`` is emitted for one release so existing automation remains usable;
@@ -2148,7 +2163,9 @@ def _state_message(ui: UiState, controller=None, detailed=None) -> dict:
             "orientation_mode": ui.orientation_mode,
             "orientation_labels": list(ui.orientation_labels),
             "yaw_offset_deg": ui.yaw_offset_deg,
-            "elevation_datum_ft": ui.elevation_datum_ft}
+            "elevation_datum_ft": ui.elevation_datum_ft,
+            "calibrated": ui.calibrated,
+            "calibration_available": calibration_available}
 
 
 # --- settings persistence (Web Phase 5) -------------------------------------
@@ -2171,6 +2188,7 @@ def ui_from_config(cfg: ViewerConfig) -> UiState:
     field against the web app's allowed values and falling back to the UiState
     default on anything unrecognized. `mode` is not restored (see note above)."""
     ui = UiState()
+    ui.calibrated = bool(cfg.flatfield_enabled)
     if cfg.color in _VALID_COLOR_MODES:
         ui.color_mode = cfg.color
     if cfg.ir_colormap in _VALID_IR_COLORMAPS:
@@ -2272,6 +2290,7 @@ def apply_ui_to_config(ui: UiState, cfg: ViewerConfig) -> None:
     toggles + the two sensor auto-idle prefs; leaving `mode` and every non-web
     field alone), ready to `cfg.save()`."""
     cfg.color = ui.color_mode
+    cfg.flatfield_enabled = bool(ui.calibrated)
     cfg.ir_colormap = ui.ir_colormap
     cfg.ir_freeze_range = bool(ui.ir_freeze)
     cfg.view_colormap = ui.view_colormap
@@ -4459,7 +4478,8 @@ async def _broadcast_state(state) -> None:
     legacy stream-9-less capture and clear the stale badge."""
     await _broadcast_text(state.clients, json.dumps(_state_message(
         state.ui_state, getattr(state, "controller", None),
-        getattr(state, "detailed_runner", None))))
+        getattr(state, "detailed_runner", None),
+        calibration_available=getattr(getattr(state, "stage", None), "has_flatfield", False))))
 
 
 async def _broadcast_captures(state, ctrl) -> None:
@@ -5108,7 +5128,8 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         await websocket.send_text(json.dumps(_state_message(
             state.ui_state, getattr(state, "controller", None),
-            getattr(state, "detailed_runner", None))))
+            getattr(state, "detailed_runner", None),
+            calibration_available=getattr(getattr(state, "stage", None), "has_flatfield", False))))
         ctrl = getattr(state, "controller", None)
         if ctrl is not None:
             await websocket.send_text(json.dumps(ctrl.session_message(None, time.time())))
@@ -5400,6 +5421,17 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             log.warning("invalid set_color mode: %r", mode)
             return
         ui.color_mode = mode
+        _persist_ui(state)
+        await _broadcast_state(state)
+
+    elif mtype == "set_calibrated":
+        # "Calibrated / Uncalibrated" toggle: apply the configured flat-field
+        # correction or show raw sensor reflectance. Updates the live stage
+        # immediately (a plain attribute the reader thread reads each frame).
+        ui.calibrated = bool(msg.get("enabled", ui.calibrated))
+        st = getattr(state, "stage", None)
+        if st is not None:
+            st.flatfield_enabled = ui.calibrated
         _persist_ui(state)
         await _broadcast_state(state)
 
@@ -5946,8 +5978,13 @@ def main(argv=None) -> int:
 
     # Always compute all three planes: marginal cost per plane is ~zero and it
     # makes color mode a pure runtime choice (no reader restart) -- §5.1/§7.2.
+    # Mode-aware flat-field: the map is chosen by the device's ranging mode
+    # (`stage.set_ranging_mode`, driven from the ranging-config ACK) and gated by
+    # the "Calibrated" toggle (`stage.flatfield_enabled`, seeded from config below
+    # once ui_state exists). Empty set => no correction, so this is safe with no
+    # maps configured.
     stage = TransformStage(outputs=("depth", "reflectance", "confidence"),
-                           flatfield=FlatField.load_configured())
+                           flatfield=FlatFieldSet.load_configured())
     slot: queue.Queue = queue.Queue(maxsize=1)
     fault: dict = {}
 
@@ -6019,6 +6056,10 @@ def main(argv=None) -> int:
     config = ViewerConfig.load()
     app.state.config = config
     app.state.ui_state = ui_from_config(config)
+    # Seed the "Calibrated" toggle from persisted config now that ui_state exists
+    # (the stage was built earlier, before ui_state). The ranging mode is pushed in
+    # later by the first ranging-config ACK via `_commit_ranging_ack`.
+    stage.flatfield_enabled = app.state.ui_state.calibrated
     if controller.mode == "replay":
         app.state.ui_state.source = "view"
         app.state.ui_state.selected_capture = os.path.basename(controller.replay_path)

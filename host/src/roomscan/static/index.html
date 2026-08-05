@@ -1452,6 +1452,19 @@
                     </div>
                 </details>
 
+                <!-- Reflectance flat-field calibration toggle (2026-08-04 cross-room
+                     study). Applies the per-zone FPN correction; the MAP is chosen
+                     server-side by the current ranging mode (Precision/Ambient need
+                     different maps). Server-driven active state (§8.3) via the `state`
+                     echo's `calibrated`; `calibration_available` disables it and shows
+                     the note when no map is configured in roomscan.toml. -->
+                <div class="field-label" title="Per-zone flat-field correction of the reflectance / IR channel. The map is selected automatically for the current ranging mode — Precision and Ambient carry different fixed-pattern noise and need separate maps (cross-room validated ~2.4% Ambient / ~3.0% Precision residual).">Reflectance Calibration</div>
+                <div class="segmented" id="seg-calibrated">
+                    <button data-calibrated="on" title="Apply the flat-field correction for the current ranging mode — removes the sensor's fixed per-zone pattern noise from reflectance / IR">Calibrated</button>
+                    <button data-calibrated="off" title="Show raw sensor reflectance with no flat-field correction">Uncalibrated</button>
+                </div>
+                <div class="hud-note" id="calibrated-note" hidden>No calibration map configured — set flatfield_precision_path / flatfield_ambient_path in roomscan.toml</div>
+
                 <details class="debug-section">
                     <summary class="field-label" title="Low-level device diagnostics and recovery">Debug</summary>
                     <div class="debug-section__body">

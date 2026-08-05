@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 
 from roomscan.config import ViewerConfig
-from roomscan.flatfield import FlatField, build_flatfield
+from roomscan.flatfield import (
+    FlatField, FlatFieldSet, build_flatfield, RANGING_PRECISION, RANGING_AMBIENT)
 from roomscan.native import Transform
 from roomscan.pipeline import TransformStage
 from roomscan.protocol import Frame, FrameHeader, FrameType, StreamId
@@ -102,6 +103,128 @@ def test_config_field_roundtrips(tmp_path):
 def test_stage_without_flatfield_is_unchanged():
     stage = TransformStage(outputs=("reflectance",))
     assert stage._flatfield is None                    # opt-in; default off
+    assert not stage.has_flatfield
+
+
+# --- mode-aware map selection (FlatFieldSet) --------------------------------
+
+def _const_ff(v):
+    return FlatField(gain=np.full((H, W), v, np.float32))
+
+
+def test_flatfieldset_selects_by_ranging_mode():
+    prec, amb = _const_ff(1.1), _const_ff(0.9)
+    s = FlatFieldSet({RANGING_PRECISION: prec, RANGING_AMBIENT: amb})
+    assert not s.is_empty
+    assert s.for_mode(RANGING_PRECISION) is prec
+    assert s.for_mode(RANGING_AMBIENT) is amb
+
+
+def test_flatfieldset_unknown_mode_falls_back_to_default():
+    default, prec = _const_ff(1.0), _const_ff(1.1)
+    s = FlatFieldSet({RANGING_PRECISION: prec}, default=default)
+    assert s.for_mode(None) is default              # replay: no device mode known
+    assert s.for_mode(RANGING_AMBIENT) is default   # no ambient map -> default
+    assert s.for_mode(RANGING_PRECISION) is prec
+
+
+def test_flatfieldset_empty_returns_none():
+    s = FlatFieldSet()
+    assert s.is_empty
+    assert s.for_mode(RANGING_PRECISION) is None
+
+
+def test_flatfieldset_load_configured_mode_and_legacy(tmp_path):
+    prec = build_flatfield(np.stack([_fpn_gain(1) * 100 for _ in range(5)]))
+    amb = build_flatfield(np.stack([_fpn_gain(2) * 100 for _ in range(5)]))
+    pp, ap = tmp_path / "prec.npz", tmp_path / "amb.npz"
+    prec.save(pp)
+    amb.save(ap)
+    s = FlatFieldSet.load_configured(ViewerConfig(
+        flatfield_precision_path=str(pp), flatfield_ambient_path=str(ap)))
+    assert np.allclose(s.for_mode(RANGING_PRECISION).gain, prec.gain)
+    assert np.allclose(s.for_mode(RANGING_AMBIENT).gain, amb.gain)
+
+    # legacy single path becomes the fallback default for every mode
+    lp = tmp_path / "legacy.npz"
+    prec.save(lp)
+    s2 = FlatFieldSet.load_configured(ViewerConfig(flatfield_path=str(lp)))
+    assert s2.for_mode(RANGING_AMBIENT).gain.shape == (H, W)
+    assert FlatFieldSet.load_configured(ViewerConfig()).is_empty
+
+
+def test_stage_flatfieldset_selection_and_toggle():
+    prec, amb = _const_ff(1.1), _const_ff(0.9)
+    stage = TransformStage(outputs=("reflectance",),
+                           flatfield=FlatFieldSet({RANGING_PRECISION: prec, RANGING_AMBIENT: amb}))
+    assert stage.has_flatfield
+    stage.set_ranging_mode(RANGING_PRECISION)
+    assert stage._active_flatfield() is prec
+    stage.set_ranging_mode(RANGING_AMBIENT)
+    assert stage._active_flatfield() is amb
+    stage.flatfield_enabled = False              # "Uncalibrated"
+    assert stage._active_flatfield() is None
+    stage.flatfield_enabled = True
+    stage.set_ranging_mode(None)                 # unknown mode, no default
+    assert stage._active_flatfield() is None
+
+
+def test_config_flatfield_mode_paths_roundtrip_calibration_table(tmp_path):
+    p = tmp_path / "roomscan.toml"
+    ViewerConfig(flatfield_precision_path="a.npz", flatfield_ambient_path="b.npz",
+                 flatfield_enabled=False).save(p)
+    # persisted under [calibration], not [viewer]
+    text = p.read_text()
+    assert "[calibration]" in text
+    assert "flatfield_precision_path = \"a.npz\"" in text
+    viewer_block, _, calib_block = text.partition("[calibration]")
+    assert "flatfield_enabled" not in viewer_block   # host/sensor keys leave [viewer]
+    assert "flatfield_enabled = false" in calib_block
+
+    c = ViewerConfig.load(p)
+    assert c.flatfield_precision_path == "a.npz"
+    assert c.flatfield_ambient_path == "b.npz"
+    assert c.flatfield_enabled is False
+    # defaults: mode paths None (empty string -> None), flatfield_enabled True
+    ViewerConfig().save(p)
+    c2 = ViewerConfig.load(p)
+    assert c2.flatfield_precision_path is None
+    assert c2.flatfield_ambient_path is None
+    assert c2.flatfield_enabled is True
+
+
+def test_config_legacy_viewer_flatfield_path_still_loads(tmp_path):
+    # An old file that predates the [calibration] table carried the key under
+    # [viewer]; load() must still honour it (back-compat).
+    p = tmp_path / "roomscan.toml"
+    p.write_text('[viewer]\ncolor = "reflectance"\nflatfield_path = "legacy.npz"\n')
+    c = ViewerConfig.load(p)
+    assert c.flatfield_path == "legacy.npz"
+    assert c.color == "reflectance"
+    assert c.flatfield_enabled is True   # absent -> default
+
+
+@needs_dll
+def test_pipeline_applies_mode_selected_flatfield():
+    calib, pairs = load_golden_pairs()
+    raw, _ = pairs[0]
+    prec_gain = _fpn_gain(1).astype(np.float32)
+    amb_gain = _fpn_gain(2).astype(np.float32)
+    fset = FlatFieldSet({RANGING_PRECISION: FlatField(gain=prec_gain),
+                         RANGING_AMBIENT: FlatField(gain=amb_gain)})
+
+    def _run(mode, enabled=True):
+        stage = TransformStage(outputs=("depth", "reflectance"),
+                               flatfield=fset, flatfield_enabled=enabled)
+        stage.set_ranging_mode(mode)
+        stage.feed(Frame(FrameHeader(FrameType.DATA, StreamId.CALIB, 0, 1, 0, 0, 0, len(calib)), calib))
+        _, out = stage.feed(
+            Frame(FrameHeader(FrameType.DATA, StreamId.RAW_3DMD, 0, 2, 0, 0, 0, len(raw)), raw))
+        return out["reflectance"]
+
+    base = _run(RANGING_PRECISION, enabled=False)          # toggle off => untouched
+    assert np.allclose(_run(RANGING_PRECISION), base * prec_gain, rtol=1e-5, atol=1e-4)
+    assert np.allclose(_run(RANGING_AMBIENT), base * amb_gain, rtol=1e-5, atol=1e-4)
 
 
 @needs_dll

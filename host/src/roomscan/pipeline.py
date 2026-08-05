@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .flatfield import FlatField
+from .flatfield import FlatField, FlatFieldSet
 from .native import Transform
 from .protocol import Frame, FrameHeader, FrameType, StreamId
 
@@ -37,11 +37,20 @@ class TransformStage:
     """
 
     def __init__(self, outputs: tuple[str, ...] = ("depth",),
-                 flatfield: "FlatField | None" = None):
+                 flatfield: "FlatField | FlatFieldSet | None" = None,
+                 flatfield_enabled: bool = True):
         self._outputs = tuple(outputs)
         self._transform: Transform | None = None
         self._calib_payload: bytes | None = None
-        self._flatfield = flatfield          # per-zone reflectance FPN correction, or None
+        # Reflectance FPN correction: a single `FlatField` (legacy: applied to every
+        # frame), a `FlatFieldSet` (mode-aware: the map for the current ranging mode),
+        # or None. `flatfield_enabled` is the runtime "Calibrated" toggle and
+        # `ranging_mode` (0 Precision / 1 Ambient) selects within a set -- both plain
+        # attributes the owner (web server) writes from another thread; the reader
+        # thread reads them each frame, one-frame-stale at worst, which is harmless.
+        self._flatfield = flatfield
+        self.flatfield_enabled = flatfield_enabled
+        self.ranging_mode: int | None = None
         self.raw_skipped_awaiting_calib = 0
         self.raw_transformed = 0
 
@@ -49,6 +58,30 @@ class TransformStage:
     def active(self) -> bool:
         """True once a Transform has been constructed from a CALIB frame."""
         return self._transform is not None
+
+    @property
+    def has_flatfield(self) -> bool:
+        """True when a correction map is configured (regardless of the enable
+        toggle) -- lets the UI show whether calibration is even available."""
+        ff = self._flatfield
+        if isinstance(ff, FlatFieldSet):
+            return not ff.is_empty
+        return ff is not None
+
+    def set_ranging_mode(self, ranging_mode: int | None) -> None:
+        """Point a mode-aware `FlatFieldSet` at the device's current ranging mode
+        (called from the ranging-config ACK commit). No-op for a single map."""
+        self.ranging_mode = int(ranging_mode) if ranging_mode is not None else None
+
+    def _active_flatfield(self) -> "FlatField | None":
+        """The map to apply this frame, honouring the enable toggle and, for a
+        set, the current ranging mode. None => leave reflectance uncorrected."""
+        ff = self._flatfield
+        if ff is None or not self.flatfield_enabled:
+            return None
+        if isinstance(ff, FlatFieldSet):
+            return ff.for_mode(self.ranging_mode)
+        return ff
 
     def feed(self, frame: Frame) -> tuple[FrameHeader, dict[str, np.ndarray]] | None:
         header = frame.header
@@ -64,8 +97,9 @@ class TransformStage:
                 self.raw_skipped_awaiting_calib += 1
                 return None
             outputs = self._transform.process(frame.payload)
-            if self._flatfield is not None and "reflectance" in outputs:
-                outputs["reflectance"] = self._flatfield.apply(outputs["reflectance"])
+            active_ff = self._active_flatfield()
+            if active_ff is not None and "reflectance" in outputs:
+                outputs["reflectance"] = active_ff.apply(outputs["reflectance"])
             self.raw_transformed += 1
             return header, outputs
 

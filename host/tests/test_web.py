@@ -1475,6 +1475,56 @@ def test_state_message_carries_yaw_offset():
     assert m["yaw_offset_deg"] == 8.0
 
 
+# --- Calibrated / Uncalibrated toggle (mode-aware flat-field) ----------------
+
+def test_state_message_carries_calibrated():
+    m = web._state_message(web.UiState(calibrated=False), calibration_available=True)
+    assert m["calibrated"] is False
+    assert m["calibration_available"] is True
+    # availability defaults False when no stage/maps are passed
+    assert web._state_message(web.UiState())["calibration_available"] is False
+
+
+def test_set_calibrated_updates_ui_stage_and_persists(tmp_path):
+    import roomscan.config as config_mod
+    p = tmp_path / "roomscan.toml"
+    stage = SimpleNamespace(flatfield_enabled=True)
+    state = SimpleNamespace(config=ViewerConfig(), ui_state=web.UiState(calibrated=True),
+                            clients=set(), controller=None, stage=stage)
+    orig = config_mod.config_path
+    config_mod.config_path = lambda: p
+    try:
+        asyncio.run(web._handle_inbound(state, {"type": "set_calibrated", "enabled": False}))
+    finally:
+        config_mod.config_path = orig
+    assert state.ui_state.calibrated is False               # UI state flipped
+    assert stage.flatfield_enabled is False                 # live stage updated at once
+    assert ViewerConfig.load(p).flatfield_enabled is False  # persisted (host, [calibration])
+
+
+def test_calibrated_config_ui_roundtrip():
+    assert web.ui_from_config(ViewerConfig(flatfield_enabled=False)).calibrated is False
+    cfg = ViewerConfig()
+    web.apply_ui_to_config(web.UiState(calibrated=False), cfg)
+    assert cfg.flatfield_enabled is False
+
+
+def test_commit_ranging_ack_pushes_mode_to_stage():
+    from roomscan.protocol import RangingConfigAck
+    calls = []
+    stage = SimpleNamespace(set_ranging_mode=lambda m: calls.append(m))
+    state = SimpleNamespace(
+        ranging_state=web.RangingState(transport="udp"),
+        imu_env_state=web.ImuEnvRateState(applied_rate_hz=30),
+        stage=stage)
+    ack = RangingConfigAck(cmd=10, result=0, ranging_mode=1, frame_period_us=33333,
+                           exposure_ms=8, power_mode=0)
+    web._commit_ranging_ack(state, ack)
+    applied = state.ranging_state.applied_ranging_mode
+    assert applied in (0, 1)                             # a real profile RangingMode
+    assert calls == [applied]                            # exactly what was applied, pushed to the stage
+
+
 def _make_sensor_capture(path: Path, n: int = 6) -> None:
     """A capture of interleaved IMU_QUAT + ENV frames (no DEPTH), so the reader
     drives SensorState without ever filling the render slot."""
