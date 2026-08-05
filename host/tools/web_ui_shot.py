@@ -123,9 +123,9 @@ async def _run(ws_url: str, args, steps: list[dict]) -> None:
 
         # Dump the on-page diag log tail -- the fastest signal for a load failure.
         d = await cmd("Runtime.evaluate", {"expression":
-            "(document.getElementById('diag-log')||{}).textContent || 'no-diag-panel'"})
+            "(document.getElementById('log-lines')||{}).innerText || 'no-log-console'"})
         tail = (d.get("result", {}).get("value") or "")[-900:]
-        print("--- diag-log tail ---")
+        print("--- event-log tail ---")
         print(tail)
 
 

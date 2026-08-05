@@ -20,7 +20,7 @@ import time
 
 import numpy as np
 
-from .protocol import HEADER_SIZE, FrameType, ProtocolError, parse_event
+from .protocol import HEADER_SIZE, FrameType, ProtocolError, describe_event
 from .sources import pump
 
 # Fixed world-up convention (== slam.frames.world_up(), [0,-1,0]); the follow
@@ -101,7 +101,7 @@ def _run_reader(source, decoder, stage, stats, slot, fault, bus, client, recorde
             ft = frame.header.frame_type
             if ft == FrameType.EVENT:
                 try:
-                    code, detail, msg = parse_event(frame.payload)
+                    code, detail, msg = describe_event(frame.payload)
                     bus.publish(f"[event] code={code} detail={detail} {msg}")
                 except ProtocolError:
                     bus.publish(f"[event] undecodable payload ({len(frame.payload)} B)")

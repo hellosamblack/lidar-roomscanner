@@ -1,9 +1,8 @@
-// layout.js — dock layout manager + the diagnostics panel's collapse toggle.
+// layout.js — dock layout manager + card collapse toggles.
 //
-// A CLASSIC script (not an ES module) on purpose: the diagnostics panel exists
-// precisely for the case where the module graph below it fails to load, so its
-// collapse toggle — and the layout that keeps it from covering anything else —
-// must not depend on that graph resolving.
+// A CLASSIC script (not an ES module) on purpose: the dock layout — and the
+// event-log console that diagnostics fold into — must stay usable even when the
+// module graph below fails to load, so neither may depend on it resolving.
 //
 // The anti-overlap contract (see the `.dock` block in index.html):
 //
@@ -20,10 +19,9 @@
 // oscillates or leaves a stale degradation behind), degrading in cheapest-first
 // order until both sides clear:
 //
-//   1. collapse the diagnostics panel   (debug-only, lowest value)
-//   2. scroll the right dock            (one column; content still reachable)
-//   3. collapse the IR monitor          (its own card, canvas hidden)
-//   4. collapse the sensors card
+//   1. scroll the right dock            (one column; content still reachable)
+//   2. collapse the IR monitor          (its own card, canvas hidden)
+//   3. collapse the sensors card
 //
 // Public surface (for debugging / headless drivers):  window.__relayout()
 
@@ -32,7 +30,6 @@
 
     var GAP = 16;                               // min clear gap between the docks
     var EDGE = 16;                              // min clear gap to a viewport edge
-    var DIAG_KEY = 'roomscan.diag.collapsed';   // '1' collapsed / '0' open / absent = default
 
     var root = document.documentElement;
     function $(id) { return document.getElementById(id); }
@@ -40,7 +37,6 @@
     var STORAGE_PREFIX = 'roomscan.card.';
 
     function getCardKey(cardId) {
-        if (cardId === 'diag') return 'roomscan.diag.collapsed';
         return STORAGE_PREFIX + cardId + '.collapsed';
     }
 
@@ -49,7 +45,6 @@
         'sensors': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4M14.12,7.88L9.88,12.12L7.88,14.12L12.12,9.88L14.12,7.88Z"/></svg>',
         'slam-hud': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M21,16.5C21,16.88 20.79,17.21 20.47,17.38L12.57,21.82C12.41,21.94 12.21,22 12,22C11.79,22 11.59,21.94 11.43,21.82L3.53,17.38C3.21,17.21 3,16.88 3,16.5V7.5C3,7.12 3.21,6.79 3.53,6.62L11.43,2.18C11.59,2.06 11.79,2 12,2C12.21,2 12.41,2.06 12.57,2.18L20.47,6.62C20.79,6.79 21,7.12 21,7.5V16.5M12,4.15L5.04,8.05L12,11.95L18.96,8.05L12,4.15Z"/></svg>',
         'ir-view': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12,9A3,3 0 0,0 9,12A3,3 0 0,0 12,15A3,3 0 0,0 15,12A3,3 0 0,0 12,9M12,4.5C7,4.5 2.73,7.61 1,12C2.73,16.39 7,19.5 12,19.5C17,19.5 21.27,16.39 23,12C21.27,7.61 17,4.5 12,4.5M12,17.5A5.5,5.5 0 0,1 6.5,12A5.5,5.5 0 0,1 12,6.5A5.5,5.5 0 0,1 17.5,12A5.5,5.5 0 0,1 12,17.5Z"/></svg>',
-        'diag': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M20,4H4A2,2 0 0,0 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V6A2,2 0 0,0 20,4M20,18H4V6H20V18M6,8L10,12L6,16V14L8.5,12L6,10V8M11,15H17V17H11V15Z"/></svg>',
         'device': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M9,4V6H11V4H9M13,4V6H15V4H13M9,18V20H11V18H9M13,18V20H15V18H13M4,9H6V11H4V9M4,13H6V15H4V13M18,9H20V11H18V9M18,13H20V15H18V13Z"/></svg>',
         'view': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22C13.1,22 14,21.1 14,20C14,19.5 13.8,19.05 13.47,18.7C13.12,18.33 12.92,17.84 12.92,17.3C12.92,16.2 13.82,15.3 14.92,15.3H16C19.31,15.3 22,12.61 22,9.3C22,5.27 17.52,2 12,2M6.5,11.5A1.5,1.5 0 0,1 5,10A1.5,1.5 0 0,1 6.5,8.5A1.5,1.5 0 0,1 8,10A1.5,1.5 0 0,1 6.5,11.5M9.5,7.5A1.5,1.5 0 0,1 8,6A1.5,1.5 0 0,1 9.5,4.5A1.5,1.5 0 0,1 11,6A1.5,1.5 0 0,1 9.5,7.5M14.5,7.5A1.5,1.5 0 0,1 13,6A1.5,1.5 0 0,1 14.5,4.5A1.5,1.5 0 0,1 16,6A1.5,1.5 0 0,1 14.5,7.5M17.5,11.5A1.5,1.5 0 0,1 16,10A1.5,1.5 0 0,1 17.5,8.5A1.5,1.5 0 0,1 19,10A1.5,1.5 0 0,1 17.5,11.5Z"/></svg>',
         'capture': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M18,4L20,8H17L15,4H13L15,8H12L10,4H8L10,8H7L5,4H4A2,2 0 0,0 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V4H18M10,10L16,13L10,16V10Z"/></svg>',
@@ -66,7 +61,6 @@
         'sensors': 'Sensors',
         'slam-hud': 'SLAM HUD',
         'ir-view': 'IR Monitor',
-        'diag': 'Diagnostics',
         'device': 'Device',
         'view': 'View',
         'capture': 'Record',
@@ -123,7 +117,7 @@
         }
     }
 
-    var HEADER_SELECTOR = '.control-group__header, .diag__header, .log-console__header, .ir-card__header';
+    var HEADER_SELECTOR = '.control-group__header, .log-console__header, .ir-card__header';
 
     // Same SVG as the squircle rail (CARD_ICONS is the single source -- do not
     // duplicate the markup into index.html, the two copies would drift), sized
@@ -157,9 +151,9 @@
             try { pref = localStorage.getItem(key); } catch (e) {}
             if (pref !== null) {
                 card.classList.toggle('collapsed', pref === '1');
-            } else if (id === 'diag' && window.__diagErrors > 0) {
-                card.classList.remove('collapsed');   // an error already fired pre-DOM
             }
+            // (The event-log console auto-opens on the first diagnostic error;
+            // that is done by the head __diag script directly, before this runs.)
         }
 
         var subgroups = document.querySelectorAll('details[data-subgroup-id]');
@@ -206,7 +200,7 @@
                 return;
             }
 
-            var header = e.target.closest('.control-group__header, .diag__header, .log-console__header, .ir-card__header');
+            var header = e.target.closest('.control-group__header, .log-console__header, .ir-card__header');
             if (!header) return;
 
             // Don't toggle collapse if clicking interactive controls inside header (e.g. colormap, freeze, close btn)
@@ -274,7 +268,7 @@
     /* ------------------------------------------------------------------ *
      * Layout pass                                                        *
      * ------------------------------------------------------------------ */
-    var AUTO = ['diag-card', 'ir-card', 'sensors-card'];   // may be auto-collapsed
+    var AUTO = ['ir-card', 'sensors-card'];   // may be auto-collapsed
 
     function autoCollapse(id) {
         var el = $(id);
@@ -300,7 +294,6 @@
         if (right) right.classList.remove('dock--scroll');
 
         if (fits()) return;
-        if (autoCollapse('diag-card') && fits()) return;
         if (right) { right.classList.add('dock--scroll'); if (fits()) return; }
         if (autoCollapse('ir-card') && fits()) return;
         autoCollapse('sensors-card');

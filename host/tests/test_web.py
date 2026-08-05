@@ -3569,7 +3569,6 @@ def test_rail_cards_data_attributes_and_default_collapsed_states():
         "browser": False,    # Expanded (§12: the View page's file browser)
         "preview": False,    # Expanded (§12: rendered only with a tile selected)
         "ir-view": True,     # Collapsed
-        "diag": True,        # Collapsed
         "device": True,      # Collapsed
         "view": False,       # Expanded
         "capture": False,    # Expanded (§11: one Record button, Live page only)

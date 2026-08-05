@@ -1080,8 +1080,8 @@ Owner-driven round of UI fixes after living with the Live/View consolidation. Si
 - **Explain the instrument.** Drops/Gaps/FPS/Bandwidth and every per-stream row now carry
   tooltips (keyed on `stream_id`, not `label` — `metrics.py` maps two ids onto "ToF"). The Fusion
   row names a remedy for each `fusion_key`, not just the fault. `body { user-select: none }` was
-  making every diagnostic uncopyable; `#diag-log`, the event log, the quat and the jitter table opt
-  back in.
+  making every diagnostic uncopyable; ~~`#diag-log`~~ (the diagnostics pane was folded into the event
+  log, 2026-08-05, BUG-080), the event log, the quat and the jitter table opt back in.
 - **Declutter.** The right-rail IR group duplicated controls the IR card already had inline — gone;
   its × now collapses into the squircle rail rather than hiding with no way back. The orientation
   decomposition picker is gone and the card is pinned to **World**, which also fixed the axis

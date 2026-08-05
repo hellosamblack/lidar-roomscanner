@@ -347,7 +347,7 @@ class CdpSession:
 
     async def diag_tail(self, chars: int = 900) -> str:
         r = await self.evaluate(
-            "(document.getElementById('diag-log')||{}).textContent || 'no-diag-panel'",
+            "(document.getElementById('log-lines')||{}).innerText || 'no-log-console'",
             await_promise=False)
         return (r.get("value") or "")[-chars:]
 
@@ -433,7 +433,7 @@ class PlaywrightSession:
 
     async def diag_tail(self, chars: int = 900) -> str:
         r = await self.evaluate(
-            "(document.getElementById('diag-log')||{}).textContent || 'no-diag-panel'")
+            "(document.getElementById('log-lines')||{}).innerText || 'no-log-console'")
         return (r.get("value") or "")[-chars:]
 
 

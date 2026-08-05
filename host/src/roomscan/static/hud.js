@@ -179,5 +179,30 @@ export function createHud(hub) {
         if (connDot) connDot.classList.toggle('connected', open);
     });
 
+    // Comm-status: server->rig link health, one chip per hop (FileHub, Scanner,
+    // ST-Link). The server computes each `state`; we only paint. title= carries
+    // the address + detail so the reachability story is one hover away.
+    const commEl = document.getElementById('comm-status');
+    hub.on('comm', (msg) => {
+        if (!commEl) return;
+        const targets = Array.isArray(msg.targets) ? msg.targets : [];
+        commEl.innerHTML = '';
+        for (const t of targets) {
+            const state = ['up', 'down', 'absent', 'unknown'].includes(t.state) ? t.state : 'unknown';
+            const item = document.createElement('div');
+            item.className = 'comm-item comm-item--' + state;
+            const addr = t.addr ? ' (' + t.addr + ')' : '';
+            item.title = (t.label || t.id) + addr + (t.detail ? ' — ' + t.detail : '');
+            const dot = document.createElement('span');
+            dot.className = 'comm-item__dot';
+            const label = document.createElement('span');
+            label.className = 'comm-item__label';
+            label.textContent = t.label || t.id;
+            item.appendChild(dot);
+            item.appendChild(label);
+            commEl.appendChild(item);
+        }
+    });
+
     return {};
 }

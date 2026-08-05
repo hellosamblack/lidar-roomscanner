@@ -159,6 +159,36 @@ def test_parse_tx_queue_stats_event_fields():
     assert ev.emitted_bytes == 123_456_789
 
 
+def test_describe_event_names_ascii_codes():
+    from roomscan.protocol import describe_event
+    payload = struct.pack("<II", 2, 3) + b"trigger retries exhausted"
+    code, detail, msg = describe_event(payload)
+    assert (code, detail) == (2, 3)
+    assert msg == "TRIGGER_TIMEOUT: trigger retries exhausted"
+    # A code with no ASCII tail is just its name (no trailing ": ").
+    assert describe_event(struct.pack("<II", 6, 10))[2] == "AUTO_WAKE_MOTION"
+
+
+def test_describe_event_decodes_tx_queue_stats_instead_of_garbling():
+    """The web event log / CLI viewers route EVENT frames through describe_event,
+    so code 7's three binary u32 counters render as legible fields rather than the
+    ascii/'replace' mojibake parse_event() produced (the field-report garbage)."""
+    from roomscan.protocol import describe_event
+    detail = (5 & 0xFF) | ((2 & 0xFF) << 8) | ((2 & 0xFFFF) << 16)  # matches the reported log
+    payload = struct.pack("<IIIII", 7, detail, 0, 0, 1_234_567_890)
+    code, det, msg = describe_event(payload)
+    assert (code, det) == (7, 131589)
+    assert msg == ("TX_QUEUE_STATS transport=udp high_water=5 pending=2 "
+                   "drops=0 stalls=0 emitted=1.15 GiB")
+    assert "�" not in msg  # no replacement chars -> nothing to render as broken
+
+
+def test_describe_event_unknown_code_still_legible():
+    from roomscan.protocol import describe_event
+    code, _, msg = describe_event(struct.pack("<II", 99, 0) + b"whatever")
+    assert code == 99 and msg == "EVENT_99: whatever"
+
+
 def test_parse_tx_queue_stats_event_rejects_bad_length():
     from roomscan.protocol import parse_tx_queue_stats_event
     with pytest.raises(ProtocolError):

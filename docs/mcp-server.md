@@ -89,7 +89,7 @@ in-process call meanwhile.
 
 | tool | notes |
 |---|---|
-| `ui_screenshot(...)` | returns the PNG as an image block plus the `#diag-log` tail |
+| `ui_screenshot(...)` | returns the PNG as an image block plus the `#log-lines` (event-log) tail |
 | `ui_eval(js)` | JS result as JSON; JS errors come back as `ok=false` |
 | `ui_wait_for(predicate_js)` | wait on a real condition instead of sleeping |
 | `ui_reset(relaunch?)` | clean page between scenarios -- server state persists |

@@ -43,6 +43,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .colors import gray, turbo
+from . import commstatus
 from .config import ViewerConfig
 from .control import (
     CommandClient,
@@ -3815,6 +3816,10 @@ async def _lifespan(app: FastAPI):
         # default. One-shot; runs concurrently with the broadcaster so server
         # startup isn't gated on the device's ACK latency.
         app.state.ranging_init_task = asyncio.create_task(_init_ranging_state(app.state))
+        # Top-bar comm indicator (owner ask, 2026-08-05): a slow, independent
+        # probe loop -- decoupled from the frame broadcaster so a ping stall can
+        # never touch the stream, and vice versa.
+        app.state.comm_probe_task = asyncio.create_task(_comm_probe_loop(app.state))
     yield
     task = getattr(app.state, "broadcast_task", None)
     if task is not None:
@@ -3825,6 +3830,9 @@ async def _lifespan(app: FastAPI):
     ranging_task = getattr(app.state, "ranging_init_task", None)
     if ranging_task is not None:
         ranging_task.cancel()
+    comm_task = getattr(app.state, "comm_probe_task", None)
+    if comm_task is not None:
+        comm_task.cancel()
     detailed = getattr(app.state, "detailed_runner", None)
     if detailed is not None:
         await asyncio.to_thread(detailed.close)
@@ -4286,6 +4294,60 @@ async def _idle_reconcile_loop() -> None:
             await _reconcile_idle_once(state)
         except Exception as exc:
             log.warning("idle reconcile tick failed: %r", exc)
+
+
+# --- comm-status indicator (top-bar link health, owner ask 2026-08-05) -------
+
+COMM_PROBE_INTERVAL_S = 3.0    # ping cadence; slow enough to be free, fast enough to feel live
+
+_SCANNER_IP_RE = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3})")
+
+
+def _scanner_ip(state) -> str:
+    """The scanner's address to probe. Prefer the live UDP source's actual peer
+    (the truth, discovered via mDNS) over the configured default -- parsed from
+    the current source label (`Ethernet/UDP · 172.17.2.58:5000`) so it tracks a
+    re-resolved board without reaching into the reader thread's source object. A
+    replay label, a broadcast fallback, or no match -> the default."""
+    ctrl = getattr(state, "controller", None)
+    label = getattr(ctrl, "source_label", "") if ctrl is not None else ""
+    if "Replay" not in label:
+        m = _SCANNER_IP_RE.search(label)
+        if m and m.group(1) != "255.255.255.255":
+            return m.group(1)
+    return commstatus.DEFAULT_SCANNER_IP
+
+
+def _scanner_fps(state) -> float | None:
+    """Live receive rate for the scanner detail line: the fastest per-stream
+    host rate (the ToF stream dominates). None when no metrics/frames."""
+    metrics = getattr(state, "metrics", None)
+    if metrics is None:
+        return None
+    try:
+        snap = metrics.snapshot(time.monotonic())
+    except Exception:
+        return None
+    rates = [s.host_hz for s in snap.streams if s.host_hz]
+    return max(rates) if rates else None
+
+
+async def _comm_probe_loop(state) -> None:
+    """Background task (started from `_lifespan`): probe the FileHub / scanner /
+    ST-Link on a slow cadence and broadcast the `comm` message. Fully decoupled
+    from `_broadcaster` so a `ping` stall can never touch the frame stream. The
+    latest result is cached on `state.last_comm` so a freshly-connected client
+    gets it immediately, without waiting a whole interval."""
+    filehub_ip = getattr(getattr(state, "config", None), "filehub_ip", None) \
+        or commstatus.DEFAULT_FILEHUB_IP
+    while True:
+        try:
+            msg = await commstatus.probe(filehub_ip, _scanner_ip(state), _scanner_fps(state))
+            state.last_comm = msg
+            await _broadcast_text(state.clients, json.dumps(msg))
+        except Exception as exc:
+            log.warning("comm probe tick failed: %r", exc)
+        await asyncio.sleep(COMM_PROBE_INTERVAL_S)
 
 
 async def _drop_client(clients: set, ws: WebSocket) -> None:
@@ -5142,6 +5204,11 @@ async def websocket_endpoint(websocket: WebSocket):
         # next tick or an unrelated control's echo.
         if getattr(state, "ranging_state", None) is not None:
             await websocket.send_text(json.dumps(_ranging_message(state)))
+        # Comm indicator: the last probe result, so the top-bar link dots are
+        # populated on the first paint rather than after a full probe interval.
+        last_comm = getattr(state, "last_comm", None)
+        if last_comm is not None:
+            await websocket.send_text(json.dumps(last_comm))
     except Exception:
         await _drop_client(clients, websocket)
         return

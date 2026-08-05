@@ -7,40 +7,58 @@
     <!-- Diagnostic trap: a plain (non-module) script installed BEFORE the
          module below, so it captures failures a `<script type=module>` would
          otherwise swallow silently (import-map miss, module 404/parse error,
-         `three` failing to load). Everything is mirrored to an on-page panel
-         (#diag-log) so it's readable over VNC / on a browser where devtools
-         aren't handy. window.__diag(msg, level) is the shared sink. -->
+         `three` failing to load). Lines are written straight into the bottom
+         event-log console (#log-lines) — no separate pane, no module needed, so
+         they stay readable over VNC even when the modules fail to load.
+         window.__diag(msg, level) is the shared sink. -->
     <script>
     (function () {
-        var buf = [];
-        window.__diagErrors = 0;   // read by layout.js to auto-open the panel
-        function render() {
-            var el = document.getElementById('diag-log');
-            if (el) { el.textContent = buf.slice(-60).join('\n'); el.scrollTop = el.scrollHeight; }
-            var count = document.getElementById('diag-count');
-            var n = window.__diagErrors;
-            if (count) count.textContent = n ? (n + ' error' + (n > 1 ? 's' : '')) : (buf.length + ' lines');
-            var card = document.getElementById('diag-card');
-            if (card) card.classList.toggle('has-error', n > 0);
-        }
+        // Diagnostics fold straight into the bottom event-log console (#log-lines,
+        // present in static HTML), NOT a separate pane and NOT via an ES module —
+        // the whole point is to stay visible when the modules fail to load (the
+        // exact case a <script type=module> would swallow). Lines emitted before
+        // the DOM is parsed are buffered and flushed on DOMContentLoaded. This
+        // shares #log-lines with log.js (device events); both just append + trim.
+        var buf = [];   // {line, level} pending until #log-lines exists
+        var MAX = 200;  // matches log.js's cap on the shared container
+        window.__diagErrors = 0;   // first error auto-opens the console (below)
         function stamp() {
-            try { return new Date().toISOString().substr(11, 12); } catch (e) { return '??'; }
+            try { return new Date().toTimeString().substr(0, 8) + '.' +
+                         String(new Date().getMilliseconds()).padStart(3, '0'); }
+            catch (e) { return '??'; }
         }
+        function paint(entry) {
+            var lines = document.getElementById('log-lines');
+            if (!lines) return false;
+            var row = document.createElement('div');
+            row.className = 'log-line log-line--' + (entry.level === 'error' ? 'error' : 'diag');
+            var ts = document.createElement('span'); ts.className = 'log-line__ts'; ts.textContent = entry.ts;
+            var src = document.createElement('span'); src.className = 'log-line__src'; src.textContent = 'diag';
+            var msg = document.createElement('span'); msg.className = 'log-line__msg'; msg.textContent = entry.msg;
+            row.appendChild(ts); row.appendChild(src); row.appendChild(msg);
+            lines.appendChild(row);
+            while (lines.childElementCount > MAX) lines.removeChild(lines.firstChild);
+            lines.scrollTop = lines.scrollHeight;
+            return true;
+        }
+        function flush() { while (buf.length && paint(buf[0])) buf.shift(); }
         window.__diag = function (msg, level) {
-            buf.push(stamp() + ' ' + (level || 'info').toUpperCase() + ' ' + msg);
+            level = level || 'info';
+            var entry = { ts: stamp(), msg: msg, level: level };
             try { (level === 'error' ? console.error : console.log)('[diag] ' + msg); } catch (e) {}
+            if (!paint(entry)) { buf.push(entry); if (buf.length > MAX) buf.shift(); }
             if (level === 'error') {
                 window.__diagErrors++;
-                // First error opens the panel — unless the user has already
-                // expressed a preference (layout.js persists one on click).
+                // First error pops the event-log console open, unless the user has
+                // already expressed a collapse preference (layout.js persists one).
                 try {
-                    var card = document.getElementById('diag-card');
-                    if (card && window.__diagErrors === 1 && localStorage.getItem('roomscan.diag.collapsed') === null) {
-                        card.classList.remove('collapsed');
+                    var con = document.getElementById('log-console');
+                    if (con && window.__diagErrors === 1 &&
+                        localStorage.getItem('roomscan.card.log.collapsed') === null) {
+                        con.classList.remove('collapsed');
                     }
                 } catch (e) {}
             }
-            render();
         };
         window.addEventListener('error', function (e) {
             var m = (e && (e.message || (e.error && e.error.message))) || 'unknown';
@@ -63,7 +81,7 @@
             var r = e && e.reason; window.__diag('unhandledrejection: ' + ((r && (r.message || r)) || r), 'error');
         });
         document.addEventListener('DOMContentLoaded', function () {
-            render();
+            flush();   // drain anything logged before #log-lines existed
             window.__diag('DOMContentLoaded; url=' + location.href, 'info');
         });
         window.__diag('inline diag installed; protocol=' + location.protocol + ' host=' + location.host, 'info');
@@ -182,6 +200,29 @@
             transition: background-color 0.3s ease, box-shadow 0.3s ease;
         }
         .dot.connected { background-color: var(--success); box-shadow: 0 0 12px var(--success); }
+
+        /* Comm-status cluster (top-right): one chip per hop the frames traverse
+           — FileHub · Scanner · ST-Link. The dot colour is the reachability
+           verdict from the server's `comm` probe; title= carries addr + detail. */
+        #comm-status { display: flex; align-items: center; gap: 12px; margin-right: 4px; }
+        .comm-item {
+            display: flex; align-items: center; gap: 5px;
+            font-size: 0.72rem; font-weight: 500; color: var(--text-muted);
+            cursor: default; white-space: nowrap;
+        }
+        .comm-item__dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background-color: var(--text-muted); flex: none;
+            transition: background-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        /* up = healthy (green glow), down = fault (red), absent/unknown = neutral grey. */
+        .comm-item--up    .comm-item__dot { background-color: var(--success); box-shadow: 0 0 8px var(--success); }
+        .comm-item--down  .comm-item__dot { background-color: var(--danger);  box-shadow: 0 0 8px var(--danger); }
+        .comm-item--absent .comm-item__dot,
+        .comm-item--unknown .comm-item__dot { background-color: var(--text-muted); opacity: 0.5; box-shadow: none; }
+        /* The informational ST-Link item is dimmed so its neutral state doesn't read as a problem. */
+        .comm-item--absent { opacity: 0.6; }
+        @media (max-width: 900px) { .comm-item__label { display: none; } }  /* dots only on narrow bars */
 
         /* ================= docks: the anti-overlap layout =================
          *
@@ -959,35 +1000,19 @@
         /* Diagnostics card (left dock, last) — the window.__diag sink. Collapsible
            and collapsed by default; it un-collapses itself on the first error so a
            silent module/import failure is still visible without devtools. */
-        #diag-card { width: 300px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
-        .diag__header {
-            display: flex; align-items: center; justify-content: flex-start; gap: 8px;
-            width: 100%; background: none; border: none; padding: 0;
-            font-family: 'Inter', sans-serif;
-            font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;
-            color: var(--text-muted); cursor: pointer;
-        }
-        .diag__header:hover { background: none; color: var(--text-main); }
-        /* see .control-group__header .chevron for why this is margin-left:auto
-           rather than the container's justify-content */
-        .diag__header .chevron { transition: transform 0.2s ease; font-size: 0.7rem; margin-left: auto; }
-        #diag-card.collapsed .chevron, #diag-card.auto-collapsed .chevron { transform: rotate(-90deg); }
-        .diag__count { font-family: 'JetBrains Mono', monospace; font-size: 0.66rem; color: var(--text-muted); }
-        #diag-card.has-error .diag__count { color: var(--danger); }
-        #diag-card.has-error { border-color: rgba(239, 68, 68, 0.45); }
-        #diag-log {
-            margin: 0; max-height: 26vh; overflow: auto;
-            color: #7fe0ff; font: 11px/1.45 'JetBrains Mono', ui-monospace, monospace;
-            white-space: pre-wrap; word-break: break-word;
-        }
+        /* Client-side diagnostics fold into the event-log console: `diag` rows
+           (info) read cyan, `error` rows red, distinct from device event/cmd. */
+        .log-line--diag  .log-line__src { color: #7fe0ff; }
+        .log-line--error .log-line__src { color: var(--danger); }
+        .log-line--error .log-line__msg { color: var(--danger); }
 
         /* Selectable readouts. `body { user-select: none }` above keeps drags on
            the 3D canvas from painting text selections across the whole overlay,
            but it also made every diagnostic uncopyable -- you could read a quat
-           or a stack trace and not get it into a bug report. These four are pure
+           or a stack trace and not get it into a bug report. These are pure
            read-only text sinks with nothing draggable in them, so they opt back
            in; the rest of the UI stays unselectable. */
-        #diag-log, .log-console__body, .sensor-block-val, .jitter-table {
+        .log-console__body, .sensor-block-val, .jitter-table {
             user-select: text; -webkit-user-select: text; cursor: text;
         }
 
@@ -1066,6 +1091,10 @@
             <button id="btn-restart" class="topbar-btn"
                     title="Relaunch the roomscan-web server process">Restart Server</button>
         </div>
+        <!-- Comm-status: server->rig link health, one chip per hop (populated by
+             the /ws `comm` message; hud.js renders it). ST-Link is informational
+             and reads neutral when absent, which is normal on the Ethernet rig. -->
+        <div id="comm-status" title="Server → rig link health"></div>
         <div class="status-indicator">
             <span id="conn-text">Offline</span>
             <div class="dot" id="conn-dot"></div>
@@ -1361,17 +1390,9 @@
             </div>
         </div>
 
-        <!-- Diagnostic feed (populated by window.__diag). Collapsed by default;
-             opens itself on the first error so a failure stays traceable without
-             devtools. #diag-log is the text sink the inline head script writes. -->
-        <div id="diag-card" class="card collapsed" data-card-id="diag">
-            <button class="diag__header" id="diag-toggle" type="button">
-                <span>Diagnostics</span>
-                <span class="diag__count" id="diag-count"></span>
-                <span class="chevron">&#9662;</span>
-            </button>
-            <pre id="diag-log" class="card-body">diag: waiting…</pre>
-        </div>
+        <!-- Diagnostics no longer have a dedicated pane: window.__diag folds them
+             into the bottom event-log console (#log-lines), so client-side faults
+             and device events read in one place (owner ask, 2026-08-05). -->
     </div>
 
     <!-- Right dock (§8.1): interactive control panel — one card per collapsible

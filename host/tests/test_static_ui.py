@@ -39,7 +39,7 @@ def _js_object_keys(js: str, var_name: str) -> set:
 # Collapse headers are exempt from the tooltip rule: the header's entire visible
 # content IS the panel name, so a `title` could only repeat it. Every other
 # button is a verb whose effect is not fully carried by its label.
-_HEADER_CLASSES = ("control-group__header", "diag__header", "log-console__header",
+_HEADER_CLASSES = ("control-group__header", "log-console__header",
                    "ir-card__header")
 
 
@@ -100,7 +100,6 @@ def test_no_duplicate_element_ids():
 
 
 @pytest.mark.parametrize("selector", [
-    "#diag-log",
     ".log-console__body",
     ".sensor-block-val",
     ".jitter-table",

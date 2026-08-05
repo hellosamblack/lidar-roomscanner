@@ -18,11 +18,11 @@ from .session import browser
 @mcp.tool()
 async def ui_screenshot(url: str = "", settle: float = 0.0, width: int = 1600,
                         height: int = 1000, renavigate: bool = False) -> list:
-    """Screenshot the web UI and return the image plus the on-page diag-log tail.
+    """Screenshot the web UI and return the image plus the on-page event-log tail.
 
     The browser stays open between calls, so by default this shoots the page as it
     already stands -- pass `renavigate=True` (with a `settle`, ~8 s for a cold load)
-    to reload first. The diag-log tail is the fastest signal for a load failure.
+    to reload first. The event-log tail is the fastest signal for a load failure.
     """
     if renavigate or browser.url is None:
         await browser.start(width=width, height=height)
@@ -38,7 +38,7 @@ async def ui_screenshot(url: str = "", settle: float = 0.0, width: int = 1600,
     import base64
     return [
         ImageContent(type="image", data=base64.b64encode(png).decode(), mimeType="image/png"),
-        TextContent(type="text", text=f"url={browser.url}\n--- diag-log tail ---\n{tail}"),
+        TextContent(type="text", text=f"url={browser.url}\n--- event-log tail ---\n{tail}"),
     ]
 
 
@@ -52,7 +52,7 @@ async def ui_eval(js: str, await_promise: bool = True) -> dict:
     host/src/roomscan/static/index.html.
 
     Note `window.__diag` is the page's *logging sink function*, not a state object --
-    call `ui_screenshot`, which returns the diag-log tail, to read what it logged.
+    call `ui_screenshot`, which returns the event-log tail, to read what it logged.
     """
     return await browser.evaluate(js, await_promise=await_promise)
 

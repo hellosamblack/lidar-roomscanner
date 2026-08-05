@@ -12,7 +12,7 @@ recipe below for day-to-day work:
 
 ```
 rig_up(replay="captures/tilt_sweep_20260729.bin", replay_fps=20)
-ui_screenshot(renavigate=True, settle=8)     # returns the PNG inline + #diag-log tail
+ui_screenshot(renavigate=True, settle=8)     # returns the PNG inline + #log-lines tail
 ui_wait_for("parseInt(document.getElementById('pos-status').textContent.match(/\\d+/)[0]) > 50")
 ui_eval("document.getElementById('hud-device-fps').textContent")
 ui_reset()                                   # between independent scenarios
@@ -37,7 +37,7 @@ escape hatch is still a `?cb=<anything>` on the URL.
 Assertable readouts: `#pos-status` ("frame N / total", replay only — it is empty on
 a live server), `#hud-view-fps`, `#hud-device-fps`, `#record-status`, `#ir-frame`,
 `#slam-frames`. **`window.__diag` is the page's logging sink *function*, not a state
-object** — read what it logged from `ui_screenshot`'s diag-log tail.
+object** — read what it logged from `ui_screenshot`'s event-log tail.
 
 ## Fallback recipe: `host/tools/web_ui_shot.py`
 
@@ -83,7 +83,7 @@ host/.venv/bin/python host/tools/web_ui_shot.py --out /tmp/01-load.png --steps '
 ]'
 ```
 
-Then **Read** each PNG to inspect it. The tool also prints the on-page `#diag-log`
+Then **Read** each PNG to inspect it. The tool also prints the on-page `#log-lines`
 tail — the fastest signal for a load failure (WS never opened, module 404, WebGL
 context refused). It manages its own Chrome (launch + teardown); pass `--port` to
 reuse an already-running remote-debugging instance instead.
@@ -120,7 +120,8 @@ its per-tile `input[data-check]`, `#seg-browser-sort button[data-sort=…]`,
 and the
 Web-Phase-4 SLAM controls `#seg-mode button[data-mode=realtime|slam]`,
 `chk-slam-traj`, `chk-slam-follow`, `#seg-walls button[data-walls=split|solid]`,
-`btn-save`, `#saved-list .cap-row a`, and the diagnostics toggle `diag-toggle`).
+`btn-save`, `#saved-list .cap-row a`, and the event-log toggle `log-toggle`
+(diagnostics fold into that console now — the old `diag-card`/`diag-toggle` are gone)).
 
 **The Sensors card's numerics live in a collapsed `<details>`.** Since the
 2026-07-29 declutter, only the gizmo/compass, the selected orientation readout,
@@ -296,16 +297,21 @@ bad.push(b[i].n+' X '+b[j].n)}window.__diag('OVERLAP '+innerWidth+'x'+innerHeigh
 Verified 0 overlaps at 1600×1000, 1280×800, 1100×560 and 820×700, with the SLAM
 cards shown and the event log expanded to its 28vh maximum.
 
-## The diagnostics panel
+## The diagnostics feed
 
-`window.__diag`'s on-page sink is now the collapsible `#diag-card` (header
-`#diag-toggle`, text sink still `#diag-log`, which `web_ui_shot.py` prints). It is
-**collapsed by default**, shows a line count — or a red error count — in its
-header, and **opens itself on the first error** so a silent module/import failure
-is still visible without devtools. Clicking the header persists the choice in
-`localStorage['roomscan.diag.collapsed']`, and an explicit choice wins over the
-auto-open. If you're driving a run where you want the log visible regardless:
-`document.getElementById('diag-card').classList.remove('collapsed')`.
+`window.__diag` no longer has its own pane (removed 2026-08-05). It writes
+**straight into the bottom event-log console** (`#log-lines`), as `diag` rows
+(cyan) or `error` rows (red), alongside device `event`/`cmd`/`log` lines — one
+place for both client-side faults and device events. It writes to `#log-lines`
+directly (a plain DOM append, no ES module), so it stays visible even when the
+modules fail to load — the exact case the sink exists for. `ui_screenshot` /
+`web_ui_shot.py` print the `#log-lines` tail (was `#diag-log`).
+
+The console is **collapsed by default** and **opens itself on the first error**
+so a silent module/import failure is still visible without devtools; clicking its
+header persists the choice in `localStorage['roomscan.card.log.collapsed']`, and
+an explicit choice wins over the auto-open. To force it open in a driven run:
+`document.getElementById('log-console').classList.remove('collapsed')`.
 
 Driving gotchas (cost time in Web Phase 3):
 - **Wait for server-rendered lists before clicking them.** Tiles built from a

@@ -308,6 +308,51 @@ def parse_tx_queue_stats_event(payload: bytes) -> TxQueueStatsEvent:
     )
 
 
+def _humanize_bytes(n: int) -> str:
+    """Compact IEC size for a byte counter, e.g. 1234567890 -> '1.15 GiB'."""
+    val = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if val < 1024.0 or unit == "TiB":
+            return f"{n} B" if unit == "B" else f"{val:.2f} {unit}"
+        val /= 1024.0
+    return f"{n} B"  # unreachable; keeps the type checker happy
+
+
+def describe_event(payload: bytes) -> tuple[int, int, str]:
+    """Decode an EVENT payload into (code, detail, human-legible message).
+
+    A display-layer superset of parse_event(): it names the code and, for
+    TX_QUEUE_STATS (7) -- whose bytes past code+detail are three binary u32
+    counters, not an ASCII string -- formats those counters instead of
+    ascii/'replace'-decoding them into mojibake (the ``code=7 detail=131589
+    <garbage>`` seen in the web event log). Use this anywhere an EVENT is shown
+    to a human (the web event log, the CLI viewers); parse_event() stays the
+    low-level raw decode used by golden-vector tests and byte-exact callers.
+    """
+    if len(payload) < 8:
+        raise ProtocolError(f"event payload too short: {len(payload)} bytes")
+    code, detail = struct.unpack_from("<II", payload, 0)
+    try:
+        name = EventCode(code).name
+    except ValueError:
+        name = f"EVENT_{code}"
+
+    if code == EventCode.TX_QUEUE_STATS:
+        try:
+            ev = parse_tx_queue_stats_event(payload)
+        except ProtocolError:
+            # Right code, unexpected length -- say so rather than garbling it.
+            return code, detail, f"{name} (malformed {len(payload)}-byte payload)"
+        return code, detail, (
+            f"{name} transport={ev.active_transport} "
+            f"high_water={ev.queue_high_water} pending={ev.pending_fragments} "
+            f"drops={ev.enqueue_drops} stalls={ev.stack_stalls} "
+            f"emitted={_humanize_bytes(ev.emitted_bytes)}")
+
+    text = payload[8:].decode("ascii", "replace").strip()
+    return code, detail, f"{name}: {text}" if text else name
+
+
 def pack_command(cmd: int, param: int, token: int) -> bytes:
     """Pack a COMMAND frame: cmd (u32) + param (u32) LE, with header seq=token.
 

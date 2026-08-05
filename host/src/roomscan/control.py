@@ -31,9 +31,9 @@ from .protocol import (
     ProtocolError,
     RangingConfigAck,
     ResultCode,
+    describe_event,
     pack_command,
     pack_manual_command,
-    parse_event,
     parse_typed_ack,
 )
 
@@ -421,7 +421,7 @@ def _start_reader_thread(source, decoder, client: CommandClient, stop: threading
                 if frame.header.frame_type == FrameType.EVENT:
                     counts["event"] += 1
                     try:
-                        code, detail, msg = parse_event(frame.payload)
+                        code, detail, msg = describe_event(frame.payload)
                         print(f"[device event] code={code} detail={detail} {msg}")
                     except ProtocolError:
                         print("[device event] undecodable payload")

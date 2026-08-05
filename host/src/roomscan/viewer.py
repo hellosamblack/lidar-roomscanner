@@ -17,7 +17,7 @@ from .decoder import StreamDecoder
 from .deproject import Deprojector
 from .flatfield import FlatField
 from .pipeline import TransformStage
-from .protocol import CommandCode, FLAG_DROPPED, FrameType, ProtocolError, parse_event
+from .protocol import CommandCode, FLAG_DROPPED, FrameType, ProtocolError, describe_event
 from .sources import FileSource, SerialSource, get_best_source, pump
 
 
@@ -86,7 +86,7 @@ def _reader(source, decoder, slot: queue.Queue, stats: Stats, record, fault: dic
         for frame in pump(source, decoder, record_path=record):
             if frame.header.frame_type == FrameType.EVENT:
                 try:
-                    code, detail, msg = parse_event(frame.payload)
+                    code, detail, msg = describe_event(frame.payload)
                     print(f"\n[device event] code={code} detail={detail} {msg}")
                 except ProtocolError:
                     print(f"\n[device event] undecodable payload ({len(frame.payload)} B)")
