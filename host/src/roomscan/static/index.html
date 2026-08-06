@@ -129,6 +129,10 @@
             --bg-color: #0b0c10;
             --panel-bg: rgba(22, 24, 30, 0.6);
             --panel-border: rgba(255, 255, 255, 0.08);
+            /* Faint fractal-noise tile, blended soft-light over the glass so the
+               chrome has a little tooth instead of reading as flat plastic. Lives
+               on the cards only — never over #canvas-container / the point cloud. */
+            --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.26'/%3E%3C/svg%3E");
             --text-main: #e2e8f0;
             --text-muted: #94a3b8;
             --accent: #3b82f6;
@@ -174,12 +178,48 @@
 
         /* ---- component: card (glassmorphic base, shared by every region) ---- */
         .card {
-            background: var(--panel-bg);
+            /* Grain is a background layer (below content, above the blurred
+               backdrop) so it can never occlude card content. */
+            background-color: var(--panel-bg);
+            background-image: var(--grain);
+            background-blend-mode: soft-light;
             backdrop-filter: blur(16px);
             -webkit-backdrop-filter: blur(16px);
             border: 1px solid var(--panel-border);
             border-radius: 16px;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            /* Depth: hue-tinted drop shadow (toward the near-black-blue bg, not
+               pure black) + a 1px top-edge highlight → light reads from above. */
+            box-shadow: 0 24px 48px -16px rgba(4, 6, 12, 0.60),
+                        0 2px 8px rgba(4, 6, 12, 0.40),
+                        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+        }
+
+        /* Cursor-follow spotlight edge — a hairline that brightens toward the
+           pointer. Scoped to the large chrome cards (every one carries a
+           data-card-id; modals and the top bar do not), painted only on the 1px
+           border via a masked overlay, and driven by spotlight.js setting
+           --mx/--my. Off-screen by default so there's no glow until the pointer
+           enters. Disabled under reduced-motion below. */
+        .card[data-card-id] { position: relative; isolation: isolate; }
+        .card[data-card-id]::after {
+            content: ""; position: absolute; inset: 0; border-radius: inherit;
+            padding: 1px; pointer-events: none; z-index: 3; opacity: 0;
+            transition: opacity 0.25s ease;
+            background: radial-gradient(150px circle at var(--mx, -200px) var(--my, -200px),
+                        rgba(96, 165, 250, 0.55), transparent 70%);
+            -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+            -webkit-mask-composite: xor; mask-composite: exclude;
+        }
+        .card[data-card-id].is-spotlit::after { opacity: 1; }
+
+        /* Respect reduced-motion: drop the pointer-driven glow and the springy
+           control transforms; keep the static depth/focus treatments. */
+        @media (prefers-reduced-motion: reduce) {
+            .card[data-card-id]::after { display: none; }
+            button:active, .topbar-btn:active { transform: none; }
+            .slider::-webkit-slider-thumb, #seek::-webkit-slider-thumb { transition: none; }
+            .slider:hover::-webkit-slider-thumb, #seek:hover::-webkit-slider-thumb,
+            .slider:active::-webkit-slider-thumb, #seek:active::-webkit-slider-thumb { transform: none; }
         }
 
         /* ================= layout regions (§8.1) ================= */
@@ -214,8 +254,12 @@
         .topbar-btn {
             padding: 5px 11px; font-size: 0.75rem; font-weight: 500;
             color: var(--text-muted); border-radius: 6px;
+            transition: color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+                        background 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+                        transform 0.08s ease;
         }
-        .topbar-btn:hover { color: var(--text-main); }
+        .topbar-btn:hover { color: var(--text-main); background: rgba(255, 255, 255, 0.06); }
+        .topbar-btn:active { transform: translateY(1px); }
         .topbar-btn.busy { opacity: 0.5; cursor: progress; }
         .topbar-btn:disabled, .topbar-btn:disabled:hover {
             opacity: 0.4; cursor: default; color: var(--text-muted);
@@ -320,7 +364,7 @@
         .hud-card .card-body { display: flex; flex-direction: column; gap: 6px; }
 
         .hud-row { display: flex; justify-content: space-between; gap: 16px; font-size: 0.8rem; color: var(--text-muted); }
-        .hud-val { color: var(--text-main); font-weight: 700; }
+        .hud-val { color: var(--text-main); font-weight: 700; font-variant-numeric: tabular-nums; }
         /* A tracking-lost frame (reached the mapper, failed to register) and an
            overwritten frame (never reached the mapper) are different failures
            with different fixes — plan item 2 requires they never share a
@@ -410,7 +454,7 @@
         }
         .sensor-label-input:focus {
             background: rgba(255,255,255,0.06); border-color: var(--accent-hover);
-            color: var(--text-main); outline: none;
+            color: var(--text-main);
         }
 
         /* Diagnostics disclosure (same <details> idiom as .debug-section).
@@ -643,10 +687,27 @@
         button:hover { background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 255, 255, 0.2); }
         button:active { transform: translateY(1px); }
         button.primary {
-            background: var(--accent); border-color: var(--accent); color: white;
-            box-shadow: 0 4px 14px rgba(59, 130, 246, 0.3);
+            /* Same-hue top sheen (a white overlay, NOT a two-colour AI gradient)
+               + a 1px inner highlight so the fill catches the overhead light. */
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 42%), var(--accent);
+            border-color: var(--accent); color: white;
+            box-shadow: 0 4px 14px rgba(59, 130, 246, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.28);
         }
-        button.primary:hover { background: var(--accent-hover); box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4); }
+        button.primary:hover {
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0) 42%), var(--accent-hover);
+            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+        }
+
+        /* Keyboard focus ring (a11y). Mouse/touch focus stays quiet; keyboard
+           focus gets a clear accent ring. Fixes the gap where inputs set
+           `outline: none` on plain :focus and nothing showed for keyboard users. */
+        :focus:not(:focus-visible) { outline: none; }
+        button:focus-visible, .segmented button:focus-visible, .topbar-btn:focus-visible,
+        .squircle-btn:focus-visible, .cap-tile:focus-visible, .cap-row:focus-visible,
+        summary:focus-visible, .toggle input:focus-visible, .slider:focus-visible,
+        #seek:focus-visible, .card input:focus-visible {
+            outline: 2px solid var(--accent); outline-offset: 2px;
+        }
 
         /* two side-by-side action buttons (replaces the old one-off grid-2) */
         .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -779,8 +840,35 @@
         .magcal-spacer { flex: 1; }
         .magcal-status { font-size: 0.74rem; color: var(--text-muted); min-height: 1.1em; }
 
-        /* Shared slider (range input) style */
-        .slider { width: 100%; accent-color: var(--accent); cursor: pointer; }
+        /* Shared slider (range input) style — thin dark track + accent thumb.
+           accent-color kept as the fallback for browsers that ignore the
+           pseudo-elements. Covers .slider and the transport #seek. */
+        .slider, #seek {
+            -webkit-appearance: none; appearance: none;
+            width: 100%; height: 4px; border-radius: 999px; cursor: pointer; /* unslop-ignore: a 4px slider rail is intentionally a pill */
+            background: rgba(255, 255, 255, 0.14); accent-color: var(--accent);
+        }
+        .slider::-webkit-slider-runnable-track, #seek::-webkit-slider-runnable-track {
+            height: 4px; border-radius: 999px; background: transparent; /* unslop-ignore: slider rail pill */
+        }
+        .slider::-moz-range-track, #seek::-moz-range-track {
+            height: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.14); /* unslop-ignore: slider rail pill */
+        }
+        .slider::-webkit-slider-thumb, #seek::-webkit-slider-thumb {
+            -webkit-appearance: none; appearance: none;
+            width: 14px; height: 14px; margin-top: -5px; border-radius: 50%;
+            background: var(--accent); border: 2px solid var(--bg-color);
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+            transition: transform 0.15s ease, background 0.15s ease;
+        }
+        .slider::-moz-range-thumb, #seek::-moz-range-thumb {
+            width: 14px; height: 14px; border-radius: 50%;
+            background: var(--accent); border: 2px solid var(--bg-color);
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45); cursor: pointer;
+        }
+        .slider:hover::-webkit-slider-thumb, #seek:hover::-webkit-slider-thumb { transform: scale(1.18); background: var(--accent-hover); }
+        .slider:hover::-moz-range-thumb, #seek:hover::-moz-range-thumb { background: var(--accent-hover); }
+        .slider:active::-webkit-slider-thumb, #seek:active::-webkit-slider-thumb { transform: scale(1.06); }
 
         /* Applied-preset benefit blurb (owner ask 2026-08-05) */
         .ranging-blurb {
@@ -809,7 +897,7 @@
             color: var(--text-main); padding: 5px 6px; border-radius: 6px;
             font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;
         }
-        .paired-input input[type="number"]:focus { outline: none; border-color: var(--accent); }
+        .paired-input input[type="number"]:focus { border-color: var(--accent); }
         .paired-input input:disabled { opacity: 0.4; cursor: not-allowed; }
         .ranging-warning { color: var(--warning); font-size: 0.72rem; line-height: 1.3; }
         .ranging-error { color: var(--danger); font-size: 0.72rem; line-height: 1.3; }
@@ -951,7 +1039,7 @@
             color: var(--text-main); padding: 9px 10px; border-radius: 8px;
             font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;
         }
-        .record-name-row input[type="text"]:focus { outline: none; border-color: var(--accent); }
+        .record-name-row input[type="text"]:focus { border-color: var(--accent); }
         .record-name-suffix { color: var(--text-muted); font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; }
         .record-name-error { font-size: 0.72rem; color: var(--danger); min-height: 1em; }
         .cap-row {
@@ -959,6 +1047,7 @@
             padding: 6px 8px; border-radius: 6px; cursor: pointer;
             background: rgba(255,255,255,0.03); border: 1px solid transparent;
             font-size: 0.76rem; color: var(--text-main);
+            transition: background 0.15s ease, border-color 0.15s ease;
         }
         .cap-row:hover { background: rgba(255,255,255,0.08); }
         .cap-row.active { border-color: var(--accent); background: rgba(59,130,246,0.14); }
