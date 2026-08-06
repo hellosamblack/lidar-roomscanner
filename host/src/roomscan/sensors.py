@@ -761,6 +761,13 @@ class YawFusion:
         self._last_t: int | None = None
         self.status = "init"
 
+    # Stream 9 can arrive in short timestamp bursts (especially over UDP).
+    # Dividing the small fp16 quaternion step by a sub-12 ms interval turns
+    # quantisation/transport jitter into a false angular-rate spike.  The next
+    # sample is still compared with the immediately preceding quaternion, so
+    # the normal ~30/60 Hz cadence remains fully covered.
+    MOTION_MIN_DT_US = 12_000
+
     def update(self, quat, raw_mag, t_us: int) -> None:
         quat = tuple(float(v) for v in quat)
         prev_quat, prev_t = self._last_quat, self._last_t
@@ -779,7 +786,7 @@ class YawFusion:
         # gate: fast motion (SFLP quat angular rate as accel-free motion proxy)
         dot = sum(a * b for a, b in zip(prev_quat, quat))
         ang = 2.0 * math.acos(max(0.0, min(1.0, abs(dot))))   # rad between orientations
-        if math.degrees(ang) / dt > self.motion_rate_dps:
+        if (t_us - prev_t) >= self.MOTION_MIN_DT_US and math.degrees(ang) / dt > self.motion_rate_dps:
             self.status = "gated:motion"
             self._last_t = t_us
             return

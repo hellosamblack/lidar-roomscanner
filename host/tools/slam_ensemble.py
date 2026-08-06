@@ -62,7 +62,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "host" / "src"))
 
 from roomscan.slam import metrics                                    # noqa: E402
-from roomscan.slam.cli import _load_frames, _run                     # noqa: E402
+from roomscan.slam.cli import _load_frames_maybe_imu, _run           # noqa: E402
 from roomscan.slam.config import SlamConfig                          # noqa: E402
 from roomscan.slam.frames import world_up                            # noqa: E402
 from roomscan.slam.validation import paired_loop_gate                # noqa: E402
@@ -114,6 +114,14 @@ def run_ensemble(capture, *, n: int = DEFAULT_N, device: str | None = None,
                  voxel_size: float | None = None, block_count: int | None = None,
                  icp_mode: str | None = None, max_frames: int | None = None,
                  baro_authority: float | None = None, max_iter: int | None = None,
+                 rot_prior_weight: float | None = None,
+                 prior_smooth_alpha: float | None = None,
+                 apply_quat_phase: bool | None = None,
+                 zupt_enabled: bool | None = None,
+                 zupt_accel_tol_g: float | None = None,
+                 zupt_window: int | None = None,
+                 zupt_coherence: float | None = None,
+                 graft_yaw_deg: float = 0.0,
                  progress=None) -> dict:
     """Run `n` perturbed SLAM passes over one capture and summarise the spread.
 
@@ -130,20 +138,50 @@ def run_ensemble(capture, *, n: int = DEFAULT_N, device: str | None = None,
         cfg.baro_authority = baro_authority
     if max_iter is not None:
         cfg.max_iter = max(1, int(max_iter))
+    if rot_prior_weight is not None:
+        cfg.icp_rot_prior_weight = rot_prior_weight
+    if prior_smooth_alpha is not None:
+        cfg.prior_smooth_alpha = prior_smooth_alpha
+    if apply_quat_phase is not None:
+        cfg.apply_quat_phase = apply_quat_phase
+    if zupt_enabled is not None:
+        cfg.zupt_enabled = zupt_enabled
+    if zupt_accel_tol_g is not None:
+        cfg.zupt_accel_tol_g = zupt_accel_tol_g
+    if zupt_window is not None:
+        cfg.zupt_window = zupt_window
+    if zupt_coherence is not None:
+        cfg.zupt_coherence = zupt_coherence
     mode = icp_mode or cfg.icp_mode
     dev = device or cfg.device
 
-    frames, width, height = _load_frames(str(capture), max_frames)
+    # The quat-phase and ZUPT levers need the raw IMU per frame; the helper
+    # decodes it only when a lever consumes it (ZUPT is on by default).
+    need_imu = bool(cfg.apply_quat_phase or cfg.zupt_enabled)
+    frames, width, height, imu_aux = _load_frames_maybe_imu(
+        str(capture), max_frames, need_imu)
     if not frames:
         return {"capture": str(capture), "error": "no depth frames decoded from capture"}
+
+    # BUG-070 harness: a constant world-Z heading graft is a PHYSICALLY NULL
+    # relabelling (tilt preserved to machine precision), so a stable estimator's
+    # drift must be invariant to it. Sweeping graft_yaw_deg and comparing the
+    # spread ACROSS headings is the invariance check -- it was done ad hoc when
+    # BUG-070 was filed; this makes it a standing knob.
+    if graft_yaw_deg:
+        from roomscan.sensors import graft_yaw
+        frames = [(d, r, c, graft_yaw(q, graft_yaw_deg), pa, t)
+                  for (d, r, c, q, pa, t) in frames]
 
     base_max_dist = cfg.max_dist
     runs: list[dict] = []
     for pert in perturbations(n):
         cfg.max_dist = base_max_dist + pert["max_dist_delta"]
         sub = frames[pert["start_frame"]:]
+        sub_imu = imu_aux[pert["start_frame"]:] if imu_aux is not None else None
         t0 = time.perf_counter()
-        mapper, timings, _ts = _run(sub, width, height, cfg, mode, device=dev)
+        mapper, timings, _ts = _run(sub, width, height, cfg, mode, device=dev,
+                                    imu_aux=sub_imu)
         wall = time.perf_counter() - t0
 
         track = metrics.tracking_stats(mapper.lost_flags)
@@ -162,6 +200,8 @@ def run_ensemble(capture, *, n: int = DEFAULT_N, device: str | None = None,
             "trailing_lost": track["trailing_lost"],
             "longest_lost_run": track["longest_lost_run"],
             "icp_escalations": mapper.icp_escalations,
+            "zupt_count": getattr(mapper, "zupt_count", 0),
+            "quat_phase_count": getattr(mapper, "quat_phase_count", 0),
             "baro_correction_m": mapper.baro_correction_m,
             "blocks": used,
             "saturated": bool(used >= 0.97 * cfg.block_count),
@@ -184,6 +224,12 @@ def run_ensemble(capture, *, n: int = DEFAULT_N, device: str | None = None,
     return {
         "capture": str(capture),
         "n": n, "device": dev, "icp_mode": mode,
+        "icp_rot_prior_weight": cfg.icp_rot_prior_weight,
+        "prior_smooth_alpha": cfg.prior_smooth_alpha,
+        "apply_quat_phase": cfg.apply_quat_phase,
+        "zupt_enabled": cfg.zupt_enabled,
+        "zupt_accel_tol_g": cfg.zupt_accel_tol_g, "zupt_window": cfg.zupt_window,
+        "graft_yaw_deg": graft_yaw_deg,
         "voxel_size": cfg.voxel_size, "block_count": cfg.block_count,
         "frames_loaded": len(frames), "width": width, "height": height,
         "summary": summary,
@@ -250,10 +296,35 @@ def main(argv=None) -> int:
     ap.add_argument("--device", default=None)
     ap.add_argument("--voxel-size", type=float, default=None)
     ap.add_argument("--block-count", type=int, default=None)
-    ap.add_argument("--icp-mode", choices=["translation", "6dof", "adaptive"], default=None)
+    ap.add_argument("--icp-mode", choices=["translation", "6dof", "adaptive", "soft_prior"],
+                    default=None)
     ap.add_argument("--max-frames", type=int, default=None)
     ap.add_argument("--baro-authority", type=float, default=None)
     ap.add_argument("--max-iter", type=int, default=None)
+    ap.add_argument("--rot-prior-weight", type=float, default=None,
+                    help="soft-prior rotational damping (dimensionless x the rotation block's "
+                         "own stiffness), overriding [slam] icp_rot_prior_weight. Only affects "
+                         "--icp-mode soft_prior. Sweep this to tune BUG-067's fix.")
+    ap.add_argument("--prior-smooth-alpha", type=float, default=None,
+                    help="rotation-prior smoothing EMA weight on history, overriding "
+                         "[slam] prior_smooth_alpha (0 = off). A BUG-067 lever independent of "
+                         "icp_mode.")
+    ap.add_argument("--apply-quat-phase", action="store_true", default=None,
+                    help="apply the +7.76 ms quat-phase compensation (BUG-031/067). Needs "
+                         "stream 11+13 in the capture.")
+    ap.add_argument("--zupt", action="store_true", default=None, dest="zupt_enabled",
+                    help="enable the accelerometer ZUPT (BUG-069). Needs stream 11.")
+    ap.add_argument("--zupt-tol", type=float, default=None, dest="zupt_accel_tol_g",
+                    help="ZUPT tolerance band around 1 g (fraction of g, default 0.04).")
+    ap.add_argument("--zupt-window", type=int, default=None,
+                    help="consecutive still frames before the ZUPT trips (default 6).")
+    ap.add_argument("--zupt-coherence", type=float, default=None,
+                    help="ZUPT translation-coherence veto threshold (default 0.5); 0 disables "
+                         "the veto = accel-only ZUPT (measured unsafe on real motion).")
+    ap.add_argument("--graft-yaw-deg", type=float, default=0.0,
+                    help="BUG-070 harness: constant world-Z heading graft on the prior (a "
+                         "physically null relabel). Sweep it; a stable estimator's drift is "
+                         "invariant to it.")
     ap.add_argument("--json", default=None, metavar="PATH")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
@@ -268,6 +339,14 @@ def main(argv=None) -> int:
                      voxel_size=args.voxel_size, block_count=args.block_count,
                      icp_mode=args.icp_mode, max_frames=args.max_frames,
                      baro_authority=args.baro_authority, max_iter=args.max_iter,
+                     rot_prior_weight=args.rot_prior_weight,
+                     prior_smooth_alpha=args.prior_smooth_alpha,
+                     apply_quat_phase=args.apply_quat_phase,
+                     zupt_enabled=args.zupt_enabled,
+                     zupt_accel_tol_g=args.zupt_accel_tol_g,
+                     zupt_window=args.zupt_window,
+                     zupt_coherence=args.zupt_coherence,
+                     graft_yaw_deg=args.graft_yaw_deg,
                      progress=tick)
     print(format_report(r))
     if args.json:

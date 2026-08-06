@@ -236,6 +236,8 @@ export function createSensors(hub) {
     const headingEl = $('sensor-heading');
     const fusionEl = $('sensor-fusion');
     const fusionHelpEl = $('sensor-fusion-help');
+    let fusionWarningTimer = null;
+    let fusionWarningFadeTimer = null;
     const elevSpark = $('sensor-elev-spark');
     const elevVal = $('sensor-elev-val');
     const elevDeltaBtn = $('sensor-elev-delta');
@@ -402,6 +404,23 @@ export function createSensors(hub) {
             // `off` are transient/configuration states, not faults.
             const help = FUSION_HELP[msg.fusion_key] || '';
             const isFault = typeof msg.fusion_key === 'string' && msg.fusion_key.startsWith('gated');
+            // A gate can last for only one sensor sample. Keep its remedy on
+            // screen for a second so the operator can read it, then let it
+            // fade instead of vanishing on the next active sample.
+            if (isFault && fusionHelpEl) {
+                clearTimeout(fusionWarningTimer);
+                clearTimeout(fusionWarningFadeTimer);
+                fusionHelpEl.classList.remove('hidden', 'is-fading');
+                fusionHelpEl.className = 'hud-warn hud-warn--transient';
+                fusionHelpEl.textContent = help;
+                fusionWarningTimer = setTimeout(() => {
+                    fusionHelpEl.classList.add('is-fading');
+                    fusionWarningFadeTimer = setTimeout(() => {
+                        fusionHelpEl.classList.add('hidden');
+                        fusionHelpEl.classList.remove('is-fading', 'hud-warn--transient');
+                    }, 300);
+                }, 1000);
+            }
             const fusionTitle = msg.fusion_key
                 ? 'YawFusion status: ' + msg.fusion_key + (help ? ' — ' + help : '')
                 : '';
@@ -411,9 +430,10 @@ export function createSensors(hub) {
                 fusionEl.title = fusionTitle;
             }
             if (fusionHelpEl) {
-                fusionHelpEl.textContent = help;
-                fusionHelpEl.className = isFault ? 'hud-warn' : 'hud-note';
-                fusionHelpEl.classList.toggle('hidden', !help);
+                if (!isFault) {
+                    fusionHelpEl.textContent = help;
+                    fusionHelpEl.className = help ? 'hud-note' : 'hud-note hidden';
+                }
                 fusionHelpEl.title = fusionTitle;
             }
             // Elevation (owner ask, 2026-07-31): feet, with the bare hPa

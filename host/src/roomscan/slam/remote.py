@@ -79,12 +79,19 @@ class RemoteSlamWorker:
             return False
 
     def submit(self, depth, quat, pressure, reflectance=None, confidence=None,
-               imu_rate_hz=None) -> None:
+               imu_rate_hz=None, imu_raw=None, quat_offset_us=None) -> None:
         """`imu_rate_hz` (Task 8): carried in the message so the container's
         own Mapper rescales `baro_tau_frames` identically to the local
         backend (see `SlamService.serve_client`). Omitted from the message
         entirely when `None`, so an older service (that never looks for the
-        key) is unaffected -- same shape as reflectance/confidence above."""
+        key) is unaffected -- same shape as reflectance/confidence above.
+
+        `imu_raw`/`quat_offset_us` (BUG-069/067 levers) are accepted so this
+        matches `SlamWorker.submit`'s signature, but NOT yet forwarded over the
+        wire -- the ZUPT/quat-phase levers are local/offline only. A remote
+        backend simply runs without them (both default off), so this is a
+        graceful no-op, not a silent bug; wiring them into the service message
+        is a follow-up if the remote backend ever needs them."""
         with self._in_lock:
             self._fid += 1
             msg = {"fid": self._fid,

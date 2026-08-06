@@ -24,11 +24,14 @@ import open3d as o3d
 from ..colors import normalize as _percentile_normalize
 from ..deproject import Deprojector
 from .cloud import source_cloud
-from .frames import baro_height_m, predict_pose, world_up
+from .frames import apply_quat_phase as _quat_phase_correct
+from .frames import baro_height_m, predict_pose, slerp, world_up
 from .intrinsics import pinhole
-from .motion import StationarityGate
-from .odometry import _COND_CAP, register_escalating
+from .motion import StationarityGate, ZuptDetector
+from .odometry import _COND_CAP, _ROT_PRIOR_WEIGHT, register_escalating
 from .tsdf import DEFAULT_BLOCK_COUNT, TsdfMap
+
+_G = 9.80665
 
 _MIN_VALID_POINTS = 100
 _DEFAULT_MIN_CONFIDENCE = 20.0  # tuned against captures/phase6_motion_ref.bin, see task-quality-report.md
@@ -49,6 +52,35 @@ _BARO_REF_FRAMES = 90
 #: number nobody reads faster than the 4 Hz metrics cadence. 0.25 s matches
 #: that cadence; between samples `FrameStep` carries the last reading.
 _BLOCK_USAGE_INTERVAL_S = 0.25
+
+
+def _batch_gyro_mean(imu_raw) -> np.ndarray | None:
+    """Bias-corrected mean body-frame gyro rate (deg/s, (3,)) over a stream-11
+    batch, or None if the batch carries no gyro words. Subtracts the SFLP live
+    gyro-bias estimate when present -- the same correction `imufusion` applies."""
+    if imu_raw is None:
+        return None
+    gyro = getattr(imu_raw, "gyro_dps", None)
+    if gyro is None or len(gyro) == 0:
+        return None
+    w = np.asarray(gyro, dtype=np.float64).mean(axis=0)
+    gbias = getattr(imu_raw, "gbias_dps", None)
+    if gbias is not None and len(gbias) > 0:
+        w = w - np.asarray(gbias, dtype=np.float64).mean(axis=0)
+    return w
+
+
+def _batch_accel_mag(imu_raw) -> float | None:
+    """Specific-force magnitude (m/s^2) from a stream-11 batch: the norm of the
+    mean raw accel over the batch. None if the batch carries no accel words. At
+    rest this is ~1 g regardless of orientation -- the ZUPT signal (see motion.py)."""
+    if imu_raw is None:
+        return None
+    accel = getattr(imu_raw, "accel_g", None)
+    if accel is None or len(accel) == 0:
+        return None
+    mean_g = np.asarray(accel, dtype=np.float64).mean(axis=0)
+    return float(np.linalg.norm(mean_g) * _G)
 
 
 @dataclass
@@ -109,6 +141,7 @@ class Mapper:
                  max_dist: float = 0.05,
                  icp_retry_dist: float = 0.10,
                  icp_cond_cap: float = _COND_CAP,
+                 icp_rot_prior_weight: float = _ROT_PRIOR_WEIGHT,
                  min_fitness: float = 0.3, max_rmse: float = 0.05,
                  max_iter: int = 6,
                  adapt_min_fitness: float = 0.6, adapt_max_rmse: float = 0.03,
@@ -124,6 +157,12 @@ class Mapper:
                  stationary_coherence: float = 0.5,
                  stationary_step_ceiling: float = 0.03,
                  stationary_rot_ceiling: float = 0.3,
+                 prior_smooth_alpha: float = 0.0,
+                 apply_quat_phase: bool = False,
+                 zupt_enabled: bool = True,
+                 zupt_window: int = 6,
+                 zupt_accel_tol_g: float = 0.04,
+                 zupt_coherence: float = 0.5,
                  imu_spike_deg: float = 0.0,
                  baro_reject_m: float = 50.0,
                  clock=time.perf_counter):
@@ -187,6 +226,7 @@ class Mapper:
                              block_count=block_count)
         self._gate = dict(max_dist=max_dist, min_fitness=min_fitness, max_rmse=max_rmse,
                           cond_cap=icp_cond_cap,
+                          rot_prior_weight=icp_rot_prior_weight,
                           max_iter=max(1, int(max_iter)),
                           adapt_min_fitness=adapt_min_fitness,
                           adapt_max_rmse=adapt_max_rmse,
@@ -215,7 +255,31 @@ class Mapper:
             if stationary_hold else None)
         self.held_count = 0         # frames whose reported translation was frozen
         self._display_pos = None    # de-jittered reported position (hold target)
+        # Accelerometer ZUPT (BUG-069): a zero-velocity constraint that, unlike the
+        # display-only StationarityGate above, reaches the MAP. It fires on the
+        # accelerometer (|a| ~= 1 g => not translating), so it works during a pan --
+        # the case the coherence gate structurally cannot see. Needs the raw IMU
+        # batch in step(); a no-op (never fires) when zupt_enabled is False or no
+        # imu_raw is supplied, so existing callers are byte-identical. See motion.py.
+        self._zupt = (ZuptDetector(window=zupt_window, accel_tol_g=zupt_accel_tol_g,
+                                   coherence_thresh=zupt_coherence)
+                      if zupt_enabled else None)
+        self.zupt_count = 0         # frames whose TRUE translation was held to t_prev
+        # +7.76 ms quat-phase compensation (BUG-031/067). Off by default: it changes
+        # the rotation prior and wants its own before/after on a moving capture.
+        self._apply_quat_phase = bool(apply_quat_phase)
+        self.quat_phase_count = 0   # frames the phase correction actually moved
         self._quat_prev = None      # for the stationarity gate's rotation signal
+        # Rotation-prior smoothing (BUG-067 lever). A causal EMA/slerp of the SFLP
+        # prior quaternion fed to predict_pose: `prior_smooth_alpha` is the weight
+        # on the PREVIOUS smoothed value (0 = off, byte-identical raw prior; higher
+        # = more smoothing). The rotation prior is what a translation/soft-prior ICP
+        # cannot disagree with, so a per-frame-noisy prior turns into fabricated
+        # translation; the phase-sweep in BUG-067 showed any low-pass of the prior
+        # collapses the tripod instability (sd 0.489 -> ~0.03). Applied to the prior
+        # only; the raw quat still drives rot_delta_deg (spike/stationarity signals).
+        self._prior_smooth_alpha = float(prior_smooth_alpha)
+        self._quat_smooth = None
         self._t_prev = np.zeros(3)
         self._ref_pa: float | None = None
         self._ref_acc = 0.0          # running sum for the averaged baro datum
@@ -277,13 +341,15 @@ class Mapper:
     def _register_device(self) -> o3d.core.Device:
         """Device passed to `odometry.register`.
 
-        `icp_device` applies to the **translation** mode only. The `6dof` path
-        is Open3D's own tensor ICP, which runs on the device its point clouds
-        live on and takes `device` only to build the init tensor; handing it a
-        host device while `source`/`target` sit on CUDA is a device mismatch,
-        not an optimization. `icp_mode` is a public attribute, so this is
-        resolved per call rather than frozen in `__init__`."""
-        return self._icp_device if self.icp_mode == "translation" else self._device
+        `icp_device` applies to the **translation** and **soft_prior** modes,
+        whose solves are hand-written numpy over a host/device NN index. The
+        `6dof` path is Open3D's own tensor ICP, which runs on the device its
+        point clouds live on and takes `device` only to build the init tensor;
+        handing it a host device while `source`/`target` sit on CUDA is a device
+        mismatch, not an optimization. `icp_mode` is a public attribute, so this
+        is resolved per call rather than frozen in `__init__`."""
+        return (self._icp_device if self.icp_mode in ("translation", "soft_prior")
+                else self._device)
 
     def set_imu_rate_hz(self, imu_rate_hz: float | None) -> None:
         """Live IMU/env poll-rate update (Task 7's decoupled rate; Task 8).
@@ -312,6 +378,18 @@ class Mapper:
         if not imu_rate_hz:
             return
         self.baro_tau_frames = max(1, round(30.0 * float(imu_rate_hz)))
+
+    def _smooth_prior(self, quat):
+        """Causal slerp EMA of the prior quaternion. `prior_smooth_alpha` is the
+        weight on history: 0 returns the raw quat (off), higher lags more. Seeds
+        on the first sample so nothing is smoothed toward an arbitrary origin."""
+        q = np.asarray(quat, dtype=np.float64)
+        if self._quat_smooth is None:
+            self._quat_smooth = q.copy()
+            return (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+        out = slerp(q, self._quat_smooth, self._prior_smooth_alpha)
+        self._quat_smooth = np.asarray(out, dtype=np.float64)
+        return out
 
     def _apply_baro_z(self, pose: np.ndarray, pressure_pa: float | None) -> np.ndarray:
         """Barometric height as a bounded, low-passed complementary correction
@@ -435,9 +513,22 @@ class Mapper:
         return np.repeat(norm[..., None], 3, axis=-1)
 
     def step(self, depth_mm: np.ndarray, quat, pressure_pa=None,
-             reflectance=None, confidence=None) -> FrameStep:
+             reflectance=None, confidence=None,
+             imu_raw=None, quat_offset_us=None) -> FrameStep:
         t0 = self._clock()
         depth_mm = self._gate_confidence(depth_mm, confidence)
+        # +7.76 ms quat-phase compensation (BUG-031/067), applied FIRST so the
+        # spike gate, rot_delta, smoothing and the pose all use the frame-instant
+        # orientation. No-op unless enabled AND this frame carries both the lead
+        # (quat_offset_us) and a gyro batch to roll the quat back with.
+        if (self._apply_quat_phase and quat is not None and quat_offset_us
+                and imu_raw is not None):
+            gyro = _batch_gyro_mean(imu_raw)
+            if gyro is not None:
+                corrected = _quat_phase_correct(quat, gyro, quat_offset_us)
+                if corrected is not quat:
+                    quat = corrected
+                    self.quat_phase_count += 1
         color = self._reflectance_color(reflectance) if reflectance is not None else None
         pts, valid = self._deproj.grid(depth_mm)
         n_valid = int(valid.sum())
@@ -473,6 +564,13 @@ class Mapper:
             self.imu_spike_count += 1
         elif quat is not None:
             self._quat_prev = np.asarray(quat, dtype=np.float64)
+
+        # Rotation-prior smoothing (BUG-067 lever): low-pass the prior orientation
+        # fed to the pose/raycast before it becomes a hard constraint ICP cannot
+        # argue with. No-op at alpha=0. Uses `quat_prior` (post spike-gate) so a
+        # held glitch is smoothed like any other sample.
+        if self._prior_smooth_alpha > 0.0 and quat_prior is not None:
+            quat_prior = self._smooth_prior(quat_prior)
 
         T_pred = predict_pose(quat_prior, self._t_prev)
 
@@ -536,6 +634,21 @@ class Mapper:
                 fitness, rmse = res.fitness, res.rmse
                 if res.ok:
                     pose = self._apply_baro_z(T_pred @ res.pose, pressure_pa)
+                    # Accelerometer ZUPT (BUG-069): a MAP-REACHING zero-velocity
+                    # constraint. When the raw accel says the sensor is not
+                    # translating (|a| ~= 1 g, true even during a pan), freeze the
+                    # TRUE pose's translation at t_prev BEFORE it feeds integrate
+                    # and _t_prev -- so the TSDF never absorbs the invented motion
+                    # in the first place. Distinct from the display-only hold
+                    # below: this changes the reconstruction, and is why it keys on
+                    # the physically-grounded, LiDAR-independent accelerometer
+                    # rather than on ICP coherence (which cannot fire on a pan).
+                    if self._zupt is not None:
+                        increment = pose[:3, 3] - self._t_prev
+                        if self._zupt.update(_batch_accel_mag(imu_raw), increment):
+                            pose = pose.copy()
+                            pose[:3, 3] = self._t_prev
+                            self.zupt_count += 1
                     # Stationarity gate (owner: "device is stationary -> model
                     # should be too"). Feed the RAW ICP-estimated increment
                     # (never a held value, or the gate could never see motion

@@ -6,7 +6,59 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..sensors import quat_to_matrix, T_CV_TO_BODY, T_WORLD_TO_CV
+from ..sensors import quat_mul, quat_to_matrix, T_CV_TO_BODY, T_WORLD_TO_CV
+
+
+def apply_quat_phase(quat, gyro_dps_body, offset_us: float):
+    """Propagate the SFLP orientation `quat` (body->world [w,x,y,z]) BACKWARD by
+    `offset_us` microseconds using the body-frame gyro rate, returning the
+    orientation at the depth-frame instant.
+
+    BUG-031 measured the stream-9 quaternion (a batch MEAN) as sitting +7.76 ms
+    AFTER the FRAME_READY edge -- it LEADS the depth frame -- so the orientation
+    that belongs with this frame is the quat rolled back by that offset, not
+    forward. During a fast pan that lead is a real rotation-prior error (~1.2 deg
+    at 156 deg/s) that translation/soft-prior ICP turns into fabricated
+    translation (BUG-067). `quat_offset_us` is positive when the quat leads;
+    `offset_us <= 0` or a None/zero gyro is a no-op.
+
+    Kinematics: for a body->world quaternion, q(t+dt) = q ⊗ exp(1/2 w_body dt),
+    so rolling back by `offset` right-multiplies by the conjugate increment."""
+    if offset_us is None or offset_us <= 0.0 or gyro_dps_body is None:
+        return quat
+    w = np.asarray(gyro_dps_body, dtype=np.float64).reshape(3)
+    dt = offset_us / 1e6
+    theta_vec = np.radians(w) * dt                  # body-frame rotation over the lead
+    half = 0.5 * theta_vec
+    ang = float(np.linalg.norm(half))
+    if ang < 1e-12:
+        return quat
+    axis = half / ang
+    dq = (np.cos(ang), *(np.sin(ang) * axis))       # forward increment exp(1/2 w dt)
+    dq_conj = (dq[0], -dq[1], -dq[2], -dq[3])        # roll BACK by the lead
+    return quat_mul(tuple(float(c) for c in quat), dq_conj)
+
+
+def slerp(a, b, t: float) -> tuple[float, float, float, float]:
+    """Spherical linear interpolation between unit quaternions [w,x,y,z], from
+    `a` at t=0 to `b` at t=1. Falls back to a normalized lerp when the two are
+    nearly parallel (numerically safer, and the regime the SLAM prior smoother
+    lives in). Hemisphere-corrects so it takes the short arc."""
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    dot = float(np.dot(a, b))
+    if dot < 0.0:
+        b = -b
+        dot = -dot
+    if dot > 0.9995:
+        out = a + t * (b - a)
+    else:
+        theta = np.arccos(max(-1.0, min(1.0, dot)))
+        s = np.sin(theta)
+        out = (np.sin((1.0 - t) * theta) / s) * a + (np.sin(t * theta) / s) * b
+    n = np.linalg.norm(out)
+    out = out / n if n > 1e-12 else np.array([1.0, 0.0, 0.0, 0.0])
+    return (float(out[0]), float(out[1]), float(out[2]), float(out[3]))
 
 
 def prior_rotation(quat: tuple[float, float, float, float]) -> np.ndarray:

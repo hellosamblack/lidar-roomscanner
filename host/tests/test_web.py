@@ -5010,7 +5010,8 @@ def _feed_state(display, *, quat=(1.0, 0.0, 0.0, 0.0), env=None):
         ui_state=SimpleNamespace(display=display),
         slam_runner=slam,
         sensor_state=SimpleNamespace(fused_quat=lambda: quat,
-                                     latest_env=lambda: env))
+                                     latest_env=lambda: env,
+                                     latest_imu_raw=lambda: None))
     return state, submitted
 
 

@@ -421,3 +421,128 @@ def test_cap_prevents_the_divergence_that_used_to_present_as_a_lost_frame():
                         max_dist=0.05, cond_cap=0.0).ok
     assert register(source, target, np.eye(4), mode="translation",
                     max_dist=0.05, cond_cap=200.0).pose[0, 3] == pytest.approx(-0.70, abs=0.01)
+
+
+# ---- BUG-067: soft-prior mode (rotation held NEAR the prior, not frozen) ------
+
+def _source_from(target: o3d.t.geometry.PointCloud) -> o3d.t.geometry.PointCloud:
+    src = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
+    src.point.positions = target.point.positions.clone()
+    return src
+
+
+def _rotated_prior(target, axis, angle_deg):
+    """init_pose whose rotation is a wrong prior: the identical cloud is
+    registered against itself (true motion = identity), but the prior claims the
+    sensor rotated by `angle_deg`. In translation mode that error has nowhere to
+    go but translation (BUG-067)."""
+    R = _rotation_matrix(np.asarray(axis, float), np.radians(angle_deg))
+    T = np.eye(4)
+    T[:3, :3] = R
+    return T
+
+
+def test_soft_prior_recovers_pure_translation_with_no_rotation():
+    """With a correct (identity) prior and a pure translation, soft_prior must
+    recover the shift and add essentially no rotation -- it does not invent a
+    rotational correction where none is called for."""
+    target = _plane_cloud(curvature=0.8)
+    src_pts = target.point.positions.numpy().copy()
+    shift = np.array([0.03, -0.02, 0.04], dtype=np.float32)
+    src_pts += shift
+    source = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
+    source.point.positions = o3d.core.Tensor(src_pts)
+    res = register(source, target, np.eye(4), mode="soft_prior")
+    assert res.ok
+    assert res.source == "soft_prior"
+    assert np.allclose(res.pose[:3, 3], -shift, atol=0.02)
+    assert _rotation_angle_deg_local(res.pose[:3, :3]) < 0.3
+
+
+def _rotation_angle_deg_local(R):
+    from roomscan.slam.odometry import _rotation_angle_deg
+    return _rotation_angle_deg(R)
+
+
+def test_soft_prior_converges_to_translation_mode_at_large_weight():
+    """The defining invariant: as rot_prior_weight -> inf the rotation is pinned
+    to the prior and the solve is the frozen-rotation translation solve. A large
+    finite weight must therefore match translation mode closely."""
+    target = _corner_cloud()
+    src_pts = target.point.positions.numpy().copy()
+    shift = np.array([0.02, -0.015, 0.01], dtype=np.float32)
+    src_pts += shift
+    source = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
+    source.point.positions = o3d.core.Tensor(src_pts)
+
+    trans = register(source, target, np.eye(4), mode="translation")
+    soft = register(source, target, np.eye(4), mode="soft_prior",
+                    rot_prior_weight=1e6)
+    assert np.allclose(soft.pose[:3, 3], trans.pose[:3, 3], atol=1e-3)
+    assert _rotation_angle_deg_local(soft.pose[:3, :3]) < 1e-3   # rotation pinned
+
+
+def test_soft_prior_bleeds_rotation_prior_error_into_rotation_not_translation():
+    """BUG-067's core. Identical clouds (true motion = identity) but a wrong 2-deg
+    rotation prior: translation mode fabricates translation to fit; soft_prior
+    spends part of the error as a rotation back toward truth, so it fabricates
+    LESS translation. A smaller weight (rotation trusted more) fabricates even
+    less. Corner geometry so the rotational correction is observable."""
+    target = _corner_cloud()
+    source = _source_from(target)
+    prior = _rotated_prior(target, [0.0, 1.0, 0.0], 2.0)
+
+    frozen = register(source, target, prior, mode="translation")
+    fab_frozen = float(np.linalg.norm(frozen.pose[:3, 3]))
+
+    soft = register(source, target, prior, mode="soft_prior", rot_prior_weight=1.0)
+    fab_soft = float(np.linalg.norm(soft.pose[:3, 3]))
+    # soft_prior moved the rotation off the prior, back toward the true identity
+    dev = _rotation_angle_deg_local(soft.pose[:3, :3] @ prior[:3, :3].T)
+    assert dev > 0.2                                    # it used its rotational DoF
+    assert fab_soft < fab_frozen                        # ...to fabricate less translation
+
+    softer = register(source, target, prior, mode="soft_prior", rot_prior_weight=0.3)
+    assert float(np.linalg.norm(softer.pose[:3, 3])) < fab_soft
+
+
+def test_soft_prior_translation_still_gets_the_conditioning_cap():
+    """Translation is marginalised out and handed to `_solve_translation_step`
+    unchanged, so BUG-068's cap must still bound an ill-conditioned translation
+    step in soft_prior mode. With rotation strongly pinned, a far in-plane shift
+    on a near-planar target is bounded, not rejected (BUG-036)."""
+    source, target = _far_pair(0.70)
+    # cap off -> the unbounded translation overshoots and loses the frame
+    assert not register(source, target, np.eye(4), mode="soft_prior",
+                        rot_prior_weight=1e6, max_dist=0.05, cond_cap=0.0).ok
+    # cap on -> registrable and bounded near the true shift
+    capped = register(source, target, np.eye(4), mode="soft_prior",
+                      rot_prior_weight=1e6, max_dist=0.05, cond_cap=200.0)
+    assert capped.pose[0, 3] == pytest.approx(-0.70, abs=0.02)
+
+
+def test_soft_prior_solve_reduces_to_translation_block_at_large_weight():
+    """Unit-level invariant on the solver: at large weight the 6x6 damped solve's
+    translation output equals `_solve_translation_step` on the translation block
+    A_tt = sum(n n^T) with rhs b_t -- i.e. the exact translation-mode 3x3 system."""
+    from roomscan.slam.odometry import _solve_soft_prior_step, _solve_translation_step
+
+    rng = np.random.default_rng(3)
+    p = rng.normal(size=(500, 3)) + np.array([0.0, 0.0, 2.0])
+    n = rng.normal(size=(500, 3))
+    n /= np.linalg.norm(n, axis=1, keepdims=True)
+    r = rng.normal(size=500) * 0.01
+    cxn = np.cross(p, n)
+    J = np.concatenate([cxn, n], axis=1)
+    A = J.T @ J
+    b = -(J * r[:, None]).sum(axis=0)
+
+    xi, _ = _solve_soft_prior_step(A, b, np.zeros(3), rot_prior_weight=1e9)
+    dt_only, _ = _solve_translation_step(A[3:, 3:], b[3:])
+    assert np.allclose(xi[:3], 0.0, atol=1e-6)          # rotation pinned
+    assert np.allclose(xi[3:], dt_only, atol=1e-6)      # == translation-mode solve
+
+
+def test_unknown_mode_still_rejected():
+    with pytest.raises(ValueError):
+        register(_plane_cloud(), _plane_cloud(), np.eye(4), mode="nonsense")

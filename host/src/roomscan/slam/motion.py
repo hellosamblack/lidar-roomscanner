@@ -32,7 +32,79 @@ import numpy as np
 # from here.
 from ..motion import coherence
 
-__all__ = ["coherence", "StationarityGate"]
+__all__ = ["coherence", "StationarityGate", "ZuptDetector"]
+
+# Standard gravity, m/s^2. The accelerometer at rest reads one g of specific
+# force regardless of orientation, so |a| ~= 1 g is the orientation-free "not
+# translating" signal -- and it holds during a pure pan, unlike a rotation-gated
+# stationarity test (BUG-069).
+_G = 9.80665
+
+
+class ZuptDetector:
+    """Accelerometer zero-velocity detector for BUG-069.
+
+    Feed each frame's specific-force magnitude (m/s^2, the norm of the mean raw
+    accel over the frame's IMU batch) via :meth:`update`; returns True when the
+    sensor is confidently NOT translating and the caller may apply a hard
+    zero-velocity constraint to the *reconstruction* pose (not just the preview).
+
+    This is the discriminator `StationarityGate` could not be. That gate keys on
+    ICP translation coherence and is disabled above `rot_ceiling_deg` precisely so
+    a scan's aiming rotation doesn't fool it -- which also makes it blind to a
+    tripod pan (rotation, zero translation), the exact case BUG-067 fabricates
+    from. The accelerometer sees the difference the LiDAR cannot: a pure rotation
+    leaves |a| at 1 g (gravity only; centripetal a = w^2 r ~= 0.005 g at a cm
+    lever arm and 1 rad/s), while walking adds gait specific force that pushes
+    |a| off 1 g. So this fires DURING a pan and is deliberately NOT rotation-gated.
+
+    A frame is a zero-velocity candidate when ``| |a| - g | <= accel_tol_g * g``.
+    The verdict trips only after `window` consecutive candidates, so a transient
+    (a footfall, a bump) cannot latch a hold, and it clears the instant one frame
+    leaves the band.
+
+    Accel alone is not enough, and the measurement proved it: steady walking is
+    also ~1 g of specific force between footfalls, so an accel-only gate froze the
+    pose mid-stride on a real room circuit (76 lost frames, a 59-frame freeze).
+    The discriminator that separates a tripod PAN from a WALK is directional
+    COHERENCE of the ICP translation: a walk's increments are directionally
+    consistent (net ~ path, coherence -> 1), while a stationary sensor's ICP
+    jitter points every which way and cancels (coherence -> 1/sqrt(window)). So
+    the hold requires BOTH accel-still AND incoherent ICP translation -- feed the
+    raw per-frame ICP increment via `increment=`. This is the accel signal
+    supplying the pan-capable "not translating" evidence and the coherence signal
+    vetoing genuine directed travel. `coherence_thresh <= 0` disables the veto
+    (accel-only, the measured-unsafe mode, kept for A/B)."""
+
+    def __init__(self, window: int = 6, accel_tol_g: float = 0.04,
+                 coherence_thresh: float = 0.5):
+        self.window = int(window)
+        self.accel_tol_g = float(accel_tol_g)
+        self.coherence_thresh = float(coherence_thresh)
+        self._still = deque(maxlen=self.window)
+        self._inc: deque = deque(maxlen=self.window)
+
+    def update(self, accel_mag_mps2: float | None, increment=None) -> bool:
+        if accel_mag_mps2 is None:
+            self._still.clear()                     # no signal -> never hold
+            self._inc.clear()
+            return False
+        candidate = abs(float(accel_mag_mps2) - _G) <= self.accel_tol_g * _G
+        self._still.append(candidate)
+        if increment is not None:
+            self._inc.append(np.asarray(increment, dtype=np.float64).reshape(3))
+        if len(self._still) < self.window or not all(self._still):
+            return False
+        # Translation-coherence veto: coherent recent motion is a real walk, not
+        # a still sensor's jitter -- do not hold it even though accel reads 1 g.
+        if self.coherence_thresh > 0.0 and len(self._inc) >= self.window:
+            if coherence(np.array(self._inc)) >= self.coherence_thresh:
+                return False
+        return True
+
+    def reset(self) -> None:
+        self._still.clear()
+        self._inc.clear()
 
 
 class StationarityGate:

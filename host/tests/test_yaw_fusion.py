@@ -125,10 +125,23 @@ def test_gate_motion_holds_delta():
     # now a big orientation jump over a tiny dt => high angular rate; a wrong
     # mag heading (90) would move delta if the gate didn't freeze it
     s = math.sqrt(0.5)
-    fast = (s, 0.0, 0.0, s)   # 90 deg in 1 ms
-    f.update(fast, _mag_for_heading(90.0), 1_001_000)
+    fast = (s, 0.0, 0.0, s)   # 90 deg in 20 ms
+    f.update(fast, _mag_for_heading(90.0), 1_020_000)
     assert f.status == "gated:motion"
     assert f._delta == pytest.approx(held)   # delta held, not pulled toward 90
+
+
+def test_motion_gate_ignores_short_burst_intervals():
+    """A short transport burst must not turn quaternion quantisation into a gate."""
+    f = YawFusion(tau_s=1.0, calibration=IDENT_CAL, motion_rate_dps=40.0)
+    f.update(LEVEL, _mag_for_heading(25.0), 0)
+    f.update(LEVEL, _mag_for_heading(25.0), 1_000_000)
+    # 0.2 degrees in 1 ms is 200 deg/s on paper, but this is below the
+    # minimum trustworthy timestamp interval for the bursty stream.
+    a = math.radians(0.2) / 2.0
+    tiny_step = (math.cos(a), 0.0, 0.0, math.sin(a))
+    f.update(tiny_step, _mag_for_heading(25.0), 1_001_000)
+    assert f.status == "active"
 
 
 def test_normal_upright_grip_is_not_gated():

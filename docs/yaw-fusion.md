@@ -88,7 +88,7 @@ never crashes uncalibrated). Config keys (in `roomscan.toml` `[viewer]`):
 | `yaw_fusion_tau` | `20.0` | complementary-filter time constant (s) — larger = gentler |
 | `mag_cal_path` | `mag_cal.json` | calibration file to load |
 | `yaw_anomaly_frac` | `0.3` | reject mag when \|mag\| deviates this fraction from the fitted field |
-| `yaw_motion_rate_dps` | `40.0` | freeze correction above this SFLP angular rate |
+| `yaw_motion_rate_dps` | `40.0` | freeze correction above this SFLP angular rate; sub-12 ms timestamp bursts are ignored so quaternion quantisation cannot create false spikes |
 
 (`yaw_gimbal_margin_deg` was removed by BUG-051 — see above. A stale copy left in an existing
 `roomscan.toml` is harmless: the loader ignores unknown keys, so there is no migration.)

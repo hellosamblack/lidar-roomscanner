@@ -11,7 +11,7 @@ def test_cli_runs_on_synthetic_capture(tmp_path, monkeypatch):
     # the non-None path.
     frames = [(np.full((42, 54), 1000.0 + 5 * i, np.float32), None, None,
                (1.0, 0.0, 0.0, 0.0), 101325.0, float(i) * 0.03) for i in range(3)]
-    monkeypatch.setattr(slamcli, "_load_frames", lambda path, max_frames=None: (frames, 54, 42))
+    monkeypatch.setattr(slamcli, "_load_frames", lambda path, max_frames=None, with_imu=False: (frames, 54, 42))
     rc = main([str(tmp_path / "dummy.bin"), "--out-mesh", str(tmp_path / "m.ply"),
                "--out-traj", str(tmp_path / "t.tum")])
     assert rc == 0
@@ -32,10 +32,12 @@ def test_reflectance_and_confidence_are_forwarded_to_mapper(monkeypatch):
     seen = {}
     orig_step = Mapper.step
 
-    def spy_step(self, depth, quat, pressure_pa=None, reflectance=None, confidence=None):
+    def spy_step(self, depth, quat, pressure_pa=None, reflectance=None, confidence=None,
+                 imu_raw=None, quat_offset_us=None):
         seen["reflectance"] = reflectance
         seen["confidence"] = confidence
-        return orig_step(self, depth, quat, pressure_pa, reflectance=reflectance, confidence=confidence)
+        return orig_step(self, depth, quat, pressure_pa, reflectance=reflectance,
+                         confidence=confidence, imu_raw=imu_raw, quat_offset_us=quat_offset_us)
 
     monkeypatch.setattr(Mapper, "step", spy_step)
     slamcli._run(frames, 54, 42, SlamConfig(), "translation")
@@ -87,14 +89,14 @@ def test_cli_device_flag_parses_and_reaches_run(tmp_path, monkeypatch):
     # exercised by test_cli_runs_on_synthetic_capture above.
     frames = [(np.full((42, 54), 1000.0 + 5 * i, np.float32), None, None,
                (1.0, 0.0, 0.0, 0.0), 101325.0, float(i) * 0.03) for i in range(3)]
-    monkeypatch.setattr(slamcli, "_load_frames", lambda path, max_frames=None: (frames, 54, 42))
+    monkeypatch.setattr(slamcli, "_load_frames", lambda path, max_frames=None, with_imu=False: (frames, 54, 42))
 
     seen_devices = []
     orig_run = slamcli._run
 
-    def spy_run(frames, width, height, cfg, mode, device=None):
+    def spy_run(frames, width, height, cfg, mode, device=None, imu_aux=None):
         seen_devices.append(device)
-        return orig_run(frames, width, height, cfg, mode, device=device)
+        return orig_run(frames, width, height, cfg, mode, device=device, imu_aux=imu_aux)
 
     monkeypatch.setattr(slamcli, "_run", spy_run)
     rc = main([str(tmp_path / "dummy.bin"), "--device", "CPU:0",
@@ -120,7 +122,7 @@ def test_cli_baro_authority_flag_reaches_the_mapper(tmp_path, monkeypatch):
     nothing. Also pins the no-flag path to the config default."""
     frames = [(np.full((42, 54), 1000.0 + 5 * i, np.float32), None, None,
                (1.0, 0.0, 0.0, 0.0), 101325.0, float(i) * 0.03) for i in range(3)]
-    monkeypatch.setattr(slamcli, "_load_frames", lambda path, max_frames=None: (frames, 54, 42))
+    monkeypatch.setattr(slamcli, "_load_frames", lambda path, max_frames=None, with_imu=False: (frames, 54, 42))
     seen = []
     orig_init = Mapper.__init__
 
@@ -148,7 +150,7 @@ def test_cli_icp_device_flag_reaches_the_mapper_and_the_report(tmp_path, monkeyp
     import json
     frames = [(np.full((42, 54), 1000.0 + 5 * i, np.float32), None, None,
                (1.0, 0.0, 0.0, 0.0), 101325.0, float(i) * 0.03) for i in range(3)]
-    monkeypatch.setattr(slamcli, "_load_frames", lambda path, max_frames=None: (frames, 54, 42))
+    monkeypatch.setattr(slamcli, "_load_frames", lambda path, max_frames=None, with_imu=False: (frames, 54, 42))
     seen = []
     orig_init = Mapper.__init__
 

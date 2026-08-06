@@ -336,11 +336,13 @@ def test_from_capture_classmethod_loads_via_slam_cli(monkeypatch):
     reimplementing capture loading."""
     sentinel_frames = _wall_sequence(2)
 
-    def fake_load_frames(path, max_frames=None):
+    def fake_load_frames(path, max_frames=None, with_imu=False):
         assert path == "some/capture.bin"
         return sentinel_frames, W, H
 
-    monkeypatch.setattr("roomscan.slam.showcase._load_frames", fake_load_frames)
+    # from_capture delegates through _load_frames_maybe_imu, which resolves
+    # `_load_frames` in the cli module -- patch it there.
+    monkeypatch.setattr("roomscan.slam.cli._load_frames", fake_load_frames)
     w = PostProcessWorker.from_capture("some/capture.bin", voxel_size=0.02)
     assert w._frames is sentinel_frames
     assert w._width == W and w._height == H

@@ -12,27 +12,40 @@ import numpy as np
 from ..decoder import StreamDecoder
 from ..flatfield import FlatField
 from ..pipeline import TransformStage
-from ..protocol import StreamId, FrameType, decode_imu_quat, decode_env
+from ..protocol import (StreamId, FrameType, decode_imu_quat, decode_env,
+                        decode_imu_raw, decode_imu_cal, decode_imu_sync)
 from .config import SlamConfig
 from .mapper import Mapper
 from . import metrics
 
 
-def _load_frames(path, max_frames=None):
+def _load_frames(path, max_frames=None, with_imu=False):
     """Return (frames, width, height) where frames is a list of
     (depth_mm(h,w), reflectance(h,w)|None, confidence(h,w)|None, quat(4),
     pressure_pa|None, t_s). Depth/reflectance/confidence come from
     TransformStage; quat/pressure are carried forward from the latest 9/10.
     reflectance/confidence are None for sources that don't provide them (the
-    on-device DEPTH_ZF32 passthrough path only ever returns "depth")."""
+    on-device DEPTH_ZF32 passthrough path only ever returns "depth").
+
+    `with_imu=True` returns a FOURTH value, `imu_aux`: a per-depth-frame list of
+    (ImuRawBatch|None, quat_offset_us|None) carried forward from the latest
+    stream 11 / 13 (with the stream-12 tick applied to the offset). It powers the
+    accel ZUPT (BUG-069) and the quat-phase lever (BUG-067); it is OPT-IN and off
+    by default so the 6-tuple frame shape and 3-value return that every existing
+    caller unpacks are unchanged. `quat_offset_us` is None where no stream-13
+    frame preceded (older captures), so those levers degrade to no-ops there."""
     dec = StreamDecoder()
     stage = TransformStage(outputs=("depth", "reflectance", "confidence"),
                            flatfield=FlatField.load_configured())
     with open(path, "rb") as f:
         data = f.read()
     frames = []
+    imu_aux = []
     last_quat = (1.0, 0.0, 0.0, 0.0)
     last_pa = None
+    last_raw = None
+    last_sync = None
+    last_tick_us = None
     width = height = None
     for frame in dec.feed(data):
         h = frame.header
@@ -43,6 +56,25 @@ def _load_frames(path, max_frames=None):
             continue
         if h.stream_id == StreamId.ENV:
             last_pa = decode_env(frame.payload)[0]
+            continue
+        if with_imu and h.stream_id == StreamId.IMU_RAW:
+            try:
+                last_raw = decode_imu_raw(frame.payload,
+                                          tick_us=last_tick_us or decode_imu_raw.__defaults__[0])
+            except Exception:
+                pass
+            continue
+        if with_imu and h.stream_id == StreamId.IMU_CAL:
+            try:
+                last_tick_us = decode_imu_cal(frame.payload).tick_us
+            except Exception:
+                pass
+            continue
+        if with_imu and h.stream_id == StreamId.IMU_SYNC:
+            try:
+                last_sync = decode_imu_sync(frame.payload)
+            except Exception:
+                pass
             continue
         out = stage.feed(frame)
         if out is None:
@@ -60,12 +92,32 @@ def _load_frames(path, max_frames=None):
             confidence.astype(np.float32) if confidence is not None else None,
             last_quat, last_pa, header.t_us / 1e6,
         ))
+        if with_imu:
+            tick = last_tick_us if last_tick_us is not None else 21.7
+            offset = last_sync.quat_offset_us(tick) if last_sync is not None else None
+            imu_aux.append((last_raw, offset))
         if max_frames and len(frames) >= max_frames:
             break
+    if with_imu:
+        return frames, width, height, imu_aux
     return frames, width, height
 
 
-def _run(frames, width, height, cfg, mode, device=None):
+def _load_frames_maybe_imu(path, max_frames=None, need_imu=False):
+    """`_load_frames`, returning a 4th `imu_aux` value, tolerant of a caller (or
+    a test double) that hands back only the legacy 3-tuple. Centralises the
+    "load the raw IMU only when a lever needs it" choice for the CLI, the
+    ensemble, and Detailed, so those three cannot drift. Returns
+    (frames, width, height, imu_aux|None)."""
+    loaded = _load_frames(path, max_frames, with_imu=True) if need_imu \
+        else _load_frames(path, max_frames)
+    if len(loaded) == 4:
+        return loaded
+    frames, width, height = loaded
+    return frames, width, height, None
+
+
+def _run(frames, width, height, cfg, mode, device=None, imu_aux=None):
     # `cfg.mapper_kwargs()` is the single source for the Mapper field list
     # (BUG-062). This used to re-list all eighteen knobs by hand, which is the
     # second-construction-site shape that bug is about -- item 5 (2026-08-02)
@@ -81,8 +133,15 @@ def _run(frames, width, height, cfg, mode, device=None):
                   device=device if device is not None else cfg.device)
     mapper = Mapper(width, height, **kwargs)
     timings, ts = [], []
-    for depth, reflectance, confidence, quat, pa, t_s in frames:
-        step = mapper.step(depth, quat, pa, reflectance=reflectance, confidence=confidence)
+    for i, (depth, reflectance, confidence, quat, pa, t_s) in enumerate(frames):
+        # imu_aux (BUG-067/069 levers) is opt-in and index-aligned to `frames`;
+        # None everywhere when a caller did not load it, so step() sees the same
+        # no-op defaults it always has.
+        imu_raw = offset = None
+        if imu_aux is not None and i < len(imu_aux):
+            imu_raw, offset = imu_aux[i]
+        step = mapper.step(depth, quat, pa, reflectance=reflectance, confidence=confidence,
+                           imu_raw=imu_raw, quat_offset_us=offset)
         timings.append(step.slam_ms)
         ts.append(t_s)
     return mapper, timings, ts
@@ -91,7 +150,8 @@ def _run(frames, width, height, cfg, mode, device=None):
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="roomscan-slam")
     ap.add_argument("capture")
-    ap.add_argument("--icp-mode", choices=["translation", "6dof", "adaptive"], default=None)
+    ap.add_argument("--icp-mode", choices=["translation", "6dof", "adaptive", "soft_prior"],
+                    default=None)
     ap.add_argument("--device", default=None,
                     help='Open3D compute device, e.g. "CPU:0" or "CUDA:0" '
                          "(default: [slam].device in roomscan.toml, else CPU:0). "
@@ -153,7 +213,11 @@ def main(argv=None) -> int:
         cfg.max_iter = max(1, int(args.max_iter))
     if args.icp_device is not None:
         cfg.icp_device = args.icp_device
-    frames, width, height = _load_frames(args.capture, args.max_frames)
+    # Load the raw IMU (streams 11/13) only when a lever consumes it (ZUPT is on
+    # by default), so the CLI's ZUPT is not a silent no-op while Live/Detailed use it.
+    need_imu = bool(cfg.zupt_enabled or cfg.apply_quat_phase)
+    frames, width, height, imu_aux = _load_frames_maybe_imu(
+        args.capture, args.max_frames, need_imu)
     if not frames:
         print("[slam] no depth frames decoded from capture", file=sys.stderr)
         return 1
@@ -171,7 +235,8 @@ def main(argv=None) -> int:
               # JSON is what `slam_rerender` and any later A/B reads.
               "icp_device": cfg.icp_device, "modes": {}}
     for mode in modes:
-        mapper, timings, ts = _run(frames, width, height, cfg, mode, device=args.device)
+        mapper, timings, ts = _run(frames, width, height, cfg, mode, device=args.device,
+                                   imu_aux=imu_aux)
         tstats = metrics.trajectory_stats(mapper.trajectory)
         mstats = metrics.timing_stats(timings)
         results[mode] = (mapper, tstats, mstats, ts)

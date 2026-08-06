@@ -1,4 +1,6 @@
 # Current State
+- **Framework exploration research complete & integrated into ROADMAP:** Evaluated `small_gicp`, `KISS-ICP`, `GTSAM`, `nvblox`, `VDBFusion`, `SuGaR`, and `Nerfstudio` in [`references/software/framerworkExploration/researchResults.md`](file:///home/sam/git/personal/lidar-roomscanner/references/software/framerworkExploration/researchResults.md). Establishes experimental migration targets for the `roomscan-native` C++ engine (`small_gicp` 3-DoF odometry + `GTSAM` iSAM2 factor graph + `nvblox` CUDA TSDF/meshing + `SuGaR` offline CAD mesh extraction). Work-items `SLAM-4`..`7` and `OFFLINE-2`..`3` are indexed in [`ROADMAP.md`](file:///home/sam/git/personal/lidar-roomscanner/ROADMAP.md) as non-binding experimental candidates to benchmark against empirical performance gates.
+- BUG-082 capture checked 2026-08-06: not a heading wrap. Stream-9 timestamp bursts (including an 87 µs interval) made the 40°/s YawFusion gate report 73 false motion gates during a gentle pan. YawFusion now ignores sub-12 ms intervals; replay gives 0 motion gates. Sensor warnings latch for 1 s and fade over 280 ms.
 - A reviewed implementation plan now exists at
   `docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md`; it starts with a
   hardware-backed contract/baseline gate before the protocol v2, autonomous capture, transport, SLAM,

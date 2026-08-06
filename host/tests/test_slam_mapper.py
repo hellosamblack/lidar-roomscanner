@@ -29,6 +29,28 @@ def test_first_frame_bootstraps_and_integrates():
     assert model is not None
     assert model.point.positions.numpy().shape[0] > 100
 
+def test_prior_smoothing_off_is_the_default_and_a_noop():
+    m = Mapper(W, H, voxel_size=0.02)
+    assert m._prior_smooth_alpha == 0.0
+    assert m._quat_smooth is None
+    m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert m._quat_smooth is None                  # never touched when off
+
+
+def test_prior_smoothing_lags_the_prior_toward_history():
+    """With alpha>0 the prior fed to the pose is a slerp EMA: after a step change
+    in orientation, the smoothed prior sits BETWEEN the old and new quats, not on
+    the new one. Seeds on the first sample so nothing is smoothed at startup."""
+    m = Mapper(W, H, voxel_size=0.02, prior_smooth_alpha=0.5)
+    q0 = (1.0, 0.0, 0.0, 0.0)
+    q1 = (float(np.cos(np.radians(20.0))), 0.0, 0.0, float(np.sin(np.radians(20.0))))
+    assert m._smooth_prior(q0) == q0               # seed: first sample passes through
+    out = np.asarray(m._smooth_prior(q1))
+    # halfway-ish between q0 (0deg) and q1 (40deg quat = 20deg rot): w between them
+    assert q1[0] < out[0] < q0[0]                  # lagged toward history
+    assert 0.0 < out[3] < q1[3]
+
+
 def test_tracking_lost_holds_pose_and_skips_integrate():
     m = Mapper(W, H, voxel_size=0.02)
     m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
@@ -951,3 +973,106 @@ def test_the_four_stationary_knobs_are_inert_when_the_hold_is_off():
                stationary_window=3, stationary_coherence=0.01,
                stationary_step_ceiling=99.0, stationary_rot_ceiling=99.0)
     assert m._stationary_gate is None
+
+
+# ---- BUG-069 accel ZUPT + BUG-031/067 quat-phase: plumbing through Mapper.step
+
+import types
+from roomscan.slam.motion import _G as _GRAV
+
+
+def _batch(accel_g=None, gyro_dps=None, gbias_dps=None):
+    """A minimal stand-in for protocol.ImuRawBatch: Mapper reads the fields by
+    getattr, so a namespace with the arrays it needs is enough."""
+    n = 8
+    a = np.tile(np.asarray(accel_g, float), (n, 1)) if accel_g is not None else np.zeros((0, 3))
+    g = np.tile(np.asarray(gyro_dps, float), (n, 1)) if gyro_dps is not None else np.zeros((0, 3))
+    b = np.tile(np.asarray(gbias_dps, float), (n, 1)) if gbias_dps is not None else np.zeros((0, 3))
+    return types.SimpleNamespace(accel_g=a, gyro_dps=g, gbias_dps=b)
+
+
+def test_zupt_is_on_by_default_but_a_noop_without_imu_raw():
+    # ON by default (owner decision 2026-08-06), but a no-op when no accel signal
+    # is supplied -- so a caller that never passes imu_raw is byte-identical.
+    m = Mapper(W, H, voxel_size=0.02)
+    assert m._zupt is not None
+    m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)   # no imu_raw
+    assert m.zupt_count == 0
+
+
+def test_zupt_can_be_disabled():
+    m = Mapper(W, H, voxel_size=0.02, zupt_enabled=False)
+    assert m._zupt is None
+    m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0,
+           imu_raw=_batch(accel_g=[0.0, 0.0, 1.0]))
+    assert m.zupt_count == 0
+
+
+def test_zupt_freezes_the_true_pose_translation_and_reaches_the_map():
+    """With ZUPT on and a steady 1 g specific force, once the window fills the
+    reconstruction pose's translation is held at t_prev -- the constraint reaches
+    _t_prev/integration, not just the preview (BUG-069)."""
+    # veto off here: this pins the FREEZE-reaches-the-map mechanism, not the
+    # coherence veto (covered by test_slam_motion.py). On a static wall the tiny
+    # residual ICP drift is weakly coherent, which the veto would (correctly)
+    # decline to hold.
+    m = Mapper(W, H, voxel_size=0.02, zupt_enabled=True, zupt_window=3, zupt_coherence=0.0)
+    accel = [0.0, 0.0, 1.0]                       # 1 g along +z body, at rest
+    for _ in range(8):
+        m.step(_textured_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0,
+               imu_raw=_batch(accel_g=accel))
+    assert m.zupt_count > 0
+    # Once ZUPT engages (after the window fills), the RECONSTRUCTION pose stops
+    # moving -- the tail is frozen bit-for-bit, and it is _t_prev (the tracking
+    # prior + integration pose) that is held, not merely the display pose.
+    tail = [p[:3, 3] for p in m.trajectory[-3:]]
+    assert np.allclose(tail[0], tail[1]) and np.allclose(tail[1], tail[2])
+    assert np.allclose(m._t_prev, m.trajectory[-1][:3, 3])
+    assert np.linalg.norm(m._t_prev) < 0.05       # total fabricated drift stayed small
+
+
+def test_zupt_does_not_fire_when_specific_force_is_off_one_g():
+    m = Mapper(W, H, voxel_size=0.02, zupt_enabled=True, zupt_window=3)
+    for _ in range(6):
+        m.step(_textured_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0,
+               imu_raw=_batch(accel_g=[0.0, 0.0, 1.5]))   # 1.5 g -> moving
+    assert m.zupt_count == 0
+
+
+def test_quat_phase_off_by_default_is_a_noop():
+    m = Mapper(W, H, voxel_size=0.02)
+    assert m._apply_quat_phase is False
+    m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0,
+           imu_raw=_batch(gyro_dps=[0.0, 0.0, 100.0]), quat_offset_us=7760.0)
+    assert m.quat_phase_count == 0
+
+
+def test_quat_phase_fires_when_enabled_with_lead_and_gyro():
+    m = Mapper(W, H, voxel_size=0.02, apply_quat_phase=True)
+    m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0,
+           imu_raw=_batch(gyro_dps=[0.0, 0.0, 100.0]), quat_offset_us=7760.0)
+    assert m.quat_phase_count == 1
+
+
+def test_quat_phase_noop_without_a_lead_even_when_enabled():
+    m = Mapper(W, H, voxel_size=0.02, apply_quat_phase=True)
+    m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0,
+           imu_raw=_batch(gyro_dps=[0.0, 0.0, 100.0]), quat_offset_us=None)
+    assert m.quat_phase_count == 0
+
+
+def test_synthetic_pan_tracks_without_loss_in_both_modes():
+    """A pure rotate-in-place pan (SyntheticPan) must stay tracked -- a lost
+    frame freezes the pose and would mask fabrication. Smoke-level: both the
+    shipped translation mode and the new soft_prior mode complete a sweep with
+    zero tracking-lost frames. (Absolute drift is not asserted: the synth ray
+    model is not bit-exact to Deprojector -- see SyntheticPan's docstring.)"""
+    from roomscan.slam.synthscene import SyntheticPan, Room
+    for mode in ("translation", "soft_prior"):
+        pan = SyntheticPan(W, H, room=Room(seed=3), amp_deg=18.0, rate_deg_s=40.0)
+        m = Mapper(W, H, voxel_size=0.03, icp_mode=mode, device="CPU:0")
+        for _ in range(60):
+            d, q = pan.next_frame()
+            m.step(d, q, 101325.0)
+        assert m.tracking_lost_count == 0
+        assert len(m.trajectory) == 60

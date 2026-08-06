@@ -38,7 +38,7 @@ import numpy as np
 import open3d as o3d
 
 from . import metrics as _metrics
-from .cli import _load_frames
+from .cli import _load_frames, _load_frames_maybe_imu
 from .mapper import Mapper
 from .tsdf import TsdfCapacityError
 
@@ -121,8 +121,9 @@ class PostProcessWorker:
     the convenience constructor for the live panel path."""
 
     def __init__(self, frames, width: int, height: int,
-                 mesh_every: int = _MESH_EVERY, **mapper_kwargs):
+                 mesh_every: int = _MESH_EVERY, imu_aux=None, **mapper_kwargs):
         self._frames = frames
+        self._imu_aux = imu_aux          # per-frame (ImuRawBatch|None, quat_offset_us|None)
         self._width = width
         self._height = height
         self._mesh_every = max(1, int(mesh_every))
@@ -136,8 +137,12 @@ class PostProcessWorker:
 
     @classmethod
     def from_capture(cls, path, mesh_every: int = _MESH_EVERY, **kw) -> "PostProcessWorker":
-        frames, width, height = _load_frames(path)
-        return cls(frames, width, height, mesh_every=mesh_every, **kw)
+        # Decode the raw IMU (streams 11/13) only when a lever that needs it is on
+        # (ZUPT is on by default) -- stream 11 is the biggest in the file, so an
+        # unconditional decode would tax a build that isn't using it.
+        need_imu = bool(kw.get("apply_quat_phase") or kw.get("zupt_enabled"))
+        frames, width, height, imu_aux = _load_frames_maybe_imu(path, need_imu=need_imu)
+        return cls(frames, width, height, mesh_every=mesh_every, imu_aux=imu_aux, **kw)
 
     # ---- reader side (GUI thread) --------------------------------------
     def latest(self) -> Progress | None:
@@ -279,8 +284,12 @@ class PostProcessWorker:
         for i, (depth, reflectance, confidence, quat, pressure, _t_s) in enumerate(self._frames, start=1):
             if self._stop_evt.is_set():
                 return   # stopping mid-run: publish nothing further
+            imu_raw = offset = None
+            if self._imu_aux is not None and i - 1 < len(self._imu_aux):
+                imu_raw, offset = self._imu_aux[i - 1]
             try:
-                mapper.step(depth, quat, pressure, reflectance=reflectance, confidence=confidence)
+                mapper.step(depth, quat, pressure, reflectance=reflectance, confidence=confidence,
+                            imu_raw=imu_raw, quat_offset_us=offset)
             except TsdfCapacityError as exc:
                 # NOT a bad frame -- the map has outgrown the device and every
                 # remaining frame would raise the same thing. `continue` here

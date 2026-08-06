@@ -2884,11 +2884,17 @@ class SlamRunner:
 
     # ---- feed (reader thread) + poll (broadcaster) --------------------------
     def submit(self, depth, quat, pressure, reflectance=None, confidence=None,
-               imu_rate_hz=None) -> None:
+               imu_rate_hz=None, imu_raw=None, quat_offset_us=None) -> None:
         """Forward the newest frame to the worker (latest-wins drop). No-op when
         inactive or when there is no orientation prior yet (SLAM needs the quat;
         without it the mapper loses tracking immediately -- see the 07-08
         no-stream-9 capture note in docs/…web-phase4…).
+
+        `imu_raw` (the latest stream-11 batch) powers the accelerometer ZUPT
+        (BUG-069) when `[slam] zupt_enabled` is set; it is a no-op otherwise, so
+        passing it always is harmless. `quat_offset_us` is None on the live path
+        (stream 13 is not decoded in the live reader), so the quat-phase lever is
+        offline/Detailed-only -- see mapper.step.
 
         Called from the READER thread (BUG-060), so it must never block on
         anything slow: the first frame after arming kicks an async build and is
@@ -2915,7 +2921,7 @@ class SlamRunner:
                                      daemon=True).start()
                 return
         worker.submit(depth, quat, pressure, reflectance=reflectance, confidence=confidence,
-                      imu_rate_hz=imu_rate_hz)
+                      imu_rate_hz=imu_rate_hz, imu_raw=imu_raw, quat_offset_us=quat_offset_us)
 
     def poll(self, wall_mode: str) -> tuple[dict | None, bytes | None]:
         """Latest (`slam` message, MESH bytes-or-None). MESH is emitted only when
@@ -3379,7 +3385,8 @@ def make_slam_feed(state):
                     env.pressure_pa if env is not None else None,
                     reflectance=outputs.get("reflectance"),
                     confidence=outputs.get("confidence"),
-                    imu_rate_hz=_applied_imu_env_rate_hz(state))
+                    imu_rate_hz=_applied_imu_env_rate_hz(state),
+                    imu_raw=sensor.latest_imu_raw())
     return _feed
 
 

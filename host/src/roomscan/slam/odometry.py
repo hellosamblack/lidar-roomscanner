@@ -1,5 +1,14 @@
-"""Point-to-plane ICP, frame-to-model. Three modes (docs spec 3.6):
-- 'translation' (DEFAULT): rotation held at the SFLP prior (init_pose rotation);
+"""Point-to-plane ICP, frame-to-model. Four modes (docs spec 3.6):
+- 'soft_prior' (BUG-067 fix): full 6-DoF point-to-plane, but rotation held NEAR the
+  SFLP prior by a soft Tikhonov prior instead of frozen at it. This is the honest
+  bridge between 'translation' (rotation frozen -> a rotation-prior error has no
+  rotational DoF and is fabricated as translation, then latched into the TSDF) and
+  '6dof' (rotation free -> noisier than the SFLP IMU on this 54x42 ToF, drifts far
+  worse). `rot_prior_weight` (dimensionless, x the rotation block's own stiffness)
+  sets how tightly rotation is pinned: -> inf reproduces 'translation' exactly,
+  0 is undamped 6-DoF. Translation still gets BUG-068's conditioning cap, reused
+  verbatim via the Schur complement. See `_soft_prior_icp`/`_solve_soft_prior_step`.
+- 'translation' (CURRENT DEFAULT): rotation held at the SFLP prior (init_pose rotation);
   a genuine 3-DoF point-to-plane translation solve (Task 9.5 Lever 2) -- NOT the
   full 6-DoF ICP with the rotation discarded afterward. Cheaper (3x3 normal
   equations vs 6x6 per iteration) and geometrically honest: gate stats
@@ -79,6 +88,13 @@ def _resolve_device(device) -> o3d.core.Device:
 # so 20 stays a tail-targeted fix rather than a change to normal operation.
 _COND_CAP = 20.0
 
+# Soft-prior rotational damping weight (BUG-067), a DIMENSIONLESS multiple of the
+# rotation block's own mean stiffness -- see `_solve_soft_prior_step`. Only read
+# by mode="soft_prior". Provisional pending the matched-ensemble sweep over the
+# three-capture truth set; pinned to config.SlamConfig.icp_rot_prior_weight by
+# test_mapper_kwargs_defaults_match_mapper_signature.
+_ROT_PRIOR_WEIGHT = 10.0
+
 
 def _solve_translation_step(a: np.ndarray, b: np.ndarray,
                             cond_cap: float = _COND_CAP) -> tuple[np.ndarray | None, float]:
@@ -122,6 +138,101 @@ def _rotation_angle_deg(R: np.ndarray) -> float:
     rotation IS the ICP-vs-IMU disagreement."""
     c = (float(np.trace(R[:3, :3])) - 1.0) / 2.0
     return float(np.degrees(np.arccos(max(-1.0, min(1.0, c)))))
+
+
+def _so3_exp(omega: np.ndarray) -> np.ndarray:
+    """Rotation matrix from a rotation vector (Rodrigues)."""
+    theta = float(np.linalg.norm(omega))
+    if theta < 1e-12:
+        return np.eye(3)
+    k = np.asarray(omega, dtype=np.float64) / theta
+    K = np.array([[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]])
+    return np.eye(3) + np.sin(theta) * K + (1.0 - np.cos(theta)) * (K @ K)
+
+
+def _so3_log(R: np.ndarray) -> np.ndarray:
+    """Rotation vector (axis*angle) of a rotation matrix -- the inverse of
+    `_so3_exp`. Used by the soft-prior solve to measure the CURRENT deviation of
+    the working rotation from the IMU prior, so the prior term pulls the total
+    rotation back toward the prior rather than merely damping each step."""
+    c = (float(np.trace(R)) - 1.0) / 2.0
+    c = max(-1.0, min(1.0, c))
+    theta = float(np.arccos(c))
+    axis = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]],
+                    dtype=np.float64)
+    if theta < 1e-9:
+        return 0.5 * axis                       # near identity: sin(theta) ~= theta
+    return (theta / (2.0 * np.sin(theta))) * axis
+
+
+def _solve_soft_prior_step(A: np.ndarray, b: np.ndarray, phi: np.ndarray,
+                           rot_prior_weight: float,
+                           cond_cap: float = _COND_CAP
+                           ) -> tuple[np.ndarray | None, float]:
+    """Solve one iteration of the anisotropically-damped 6-DoF point-to-plane
+    normal equations for the increment ``xi = [omega; dt]`` (world-frame rotation
+    then translation), returning (xi, translation_cond) or (None, cond) when the
+    translation marginal is genuinely singular.
+
+    `A` (6x6, symmetric PSD) and `b` (6) are the raw point-to-plane normal
+    equations ``A xi = b`` with rows ordered rotation-block first. `phi` is the
+    working rotation's current geodesic deviation from the IMU prior
+    (`_so3_log(R @ R0^T)`), so the soft prior penalises the TOTAL rotation off the
+    prior, not just this step.
+
+    Two couplings make this the honest bridge between the two shipped modes rather
+    than a third thing:
+
+    * **Soft IMU prior on rotation.** A Tikhonov term ``lambda_r * ||omega_total||^2``
+      adds ``lambda_r * I`` to the rotational block and ``-lambda_r * phi`` to its
+      rhs. `lambda_r` is `rot_prior_weight` scaled by the rotational block's own
+      mean stiffness (``trace(A_rr)/3``), so the knob is a dimensionless "how many
+      times the geometry's own rotational constraint", robust across scenes/ranges
+      rather than an absolute value that means something different every frame.
+      As `rot_prior_weight -> inf` the rotation is pinned to the prior and this
+      collapses onto the translation-only solve; at 0 it is undamped 6-DoF.
+
+    * **BUG-068 cap on translation, reused verbatim.** Rotation is marginalised out
+      by its Schur complement, leaving a 3x3 translation system that is handed to
+      `_solve_translation_step` UNCHANGED -- so the eigenvalue-floor cap that bounds
+      in-plane slides applies to translation here with identical semantics, and the
+      translation block equals ``sum n n^T`` exactly (as in `_translation_icp`) in
+      the large-weight limit.
+
+    `rot_prior_weight <= 0` is not this mode's regime (that is `6dof`); callers use
+    a positive weight. A non-finite/degenerate rotational block forces ``omega=0``
+    (pure translation for that frame) rather than failing."""
+    Arr = A[:3, :3]
+    Art = A[:3, 3:]
+    Att = A[3:, 3:]
+    br = b[:3]
+    bt = b[3:]
+    scale = float(np.trace(Arr)) / 3.0
+    lam = rot_prior_weight * scale if scale > 0.0 else 0.0
+    Arr_d = Arr + lam * np.eye(3)
+    br_d = br - lam * np.asarray(phi, dtype=np.float64)
+    try:
+        Arr_inv = np.linalg.inv(Arr_d)
+    except np.linalg.LinAlgError:
+        # Rotational block unobservable and unregularised: drop the rotational DoF
+        # for this frame and solve translation alone (equivalent to lambda_r -> inf).
+        dt, cond = _solve_translation_step(Att, bt, cond_cap)
+        if dt is None:
+            return None, cond
+        xi = np.zeros(6)
+        xi[3:] = dt
+        return xi, cond
+    # Translation Schur complement: S dt = c, rotation eliminated.
+    S = Att - Art.T @ Arr_inv @ Art
+    c = bt - Art.T @ (Arr_inv @ br_d)
+    dt, cond = _solve_translation_step(S, c, cond_cap)
+    if dt is None:
+        return None, cond
+    omega = Arr_inv @ (br_d - Art @ dt)
+    xi = np.empty(6)
+    xi[:3] = omega
+    xi[3:] = dt
+    return xi, cond
 
 
 def rotation_observability_cond(points: np.ndarray, normals: np.ndarray) -> float:
@@ -219,11 +330,76 @@ def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: 
     return t, fitness, rmse, False
 
 
+def _soft_prior_icp(src_pts: np.ndarray, tgt_pts: np.ndarray, tgt_normals: np.ndarray,
+                    R0: np.ndarray, t0: np.ndarray, rot_prior_weight: float,
+                    max_dist: float, max_iter: int,
+                    tol: float = 1e-7,
+                    device: str | o3d.core.Device = "CPU:0",
+                    cond_cap: float = _COND_CAP
+                    ) -> tuple[np.ndarray, np.ndarray, float, float, bool]:
+    """Iterated closest-point, full 6-DoF point-to-plane, with the rotation held
+    near the IMU prior `R0` by a soft Tikhonov prior (see `_solve_soft_prior_step`).
+    `src_pts` is the RAW source cloud (unrotated); `R0`/`t0` are the prior pose.
+    Returns (R, t, fitness, rmse, singular).
+
+    This is BUG-067's fix: `_translation_icp` freezes rotation at `R0` and can only
+    reduce a residual by translating, so a rotation-prior error becomes fabricated
+    translation and is latched into the TSDF. Here a rotation-prior error has a
+    (softly bounded) rotational degree of freedom to land in instead. The prior
+    weight keeps rotation IMU-dominated -- undamped 6-DoF rotation is noisier than
+    the SFLP quaternion on this 54x42 ToF and drifts far worse (see the module
+    docstring / CUDA-ICP study) -- while letting geometry nudge it where the scene
+    strongly constrains rotation."""
+    dev = _resolve_device(device)
+    n_source = src_pts.shape[0]
+    tgt_t = o3d.core.Tensor(tgt_pts, device=dev)
+    nns = o3d.core.nns.NearestNeighborSearch(tgt_t)
+    nns.hybrid_index(max_dist)
+
+    R = np.asarray(R0, dtype=np.float64).copy()
+    t = np.asarray(t0, dtype=np.float64).copy()
+    fitness, rmse = 0.0, float("inf")
+    for _ in range(max_iter):
+        query = (R @ src_pts.T).T + t
+        idx, _dist2, counts = nns.hybrid_search(
+            o3d.core.Tensor(query, device=dev), max_dist, 1)
+        matched = counts.cpu().numpy().reshape(-1) > 0
+        n_valid = int(matched.sum())
+        if n_valid == 0:
+            return R, t, 0.0, float("inf"), False
+        rows = idx.cpu().numpy().reshape(-1)[matched]
+        q = tgt_pts[rows]
+        n = tgt_normals[rows]
+        p = query[matched]
+        r = np.einsum("ij,ij->i", n, p - q)             # point-to-plane residual
+        fitness = n_valid / n_source
+        rmse = float(np.sqrt(np.mean(r ** 2)))
+
+        # Jacobian rows [ (p x n)^T , n^T ] for the world-frame increment
+        # xi = [omega; dt] applied about the origin: p -> exp([omega]x) p + dt.
+        cxn = np.cross(p, n)
+        J = np.concatenate([cxn, n], axis=1)            # (m, 6)
+        A = J.T @ J                                     # 6x6 normal equations
+        b = -(J * r[:, None]).sum(axis=0)
+        phi = _so3_log(R @ R0.T)                        # current deviation from the prior
+        xi, _cond = _solve_soft_prior_step(A, b, phi, rot_prior_weight, cond_cap)
+        if xi is None:
+            return R, t, fitness, rmse, True
+        omega, dt = xi[:3], xi[3:]
+        R_delta = _so3_exp(omega)
+        R = R_delta @ R                                 # world-frame left update...
+        t = R_delta @ t + dt                            # ...so translation rotates with it
+        if np.linalg.norm(xi) < tol:
+            break
+    return R, t, fitness, rmse, False
+
+
 def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointCloud,
              init_pose: np.ndarray, mode: str = "translation", max_dist: float = 0.05,
              min_fitness: float = 0.3, max_rmse: float = 0.05,
              max_iter: int = 6, device: str | o3d.core.Device = "CPU:0",
              cond_cap: float = _COND_CAP,
+             rot_prior_weight: float = _ROT_PRIOR_WEIGHT,
              adapt_min_fitness: float = 0.6, adapt_max_rmse: float = 0.03,
              adapt_max_corr_deg: float = 20.0,
              adapt_rot_cond_cap: float = 100.0) -> RegistrationResult:
@@ -236,7 +412,7 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
     # accumulates drift, so fewer iterations track the true motion better. iter=6 is
     # the drift minimum; it also happens to sit near the ~35 ms/frame live-preview
     # target, but accuracy -- not that budget -- is why it's the default.
-    if mode not in ("translation", "6dof", "adaptive"):
+    if mode not in ("translation", "6dof", "adaptive", "soft_prior"):
         raise ValueError(f"unknown mode {mode!r}")
     init_pose = np.asarray(init_pose, dtype=np.float64)
 
@@ -294,6 +470,24 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
         T[:3, 3] = t
         ok = bool(fitness >= min_fitness and rmse <= max_rmse)
         return RegistrationResult(pose=T, fitness=float(fitness), rmse=float(rmse), ok=ok)
+
+    if mode == "soft_prior":
+        R0 = init_pose[:3, :3]
+        src_pts = source.point.positions.cpu().numpy().astype(np.float64, copy=False)
+        tgt_pts = target.point.positions.cpu().numpy().astype(np.float64, copy=False)
+        tgt_normals = target.point.normals.cpu().numpy().astype(np.float64, copy=False)
+        R, t, fitness, rmse, singular = _soft_prior_icp(
+            src_pts, tgt_pts, tgt_normals, R0, init_pose[:3, 3], rot_prior_weight,
+            max_dist, max_iter, device=device, cond_cap=cond_cap)
+        if singular:
+            return RegistrationResult(pose=init_pose.copy(), fitness=0.0,
+                                      rmse=float("inf"), ok=False, source="soft_prior")
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = t
+        ok = bool(fitness >= min_fitness and rmse <= max_rmse)
+        return RegistrationResult(pose=T, fitness=float(fitness), rmse=float(rmse),
+                                  ok=ok, source="soft_prior")
 
     init = o3d.core.Tensor(init_pose, device=_resolve_device(device))
     criteria = _reg.ICPConvergenceCriteria(max_iteration=max_iter)

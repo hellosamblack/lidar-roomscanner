@@ -83,6 +83,15 @@ class SlamConfig:
     # pinned to `odometry._COND_CAP` by
     # test_mapper_kwargs_defaults_match_mapper_signature.
     icp_cond_cap: float = 20.0
+    # Soft-prior rotational damping (BUG-067), a DIMENSIONLESS multiple of the
+    # rotation block's own mean stiffness. Only read when icp_mode="soft_prior":
+    # rotation is held NEAR the SFLP prior rather than frozen at it, so a
+    # rotation-prior error lands in a small bounded rotation instead of being
+    # fabricated as translation and latched into the TSDF. -> inf reproduces the
+    # frozen-rotation "translation" solve; 0 is undamped 6-DoF. Provisional
+    # default pending the matched-ensemble sweep; pinned to odometry._ROT_PRIOR_WEIGHT
+    # by test_mapper_kwargs_defaults_match_mapper_signature. See slam/odometry.py.
+    icp_rot_prior_weight: float = 10.0
     min_fitness: float = 0.3
     max_rmse: float = 0.05
     # icp_mode="adaptive" (LiDAR-primary, IMU-gated): the STRICTER bar the full
@@ -117,6 +126,37 @@ class SlamConfig:
     stationary_coherence: float = 0.5
     stationary_step_ceiling: float = 0.03
     stationary_rot_ceiling: float = 0.3
+    # Rotation-prior smoothing (BUG-067 lever): causal EMA/slerp weight on the
+    # PREVIOUS smoothed prior quaternion. 0 = off (raw prior, byte-identical);
+    # higher low-passes the orientation prior more. A noisy prior becomes
+    # fabricated translation in translation/soft-prior ICP (rotation cannot argue
+    # with it), so smoothing it collapsed the tripod instability in BUG-067's
+    # phase sweep. See mapper._smooth_prior.
+    prior_smooth_alpha: float = 0.0
+    # +7.76 ms quat-phase compensation (BUG-031/067): roll the SFLP prior back to
+    # the depth-frame instant using the gyro, from the measured stream-13 lead.
+    # OFF by default -- it changes the rotation prior and wants its own
+    # before/after on a moving capture. Needs stream 11 (gyro) + 13 (IMU_SYNC) in
+    # the frame; a no-op where either is absent. See mapper.step / frames.apply_quat_phase.
+    apply_quat_phase: bool = False
+    # Accelerometer ZUPT (BUG-069): a MAP-REACHING zero-velocity constraint that
+    # fires on |a| ~= 1 g, so it works during a pan (unlike the display-only
+    # StationarityGate). ON by default -- validated clean (0 tracking loss) and
+    # beneficial on three captures: tripod closure sd 0.069 -> 0.015, coffee
+    # circuit 0.735 -> 0.671 m, roomSweep neutral (owner decision 2026-08-06).
+    # A no-op wherever stream 11 (accel) is absent, so it degrades gracefully.
+    # `zupt_accel_tol_g` is the tolerance band around 1 g (fraction of g);
+    # `zupt_window` frames must all be still before it trips. See mapper.step /
+    # motion.ZuptDetector. Set false to restore pre-2026-08-06 behaviour.
+    zupt_enabled: bool = True
+    zupt_window: int = 6
+    zupt_accel_tol_g: float = 0.04
+    # Translation-coherence veto on the ZUPT: steady walking also reads ~1 g, so
+    # the accel gate alone froze the pose mid-stride on a real circuit. Holding
+    # only when the recent ICP translation is ALSO incoherent (jitter, not a
+    # directed walk) is what separates a tripod pan from a walk. 0 disables the
+    # veto (accel-only, measured unsafe on real motion). See motion.ZuptDetector.
+    zupt_coherence: float = 0.5
     # IMU spike pre-gate: inter-frame SFLP rotation (deg) above which the quat is
     # held at the last good orientation instead of corrupting the raycast viewpoint
     # and the pose. DEFAULT 0 = DISABLED (defensive-only): the capture that looked
@@ -275,6 +315,7 @@ class SlamConfig:
             "icp_mode": self.icp_mode, "voxel_size": self.voxel_size,
             "max_dist": self.max_dist, "icp_retry_dist": self.icp_retry_dist,
             "icp_cond_cap": self.icp_cond_cap,
+            "icp_rot_prior_weight": self.icp_rot_prior_weight,
             "max_iter": self.max_iter,
             "min_fitness": self.min_fitness, "max_rmse": self.max_rmse,
             "adapt_min_fitness": self.adapt_min_fitness,
@@ -291,6 +332,12 @@ class SlamConfig:
             "stationary_coherence": self.stationary_coherence,
             "stationary_step_ceiling": self.stationary_step_ceiling,
             "stationary_rot_ceiling": self.stationary_rot_ceiling,
+            "prior_smooth_alpha": self.prior_smooth_alpha,
+            "apply_quat_phase": self.apply_quat_phase,
+            "zupt_enabled": self.zupt_enabled,
+            "zupt_window": self.zupt_window,
+            "zupt_accel_tol_g": self.zupt_accel_tol_g,
+            "zupt_coherence": self.zupt_coherence,
             "imu_spike_deg": self.imu_spike_deg,
             "release_cache_every": self.release_cache_every,
             "block_count": self.block_count,

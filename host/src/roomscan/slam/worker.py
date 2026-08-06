@@ -87,16 +87,21 @@ class SlamWorker:
 
     # ---- producer side (GUI/reader thread) ----------------------------------
     def submit(self, depth, quat, pressure, reflectance=None, confidence=None,
-               imu_rate_hz=None) -> None:
+               imu_rate_hz=None, imu_raw=None, quat_offset_us=None) -> None:
         """`imu_rate_hz` (Task 8): the applied IMU/env poll rate concurrent
         with this frame -- the caller resolves coupled/decoupled mode to a
         concrete Hz value (or leaves it `None` if unknown); `run_once()`
-        applies it to the mapper on the WORKER thread, never here."""
+        applies it to the mapper on the WORKER thread, never here.
+
+        `imu_raw`/`quat_offset_us` (BUG-069/067 levers): the latest raw IMU
+        batch and the +7.76 ms quat lead, forwarded to `Mapper.step`. Both are
+        None-safe no-ops, so a caller that supplies neither is byte-identical."""
         with self._in_lock:
             self._frames_submitted += 1
             if self._in_slot is not None:
                 self._frames_overwritten += 1
-            self._in_slot = (depth, quat, pressure, reflectance, confidence, imu_rate_hz)
+            self._in_slot = (depth, quat, pressure, reflectance, confidence,
+                             imu_rate_hz, imu_raw, quat_offset_us)
 
     # ---- worker side ---------------------------------------------------------
     def run_once(self) -> bool:
@@ -107,12 +112,14 @@ class SlamWorker:
             item, self._in_slot = self._in_slot, None
         if item is None:
             return False
-        depth, quat, pressure, reflectance, confidence, imu_rate_hz = item
+        depth, quat, pressure, reflectance, confidence, imu_rate_hz, imu_raw, quat_offset_us = item
         # Task 8 step 2: applied here, on the worker thread, between step()
         # calls -- never from submit()'s producer thread. A no-op when
         # `imu_rate_hz` is None/0 (see Mapper.set_imu_rate_hz's docstring).
         self._mapper.set_imu_rate_hz(imu_rate_hz)
-        step = self._mapper.step(depth, quat, pressure, reflectance=reflectance, confidence=confidence)
+        step = self._mapper.step(depth, quat, pressure, reflectance=reflectance,
+                                 confidence=confidence, imu_raw=imu_raw,
+                                 quat_offset_us=quat_offset_us)
         self._frames_processed += 1
         trajectory = list(self._mapper.trajectory)   # copy: caller must not see it mutate later
         # Publish the pose the instant it's known -- stale mesh, fresh pose --

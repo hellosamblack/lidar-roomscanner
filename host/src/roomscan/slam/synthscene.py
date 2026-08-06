@@ -142,3 +142,76 @@ class SyntheticWalk:
         depth_mm = np.where(np.isfinite(depth_m), depth_m * 1000.0, 0.0)
         return (depth_mm.reshape(self.height, self.width).astype(np.float32),
                 (1.0, 0.0, 0.0, 0.0))
+
+
+class SyntheticPan:
+    """Rotate-in-place camera: FIXED position, sweeping orientation, inside `Room`.
+
+    This is the hermetic counterpart to BUG-067's tripod capture that
+    `SyntheticWalk` cannot be (it only translates). True translation is exactly
+    zero, so any translation `Mapper.step` reports is fabricated.
+
+    The scene is rendered from the SAME orientation `quat(theta)` that is handed
+    to the mapper as its prior, so with a PERFECT prior there is no rotation-prior
+    error and a correct mapper reports ~0 translation. Set `prior_error_deg > 0`
+    to hand the mapper a prior rotated slightly off the truth (the standing in for
+    the +7.76 ms phase lead / fp16 quantisation the real capture suffers): that
+    error has nowhere to go in translation mode and comes out as fabricated
+    translation, which the soft prior / quat-phase levers are meant to reduce.
+
+    `next_frame()` returns `(depth_mm, quat_prior)`; `path_length_m` stays 0.
+
+    Honest limitation: the ray model here is not bit-exact to `Deprojector`, so
+    even a perfect prior leaves a small model-residual drift (~0.2 m over a
+    sweep). Use this for no-crash / no-tracking-loss regression on a pan and for
+    RELATIVE lever comparisons at a fixed `prior_error_deg`, not as an absolute
+    zero-truth oracle -- `captures/imuTranslationError.bin` is the authoritative
+    null test."""
+
+    def __init__(self, width: int, height: int, fov_h: float = 55.0, fov_v: float = 42.0,
+                 room: Room | None = None, amp_deg: float = 20.0, rate_deg_s: float = 30.0,
+                 fps: float = 30.0, position=(1.5, 1.4, 0.0), max_range_m: float = 4.9,
+                 prior_error_deg: float = 0.0):
+        from .frames import prior_rotation
+        from ..sensors import quat_mul
+
+        self.width, self.height = width, height
+        self.room = room or Room()
+        self.max_range_m = max_range_m
+        self.path_length_m = 0.0
+        self._prior_rotation = prior_rotation
+        self._quat_mul = quat_mul
+        self._pos = np.asarray(position, dtype=np.float64)
+        self._amp = math.radians(amp_deg)
+        self._dtheta = math.radians(rate_deg_s) / fps
+        self._i = 0
+        # A small constant prior error about body-x (a different axis from the
+        # body-y pan, so it cannot be absorbed as a pure phase of the sweep).
+        e = math.radians(prior_error_deg) / 2.0
+        self._q_err = (math.cos(e), math.sin(e), 0.0, 0.0)
+
+        ax = np.deg2rad(((np.arange(width) + 0.5) / width - 0.5) * fov_h)
+        ay = np.deg2rad(((np.arange(height) + 0.5) / height - 0.5) * fov_v)
+        tx = np.tan(ax)[None, :] * np.ones((height, 1))
+        ty = np.tan(ay)[:, None] * np.ones((1, width))
+        d = np.stack([tx, ty, np.ones_like(tx)], axis=-1).reshape(-1, 3)
+        self._d_cam = d / np.linalg.norm(d, axis=1, keepdims=True)
+        self._z_cam = self._d_cam[:, 2]
+        self._flip = np.diag([1.0, -1.0, 1.0])
+
+    def _quat(self, theta: float) -> tuple[float, float, float, float]:
+        """Pan about the camera's own vertical (body y): a horizontal sweep."""
+        return (math.cos(theta / 2.0), 0.0, math.sin(theta / 2.0), 0.0)
+
+    def next_frame(self):
+        theta = self._amp * math.sin(self._dtheta * self._i)
+        self._i += 1
+        q_true = self._quat(theta)
+        R = self._prior_rotation(q_true)                 # render from the TRUE orientation
+        dirs_world = self._d_cam @ (self._flip @ R).T
+        dist = self.room.raycast(self._pos, dirs_world, self.max_range_m)
+        depth_m = dist * self._z_cam
+        depth_mm = np.where(np.isfinite(depth_m), depth_m * 1000.0, 0.0)
+        # The mapper's prior carries the (optional) error, the render does not.
+        q_prior = self._quat_mul(q_true, self._q_err)
+        return (depth_mm.reshape(self.height, self.width).astype(np.float32), q_prior)
