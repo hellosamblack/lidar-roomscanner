@@ -14,8 +14,10 @@ New work — the PC-side visualizer, the binary frame protocol, and any new firm
 F:\git\personal\lidar\
 ├─ roomscanner\            ← YOU ARE HERE (active dev)
 │  ├─ CLAUDE.md            ← this file
-│  ├─ ROADMAP.md           ← phased plan (source of truth for sequencing; per-phase risks + reference-firmware bug list)
-│  ├─ BUGS.md              ← bug tracker for OUR code (host + scanner-stream firmware); file new bugs here
+│  ├─ ROADMAP.md           ← current-state doc: standing decisions, reference-firmware bug ledger, risks, plans register, data-collection queue, + the forward-looking Work-item register (type-prefixed IDs: SLAM-/SENS-/XPORT-/FW-/OFFLINE-/TOOL-/DC-)
+│  ├─ docs\roadmap-history.md ← completed-phase narratives + measured outcomes (they keep their Phase-N names); ROADMAP.md links here
+│  ├─ BUGS.md              ← bug tracker INDEX for OUR code (host + scanner-stream firmware); each bug's full entry is bugs/BUG-NNN.md. File a new bug as bugs/BUG-NNN.md + a row in BUGS.md
+│  ├─ bugs\                ← one file per bug (bugs/BUG-NNN.md); BUGS.md is the index table over these
 │  ├─ .claude\skills\      ← project skills: firmware-loop (build/flash/monitor), protocol-change (wire-change checklist), status-sync (MANDATORY at ship time — docs move with the code), stack-electrical (jumpers/SBs/bus routing across the board stack)
 │  ├─ docs\
 │  │  ├─ engineering-practices.md            ← binding conventions (repo rules, protocol rules, firmware/host standards)
@@ -128,7 +130,10 @@ ambiguity, so it needs a braced fixed-heading tilt sweep (resume doc §4.6).
 
 ### Roadmap
 
-Full detail in `ROADMAP.md`. Summary:
+Forward-looking work lives in `ROADMAP.md` → **Work-item register** (type-prefixed IDs by subsystem);
+completed-phase narratives and measured outcomes are in `docs/roadmap-history.md` (keeping their
+`Phase N` names). The phase-by-phase summary below is the historical arc — treat the register and
+`docs/roadmap-history.md` as authoritative for current status. Summary:
 
 - **Phase 0 — ✅ done.** On-device transform + ASCII depth map over ST-Link VCOM (`CONF_PRINT_FRAME = 1` in `<APP>/Src/vl53l9_app.c:31`).
 - **Phase 1 — ✅ done. Real-time 3D visualizer**: versioned binary frame protocol (magic + seq + timestamp + payload + CRC32) over native USB CDC FS (TinyUSB, VID:PID `CAFE:4001`); PC package `roomscan` decodes, deprojects, and renders live (Open3D).

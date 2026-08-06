@@ -12,10 +12,18 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
 - Commit style: conventional-commit-ish prefixes (`feat:`, `fix:`, `docs:`, `test:`, `chore:`), small and
   frequent. Never commit `build/` output or captured binary streams >1 MB (put large captures in
   `captures/` — gitignored — and check in only the small golden fixtures under `host/tests/fixtures/`).
-- **Docs move with the code (status-sync rule).** Any commit that completes a phase, clears a
-  deferred item, changes a measured number, or invalidates a prediction updates `ROADMAP.md` (and
-  `CLAUDE.md`/memory when phase status changes) **in the same commit** — follow the `status-sync` skill
+- **Docs move with the code (status-sync rule).** Any commit that advances/closes a work item,
+  clears a deferred item, changes a measured number, or invalidates a prediction updates `ROADMAP.md`
+  (and `CLAUDE.md`/memory when status changes) **in the same commit** — follow the `status-sync` skill
   checklist. "Docs later" is how the 2026-07-10 drift happened.
+- **Tracker layout (hot vs cold).** `ROADMAP.md` is the *current-state* doc — standing decisions, the
+  reference-firmware bug ledger, the plans/specs register, the data-collection queue, and the
+  forward-looking **Work-item register** (type-prefixed IDs grouped by subsystem: `SLAM-`, `SENS-`,
+  `XPORT-`, `PIPE-`, `WEB-`, `FW-`, `OFFLINE-`, `TOOL-`, `DC-`; per-type counter, next free ID, never
+  reused). Completed-work narratives live in `docs/roadmap-history.md` (they keep their `Phase N`
+  names). Defects live in `BUGS.md`, which is an **index table**: file a new bug as `bugs/BUG-NNN.md`
+  and add a row; close one by flipping its row status (the entry file stays). Keep the hot docs small —
+  when a piece is done, move its write-up to the archive and leave a one-line stub, don't accrete it.
 - **Branch discipline (owner workflow, 2026-07-16).** Land work by **committing straight to `main`
   and closing any feature/worktree branch without a PR** (the PR flow is retired — no `gh pr create`,
   no `gh pr merge`). A short-lived branch/worktree for isolation is fine; finish by getting the commit

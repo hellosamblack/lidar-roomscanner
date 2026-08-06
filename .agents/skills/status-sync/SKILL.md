@@ -13,21 +13,28 @@ session pays to rediscover (the 2026-07-10 retro burned a full session correctin
 
 ## The checklist (fill every slot; write "n/a — <why>" where truly not applicable)
 
-1. **ROADMAP.md** — Does this work complete/advance a phase, clear a deferred/open item, change a
-   measured number, or invalidate a prediction? Update the phase's status block **in this commit**.
-   State measured numbers with their convention (interval vs wall-clock fps).
-2. **Superseded content** — Anything the work proved wrong (a predicted encoding, a planned
-   approach) gets **annotated as superseded in place** (strikethrough + what shipped instead).
-   Never silently delete it; never leave it stale.
-3. **Ledgers** — Reference-firmware bug list, deferred/open lists, "Considered and rejected":
+1. **ROADMAP.md — work-item register.** Does this work advance/close a work item
+   (`SLAM-`/`SENS-`/`XPORT-`/`FW-`/`OFFLINE-`/`TOOL-`/`DC-`), clear a deferred item, change a measured
+   number, or invalidate a prediction? Update the register entry **in this commit**, with measured
+   numbers in their convention (interval vs wall-clock fps). Completed-work narratives belong in
+   `docs/roadmap-history.md` (keep the `Phase N` names) with only a stub left behind — don't let
+   ROADMAP.md grow back into a history dump.
+2. **BUGS.md + `bugs/`.** New defect → next free `BUG-NNN`, write the full entry as `bugs/BUG-NNN.md`,
+   and add a row to the `BUGS.md` index table. Closing one → flip the status in its index row; the
+   entry file stays as the record. Post-mortems live in the entry file, never inline in the index.
+3. **Superseded content — annotate while open, move on close.** While an item is *open*, annotate what
+   you proved wrong in place (strikethrough + what shipped). On *close*, the record moves to its
+   archive (the bug's entry file / `docs/roadmap-history.md`) instead of accreting strikethrough
+   forever. Never silently delete it; never leave it stale.
+4. **Ledgers** — Reference-firmware bug list, "Considered and rejected", the data-collection queue:
    move or annotate affected entries; don't create a duplicate entry elsewhere.
-4. **AGENTS.md** — Only if a phase status or an architecture decision changed; keep the summary
+5. **AGENTS.md** — Only if a phase status or an architecture decision changed; keep the summary
    consistent with ROADMAP.md.
-5. **Memory** — Any auto-memory file (and its `MEMORY.md` index line) whose description states a
+6. **Memory** — Any auto-memory file (and its `MEMORY.md` index line) whose description states a
    now-changed status ("STILL OPEN", "blocked", "draft PR") gets reconciled.
-6. **New files** — repo-relative paths ≤150 chars (longer breaks `git worktree add` and fresh
+7. **New files** — repo-relative paths ≤150 chars (longer breaks `git worktree add` and fresh
    clones on Windows).
-7. **MCP surface** — did this work add an agent-facing capability, or a script under `host/tools/`?
+8. **MCP surface** — did this work add an agent-facing capability, or a script under `host/tools/`?
    Then it ships as an MCP tool in the same commit: wrapper registered in
    `host/src/roomscan/mcp_server/`, `EXPOSED`/`EXCLUDED` updated in
    `host/tests/test_mcp_registry.py`, `docs/mcp-server.md` updated. Did it change a `/ws` message

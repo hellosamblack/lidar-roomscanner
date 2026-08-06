@@ -166,8 +166,9 @@ Provide the owner with a clear forward-looking summary covering three areas:
   cliffs that the next session should watch for or test against
 - **Opportunities** — Nice-to-have optimizations, follow-up improvements, or
   architectural cleanup that would pay off if time allows
-- For each item: suggest a documentation home (ROADMAP.md sub-section,
-  CLAUDE.md note, or a new memory file) so it persists across sessions
+- For each item: suggest a documentation home (a ROADMAP.md work-item register entry,
+  a `bugs/BUG-NNN.md` + BUGS.md index row for a defect, a CLAUDE.md note, or a new
+  memory file) so it persists across sessions
 
 All three sections can be brief if the session was a small bug fix or
 maintenance task with no forward-looking implications. If none apply, say

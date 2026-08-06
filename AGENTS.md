@@ -34,5 +34,7 @@ or duplicate these skills for Codex.
 - Durable operating rules: `CLAUDE.md`
 - Project history / decisions: Claude memory index and its linked notes
 - Immediate shared state: `.remember/now.md` and `.remember/recent.md` (gitignored)
-- Product plans and current status: `ROADMAP.md`, `BUGS.md`, and `docs/`
+- Product plans and current status: `ROADMAP.md` (standing decisions + the forward-looking Work-item
+  register; completed-phase history in `docs/roadmap-history.md`), `BUGS.md` (an index over per-bug
+  files in `bugs/`), and `docs/`
 - Reusable workflows: `.claude/skills/`

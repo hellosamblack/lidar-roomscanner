@@ -113,6 +113,7 @@ The project is organized into several layers. Start here, and follow the links t
 
 ## <img src="https://api.iconify.design/material-symbols/explore.svg?color=white#gh-dark-mode-only" width="28" height="28" align="absmiddle"><img src="https://api.iconify.design/material-symbols/explore.svg#gh-light-mode-only" width="28" height="28" align="absmiddle"> Key Project Documents
 
-*   [**`ROADMAP.md`**](ROADMAP.md) - The phased implementation plan and source of truth for sequencing tasks, milestones, and architectural decisions.
-*   [**`BUGS.md`**](BUGS.md) - Bug tracker for host and firmware issues.
+*   [**`ROADMAP.md`**](ROADMAP.md) - Current-state doc: standing decisions, architecture, and the forward-looking work-item register (type-prefixed IDs by subsystem).
+*   [**`docs/roadmap-history.md`**](docs/roadmap-history.md) - Completed-phase narratives and measured outcomes (the historical record behind the roadmap).
+*   [**`BUGS.md`**](BUGS.md) - Bug tracker index for host and firmware issues; each bug's full entry lives in [`bugs/`](bugs/).
 *   [**`CLAUDE.md`**](CLAUDE.md) - The primary system guidance and agentic instructions for working in this repo. Read this first if you are an agent contributing to the codebase.
