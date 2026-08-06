@@ -578,8 +578,8 @@ def _run_rate(monkeypatch, script, latest=None, **kwargs):
 def test_rig_profile_confirms_an_exact_device_readback(monkeypatch):
     hfr = _preset_applied("high_framerate")
     r, fake = _run_profile(monkeypatch, [
-        _ranging(_preset_applied("room_mapping")),          # pre-flight
-        _ranging(_preset_applied("room_mapping"), pending=True),
+        _ranging(_preset_applied("stability")),          # pre-flight
+        _ranging(_preset_applied("stability"), pending=True),
         _ranging(hfr, measured_fps=45.6),
     ], profile="high_framerate")
 
@@ -600,7 +600,7 @@ def test_rig_profile_does_not_accept_a_stale_cached_broadcast(monkeypatch):
     """
     target = _preset_applied("high_framerate")
     r, fake = _run_profile(monkeypatch,
-                           [_ranging(_preset_applied("room_mapping"))],
+                           [_ranging(_preset_applied("stability"))],
                            latest={"ranging": _ranging(target)},
                            profile="high_framerate")
 
@@ -611,21 +611,21 @@ def test_rig_profile_does_not_accept_a_stale_cached_broadcast(monkeypatch):
 
 def test_rig_profile_times_out_when_the_command_never_settles(monkeypatch):
     r, _ = _run_profile(monkeypatch, [
-        _ranging(_preset_applied("room_mapping")),
-        _ranging(_preset_applied("room_mapping"), pending=True),
-        _ranging(_preset_applied("room_mapping"), pending=True),
+        _ranging(_preset_applied("stability")),
+        _ranging(_preset_applied("stability"), pending=True),
+        _ranging(_preset_applied("stability"), pending=True),
     ], profile="precision")
 
     assert r["ok"] is False
     assert "no confirmed readback" in r["error"]
-    assert r["applied"] == _preset_applied("room_mapping")
+    assert r["applied"] == _preset_applied("stability")
 
 
 def test_rig_profile_reports_a_device_error(monkeypatch):
     r, _ = _run_profile(monkeypatch, [
-        _ranging(_preset_applied("room_mapping")),
-        _ranging(_preset_applied("room_mapping"), pending=True),
-        _ranging(_preset_applied("room_mapping"), error="SET_RANGING_PROFILE -> BUSY"),
+        _ranging(_preset_applied("stability")),
+        _ranging(_preset_applied("stability"), pending=True),
+        _ranging(_preset_applied("stability"), error="SET_RANGING_PROFILE -> BUSY"),
     ], profile="precision")
 
     assert r["ok"] is False
@@ -639,9 +639,9 @@ def test_rig_profile_ignores_a_previous_commands_error_that_predates_the_send(mo
     tool would stop waiting for the real answer."""
     stale = "SET_RANGING_PROFILE timeout: no ACK"
     r, _ = _run_profile(monkeypatch, [
-        _ranging(_preset_applied("room_mapping"), error=stale),        # pre-flight
-        _ranging(_preset_applied("room_mapping"), error=stale),        # tick, still stale
-        _ranging(_preset_applied("room_mapping"), pending=True),
+        _ranging(_preset_applied("stability"), error=stale),        # pre-flight
+        _ranging(_preset_applied("stability"), error=stale),        # tick, still stale
+        _ranging(_preset_applied("stability"), pending=True),
         _ranging(_preset_applied("precision")),
     ], profile="precision")
 
@@ -651,7 +651,7 @@ def test_rig_profile_ignores_a_previous_commands_error_that_predates_the_send(mo
 
 def test_rig_profile_refuses_while_another_command_is_pending(monkeypatch):
     r, fake = _run_profile(monkeypatch,
-                           [_ranging(_preset_applied("room_mapping"), pending=True)],
+                           [_ranging(_preset_applied("stability"), pending=True)],
                            profile="precision")
 
     assert r["ok"] is False
@@ -661,7 +661,7 @@ def test_rig_profile_refuses_while_another_command_is_pending(monkeypatch):
 
 def test_rig_profile_refuses_on_a_replay_source(monkeypatch):
     r, fake = _run_profile(monkeypatch,
-                           [_ranging(_preset_applied("room_mapping"), transport="replay")],
+                           [_ranging(_preset_applied("stability"), transport="replay")],
                            profile="precision")
 
     assert r["ok"] is False
@@ -672,7 +672,7 @@ def test_rig_profile_refuses_on_a_replay_source(monkeypatch):
 def test_rig_profile_rejects_invalid_manual_params_before_the_device(monkeypatch):
     """16 ms of exposure cannot fit a 90 fps (11111 us) frame period. The host
     model knows that, so the device must never be asked."""
-    r, fake = _run_profile(monkeypatch, [_ranging(_preset_applied("room_mapping"))],
+    r, fake = _run_profile(monkeypatch, [_ranging(_preset_applied("stability"))],
                            ranging_mode="precision", fps=90, exposure_ms=16,
                            power_mode="regular")
 
@@ -688,7 +688,7 @@ def test_rig_profile_refuses_an_unsupported_cdc_rate_but_force_sends_it(monkeypa
     args = dict(ranging_mode="precision", fps=over, exposure_ms=2, power_mode="regular")
 
     refused, fake = _run_profile(monkeypatch,
-                                 [_ranging(_preset_applied("room_mapping"), transport="cdc")],
+                                 [_ranging(_preset_applied("stability"), transport="cdc")],
                                  **args)
     assert refused["ok"] is False
     assert "USB CDC" in refused["error"] and "force=True" in refused["error"]
@@ -697,8 +697,8 @@ def test_rig_profile_refuses_an_unsupported_cdc_rate_but_force_sends_it(monkeypa
 
     applied = _applied("manual", "precision", over, 2, "regular")
     forced, fake2 = _run_profile(monkeypatch, [
-        _ranging(_preset_applied("room_mapping"), transport="cdc"),
-        _ranging(_preset_applied("room_mapping"), transport="cdc", pending=True),
+        _ranging(_preset_applied("stability"), transport="cdc"),
+        _ranging(_preset_applied("stability"), transport="cdc", pending=True),
         _ranging(applied, transport="cdc"),
     ], force=True, **args)
     assert forced["ok"] is True, forced
@@ -710,8 +710,8 @@ def test_rig_profile_reports_an_applied_mismatch_rather_than_the_request(monkeyp
     result must show what it actually did."""
     other = _applied("manual", "precision", 45, 4, "regular")
     r, _ = _run_profile(monkeypatch, [
-        _ranging(_preset_applied("room_mapping")),
-        _ranging(_preset_applied("room_mapping"), pending=True),
+        _ranging(_preset_applied("stability")),
+        _ranging(_preset_applied("stability"), pending=True),
         _ranging(other),
     ], ranging_mode="precision", fps=50, exposure_ms=4, power_mode="regular")
 
@@ -724,8 +724,8 @@ def test_rig_profile_applies_two_sequential_manual_changes(monkeypatch):
     for fps, exposure in ((40, 4), (25, 8)):
         applied = _applied("manual", "precision", fps, exposure, "regular")
         r, fake = _run_profile(monkeypatch, [
-            _ranging(_preset_applied("room_mapping")),
-            _ranging(_preset_applied("room_mapping"), pending=True),
+            _ranging(_preset_applied("stability")),
+            _ranging(_preset_applied("stability"), pending=True),
             _ranging(applied),
         ], ranging_mode="precision", fps=fps, exposure_ms=exposure, power_mode="regular")
 
@@ -861,9 +861,9 @@ def test_rig_imu_env_rate_applies_two_sequential_changes(monkeypatch):
 
 def test_a_profile_change_is_not_failed_by_an_imu_env_error_landing_mid_flight(monkeypatch):
     r, _ = _run_profile(monkeypatch, [
-        _ranging(_preset_applied("room_mapping")),
-        _ranging(_preset_applied("room_mapping"), pending=True),
-        _ranging(_preset_applied("room_mapping"), pending=True,
+        _ranging(_preset_applied("stability")),
+        _ranging(_preset_applied("stability"), pending=True),
+        _ranging(_preset_applied("stability"), pending=True,
                  imu_env=_imu_env(0, error="SET_IMU_ENV_RATE -> BUSY")),
         _ranging(_preset_applied("precision"),
                  imu_env=_imu_env(0, error="SET_IMU_ENV_RATE -> BUSY")),
@@ -876,8 +876,8 @@ def test_a_profile_change_is_not_failed_by_an_imu_env_error_landing_mid_flight(m
 
 def test_an_imu_env_change_is_not_failed_or_confirmed_by_the_ranging_half(monkeypatch):
     r, _ = _run_rate(monkeypatch, [
-        _ranging(_preset_applied("room_mapping")),
-        _ranging(_preset_applied("room_mapping"), imu_env=_imu_env(0, pending=True)),
+        _ranging(_preset_applied("stability")),
+        _ranging(_preset_applied("stability"), imu_env=_imu_env(0, pending=True)),
         # A profile command lands (and fails) while ours is still in flight:
         # neither its settle nor its error may decide this tool's verdict.
         _ranging(_preset_applied("precision"), error="SET_RANGING_PROFILE -> BAD_PARAM",
@@ -959,7 +959,7 @@ def test_profile_estimate_with_no_arguments_describes_every_preset():
     r = profile_estimate()
 
     assert set(r["presets"]) == {profiles.PROFILE_ID_TO_STR[p] for p in profiles.PRESETS}
-    assert r["presets"]["room_mapping"]["fps"] == 30
+    assert r["presets"]["stability"]["fps"] == 30
 
 
 def test_profile_estimate_names_the_cdc_ceiling_only_on_cdc():

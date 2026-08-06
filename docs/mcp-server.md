@@ -76,6 +76,7 @@ in-process call meanwhile.
 | `rig_up(replay?, replay_fps?)` | starts the server detached; `replay` for deterministic checks |
 | `rig_down()` | terminates it and drops the `/ws` connection |
 | `rig_command(name, param?)` | device COMMAND/ACK; `ok=false` when the ACK is an error |
+| `rig_idle(auto_idle?, level?, wake?)` | wake the ToF laser and/or control the laser-wear auto-idle; disable `auto_idle` before recording a static scene (else the laser parks mid-capture and only IMU is recorded), restore it after |
 | `rig_record(on)` | records via the server, returning the capture path |
 | `rig_set(...)` | legacy display options; verifies the echo before reporting success |
 | `rig_view(source?, display?, regenerate?)` | authoritative Live/View and Point cloud/Preview/SLAM/Detailed control |

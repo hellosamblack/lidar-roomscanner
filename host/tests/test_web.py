@@ -5787,9 +5787,9 @@ class _FakeRangingClient:
     device."""
     def __init__(self):
         self.calls: list[tuple] = []
-        self.profile_result = (web.ResultCode.OK, int(_profiles.ProfileId.ROOM_MAPPING))
-        self.ranging_config_result = (web.ResultCode.OK, _ack_for(_profiles.PRESETS[_profiles.ProfileId.ROOM_MAPPING]))
-        self.manual_result = (web.ResultCode.OK, _ack_for(_profiles.PRESETS[_profiles.ProfileId.ROOM_MAPPING]))
+        self.profile_result = (web.ResultCode.OK, int(_profiles.ProfileId.STABILITY))
+        self.ranging_config_result = (web.ResultCode.OK, _ack_for(_profiles.PRESETS[_profiles.ProfileId.STABILITY]))
+        self.manual_result = (web.ResultCode.OK, _ack_for(_profiles.PRESETS[_profiles.ProfileId.STABILITY]))
         self.imu_rate_result = (web.ResultCode.OK, 30)
         self.imu_rate_status_result = (web.ResultCode.OK, 0)
         self.raise_on: str | None = None   # method name -> raise self.exc instead of returning
@@ -6005,9 +6005,9 @@ def test_init_ranging_state_populates_applied_from_get_ranging_config():
         web._broadcast_text = orig
 
     rs = state.ranging_state
-    room_cfg = _profiles.PRESETS[_profiles.ProfileId.ROOM_MAPPING]
+    room_cfg = _profiles.PRESETS[_profiles.ProfileId.STABILITY]
     assert rs.initialized is True
-    assert rs.applied_profile_id == int(_profiles.ProfileId.ROOM_MAPPING)
+    assert rs.applied_profile_id == int(_profiles.ProfileId.STABILITY)
     assert rs.applied_fps == room_cfg.fps
     assert rs.estimate["i3c_bus_utilization_pct"] == pytest.approx(
         _profiles.i3c_bus_utilization_pct(room_cfg.fps), abs=0.05)
@@ -6037,13 +6037,15 @@ def test_init_ranging_state_is_a_noop_in_replay_launch():
 
 # --- set_profile ---------------------------------------------------------
 
-def test_set_profile_success_commits_from_the_followup_readback():
-    """cmd 8's own ACK carries no config fields, so a successful preset switch
-    must chain exactly one GET_RANGING_CONFIG to learn what was applied."""
+def test_set_profile_success_applies_manual_params_plus_imu_rate():
+    """Presets are HOST-COMPOSED (2026-08-05): a preset switch is one
+    SET_MANUAL_PARAMS (whose ACK already carries the config) plus the preset's own
+    IMU/env rate -- NOT the firmware SET_RANGING_PROFILE. The readback is re-labelled
+    back to the preset by `_match_profile_id`, so `applied_profile_id` is the preset."""
+    hfr = _profiles.PRESETS[_profiles.ProfileId.HIGH_FRAMERATE]
     client = _FakeRangingClient()
-    client.profile_result = (web.ResultCode.OK, int(_profiles.ProfileId.HIGH_FRAMERATE))
-    client.ranging_config_result = (web.ResultCode.OK,
-                                    _ack_for(_profiles.PRESETS[_profiles.ProfileId.HIGH_FRAMERATE]))
+    client.manual_result = (web.ResultCode.OK, _ack_for(hfr))
+    client.imu_rate_result = (web.ResultCode.OK, hfr.imu_env_rate_hz)
     state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
     orig = web._broadcast_text
     web._broadcast_text = capture
@@ -6052,18 +6054,24 @@ def test_set_profile_success_commits_from_the_followup_readback():
     finally:
         web._broadcast_text = orig
 
-    assert [c[0] for c in client.calls] == ["send_profile", "get_ranging_config"]
+    assert [c[0] for c in client.calls] == ["send_manual_params", "send_imu_env_rate"]
+    # The IMU half applied the preset's own rate (60 Hz), not coupled.
+    assert client.calls[1] == ("send_imu_env_rate", hfr.imu_env_rate_hz)
     rs = state.ranging_state
     assert rs.pending is False and rs.pending_kind is None
     assert rs.applied_profile_id == int(_profiles.ProfileId.HIGH_FRAMERATE)
-    assert rs.applied_fps == _profiles.PRESETS[_profiles.ProfileId.HIGH_FRAMERATE].fps
+    assert rs.applied_fps == hfr.fps
     assert rs.error is None
+    assert state.imu_env_state.applied_rate_hz == hfr.imu_env_rate_hz
     assert len(sent) >= 2   # at least the "pending" and the final broadcasts
 
 
-def test_set_profile_device_rejection_reports_error_and_leaves_no_applied_state():
+def test_set_profile_device_rejection_reports_error_and_skips_imu_half():
+    """If the ranging half is rejected (BUSY), the error is surfaced and the IMU
+    half is NOT pushed on top of it."""
     client = _FakeRangingClient()
-    client.profile_result = (web.ResultCode.BUSY, 0)
+    client.manual_result = (web.ResultCode.BUSY, _ack_for(
+        _profiles.PRESETS[_profiles.ProfileId.PRECISION]))
     state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
     orig = web._broadcast_text
     web._broadcast_text = capture
@@ -6074,10 +6082,10 @@ def test_set_profile_device_rejection_reports_error_and_leaves_no_applied_state(
 
     rs = state.ranging_state
     assert rs.pending is False
-    assert rs.initialized is False          # never committed -- no readback happened
+    assert rs.initialized is False          # never committed
     assert "BUSY" in rs.error
-    # BUSY must not even attempt a readback -- there is nothing new to read.
-    assert [c[0] for c in client.calls] == ["send_profile"]
+    # BUSY on the ranging half must not attempt the IMU command.
+    assert [c[0] for c in client.calls] == ["send_manual_params"]
 
 
 def test_set_profile_rejected_client_side_when_already_pending():
@@ -6174,7 +6182,7 @@ def test_set_manual_params_timeout_leaves_previous_applied_state_visible():
     client.raise_on = "send_manual_params"
     client.exc = TimeoutError("no ACK within 2.0s")
     state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
-    state.ranging_state.applied_profile_id = int(_profiles.ProfileId.ROOM_MAPPING)
+    state.ranging_state.applied_profile_id = int(_profiles.ProfileId.STABILITY)
     state.ranging_state.applied_fps = 30
     state.ranging_state.initialized = True
     orig = web._broadcast_text
@@ -6189,7 +6197,7 @@ def test_set_manual_params_timeout_leaves_previous_applied_state_visible():
     assert rs.pending is False
     assert "timeout" in rs.error.lower()
     # Unchanged -- the request was never committed.
-    assert rs.applied_profile_id == int(_profiles.ProfileId.ROOM_MAPPING)
+    assert rs.applied_profile_id == int(_profiles.ProfileId.STABILITY)
     assert rs.applied_fps == 30
 
 
@@ -6234,7 +6242,7 @@ def test_set_imu_env_rate_success_updates_ranging_estimate_imu_fields():
     client = _FakeRangingClient()
     client.imu_rate_result = (web.ResultCode.OK, 30)
     state, sent, capture = _ranging_state(client=client, ctrl=_FakeRangingCtrl(mode="live"))
-    web._commit_ranging_ack(state, _ack_for(_profiles.PRESETS[_profiles.ProfileId.ROOM_MAPPING]))
+    web._commit_ranging_ack(state, _ack_for(_profiles.PRESETS[_profiles.ProfileId.STABILITY]))
     orig = web._broadcast_text
     web._broadcast_text = capture
     try:
@@ -6294,8 +6302,10 @@ def test_ranging_message_reflects_committed_applied_state():
     web._commit_ranging_ack(state, _ack_for(cfg))
     msg = web._ranging_message(state)
     assert msg["applied"] == {
-        "profile": "precision", "ranging_mode": "precision",
-        "fps": cfg.fps, "exposure_ms": cfg.exposure_ms, "power_mode": "ulp",
+        "profile": "precision",
+        "ranging_mode": _profiles.RANGING_MODE_TO_STR[cfg.ranging_mode],
+        "fps": cfg.fps, "exposure_ms": cfg.exposure_ms,
+        "power_mode": _profiles.POWER_MODE_TO_STR[cfg.power_mode],
     }
     assert msg["estimate"]["max_range_m"] == pytest.approx(
         _profiles.estimate_max_range_m(cfg.ranging_mode, _profiles.dss_enabled_for_fps(cfg.fps)))
@@ -6313,7 +6323,8 @@ def test_handle_inbound_set_profile_dispatches_by_name():
         asyncio.run(web._handle_inbound(state, {"type": "set_profile", "profile": "precision"}))
     finally:
         web._broadcast_text = orig
-    assert [c[0] for c in client.calls] == ["send_profile", "get_ranging_config"]
+    # Host-composed preset (2026-08-05): SET_MANUAL_PARAMS + the preset's IMU rate.
+    assert [c[0] for c in client.calls] == ["send_manual_params", "send_imu_env_rate"]
 
 
 def test_handle_inbound_set_profile_unknown_name_is_a_noop():

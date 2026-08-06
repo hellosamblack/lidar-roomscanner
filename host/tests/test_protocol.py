@@ -346,7 +346,7 @@ def test_new_command_codes_registry():
 
 
 def test_profile_id_enum():
-    assert ProfileId.ROOM_MAPPING == 0
+    assert ProfileId.STABILITY == 0
     assert ProfileId.PRECISION == 1
     assert ProfileId.HIGH_FRAMERATE == 2
     assert ProfileId.MANUAL == 3

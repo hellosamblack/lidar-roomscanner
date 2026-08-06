@@ -750,6 +750,19 @@
         /* Shared slider (range input) style */
         .slider { width: 100%; accent-color: var(--accent); cursor: pointer; }
 
+        /* Applied-preset benefit blurb (owner ask 2026-08-05) */
+        .ranging-blurb {
+            font-size: 11px; line-height: 1.45; color: var(--text-dim, #9aa);
+            margin: 6px 0 2px; padding-left: 8px;
+            border-left: 2px solid var(--accent); user-select: text;
+        }
+        /* fps ceiling bar: bright = deliverable 1:1, grey = quantized above the
+           measured 1x ceiling for the current exposure (2026-08-05). */
+        .fps-cap { display: flex; height: 4px; border-radius: 2px; overflow: hidden; margin-top: 5px; }
+        .fps-cap__ok { background: var(--accent); }
+        .fps-cap__no { background: rgba(140, 140, 150, 0.35); }
+        .fps-cap-note { color: var(--text-dim, #9aa); margin-top: 3px; user-select: text; }
+
         /* Surface options sub-group (mirrors control-group__body gap) */
         #surface-opts { display: flex; flex-direction: column; gap: 10px; }
 
@@ -1408,13 +1421,15 @@
                      (progressive disclosure) and sends nothing by itself. -->
                 <div class="field-label">Ranging Profile</div>
                 <div class="segmented" id="seg-ranging-profile">
-                    <button data-profile="room_mapping" title="Ambient mode with DSS, ultra-low power — the default all-around scanning profile. Exact fps/exposure/range/power appear in Applied and the estimate readouts below once selected.">Room Mapping</button>
-                    <button data-profile="precision" title="Precision mode with DSS, ultra-low power — best accuracy at short/mid range, shorter minimum distance than Ambient. Exact fps/exposure/range/power appear in Applied and the estimate readouts below once selected.">Precision</button>
-                    <button data-profile="high_framerate" title="Precision mode, DSS off, regular power — for live SLAM tracking at the highest supported frame rate. Ethernet is required for full-rate streaming; USB CDC shows a bandwidth warning above its reliable ceiling. Exact fps/exposure/range/power appear in Applied and the estimate readouts below once selected.">High Frame-Rate</button>
+                    <button data-profile="stability" title="Default. Steadiest frame rate with the fewest dropped frames, at the same close-range accuracy as longer exposures. Exact fps/exposure/range/power appear in Applied and the estimate readouts below once selected.">Stability</button>
+                    <button data-profile="precision" title="Most light per frame — best on dark or distant surfaces; the longest exposure that still holds the full frame rate. Exact fps/exposure/range/power appear in Applied and the estimate readouts below once selected.">Precision</button>
+                    <button data-profile="high_framerate" title="Highest frame rate for fast motion and quick sweeps; the short exposure also cuts motion blur. Exact fps/exposure/range/power appear in Applied and the estimate readouts below once selected.">High Frame Rate</button>
                     <button data-profile="manual" title="Open manual ranging controls below — set ranging mode, frame rate, exposure and power mode by hand">Manual</button>
                 </div>
                 <div class="hud-row" title="What the device actually confirmed, from its own GET_RANGING_CONFIG readback — never what was last clicked"><span>Applied</span><span class="hud-val" id="ranging-applied-val">—</span></div>
                 <div class="field-label field-label--sub" id="ranging-requested-status" title="The most recently requested configuration — shown while a command is pending or after it fails" hidden></div>
+                <!-- Benefit blurb for the applied preset (owner ask 2026-08-05); text from PROFILE_BLURBS. -->
+                <div class="ranging-blurb" id="ranging-blurb" hidden></div>
                 <div class="ranging-error" id="ranging-error" title="The last ranging command's result, if it did not succeed" hidden></div>
 
                 <details class="control-subgroup" id="ranging-manual-panel" data-subgroup-id="ranging-manual">
@@ -1430,6 +1445,12 @@
                             <input type="range" class="slider" id="sl-manual-fps" min="1" max="100" step="1" value="30" title="Target frame rate, 1-100 fps — frame_period_us = round(1e6 / fps); above 60 fps forces DSS off and Precision ranging mode">
                             <input type="number" id="num-manual-fps" min="1" max="100" step="1" value="30" title="Target frame rate, 1-100 fps">
                         </div>
+                        <!-- fps ceiling bar (2026-08-05): the greyed segment is the fps range the
+                             current exposure cannot deliver 1:1 — the slider clamps out of it. -->
+                        <div class="fps-cap" id="fps-cap" hidden title="Frame rates in the greyed segment are above the measured 1x ceiling for the current exposure: the sensor would accept the request but deliver a lower, period-multiple rate. Lower the exposure to raise the ceiling.">
+                            <span class="fps-cap__ok" id="fps-cap-ok"></span><span class="fps-cap__no" id="fps-cap-no"></span>
+                        </div>
+                        <div class="field-label field-label--sub fps-cap-note" id="fps-cap-note" hidden></div>
                         <div class="field-label field-label--sub">Exposure <span class="hud-val" id="manual-exposure-val">6 ms</span></div>
                         <div class="paired-input">
                             <input type="range" class="slider" id="sl-manual-exposure" min="1" max="16" step="1" value="6" title="Integration time, 1-16 ms (1 ms step — the current driver has no sub-millisecond control)">

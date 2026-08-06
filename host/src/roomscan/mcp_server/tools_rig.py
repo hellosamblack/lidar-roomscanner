@@ -215,6 +215,110 @@ async def rig_command(name: str, param: int | None = None, timeout: float = 5.0)
     return out
 
 
+async def _await_tof_live(timeout: float, threshold_hz: float = 10.0
+                          ) -> tuple[bool, float | None]:
+    """Wait for the ToF stream to resume above `threshold_hz`, proving the laser
+    woke. When idled, stream 7's device_hz is null/0; awake it is ~fps. Returns
+    (live, measured_hz)."""
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+
+    def _tof_hz(m: dict | None) -> float | None:
+        for s in (m or {}).get("streams") or []:
+            if s.get("stream_id") == 7:  # metrics labels stream 7 "ToF"
+                return s.get("device_hz") or s.get("host_hz")
+        return None
+
+    hz = _tof_hz(rig.latest.get("metrics"))
+    while loop.time() < deadline:
+        if hz is not None and hz > threshold_hz:
+            return True, hz
+        m = await rig.wait_for("metrics", timeout=max(0.1, deadline - loop.time()))
+        if m is None:
+            break
+        hz = _tof_hz(m)
+    return (hz is not None and hz > threshold_hz), hz
+
+
+@mcp.tool()
+async def rig_idle(auto_idle: bool | None = None, level: str = "",
+                   wake: bool = True, timeout: float = 12.0) -> dict:
+    """Wake the ToF sensor and/or control the laser-wear auto-idle.
+
+    The server idles the ToF LASER (SET_STANDBY) when no browser tab is actively
+    watching, and the firmware self-wakes only on real MOTION. So on a STATIC scene
+    the laser parks and stays parked: a recording then captures only IMU (RAW_3DMD
+    stops, the IMU streams drop to the ~18 Hz parked rate) while `capture_analyze`
+    continuity still reads `loss 0%`, because an absent frame never gets a seq slot.
+    This is the host-side wake a real viewer triggers on focus, exposed for headless
+    work -- the device command channel's SET_STANDBY(ACTIVE) does not reliably ACK
+    from cold standby, but `idle_state{active:true}` -> `_viewer_arrived` does.
+
+    `wake=True` (default) sends the same `idle_state{active:true}` a viewer sends:
+    it wakes the laser if idled AND marks this connection active so it does not
+    immediately re-idle. `auto_idle` True/False persistently enables/disables the
+    whole auto-idle feature (persisted to roomscan.toml, shared with the live UI) --
+    set it False before recording a static scene, True to restore. `level` is
+    soft|hard (idle depth). Verified against the device: a wake waits for ToF frames
+    to resume (stream 7 device_hz), an `auto_idle` change waits for the `state` echo
+    to carry it. `ok=false` on an unreachable server, a bad `level`, an `auto_idle`
+    that did not take, or ToF not resuming within `timeout` (a replay, or genuinely
+    down).
+    """
+    if not await rig.connect():
+        return {"ok": False,
+                "error": "cannot reach roomscan-web — call rig_status()/rig_up() first"}
+    if level and level not in ("soft", "hard"):
+        return {"ok": False, "error": f"level must be soft|hard, got {level!r}"}
+    if auto_idle is None and not level and not wake:
+        return {"ok": False, "error": "nothing to do — pass auto_idle, level, or wake"}
+
+    sent: list[dict] = []
+    idle_state_msg: dict | None = None
+    # 1) Auto-idle feature control (persisted, shared with the UI).
+    if auto_idle is not None or level:
+        msg: dict = {"type": "set_idle"}
+        if auto_idle is not None:
+            msg["enabled"] = bool(auto_idle)
+        if level:
+            msg["level"] = level
+        await rig.send(msg)
+        sent.append(msg)
+        expected: dict = {}
+        if auto_idle is not None:
+            expected["idle_enabled"] = bool(auto_idle)
+        if level:
+            expected["idle_level"] = level
+        idle_state_msg = await _await_state(expected, timeout=timeout)
+
+    # 2) Wake now (also refreshes this connection's activity so it won't re-idle).
+    tof_hz = None
+    woke = None
+    if wake:
+        wmsg = {"type": "idle_state", "active": True}
+        await rig.send(wmsg)
+        sent.append(wmsg)
+        woke, tof_hz = await _await_tof_live(timeout=timeout)
+
+    st = idle_state_msg or rig.latest.get("state") or {}
+    out: dict = {"ok": True, "sent": sent,
+                 "idle_enabled": st.get("idle_enabled"),
+                 "idle_level": st.get("idle_level")}
+    if wake:
+        out["tof_live"] = bool(woke)
+        out["tof_hz"] = tof_hz
+        if not woke:
+            out["ok"] = False
+            out["error"] = (f"ToF did not resume within {timeout}s — the rig may be on a "
+                            "replay (rig_playback('go_live')) or the device is not streaming "
+                            "(rig_status()).")
+    if auto_idle is not None and st.get("idle_enabled") != bool(auto_idle):
+        out["ok"] = False
+        out["error"] = (f"auto-idle did not change to {auto_idle} "
+                        f"(state says {st.get('idle_enabled')})")
+    return out
+
+
 @mcp.tool()
 async def rig_record(on: bool, timeout: float = 10.0) -> dict:
     """Start or stop recording through the server, returning the capture path.
@@ -441,7 +545,7 @@ async def rig_profile(profile: str = "", ranging_mode: str = "", fps: int = 0,
     With no arguments this QUERIES: it returns the server's current ranging state
     (applied config, model estimate, measured fps, transport, IMU/env rate).
 
-    To set, pass either `profile` — room_mapping|precision|high_framerate, or
+    To set, pass either `profile` — stability|precision|high_framerate, or
     `manual` to reapply the device's last accepted manual candidate — or all four
     manual fields: `ranging_mode` (ambient|precision), `fps` 1-100, `exposure_ms`
     1-16, `power_mode` (ulp|lp|regular). Manual candidates are validated

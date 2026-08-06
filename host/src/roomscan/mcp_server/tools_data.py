@@ -512,7 +512,7 @@ def profile_estimate(profile: str = "", ranging_mode: str = "", fps: int = 0,
     card would show. Call it BEFORE applying a config to see whether it is even
     valid and what it costs.
 
-    Pass `profile` (room_mapping|precision|high_framerate) for a preset, or all
+    Pass `profile` (stability|precision|high_framerate) for a preset, or all
     four manual fields — `ranging_mode` (ambient|precision), `fps` 1-100,
     `exposure_ms` 1-16, `power_mode` (ulp|lp|regular) — for a candidate. With no
     arguments it estimates every preset at once. `imu_env_rate_hz` is 0/omitted

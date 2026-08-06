@@ -645,7 +645,7 @@ from roomscan import profiles as _profiles  # noqa: E402
 
 def test_ranging_profile_selector_replaces_the_old_usecase_control():
     """The old two-button Usecase segmented control is gone; the four-way
-    Room Mapping / Precision / High Frame-Rate / Manual selector replaces it
+    Stability / Precision / High Frame Rate / Manual selector replaces it
     entirely (plan Task 10 item 4)."""
     html = _index()
     assert 'id="seg-usecase"' not in html
@@ -653,7 +653,7 @@ def test_ranging_profile_selector_replaces_the_old_usecase_control():
     seg = re.search(r'<div class="segmented" id="seg-ranging-profile">(.*?)</div>', html, re.DOTALL)
     assert seg is not None, "seg-ranging-profile not found"
     profiles_present = set(re.findall(r'data-profile="([^"]+)"', seg.group(1)))
-    assert profiles_present == {"room_mapping", "precision", "high_framerate", "manual"}
+    assert profiles_present == {"stability", "precision", "high_framerate", "manual"}
 
 
 def test_every_new_ranging_input_has_a_tooltip():
@@ -724,7 +724,7 @@ def test_imu_env_rate_bounds_match_profiles_py():
 
 
 def test_preset_button_tooltips_carry_no_hardcoded_consequence_numbers():
-    """The Room Mapping/Precision/High Frame-Rate tooltips are STATIC markup
+    """The Stability/Precision/High Frame Rate tooltips are STATIC markup
     that cannot track a live `profiles.py` coefficient/preset change -- a
     concurrent hardware-investigation session amending
     `PRESETS[ProfileId.HIGH_FRAMERATE]`'s fps mid-review is exactly the case
@@ -735,7 +735,7 @@ def test_preset_button_tooltips_carry_no_hardcoded_consequence_numbers():
     always current because they come from the server on every change --
     never in a preset button's own `title=`."""
     html = _index()
-    for profile in ("room_mapping", "precision", "high_framerate"):
+    for profile in ("stability", "precision", "high_framerate"):
         m = re.search(r'data-profile="' + profile + r'"[^>]*title="([^"]+)"', html)
         assert m is not None, f"data-profile={profile!r} button not found"
         tooltip = m.group(1)
@@ -796,3 +796,57 @@ def test_ranging_and_imu_env_pending_disable_their_own_controls_only():
     # The IMU/env controls must never be gated on the ranging pending flag.
     imu_block = js[js.index("segImuEnvMode?.addEventListener"):js.index("hub.on('ranging'")]
     assert "rangingPending" not in imu_block
+
+
+# --- 2026-08-05: use-case presets, fps grey-out, number-input focus guard ------
+
+def _controls() -> str:
+    return (STATIC / "controls.js").read_text(encoding="utf-8")
+
+
+def test_fps_ceiling_table_in_js_matches_the_python_measured_table():
+    """controls.js mirrors profiles._MEASURED_CEILING_FPS so the fps grey-out can
+    track the exposure live while editing. The two must not drift."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+    from roomscan import profiles
+    js = _controls()
+    m = re.search(r"CEILING_FPS_TABLE\s*=\s*\[(.*?)\]\s*;", js, re.DOTALL)
+    assert m is not None, "CEILING_FPS_TABLE not found in controls.js"
+    pairs = [(int(a), int(b)) for a, b in re.findall(r"\[\s*(\d+)\s*,\s*(\d+)\s*\]", m.group(1))]
+    assert pairs == list(profiles._MEASURED_CEILING_FPS), (
+        "controls.js CEILING_FPS_TABLE has drifted from profiles._MEASURED_CEILING_FPS")
+
+
+def test_manual_number_fields_have_a_focus_edit_guard():
+    """Typing in the fps/exposure number box must not be clobbered by the ~4 Hz
+    `ranging` re-seed (BUG-081): the re-seed is suppressed while a field has focus."""
+    js = _controls()
+    assert "manualEditing" in js
+    assert "!manualEditing" in js  # folded into the re-seed guard
+    assert re.search(r"numManualFps\?\.addEventListener\('focus'", js)
+    assert re.search(r"numManualExposure\?\.addEventListener\('focus'", js)
+
+
+def test_fps_cap_and_blurb_elements_present():
+    html = _index()
+    for el_id in ("ranging-blurb", "fps-cap", "fps-cap-ok", "fps-cap-no", "fps-cap-note"):
+        assert f'id="{el_id}"' in html, f"missing #{el_id} in index.html"
+
+
+def test_profile_blurbs_cover_the_preset_slugs():
+    js = _controls()
+    m = re.search(r"PROFILE_BLURBS\s*=\s*\{(.*?)\n\s*\};", js, re.DOTALL)
+    assert m is not None
+    keys = set(re.findall(r"(\w+)\s*:", m.group(1)))
+    assert {"stability", "precision", "high_framerate", "manual"} <= keys
+
+
+def test_profile_blurbs_carry_no_hardcoded_consequence_numbers():
+    """Like the button tooltips, the static benefit blurbs must not bake in
+    fps/exposure numbers that would stale on a preset retune -- the live config is
+    in the Applied/estimate readouts."""
+    js = _controls()
+    m = re.search(r"PROFILE_BLURBS\s*=\s*\{(.*?)\n\s*\};", js, re.DOTALL)
+    assert m is not None
+    assert not re.search(r"\d", m.group(1)), "PROFILE_BLURBS contains a digit (stale-prone)"

@@ -307,10 +307,16 @@ from enum import IntEnum
 
 
 class ProfileId(IntEnum):
-    """`SET_RANGING_PROFILE` (command 8) enum value. Order fixed by the plan's
-    Task 2 §3: "preset IDs 0-2 apply immediately, while MANUAL (3) reapplies the
-    last accepted manual candidate"."""
-    ROOM_MAPPING = 0
+    """Host-facing preset identity. Values 0-2 are the three named use-case presets;
+    MANUAL (3) is any configuration no preset describes.
+
+    NOTE (2026-08-05): presets are now composed HOST-SIDE -- the web/CLI apply path
+    resolves a preset to its `PRESETS` entry and sends it as `SET_MANUAL_PARAMS`
+    (+ the preset's IMU/env rate), NOT the wire `SET_RANGING_PROFILE` command, whose
+    firmware-resident table is fixed and cannot set an IMU rate. So these ids are the
+    host's own preset vocabulary; the wire `protocol.ProfileId` (same values) is kept
+    for the legacy command path only. STABILITY (12 ms) is the default preset."""
+    STABILITY = 0
     PRECISION = 1
     HIGH_FRAMERATE = 2
     MANUAL = 3
@@ -343,7 +349,7 @@ class PowerMode(IntEnum):
 # above, and the two are mapped BY NAME (`control._manual_params_to_wire`).
 
 PROFILE_ID_TO_STR: dict[ProfileId, str] = {
-    ProfileId.ROOM_MAPPING: "room_mapping",
+    ProfileId.STABILITY: "stability",
     ProfileId.PRECISION: "precision",
     ProfileId.HIGH_FRAMERATE: "high_framerate",
     ProfileId.MANUAL: "manual",
@@ -405,74 +411,94 @@ def dss_enabled_for_fps(fps: int) -> bool:
     return fps <= DSS_FPS_CEILING
 
 
-# --- Measured hardware ceiling (2026-08-03) -- integer-multiple quantization below
-# the sensor's own per-frame floor. See module docstring "Measured hardware ceiling"
-# for the full investigation; these are its brackets, unchanged. -------------------
-
-# (exposure_ms upper bound of the bracket, floor_ms -- the bracket's OWN upper bound,
-# i.e. the conservative/under-promising side). Measured at 54x42/binning 2, Precision
-# context, Regular power; DSS on vs off made no measurable difference. These three
-# brackets are AUTHORITATIVE below 8 ms exposure -- real measurements, which the
-# 2026-08-03 refinement investigation showed outrank ST's own planning-tool equation
-# (a flat 26.9 ms) in this range. See module docstring "Floor extrapolation above 8 ms
-# exposure" for what happens above 8 ms (UNMEASURED; a derived line, not this table).
-_FLOOR_MS_BRACKETS: tuple[tuple[float, float], ...] = (
-    (2.0, 20.0),
-    (4.0, 21.739),
-    (8.0, 23.529),
+# --- Measured hardware ceiling -- integer-multiple quantization below the sensor's
+# own per-frame floor. Full investigation in the module docstring "Measured hardware
+# ceiling". -------------------------------------------------------------------------
+#
+# FULL-CURVE REMEASUREMENT (2026-08-05, on-rig sweep, `host/tools/fps_sweep`-style):
+# the highest INTEGER fps delivered ~1:1 at each exposure, Precision/Regular/DSS-on,
+# 54x42/binning 2. This SUPERSEDES the 2026-08-03 three-bracket table (<=8 ms) AND
+# its derived extrapolation line (>8 ms): that line predicted 16 ms -> 30.8 fps 1x
+# when the sensor actually tops out at 29 (a 30 fps request there delivers a bimodal
+# ~24 fps). It is IMU-load-independent -- a coupled 30 Hz IMU and a decoupled 60 Hz
+# IMU gave identical ceilings within 1 fps (4 ms: 47 vs 46; 8/12 ms: identical), so
+# the curve is a function of exposure alone. Values are conservative (the true
+# ceiling for the coarsely-stepped exposures may be 0-1 fps higher). The floor is
+# `1000 / ceiling`; intermediate exposures interpolate the floor linearly.
+_MEASURED_CEILING_FPS: tuple[tuple[int, int], ...] = (
+    (2, 48), (4, 46), (6, 42), (8, 40), (10, 36), (12, 34), (14, 31), (15, 30), (16, 29),
 )
-
-# Extrapolation above 8 ms exposure (UNMEASURED -- Task 5's sweep stopped at 8 ms).
-# REFINEMENT (2026-08-03, decompiled ProfileTuning.exe + AN6522 investigation):
-# floor_ms = FW dead time + I3C readout + exposure + margin, ~= 16.5 + exposure_ms.
-# Replaces the earlier flat-hold-the-8ms-bracket placeholder. See module docstring.
-FLOOR_FW_DEADTIME_MS = 1.6            # firmware dead time, decompiled ProfileTuning.exe
-FLOOR_EXTRAPOLATION_MARGIN_MS = 3.0   # largest residual vs the three measured brackets
 
 
 def measured_floor_ms(exposure_ms: float) -> float:
-    """Per-frame floor, ms, for a given exposure. Below 8 ms exposure this is the
-    measured (upper-bound-of-bracket, conservative) 2026-08-03 figure -- see module
-    docstring. Above 8 ms (UNMEASURED) it is the DERIVED line `FLOOR_FW_DEADTIME_MS +
-    I3C_XFER_MS + exposure_ms + FLOOR_EXTRAPOLATION_MARGIN_MS`, clearly not a
-    measurement. Any requested frame period shorter than this floor is still ACCEPTED
-    by the sensor but delivered as an integer multiple of the requested period, not 1:1.
+    """Per-frame floor, ms, for a given exposure -- `1000 / ceiling`, where the
+    ceiling is the measured (2026-08-05) highest integer fps delivered 1:1 at that
+    exposure. At/below the fastest measured exposure the floor holds that point; for
+    intermediate exposures the floor is linearly interpolated between the two
+    bracketing measured points; above the slowest measured exposure (the UI caps at
+    16 ms, but the driver allows to 30 ms) the last segment's slope is extended. Any
+    requested frame period shorter than this floor is still ACCEPTED by the sensor
+    but delivered as an integer multiple of the requested period, not 1:1.
     """
-    for bracket_exposure_ms, floor_ms in _FLOOR_MS_BRACKETS:
-        if exposure_ms <= bracket_exposure_ms:
-            return floor_ms
-    # Beyond 8 ms: derived, not measured -- see docstring above and module docstring
-    # "Floor extrapolation above 8 ms exposure".
-    return (FLOOR_FW_DEADTIME_MS + I3C_XFER_MS + exposure_ms
-            + FLOOR_EXTRAPOLATION_MARGIN_MS)
+    pts = _MEASURED_CEILING_FPS
+    lo_e, lo_c = pts[0]
+    if exposure_ms <= lo_e:
+        return 1000.0 / lo_c
+    for (e0, c0), (e1, c1) in zip(pts, pts[1:]):
+        if exposure_ms <= e1:
+            f0, f1 = 1000.0 / c0, 1000.0 / c1
+            t = (exposure_ms - e0) / (e1 - e0)
+            return f0 + t * (f1 - f0)
+    (e0, c0), (e1, c1) = pts[-2], pts[-1]
+    f0, f1 = 1000.0 / c0, 1000.0 / c1
+    slope = (f1 - f0) / (e1 - e0)
+    return f1 + slope * (exposure_ms - e1)
 
 
 def ceiling_fps_for_exposure(exposure_ms: float) -> float:
     """Highest fps delivered 1:1 (multiplier 1) at this exposure, i.e.
     `1000 / measured_floor_ms(exposure_ms)`. Requests above this are still
-    accepted by the sensor but quantized — see `expected_delivered_fps`."""
+    accepted by the sensor but quantized — see `expected_delivered_fps`.
+    For the INTEGER grey-out boundary the UI and validation use, call
+    `ceiling_fps_int` instead — this float shaves to 29 at 15 ms (33.3333 ms
+    floor) purely from representation."""
     floor_ms = measured_floor_ms(exposure_ms)
     if floor_ms <= 0:
         return float("inf")
     return 1000.0 / floor_ms
 
 
+def ceiling_fps_int(exposure_ms: float) -> int:
+    """The measured highest INTEGER fps delivered 1:1 at this exposure -- the value
+    the fps slider greys out above and that `expected_delivered_fps` treats as
+    exactly deliverable. At a measured exposure this is the table value verbatim (so
+    15 ms is 30, never 29 from a 33.3333 ms / 33.333 ms float split); off a measured
+    point it floors the interpolated ceiling (conservative -- never promise more than
+    the interpolation supports)."""
+    for e, c in _MEASURED_CEILING_FPS:
+        if exposure_ms == e:
+            return c
+    return int(math.floor(ceiling_fps_for_exposure(exposure_ms) + 1e-9))
+
+
 def expected_delivered_fps(requested_fps: int, exposure_ms: float) -> float:
-    """Honest expected delivered rate for a requested fps at a given exposure:
-    `requested_fps / ceil(floor_ms / period_ms)` — the measured integer-multiple
-    quantization (measured 2026-08-03). At/below the exposure's 1x ceiling this
-    equals `requested_fps` exactly (multiplier 1); above it, this is what the
-    sensor actually delivers, not what was asked for — callers must report THIS
-    value, not echo the request, once a manual candidate exceeds its ceiling."""
+    """Honest expected delivered rate for a requested fps at a given exposure. At or
+    below the exposure's measured integer 1x ceiling (`ceiling_fps_int`) the sensor
+    delivers the request 1:1; above it the request is still ACCEPTED but delivered as
+    an integer-multiple-of-the-period quantization (`requested_fps / ceil(floor_ms /
+    period_ms)`), which is what this returns -- callers must report THIS value, not
+    echo the request, once a candidate exceeds its ceiling. (The quantization is a
+    conservative model of a boundary that is really bimodal on hardware -- e.g. a
+    30 fps request at 16 ms measured ~24 fps, between this 1x-stretched and 2x
+    predictions; the grey-out steers users off that boundary regardless.)"""
     if requested_fps <= 0:
         return 0.0
+    if requested_fps <= ceiling_fps_int(exposure_ms):
+        return float(requested_fps)  # 1x -- at/below the measured integer ceiling
     period_us = fps_to_period_us(requested_fps)
     floor_us = measured_floor_ms(exposure_ms) * 1000.0
     if period_us <= 0:
         return 0.0
-    # Tiny epsilon guards the exact-boundary case (e.g. 46 fps @ 4 ms, where
-    # floor_us and period_us are equal up to float representation) from spuriously
-    # rounding up to a 2x multiplier.
     multiplier = max(1, math.ceil(floor_us / period_us - 1e-9))
     return requested_fps / multiplier
 
@@ -695,13 +721,13 @@ def validate_manual_params(params: ManualParams) -> ValidationResult:
 
     if (FPS_MIN <= params.fps <= FPS_MAX
             and EXPOSURE_MS_MIN <= params.exposure_ms <= EXPOSURE_MS_MAX):
-        ceiling_fps = ceiling_fps_for_exposure(params.exposure_ms)
+        ceiling_fps = ceiling_fps_int(params.exposure_ms)
         if params.fps > ceiling_fps:
             delivered = expected_delivered_fps(params.fps, params.exposure_ms)
             warnings.append(
                 f"fps={params.fps} at exposure_ms={params.exposure_ms} exceeds the "
-                f"measured ~{ceiling_fps:.1f} fps 1x delivery ceiling (measured "
-                "2026-08-03, 54x42/binning 2, Precision context/Regular power — see "
+                f"measured {ceiling_fps} fps 1x delivery ceiling (measured "
+                "2026-08-05, 54x42/binning 2, Precision context/Regular power — see "
                 "module docstring 'Measured hardware ceiling'); the sensor ACCEPTS "
                 f"this request but delivers period-multiples, expected ~{delivered:.1f} "
                 f"fps, not {params.fps} fps.")
@@ -733,25 +759,65 @@ class ProfileConfig:
         return dss_enabled_for_fps(self.fps)
 
 
-# Table 9 "Profile examples" anchors, exactly (Room Mapping, and the Precision
-# preset's own min-distance/power-mode choice) or, for High Frame-Rate, the
-# MEASURED hardware ceiling (2026-08-03, see module docstring): the original
-# design ran this preset at 90 fps by construction, matching Table 9's 100 fps
-# "Gaming" example's shape, but an on-target sweep found that config does not
-# reproduce -- 90 fps and 100 fps requests are both accepted and both silently
-# delivered as period-multiples (44.85 fps and 33.2 fps respectively), not the
-# requested rate. High Frame-Rate is amended to 46 fps -- the measured 1x
-# delivery ceiling at this preset's own 4 ms exposure -- keeping Precision
-# context and Regular power; DSS is now ON (46 <= the 60 Hz DSS ceiling), which
-# also raises this preset's max range from 5.0 m to 8.8 m (see MAX_RANGE_M).
+# USE-CASE PRESETS (2026-08-05, owner-directed, grounded in an on-rig exposure/fps
+# sweep). All three are Precision ranging (50 mm near, 8.8 m far -- past the ~6 m /
+# 20 ft this rig ever scans, so Ambient's only edge, longer range, is irrelevant and
+# its 450 mm near limit is worse), Regular power, and a decoupled 60 Hz IMU (2 samples
+# per 30 fps frame; the fps ceiling is IMU-load-independent, measured 2026-08-05). The
+# three are three points on ONE tradeoff -- exposure vs fps -- not three sensor modes:
+#   STABILITY (12 ms/30 fps): the DEFAULT. Steadiest 30 fps -- 0 dropped frames and no
+#       frame-doubling in testing, vs 15 ms which sits right on the 30 fps edge and
+#       occasionally doubles a frame. Same close-range noise (~2.2 mm plane-RMS) as any
+#       longer exposure, because DSS already saturates SNR on a near/bright surface.
+#   PRECISION (15 ms/30 fps): the longest exposure that still holds 30 fps (16 ms
+#       collapses to a bimodal ~24 fps -- see "Measured hardware ceiling"). Most light
+#       gathered per frame -> best on dark/far surfaces, lowest temporal jitter; the
+#       cost is it runs on the 30 fps knife-edge.
+#   HIGH_FRAMERATE (4 ms/46 fps): 46 fps for fast motion / quick sweeps, and a short
+#       exposure that also cuts motion blur; 46 is the measured 1x ceiling at 4 ms.
 PRESETS: dict[ProfileId, ProfileConfig] = {
-    ProfileId.ROOM_MAPPING: ProfileConfig(
-        ProfileId.ROOM_MAPPING, RangingMode.AMBIENT, 30, 6, PowerMode.ULTRA_LOW),
+    ProfileId.STABILITY: ProfileConfig(
+        ProfileId.STABILITY, RangingMode.PRECISION, 30, 12, PowerMode.REGULAR, 60),
     ProfileId.PRECISION: ProfileConfig(
-        ProfileId.PRECISION, RangingMode.PRECISION, 30, 10, PowerMode.ULTRA_LOW),
+        ProfileId.PRECISION, RangingMode.PRECISION, 30, 15, PowerMode.REGULAR, 60),
     ProfileId.HIGH_FRAMERATE: ProfileConfig(
-        ProfileId.HIGH_FRAMERATE, RangingMode.PRECISION, 46, 4, PowerMode.REGULAR),
+        ProfileId.HIGH_FRAMERATE, RangingMode.PRECISION, 46, 4, PowerMode.REGULAR, 60),
 }
+
+# The default preset a fresh install / "reset to default" adopts.
+DEFAULT_PROFILE_ID = ProfileId.STABILITY
+
+# Short, benefit-focused blurb shown under the preset selector once a preset is
+# chosen (owner ask, 2026-08-05). Presentation copy, but kept HERE beside the configs
+# it describes so the two cannot drift; the web UI and MCP both read it from here.
+# Qualitative (number-free) benefit copy: the exact fps/exposure/range/power for the
+# applied config live in the `ranging` echo's Applied/estimate readouts, never baked
+# into static strings that would silently stale on a preset retune.
+PRESET_DESCRIPTIONS: dict[ProfileId, str] = {
+    ProfileId.STABILITY: (
+        "Steadiest frame rate — the most reliable tracking, with the fewest dropped "
+        "frames, at the same close-range accuracy as longer exposures. The all-round "
+        "default."),
+    ProfileId.PRECISION: (
+        "Most light per frame — best on dark or distant surfaces. The longest exposure "
+        "that still holds the full frame rate, for the lowest jitter and the most range "
+        "headroom; runs closest to the frame-rate limit."),
+    ProfileId.HIGH_FRAMERATE: (
+        "Highest frame rate for fast motion and quick sweeps — the short exposure also "
+        "cuts motion blur. Less light per frame, so dim or dark surfaces read better on "
+        "Stability or Precision."),
+    ProfileId.MANUAL: (
+        "Full manual control of ranging mode, frame rate, exposure and power. The fps "
+        "slider greys out the rates the current exposure cannot deliver."),
+}
+
+
+def profile_description(profile_id: "ProfileId | int") -> str:
+    """The benefit blurb for a preset id (empty string if unknown)."""
+    try:
+        return PRESET_DESCRIPTIONS.get(ProfileId(profile_id), "")
+    except ValueError:
+        return ""
 
 
 def manual_profile_config(params: ManualParams) -> ProfileConfig:
@@ -783,6 +849,9 @@ class ProfileEstimate:
     imu_env_rate_hz: int | None
     imu_env_coupled: bool
     expected_delivered_fps: float
+    # Measured integer 1x fps ceiling for this exposure (`ceiling_fps_int`): the
+    # fps slider greys out above it. 0 when fps/exposure is out of range.
+    ceiling_fps: int
     warnings: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
 
@@ -820,6 +889,8 @@ def estimate_profile(config: ProfileConfig, transport: str = "ethernet",
     tw = transport_warning_message(transport, config.fps)
     delivered_fps = (expected_delivered_fps(config.fps, config.exposure_ms)
                      if FPS_MIN <= config.fps <= FPS_MAX else 0.0)
+    ceiling = (ceiling_fps_int(config.exposure_ms)
+               if EXPOSURE_MS_MIN <= config.exposure_ms <= EXPOSURE_MS_MAX else 0)
 
     warnings = list(validation.warnings)
     if tw:
@@ -835,6 +906,7 @@ def estimate_profile(config: ProfileConfig, transport: str = "ethernet",
         transport_warning=tw, imu_env_rate_hz=config.imu_env_rate_hz,
         imu_env_coupled=config.imu_env_rate_hz in (None, 0),
         expected_delivered_fps=round(delivered_fps, 2),
+        ceiling_fps=ceiling,
         warnings=tuple(warnings), errors=validation.errors)
 
 
@@ -844,8 +916,12 @@ def estimate_preset(profile_id: ProfileId, transport: str = "ethernet",
     if profile_id not in PRESETS:
         raise ValueError(f"{profile_id!r} is not a preset (use estimate_manual for MANUAL)")
     base = PRESETS[profile_id]
+    # Default to the preset's OWN IMU/env rate (presets now carry one, 2026-08-05) so
+    # the estimate reflects the preset as it is actually applied; an explicit
+    # `imu_env_rate_hz` (including 0 = coupled) still overrides.
+    rate = base.imu_env_rate_hz if imu_env_rate_hz is None else imu_env_rate_hz
     config = ProfileConfig(base.profile_id, base.ranging_mode, base.fps, base.exposure_ms,
-                          base.power_mode, imu_env_rate_hz)
+                          base.power_mode, rate)
     return estimate_profile(config, transport=transport, ambient_lux=ambient_lux)
 
 
@@ -882,6 +958,9 @@ def estimate_to_json(est: ProfileEstimate) -> dict:
         # delivers period-multiples, and this is what it actually delivers --
         # callers must show THIS, never just echo the request.
         "expected_delivered_fps": est.expected_delivered_fps,
+        # Measured integer 1x fps ceiling for this exposure -- the fps slider greys
+        # out above it (2026-08-05 sweep). See `ceiling_fps_int`.
+        "ceiling_fps": est.ceiling_fps,
         "warnings": list(est.warnings),
         "errors": list(est.errors),
         "ok": est.ok,

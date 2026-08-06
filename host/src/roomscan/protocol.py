@@ -75,11 +75,15 @@ class CommandCode(IntEnum):
 
 
 class ProfileId(IntEnum):
-    """SET_RANGING_PROFILE (cmd 8) param / ACK applied. Presets 0-2 apply immediately;
-    MANUAL (3) reapplies the last accepted SET_MANUAL_PARAMS candidate and is rejected
-    until one exists (docs/superpowers/specs/2026-07-31-high-framerate-and-manual-ranging-modes.md
-    section 5.1)."""
-    ROOM_MAPPING = 0
+    """SET_RANGING_PROFILE (cmd 8) param / ACK applied -- the WIRE preset enum, whose
+    table is firmware-resident. Values match the host-facing `profiles.ProfileId`.
+
+    LEGACY as of 2026-08-05: the host now composes presets itself (resolves a preset to
+    its `profiles.PRESETS` entry and applies it via SET_MANUAL_PARAMS + an IMU rate),
+    so the web/CLI apply path no longer sends cmd 8. This enum is kept for the raw
+    command path and back-compat. MANUAL (3) reapplies the last accepted
+    SET_MANUAL_PARAMS candidate and is rejected until one exists."""
+    STABILITY = 0
     PRECISION = 1
     HIGH_FRAMERATE = 2
     MANUAL = 3

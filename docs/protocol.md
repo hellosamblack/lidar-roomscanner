@@ -286,7 +286,7 @@ malformed and rejected, unlike EVENT's legitimate variable message tail. Future 
 | 5   | SET_EXPOSURE_MS   | exposure in ms (u32) | applied exposure (u32) |
 | 6   | REINIT            | ignored       | 0 — the ACK is sent **after** the re-init completes (normally well under the host's 2 s timeout); if the first re-init attempt itself faults, the device enters its bounded recovery ladder (up to ~3.1 s) and may finish successfully after the host has already timed out — hosts must treat a REINIT timeout as "outcome unknown", not "failed" (a late ACK is silently ignored by token matching) |
 | 7   | SET_STANDBY       | standby level (u32): 0 = wake/resume, 1 = soft standby, 2 = hard power-down | standby level now in effect (u32) — echoes param on success. Idles the ToF laser (VCSEL) to reduce wear when no host is viewing. **Soft** (1) = `vl53l9_stop()` → FSM STANDBY: VCSEL stops firing per frame, I3C config/calibration retained, instant resume via wake. **Hard** (2) = additionally `platform_power_disable()` (XSHUT low): sensor fully unpowered; waking re-runs the full re-init cycle (reset → re-address → init → calib → start), so a wake-from-hard ACK is sent **after** that completes (same "outcome unknown on timeout" caveat as REINIT). Applied only at the per-frame safe point (after readout ack, before the next trigger) so `vl53l9_stop()` never races an in-flight trigger. While idled the device streams no DATA frames but keeps servicing the command channel; wake resumes streaming. A wake (0) issued while already active, or a standby issued while already idled at that level, is a harmless no-op ack |
-| 8   | SET_RANGING_PROFILE | profile enum (u32), see profile registry | applied profile enum (u32) — legacy 8-byte COMMAND payload, legacy 12-byte ACK. Presets 0-2 (ROOM_MAPPING/PRECISION/HIGH_FRAMERATE) apply immediately; MANUAL (3) reapplies the **last accepted SET_MANUAL_PARAMS candidate** and is rejected (BAD_PARAM) until one exists. **Firmware application is live** (`7598fde`, hardware-gated: readback exact, survives REINIT and both standby levels) |
+| 8   | SET_RANGING_PROFILE | profile enum (u32), see profile registry | applied profile enum (u32) — legacy 8-byte COMMAND payload, legacy 12-byte ACK. Presets 0-2 (STABILITY/PRECISION/HIGH_FRAMERATE) apply the firmware's fixed table immediately; MANUAL (3) reapplies the **last accepted SET_MANUAL_PARAMS candidate** and is rejected (BAD_PARAM) until one exists. **LEGACY as of 2026-08-05:** the host/CLI no longer send this — presets are composed host-side (`profiles.PRESETS` → SET_MANUAL_PARAMS + an IMU rate) so they can carry an IMU rate and be retuned without a reflash; the firmware table is unused by our tooling. Firmware support remains live (`7598fde`) |
 | 9   | SET_MANUAL_PARAMS | manual shape (12 B, see above) | ranging-config shape (16 B, see above) — the one command that needed v2: v1's fixed 8-byte payload cannot carry `ranging_mode`+`frame_period_us`+`exposure_ms`+`power_mode` together. **Firmware application is live** (`7598fde`) — applied as one atomic candidate at the existing post-readout/pre-next-frame safe point, hardware-gated |
 | 10  | GET_RANGING_CONFIG | ignored (legacy 8-byte shape) | ranging-config shape (16 B) — the complete current applied ranging configuration, read back from the device rather than assumed; needed to restore authoritative state after a web-server restart or when a second client attaches. **Live** (`7598fde`) |
 | 11  | SET_IMU_ENV_RATE  | rate_hz (u32): `0` = coupled to the ToF trigger (**default**, today's behavior, byte-identical framing), `1`–`480` decouples streams 9/10/11 onto their own service tick | applied rate_hz (u32) — legacy 8-byte COMMAND payload, legacy 12-byte ACK (`applied` = rate_hz). A requested rate above the 60 Hz sensor-hub cycle sub-samples stream 10 (env) specifically; streams 9 (quat)/11 (raw) can still hit the requested rate. Rejects > 480 Hz (`RS_IMU_ENV_RATE_MAX_HZ` / `IMU_ENV_RATE_MAX_HZ`). **Decoupled draining is live** (`3f4b307`, shared `rs_lsm_service_tick()`) — hardware-gated: coupled mode is byte-identical to pre-feature firmware, decoupled 30/90 Hz hold independent of the concurrent ToF rate; see BUG-077 for the FRAME_READY-priority fix this gate found |
@@ -296,10 +296,15 @@ malformed and rejected, unlike EVENT's legitimate variable message tail. Future 
 
 | id | Name           |
 |----|----------------|
-| 0  | ROOM_MAPPING   |
+| 0  | STABILITY      |
 | 1  | PRECISION      |
 | 2  | HIGH_FRAMERATE |
 | 3  | MANUAL         |
+
+Host-facing preset *configurations* (what each id resolves to) live in `profiles.PRESETS`, not the
+wire — since 2026-08-05 they are all Precision/Regular/60 Hz IMU, differing only in exposure/fps
+(STABILITY 12 ms/30 fps default, PRECISION 15 ms/30 fps, HIGH_FRAMERATE 4 ms/46 fps). The firmware's
+own id→config table (this registry's original meaning) is legacy — see cmd 8 above.
 
 ### Ranging-mode registry (SET_MANUAL_PARAMS `ranging_mode` / the cmd 9/10 ACK's `ranging_mode`)
 

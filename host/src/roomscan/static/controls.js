@@ -44,8 +44,22 @@ export function createControls(hub) {
     // seeded from the server's applied config whenever nothing is pending, exactly
     // like the View card's camera-framing sliders already do.
     const PROFILE_LABELS = {
-        room_mapping: 'Room Mapping', precision: 'Precision',
-        high_framerate: 'High Frame-Rate', manual: 'Manual',
+        stability: 'Stability', precision: 'Precision',
+        high_framerate: 'High Frame Rate', manual: 'Manual',
+    };
+    // Short benefit blurb shown under the selector once a preset is applied. Mirrors
+    // profiles.PRESET_DESCRIPTIONS (kept in step by test_static_ui). Presentation copy.
+    const PROFILE_BLURBS = {
+        stability: 'Steadiest frame rate — the most reliable tracking, with the fewest dropped ' +
+            'frames, at the same close-range accuracy as longer exposures. The all-round default.',
+        precision: 'Most light per frame — best on dark or distant surfaces. The longest exposure ' +
+            'that still holds the full frame rate, for the lowest jitter and the most range ' +
+            'headroom; runs closest to the frame-rate limit.',
+        high_framerate: 'Highest frame rate for fast motion and quick sweeps — the short exposure ' +
+            'also cuts motion blur. Less light per frame, so dim or dark surfaces read better on ' +
+            'Stability or Precision.',
+        manual: 'Full manual control of ranging mode, frame rate, exposure and power. The fps ' +
+            'slider greys out the rates the current exposure cannot deliver.',
     };
     const MANUAL_DEBOUNCE_MS = 300;
 
@@ -71,6 +85,57 @@ export function createControls(hub) {
     const slManualExposure = $('sl-manual-exposure');
     const numManualExposure = $('num-manual-exposure');
     const manualExposureVal = $('manual-exposure-val');
+    const rangingBlurb = $('ranging-blurb');
+    const fpsCap = $('fps-cap');
+    const fpsCapOk = $('fps-cap-ok');
+    const fpsCapNo = $('fps-cap-no');
+    const fpsCapNote = $('fps-cap-note');
+
+    // Measured 1x fps ceiling per exposure (profiles._MEASURED_CEILING_FPS, on-rig
+    // 2026-08-05). Kept in step with the Python table by test_static_ui. Mirrored here
+    // so the fps grey-out tracks the exposure LIVE while editing -- the server's
+    // est.ceiling_fps only follows the last APPLIED config, one commit behind.
+    const CEILING_FPS_TABLE = [[2, 48], [4, 46], [6, 42], [8, 40], [10, 36],
+        [12, 34], [14, 31], [15, 30], [16, 29]];
+    function ceilingForExposure(exp) {
+        const t = CEILING_FPS_TABLE;
+        if (!(exp > 0)) return 100;
+        if (exp <= t[0][0]) return t[0][1];
+        for (let i = 0; i < t.length; i++) if (exp === t[i][0]) return t[i][1];
+        for (let i = 0; i < t.length - 1; i++) {
+            const [e0, c0] = t[i], [e1, c1] = t[i + 1];
+            if (exp > e0 && exp < e1) {
+                const f0 = 1000 / c0, f1 = 1000 / c1;
+                const f = f0 + (exp - e0) / (e1 - e0) * (f1 - f0);
+                return Math.floor(1000 / f + 1e-9);
+            }
+        }
+        const [e0, c0] = t[t.length - 2], [e1, c1] = t[t.length - 1];
+        const f0 = 1000 / c0, f1 = 1000 / c1, slope = (f1 - f0) / (e1 - e0);
+        return Math.floor(1000 / (f1 + slope * (exp - e1)) + 1e-9);
+    }
+    // Paint the fps cap bar for `ceiling` and clamp the fps SLIDER out of the greyed
+    // range (the number box still accepts an over-ceiling value for power users -- it
+    // is applicable, just quantized, and the estimate warns). fps min is 1, max 100.
+    function applyFpsCeiling(ceiling) {
+        const fpsMin = 1, fpsMax = 100;
+        const okFrac = Math.max(0, Math.min(1, (ceiling - fpsMin) / (fpsMax - fpsMin)));
+        if (fpsCapOk) fpsCapOk.style.flex = `${okFrac}`;
+        if (fpsCapNo) fpsCapNo.style.flex = `${1 - okFrac}`;
+        const show = ceiling < fpsMax;
+        if (fpsCap) fpsCap.hidden = !show;
+        if (fpsCapNote) {
+            fpsCapNote.hidden = !show;
+            fpsCapNote.textContent = show ? `Max ${ceiling} fps at this exposure` : '';
+        }
+        if (slManualFps && Number(slManualFps.value) > ceiling) {
+            slManualFps.value = ceiling;
+            if (numManualFps && Number(numManualFps.value) > ceiling) numManualFps.value = ceiling;
+            if (manualFpsVal) manualFpsVal.textContent = ceiling;
+        }
+    }
+    // The ceiling to enforce is driven by the exposure currently in the box.
+    function currentFpsCeiling() { return ceilingForExposure(Number(numManualExposure?.value)); }
 
     const segCalibrated = $('seg-calibrated');
     const calibratedNote = $('calibrated-note');
@@ -97,6 +162,13 @@ export function createControls(hub) {
     // completes (a pending true -> false transition).
     let manualDirty = false;
     let prevRangingPending = false;
+    // A manual number field is being edited as long as it holds focus. The ~4 Hz
+    // `ranging` echo must not overwrite a half-typed value: `manualDirty` alone did
+    // NOT cover this because it is set only when an edit is COMMITTED (on `change`,
+    // i.e. blur/Enter), so while the user is mid-typing "25" the echo re-seeded the
+    // field to the applied value right after the "2" -- clearing the entry and
+    // forcing a re-click (BUG-081). While a field has focus, suppress the re-seed.
+    let manualEditing = false;
 
     function setSegActive(seg, attr, value) {
         if (!seg) return;
@@ -151,6 +223,10 @@ export function createControls(hub) {
 
     slManualFps?.addEventListener('input', () => {
         if (rangingPending) return;
+        // The slider cannot enter the greyed range: clamp to the current exposure's
+        // measured 1x ceiling (the number box below stays free for power users).
+        const cap = currentFpsCeiling();
+        if (Number(slManualFps.value) > cap) slManualFps.value = cap;
         if (numManualFps) numManualFps.value = slManualFps.value;
         if (manualFpsVal) manualFpsVal.textContent = slManualFps.value;
         sendManualParamsDebounced();
@@ -165,13 +241,35 @@ export function createControls(hub) {
         if (rangingPending) return;
         if (numManualExposure) numManualExposure.value = slManualExposure.value;
         if (manualExposureVal) manualExposureVal.textContent = slManualExposure.value + ' ms';
+        applyFpsCeiling(ceilingForExposure(Number(slManualExposure.value)));
         sendManualParamsDebounced();
     });
     numManualExposure?.addEventListener('change', () => {
         if (rangingPending) return;
         if (slManualExposure) slManualExposure.value = numManualExposure.value;
         if (manualExposureVal) manualExposureVal.textContent = numManualExposure.value + ' ms';
+        applyFpsCeiling(ceilingForExposure(Number(numManualExposure.value)));
         sendManualParamsDebounced();
+    });
+
+    // Focus/blur guard + live label tracking for the manual number fields. Focus
+    // marks the field as being edited (suppresses the periodic re-seed, BUG-081);
+    // `input` keeps the slider/label in step with each keystroke WITHOUT committing
+    // (commit stays on `change` = blur/Enter, so no half-typed value is ever sent).
+    numManualFps?.addEventListener('focus', () => { manualEditing = true; });
+    numManualFps?.addEventListener('blur', () => { manualEditing = false; });
+    numManualFps?.addEventListener('input', () => {
+        if (numManualFps.value === '') return;   // mid-clear; don't disturb the slider
+        if (slManualFps) slManualFps.value = numManualFps.value;
+        if (manualFpsVal) manualFpsVal.textContent = numManualFps.value;
+    });
+    numManualExposure?.addEventListener('focus', () => { manualEditing = true; });
+    numManualExposure?.addEventListener('blur', () => { manualEditing = false; });
+    numManualExposure?.addEventListener('input', () => {
+        if (numManualExposure.value === '') return;
+        if (slManualExposure) slManualExposure.value = numManualExposure.value;
+        if (manualExposureVal) manualExposureVal.textContent = numManualExposure.value + ' ms';
+        applyFpsCeiling(ceilingForExposure(Number(numManualExposure.value)));
     });
 
     function sendImuEnvRateDebounced() {
@@ -231,7 +329,7 @@ export function createControls(hub) {
                 rangingAppliedVal.textContent =
                     `${PROFILE_LABELS[a.profile] || a.profile} (${a.ranging_mode}, ${a.fps} fps, ` +
                     `${a.exposure_ms} ms, ${a.power_mode})`;
-                if (!rangingPending && !manualDirty) {
+                if (!rangingPending && !manualDirty && !manualEditing) {
                     manualRangingMode = a.ranging_mode;
                     manualPowerMode = a.power_mode;
                     setSegActive(segManualRangingMode, 'rangingMode', manualRangingMode);
@@ -246,6 +344,21 @@ export function createControls(hub) {
             } else {
                 rangingAppliedVal.textContent = msg.initialized ? '—' : 'not yet read back';
             }
+        }
+        // Benefit blurb for the applied preset (Manual has its own). Shown under the
+        // selector so each preset explains itself once chosen (owner ask 2026-08-05).
+        if (rangingBlurb) {
+            const slug = msg.applied ? msg.applied.profile : null;
+            const blurb = slug ? PROFILE_BLURBS[slug] : '';
+            rangingBlurb.textContent = blurb || '';
+            rangingBlurb.hidden = !blurb;
+        }
+        // Keep the fps cap bar in step with whatever exposure the manual box now holds
+        // (prefer the server's measured ceiling for the applied config when idle).
+        if (!manualEditing) {
+            const ceiling = (msg.estimate && msg.estimate.ceiling_fps)
+                ? msg.estimate.ceiling_fps : currentFpsCeiling();
+            applyFpsCeiling(ceiling);
         }
 
         if (rangingRequestedStatus) {

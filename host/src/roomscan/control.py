@@ -265,10 +265,10 @@ _DEPRECATED_LEGACY_ACTIONS = frozenset({"usecase", "period", "exposure"})
 # need roomscan.profiles validation first (manual, imu-rate) or a typed ACK (all of them).
 _TYPED_ACTIONS = frozenset({"profile", "manual", "profile-status", "imu-rate", "imu-rate-status"})
 
-_PROFILE_PRESET_CHOICES: dict[str, protocol.ProfileId] = {
-    "room_mapping": protocol.ProfileId.ROOM_MAPPING,
-    "precision": protocol.ProfileId.PRECISION,
-    "high_framerate": protocol.ProfileId.HIGH_FRAMERATE,
+_PROFILE_PRESET_CHOICES: dict[str, profiles.ProfileId] = {
+    "stability": profiles.ProfileId.STABILITY,
+    "precision": profiles.ProfileId.PRECISION,
+    "high_framerate": profiles.ProfileId.HIGH_FRAMERATE,
 }
 _MANUAL_RANGING_CHOICES: dict[str, profiles.RangingMode] = {
     "ambient": profiles.RangingMode.AMBIENT,
@@ -348,8 +348,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("reinit", help="full sensor re-init cycle")
 
     p_profile = sub.add_parser(
-        "profile", help="SET_RANGING_PROFILE <preset> -- one atomic preset switch "
-                        "(room_mapping|precision|high_framerate)")
+        "profile", help="Apply a use-case preset (host-composed: SET_MANUAL_PARAMS + "
+                        "IMU rate) -- stability|precision|high_framerate")
     p_profile.add_argument("preset", choices=sorted(_PROFILE_PRESET_CHOICES))
 
     p_manual = sub.add_parser(
@@ -434,15 +434,30 @@ def _start_reader_thread(source, decoder, client: CommandClient, stop: threading
 
 
 def _do_profile(client: CommandClient, args: argparse.Namespace) -> int:
-    preset = _PROFILE_PRESET_CHOICES[args.preset]
-    print(f"requested: profile={args.preset} ({int(preset)})")
-    result, applied = client.send_profile(preset, timeout=args.timeout)
-    try:
-        applied_name = protocol.ProfileId(applied).name
-    except ValueError:
-        applied_name = f"unknown({applied})"
-    print(f"applied:   result={result.name} profile={applied_name} ({applied})")
-    return 0 if result == ResultCode.OK else 1
+    """Presets are host-composed (2026-08-05): resolve to `profiles.PRESETS` and apply
+    as one SET_MANUAL_PARAMS plus the preset's IMU/env rate, NOT the firmware
+    SET_RANGING_PROFILE table (fixed, and cannot set an IMU rate). See
+    `profiles.ProfileId`. This keeps the CLI and the web UI applying the identical
+    configuration for a preset name."""
+    pid = _PROFILE_PRESET_CHOICES[args.preset]
+    cfg = profiles.PRESETS[pid]
+    params = profiles.ManualParams(cfg.ranging_mode, cfg.fps, cfg.exposure_ms,
+                                   cfg.power_mode, cfg.imu_env_rate_hz)
+    print(f"requested: preset={args.preset} -> ranging={cfg.ranging_mode.name.lower()} "
+          f"fps={cfg.fps} exposure_ms={cfg.exposure_ms} power={cfg.power_mode.name.lower()} "
+          f"imu_env_rate_hz={cfg.imu_env_rate_hz}")
+    result, ack = client.send_manual_params(_manual_params_to_wire(params), timeout=args.timeout)
+    print(f"applied:   result={result.name} ranging_mode={protocol.RangingMode(ack.ranging_mode).name} "
+          f"frame_period_us={ack.frame_period_us} exposure_ms={ack.exposure_ms} "
+          f"power_mode={protocol.PowerMode(ack.power_mode).name}")
+    if result != ResultCode.OK:
+        return 1
+    if cfg.imu_env_rate_hz is not None:
+        rate_result, applied_rate = client.send_imu_env_rate(cfg.imu_env_rate_hz, timeout=args.timeout)
+        print(f"imu_env:   result={rate_result.name} rate_hz={applied_rate}")
+        if rate_result != ResultCode.OK:
+            return 1
+    return 0
 
 
 def _do_manual(client: CommandClient, args: argparse.Namespace) -> int:

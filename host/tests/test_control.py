@@ -304,17 +304,17 @@ def test_send_profile_typed_readback_and_token_matching():
 def test_send_profile_ignores_interleaved_data_and_event_frames():
     written = []
     client = CommandClient(written.append)
-    t, box = _run_send_profile(client, ProfileId.ROOM_MAPPING, timeout=2.0)
+    t, box = _run_send_profile(client, ProfileId.STABILITY, timeout=2.0)
     _wait_for_write(written)
     hdr = FrameHeader.unpack(written[0][:HEADER_SIZE])
 
     assert client.offer(make_data(seq=1)) is False
     assert client.offer(make_event(seq=2)) is False
 
-    ack = make_ack(hdr.seq, CommandCode.SET_RANGING_PROFILE, ResultCode.OK, ProfileId.ROOM_MAPPING)
+    ack = make_ack(hdr.seq, CommandCode.SET_RANGING_PROFILE, ResultCode.OK, ProfileId.STABILITY)
     assert client.offer(ack) is True
     t.join(timeout=2.0)
-    assert box.get("value") == (ResultCode.OK, ProfileId.ROOM_MAPPING)
+    assert box.get("value") == (ResultCode.OK, ProfileId.STABILITY)
 
 
 def test_send_profile_busy_result():
@@ -693,7 +693,7 @@ def test_parse_command_requires_an_action():
 def test_parse_command_rejects_typed_actions():
     """profile/manual/profile-status/imu-rate/imu-rate-status don't reduce to a
     single cmd+param pair -- parse_command() says so instead of guessing."""
-    for argv in (["profile", "room_mapping"], ["manual", "--ranging", "ambient",
+    for argv in (["profile", "stability"], ["manual", "--ranging", "ambient",
                  "--fps", "30", "--exposure", "6", "--power", "ulp"],
                  ["profile-status"], ["imu-rate", "coupled"], ["imu-rate-status"]):
         with pytest.raises(ValueError):

@@ -1897,28 +1897,44 @@ async def _broadcast_ranging(state) -> None:
     await _broadcast_text(state.clients, json.dumps(_ranging_message(state)))
 
 
-async def _refresh_ranging_state(state) -> None:
+async def _refresh_ranging_state(state, retries: int = 0, retry_delay: float = 0.5) -> None:
     """`GET_RANGING_CONFIG` (cmd 10): the authoritative restore path -- called
-    at startup/device-connect and after every successful preset switch (cmd 8's
-    own ACK carries no config fields to commit from directly)."""
+    at startup/device-connect and after every successful preset switch.
+
+    At launch the device can answer BUSY (or time out) for the first second or two
+    while it finishes bringing ranging up over I3C, which surfaced as a stuck
+    "Error: GET_RANGING_CONFIG -> BUSY" on the first applied-mode read (owner-reported
+    2026-08-05). `retries` re-reads on BUSY/timeout with `retry_delay` between attempts
+    so the launch settles onto the real config instead; a genuine protocol error is
+    not retried. Post-switch callers pass retries=0 (single-shot, as before)."""
     rs: RangingState = state.ranging_state
     ctrl = getattr(state, "controller", None)
     client = getattr(state, "client", None)
     rs.transport = _transport_kind(ctrl)
     if client is None:
         return
-    try:
-        result, ack = await asyncio.to_thread(client.get_ranging_config)
-    except TimeoutError as exc:
-        rs.error = f"GET_RANGING_CONFIG timeout: {exc}"
+    for attempt in range(retries + 1):
+        last = attempt >= retries
+        try:
+            result, ack = await asyncio.to_thread(client.get_ranging_config)
+        except TimeoutError as exc:
+            rs.error = f"GET_RANGING_CONFIG timeout: {exc}"
+            if not last:
+                await asyncio.sleep(retry_delay)
+                continue
+            return
+        except ProtocolError as exc:
+            rs.error = f"GET_RANGING_CONFIG protocol error: {exc}"
+            return
+        if result != ResultCode.OK:
+            rs.error = f"GET_RANGING_CONFIG -> {result.name}"
+            if result == ResultCode.BUSY and not last:
+                await asyncio.sleep(retry_delay)
+                continue
+            return
+        rs.error = None
+        _commit_ranging_ack(state, ack)
         return
-    except ProtocolError as exc:
-        rs.error = f"GET_RANGING_CONFIG protocol error: {exc}"
-        return
-    if result != ResultCode.OK:
-        rs.error = f"GET_RANGING_CONFIG -> {result.name}"
-        return
-    _commit_ranging_ack(state, ack)
 
 
 async def _refresh_imu_env_state(state) -> None:
@@ -1955,52 +1971,43 @@ async def _init_ranging_state(state) -> None:
     rs.transport = _transport_kind(ctrl)
     if getattr(state, "client", None) is None:
         return
-    await _refresh_ranging_state(state)
+    # Retry the launch read across the device's brief post-boot BUSY window so the
+    # applied mode reads back instead of sticking on "GET_RANGING_CONFIG -> BUSY".
+    await _refresh_ranging_state(state, retries=8, retry_delay=0.5)
     await _refresh_imu_env_state(state)
     await _broadcast_ranging(state)
 
 
 async def _set_profile(state, profile_id: int) -> None:
-    """Inbound `set_profile`. One atomic `SET_RANGING_PROFILE` (cmd 8), off the
-    event loop; on success, one `GET_RANGING_CONFIG` round trip to learn what
-    was actually applied (cmd 8's own ACK has no config fields)."""
+    """Inbound `set_profile`. Presets are HOST-COMPOSED (2026-08-05): resolve the id to
+    its `profiles.PRESETS` entry and apply it as ONE `SET_MANUAL_PARAMS` (cmd 9) plus
+    the preset's IMU/env rate (cmd 11) -- NOT the wire `SET_RANGING_PROFILE` (cmd 8),
+    whose firmware-resident table is fixed and cannot carry an IMU rate. The device
+    readback is re-labelled back to the preset by `_match_profile_id`, so the UI still
+    shows the preset as `applied`. MANUAL is driven by the manual panel, not here."""
     rs: RangingState = state.ranging_state
-    ctrl = getattr(state, "controller", None)
-    client = getattr(state, "client", None)
-    rs.transport = _transport_kind(ctrl)
-    if client is None or rs.transport == "replay":
-        rs.error = "ranging control unavailable in replay"
-        await _broadcast_ranging(state)
-        return
-    if rs.pending:
-        log.warning("set_profile: rejected -- a ranging command is already pending")
-        return
-    rs.requested_profile_id = int(profile_id)
-    rs.requested_manual = None
-    rs.pending_kind = "profile"
-    rs.pending = True
-    rs.error = None
-    await _broadcast_ranging(state)
     try:
-        result, _applied = await asyncio.to_thread(client.send_profile, int(profile_id))
-    except TimeoutError as exc:
-        rs.error = f"SET_RANGING_PROFILE timeout: {exc}"
-        rs.pending, rs.pending_kind = False, None
-        await _broadcast_ranging(state)
+        pid = profiles.ProfileId(profile_id)
+    except ValueError:
+        log.warning("set_profile: unknown profile id %r", profile_id)
         return
-    except ProtocolError as exc:
-        rs.error = f"SET_RANGING_PROFILE protocol error: {exc}"
-        rs.pending, rs.pending_kind = False, None
-        await _broadcast_ranging(state)
+    cfg = profiles.PRESETS.get(pid)
+    if cfg is None:
+        log.warning("set_profile: %s is not a composable preset", pid.name)
         return
-    if result != ResultCode.OK:
-        rs.error = f"SET_RANGING_PROFILE -> {result.name}"
-        rs.pending, rs.pending_kind = False, None
-        await _broadcast_ranging(state)
+    # Ranging half: validated host-side and device-confirmed by SET_MANUAL_PARAMS.
+    await _set_manual_params(
+        state,
+        ranging_mode=profiles.RANGING_MODE_TO_STR[cfg.ranging_mode],
+        fps=cfg.fps, exposure_ms=cfg.exposure_ms,
+        power_mode=profiles.POWER_MODE_TO_STR[cfg.power_mode])
+    # Only apply the IMU half if the ranging half actually landed: an error, or a
+    # still-pending flag (the ranging command was rejected because another was in
+    # flight), means we must not push an IMU change on top.
+    if rs.error or rs.pending:
         return
-    await _refresh_ranging_state(state)
-    rs.pending, rs.pending_kind = False, None
-    await _broadcast_ranging(state)
+    if cfg.imu_env_rate_hz is not None:
+        await _set_imu_env_rate(state, int(cfg.imu_env_rate_hz))
 
 
 async def _set_manual_params(state, *, ranging_mode, fps, exposure_ms, power_mode) -> None:
