@@ -22,8 +22,70 @@ from roomscan.protocol import (
     decode_imu_quat,
     decode_imu_raw,
     decode_imu_sync,
+    decode_tof_meta,
     imu_tick_us,
 )
+from roomscan.protocol import TOF_META_SIZE
+
+
+def _u24(v):
+    return bytes((v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF))
+
+
+def _make_tof_meta(*, frame_counter=42, die_temp=35, nb_step=7, binning=2, dss=2,
+                   power=1, sync=2, frame_period_us=33333, step1=1170, step6=14430,
+                   error_status=0, error_code=0):
+    """Build a synthetic 100-byte vl53l9_meta_t block for testing."""
+    m = bytearray(TOF_META_SIZE)
+    m[0:4] = struct.pack("<I", frame_counter)
+    m[4:6] = struct.pack("<H", die_temp)
+    m[36:52] = struct.pack("<8H", 100, 200, 300, 400, 500, 600, 700, 800)
+    m[52:54] = struct.pack("<H", 54)
+    m[54:56] = struct.pack("<H", 42)
+    m[56] = (sync & 0x3) | ((power & 0x3) << 2)
+    m[57] = 4  # ambient_attenuation
+    m[58:60] = struct.pack("<H", ((dss & 0x3) << 4) | ((binning & 0x1F) << 6) | ((nb_step & 0xF) << 12))
+    m[60:62] = struct.pack("<H", error_code)
+    m[62] = error_status
+    m[68:72] = struct.pack("<I", frame_period_us)
+    m[76:79] = _u24(step1)
+    m[82:85] = _u24(step6)
+    return bytes(m)
+
+
+def test_decode_tof_meta_precision_exposure():
+    # precision: step1=117*x, step6=1443*x -> x=10 ms for 1170/14430.
+    md = decode_tof_meta(_make_tof_meta(nb_step=7, step1=1170, step6=14430))
+    assert md["ranging_mode"] == "precision"
+    assert md["exposure_ms"] == pytest.approx(10.0)          # value, not just type
+    assert md["exposure_consistent"] is True
+    assert md["die_temp_c"] == 35
+    assert md["frame_counter"] == 42
+    assert md["dss_mode"] == 2 and md["binning"] == 2 and md["nb_step"] == 7
+    assert md["power_mode"] == 1
+    assert md["fps"] == pytest.approx(30.0, abs=0.01)
+    assert md["error_status"] == 0 and md["error_code"] == 0
+    assert md["ref_channels"] == [100, 200, 300, 400, 500, 600, 700, 800]
+
+
+def test_decode_tof_meta_ambient_exposure():
+    # ambient: step1=231*x, step6=1418*x -> x=8 ms for 1848/11344.
+    md = decode_tof_meta(_make_tof_meta(nb_step=6, step1=1848, step6=11344))
+    assert md["ranging_mode"] == "ambient"
+    assert md["exposure_ms"] == pytest.approx(8.0)
+    assert md["exposure_consistent"] is True
+
+
+def test_decode_tof_meta_reads_tail_of_full_payload():
+    # decode must slice the last 100 bytes of a full RAW_3DMD payload.
+    meta = _make_tof_meta(die_temp=37)
+    md = decode_tof_meta(b"\x00" * 14742 + meta)
+    assert md["die_temp_c"] == 37
+
+
+def test_decode_tof_meta_too_short():
+    assert decode_tof_meta(b"\x00" * 50) is None
+    assert decode_tof_meta(None) is None
 
 
 def test_stream_ids():

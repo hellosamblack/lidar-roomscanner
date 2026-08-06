@@ -678,3 +678,105 @@ def decode_env(payload: bytes) -> tuple[float, tuple[float, float, float], float
         raise ProtocolError(f"ENV payload must be {ENV_SIZE} bytes, got {len(payload)}")
     pressure, mx, my, mz, temp = struct.unpack("<5f", payload)
     return pressure, (mx, my, mz), temp
+
+
+# --- RAW_3DMD frame metadata tail (vl53l9_meta_t) ---------------------------
+# The VL53L9CX places a fixed metadata block in the LAST TOF_META_SIZE bytes of
+# every raw 3DMD payload (firmware/vendor/53L9A1/Utilities/vl53l9-common/vl53l9/
+# vl53l9_utils.c:155: buffer[buffer_size - sizeof(vl53l9_meta_t)]). The firmware
+# reads only frame_counter from it; the host archives the whole tail in every
+# RAW_3DMD frame but never decoded it. Offsets below are relative to the start of
+# the metadata block and were validated empirically against recorded captures
+# (frame_counter increments 1/frame, frame_period_us == 33333 at 30 fps,
+# nb_step 6/7 distinguishes ambient/precision, frame_width/height == 54/42).
+TOF_META_SIZE = 100  # sizeof(vl53l9_meta_t)
+
+# AN6522 Table 3 step->exposure ratios (nb_shot_step_n = ratio * exposure_ms).
+# Keyed by nb_step: precision mode runs 7 integration steps, ambient runs 6.
+_TOF_EXPOSURE_RATIOS = {
+    7: (117.0, 1443.0),   # precision: (step1, step6) coefficients
+    6: (231.0, 1418.0),   # ambient
+}
+
+
+def _u24le(m: bytes, o: int) -> int:
+    return m[o] | (m[o + 1] << 8) | (m[o + 2] << 16)
+
+
+def decode_tof_meta(payload: bytes) -> dict | None:
+    """Decode the vl53l9_meta_t block in a RAW_3DMD payload's last 100 bytes.
+
+    Accepts a full RAW_3DMD payload (or just the >=100-byte tail) and returns a
+    flat dict of the device's per-frame readback: die temperature, per-frame
+    error status/code, reference-SPAD channels, DSS/binning/nb_step, actual
+    frame_period, and the nb_shot_step exposure counts -- plus a derived
+    `exposure_ms`, `ranging_mode`, and `fps`. Returns None if the payload is too
+    short to carry the metadata block.
+
+    `die_temp_c` is the sensor die temperature; ST does not document a scale in
+    the vendored header, but it reads as degrees C empirically (a few C above the
+    STTS22H ambient, tracking laser self-heating). `exposure_ms` is inverted from
+    the nb_shot_step counts via the AN6522 ratios; `exposure_consistent` is True
+    when the step1- and step6-derived values agree within 2%.
+    """
+    if payload is None or len(payload) < TOF_META_SIZE:
+        return None
+    m = payload[-TOF_META_SIZE:]
+
+    frame_counter = int.from_bytes(m[0:4], "little")
+    die_temp_c = int.from_bytes(m[4:6], "little")
+    refs = struct.unpack_from("<8H", m, 36)  # amp/dist ch1L, ch2L, ch1S, ch2S
+    frame_width = int.from_bytes(m[52:54], "little")
+    frame_height = int.from_bytes(m[54:56], "little")
+    static = m[56]
+    ambient_attenuation = m[57]
+    dyn = int.from_bytes(m[58:60], "little")
+    error_code = int.from_bytes(m[60:62], "little")
+    error_status = m[62]
+    frame_period_us = int.from_bytes(m[68:72], "little")
+
+    dss_mode = (dyn >> 4) & 0x3
+    binning = (dyn >> 6) & 0x1F
+    nb_step = (dyn >> 12) & 0xF
+
+    step1 = _u24le(m, 76)
+    step4_5 = _u24le(m, 79)
+    step6 = _u24le(m, 82)
+    step7 = _u24le(m, 85)
+
+    ranging_mode = {7: "precision", 6: "ambient"}.get(nb_step)
+    exposure_ms = None
+    exposure_consistent = None
+    ratios = _TOF_EXPOSURE_RATIOS.get(nb_step)
+    if ratios is not None:
+        x1 = step1 / ratios[0]
+        x6 = step6 / ratios[1]
+        exposure_ms = (x1 + x6) / 2.0
+        exposure_consistent = abs(x1 - x6) <= 0.02 * max(exposure_ms, 1e-6)
+
+    fps = (1_000_000.0 / frame_period_us) if frame_period_us else None
+
+    return {
+        "frame_counter": frame_counter,
+        "die_temp_c": die_temp_c,
+        "error_status": error_status,
+        "error_code": error_code,
+        "ranging_mode": ranging_mode,
+        "nb_step": nb_step,
+        "dss_mode": dss_mode,
+        "binning": binning,
+        "power_mode": (static >> 2) & 0x3,
+        "sync_mode": static & 0x3,
+        "ambient_attenuation": ambient_attenuation,
+        "frame_period_us": frame_period_us,
+        "fps": fps,
+        "exposure_ms": exposure_ms,
+        "exposure_consistent": exposure_consistent,
+        "nb_shot_step1": step1,
+        "nb_shot_step4_5": step4_5,
+        "nb_shot_step6": step6,
+        "nb_shot_step7": step7,
+        "ref_channels": list(refs),  # [amp1L, dist1L, amp2L, dist2L, amp1S, dist1S, amp2S, dist2S]
+        "frame_width": frame_width,
+        "frame_height": frame_height,
+    }

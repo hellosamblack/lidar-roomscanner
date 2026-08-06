@@ -1471,7 +1471,8 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
                           msl_source: str = "fallback",
                           msl_age_s: float | None = None,
                           elevation_datum_ft: float | None = None,
-                          altitude_smoother: "ElevationSmoother | None" = None) -> dict | None:
+                          altitude_smoother: "ElevationSmoother | None" = None,
+                          tof_meta: dict | None = None) -> dict | None:
     """SensorState -> `sensor` JSON dict (streams 9/10), or None when there is no
     sensor data at all (so the broadcaster stays silent on a ToF-only session).
 
@@ -1641,6 +1642,17 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
         "orientation_raw": orientation_raw,
         "orientation_view": orientation_view_out,
         "jitter": jitter_out,
+        # ToF per-frame metadata (decoded host-side from the RAW tail; None on a
+        # ToF-frame-less tick). Diagnostics-drawer only.
+        "tof_exposure_ms": (None if tof_meta is None or tof_meta.get("exposure_ms") is None
+                            else round(float(tof_meta["exposure_ms"]), 2)),
+        "tof_ranging_mode": None if tof_meta is None else tof_meta.get("ranging_mode"),
+        "tof_die_temp_c": None if tof_meta is None else tof_meta.get("die_temp_c"),
+        "tof_error": None if tof_meta is None else (tof_meta.get("error_status", 0) or tof_meta.get("error_code", 0)),
+        "tof_dss_mode": None if tof_meta is None else tof_meta.get("dss_mode"),
+        "tof_binning": None if tof_meta is None else tof_meta.get("binning"),
+        "tof_fps": (None if tof_meta is None or tof_meta.get("fps") is None
+                    else round(float(tof_meta["fps"]), 1)),
         # Residual in-plane roll the IR pane's server-side 90-deg snap leaves
         # behind, for the client to finish with a CSS transform (see
         # `ir_gravity_residual_deg`). CCW-positive, so CSS must negate it.
@@ -4964,6 +4976,9 @@ async def _broadcaster() -> None:
 
         if last_item is not None:
             header, outputs = last_item
+            tof_meta = outputs.get("tof_meta")
+            if tof_meta is not None:
+                state.tof_meta = tof_meta
             depth = outputs["depth"]
             h, w = depth.shape
             if state.deproj is None:
@@ -5096,7 +5111,8 @@ async def _broadcaster() -> None:
                                          msl_source=snap["msl_source"],
                                          msl_age_s=snap["msl_age_s"],
                                          elevation_datum_ft=state.ui_state.elevation_datum_ft,
-                                         altitude_smoother=elevation)
+                                         altitude_smoother=elevation,
+                                         tof_meta=state.tof_meta)
             if smsg is not None:
                 await _broadcast_text(clients, json.dumps(smsg))
 
@@ -6150,6 +6166,10 @@ def main(argv=None) -> int:
     app.state.slam_runner = slam_runner
     app.state.detailed_runner = DetailedRunner(bus=bus, results_dir=RESULTS_DIR)
     app.state.deproj = None
+    # Latest ToF per-frame metadata (exposure/die-temp/health), decoded host-side
+    # from the RAW tail in pipeline.py and cached here so the ~15 Hz sensor tick
+    # (decoupled from the ToF frame tick) always has the freshest value.
+    app.state.tof_meta = None
     app.state.orientation_smoother = OrientationSmoother()
     app.state.orientation_jitter = OrientationJitter()
     # Elevation readout (owner ask, 2026-07-31): the display EMA and the cached

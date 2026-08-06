@@ -1640,6 +1640,7 @@ def _build_app_state(replay_path: Path, replay_fps: float = 20.0):
     web.app.state.sensor_state = sensor_state
     web.app.state.mag_cal = None
     web.app.state.deproj = None
+    web.app.state.tof_meta = None
     web.app.state.orientation_smoother = web.OrientationSmoother()
     web.app.state.clients = set()
     web.app.state.command_labels = set()

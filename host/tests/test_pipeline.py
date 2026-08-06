@@ -47,7 +47,9 @@ def test_calib_then_raw_matches_direct_transform():
     assert result is not None
     header, outputs = result
     assert header.stream_id == StreamId.RAW_3DMD
-    assert set(outputs) == {"depth"}
+    # RAW frames now also carry the decoded metadata tail alongside the planes.
+    assert "tof_meta" in outputs
+    assert {k for k in outputs if k != "tof_meta"} == {"depth"}
     depth = outputs["depth"]
     assert depth.shape == (42, 54) and depth.dtype == np.float32
     assert stage.raw_transformed == 1
@@ -72,9 +74,11 @@ def test_stage_carries_aux_planes_when_requested():
     result = stage.feed(_raw_frame(raw, seq=2))
     assert result is not None
     header, outputs = result
-    assert set(outputs) == {"depth", "reflectance", "confidence"}
-    for name in outputs:
-        assert outputs[name].shape == (42, 54) and outputs[name].dtype == np.float32
+    assert outputs.get("tof_meta") is not None  # metadata tail rides alongside the planes
+    planes = {k: v for k, v in outputs.items() if k != "tof_meta"}
+    assert set(planes) == {"depth", "reflectance", "confidence"}
+    for name, arr in planes.items():
+        assert arr.shape == (42, 54) and arr.dtype == np.float32
 
 
 def test_depth_passthrough_without_dll():

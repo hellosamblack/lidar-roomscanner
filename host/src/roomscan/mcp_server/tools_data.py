@@ -207,6 +207,34 @@ def capture_skew(path: str, window_s: float = 2.0) -> dict:
 
 
 @mcp.tool()
+def capture_meta(path: str) -> dict:
+    """Report the ToF per-frame metadata a capture actually ran at.
+
+    Every RAW_3DMD payload carries a 100-byte vl53l9_meta_t tail the host has
+    always archived but never decoded. This reports the exposure the device
+    *actually* used (inverted from nb_shot_step via AN6522 ratios, so a capture
+    whose exposure was only guessed from its filename is now answerable), the ToF
+    die temperature (ranging-drift relevant), the per-frame error_status/code
+    health flag, the DSS/binning/nb_step config readback, and the internal
+    reference-SPAD channels -- aggregated across the capture.
+
+    `exposure_ms.consistent_frac` < 1.0 flags frames where the step1- and
+    step6-derived exposures disagree; `die_temp_c` is a raw u16 that reads as C
+    empirically (ST does not document the scale).
+
+    Wraps `host/tools/meta_check.py::check_capture()`.
+    """
+    from tools.meta_check import check_capture
+
+    p = (REPO / path) if not Path(path).is_absolute() else Path(path)
+    if not p.is_file():
+        return {"error": f"no such capture: {rel(p)}"}
+    rep = check_capture(p)
+    rep["path"] = rel(p)
+    return rep
+
+
+@mcp.tool()
 def capture_heading(path: str, cal_path: str = "") -> dict:
     """Is the heading a HEADING, or is it wearing another axis's clothes (BUG-058)?
 

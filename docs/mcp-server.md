@@ -142,7 +142,7 @@ carries the same ranging state (`ranging_profile`, `ranging_measured_fps`,
 **data** — `capture_list()` (includes `has_stream_9`, which SLAM and orientation work
 ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, compare?)`,
 `capture_skew(path, window_s?)`, `capture_motion(path)`, `capture_heading(path, cal_path?)`,
-`capture_profile_probe(path, requested_fps?, udp_stats?)`,
+`capture_meta(path)`, `capture_profile_probe(path, requested_fps?, udp_stats?)`,
 `profile_estimate(profile?, ranging_mode?, fps?, exposure_ms?, power_mode?, imu_env_rate_hz?, transport?)`,
 `profile_tuning(ranging_mode?, power_config?, resolution?, dss?, output_interface?, fps?, exposure_ms?, ambient_lux?)`,
 `slam_rerender(capture, voxel_size?, block_count?, device?, max_frames?)`,
@@ -213,6 +213,14 @@ operator actually returned to the start pose. Budget ≈ frames × n × 7 ms on 
 2/5/20 — because what survives the fix is the two oscillators drifting apart, not per-frame skew
 (lag-1 autocorrelation 0.992). Quote the window alongside the figure, or use the window-free
 10–11 µs. It also reports the quaternion's phase offset, which is a **+7.8 ms lead**, not a lag.
+
+`capture_meta` decodes the 100-byte `vl53l9_meta_t` tail every RAW_3DMD frame carries (and the host
+has always archived but never read). Use it to recover what a capture *actually* ran at — the
+exposure (inverted from `nb_shot_step` via AN6522 ratios, so a `...8ms...`-named file that was only
+ever a guess is now answerable), the ToF **die temperature** (a few °C over ambient from laser
+self-heating; datasheet ±0.1 mm/°C ranging drift), the per-frame `error_status`/`error_code` health
+flag, the DSS/binning/nb_step config readback, and the reference-SPAD channels. No firmware or wire
+change — it reads bytes already in the file. `die_temp_c` is a raw u16 that reads as °C empirically.
 
 `capture_analyze` answers **two** questions that are easy to conflate. `clean` means the
 bytes that arrived decode end to end; `continuity.complete` means everything the device

@@ -252,6 +252,13 @@ export function createSensors(hub) {
     const yawEl = $('sensor-yaw');
     const headingRawEl = $('sensor-heading-raw');
     const quatEl = $('sensor-quat');
+    // ToF frame metadata (diagnostics drawer).
+    const tofExposureEl = $('tof-exposure');
+    const tofModeEl = $('tof-mode');
+    const tofDieTempEl = $('tof-die-temp');
+    const tofFpsEl = $('tof-fps');
+    const tofDssEl = $('tof-dss');
+    const tofErrorEl = $('tof-error');
     // [p95 cell, mean cell] per signal — two columns of a grid, not one string.
     const jitterEls = {
         roll: [$('jitter-roll'), $('jitter-roll-mean')],
@@ -461,6 +468,19 @@ export function createSensors(hub) {
                 if (p95El) p95El.textContent = fmtJitterNum(j[signal], 'p95_deg');
                 if (meanEl) meanEl.textContent = fmtJitterNum(j[signal], 'mean_deg');
             }
+
+            // ToF frame metadata (decoded host-side from the RAW tail). Fields are
+            // null on a tick with no fresh ToF frame — leave the last value shown.
+            if (tofExposureEl && msg.tof_exposure_ms != null)
+                tofExposureEl.textContent = msg.tof_exposure_ms.toFixed(2) + ' ms';
+            if (tofModeEl && msg.tof_ranging_mode != null) tofModeEl.textContent = msg.tof_ranging_mode;
+            if (tofDieTempEl && msg.tof_die_temp_c != null)
+                tofDieTempEl.textContent = msg.tof_die_temp_c + ' °C';
+            if (tofFpsEl && msg.tof_fps != null) tofFpsEl.textContent = msg.tof_fps.toFixed(1);
+            if (tofDssEl && msg.tof_dss_mode != null)
+                tofDssEl.textContent = msg.tof_dss_mode + ' / ' + (msg.tof_binning ?? '—');
+            if (tofErrorEl && msg.tof_error != null)
+                tofErrorEl.textContent = msg.tof_error === 0 ? 'none' : String(msg.tof_error);
 
             // Orientation View: selected-mode readout + labels + warnings.
             const ov = msg.orientation_view || {};

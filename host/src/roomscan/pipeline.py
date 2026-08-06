@@ -12,7 +12,7 @@ import numpy as np
 
 from .flatfield import FlatField, FlatFieldSet
 from .native import Transform
-from .protocol import Frame, FrameHeader, FrameType, StreamId
+from .protocol import Frame, FrameHeader, FrameType, StreamId, decode_tof_meta
 
 
 class TransformStage:
@@ -100,6 +100,11 @@ class TransformStage:
             active_ff = self._active_flatfield()
             if active_ff is not None and "reflectance" in outputs:
                 outputs["reflectance"] = active_ff.apply(outputs["reflectance"])
+            # Decode the vl53l9_meta_t tail (exposure/die-temp/health) from the raw
+            # bytes still in hand; carried by key so it never reaches array consumers.
+            meta = decode_tof_meta(frame.payload)
+            if meta is not None:
+                outputs["tof_meta"] = meta
             self.raw_transformed += 1
             return header, outputs
 

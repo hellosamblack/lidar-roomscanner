@@ -1277,6 +1277,20 @@
                             <span>Heading</span><span class="jitter-num" id="jitter-heading">—</span><span class="jitter-num jitter-num--mean" id="jitter-heading-mean">—</span>
                             <span title="Total angular step of the orientation quaternion — convention-independent, so unlike the Euler rows above it is never inflated by a near-singular decomposition">Orientation</span><span class="jitter-num" id="jitter-orientation">—</span><span class="jitter-num jitter-num--mean" id="jitter-orientation-mean">—</span>
                         </div>
+
+                        <!-- ToF frame metadata (2026-08-06): decoded host-side from
+                             the vl53l9_meta_t tail every RAW_3DMD frame carries. These
+                             are the device's own per-frame readback of what it actually
+                             ran — exposure (inverted from nb_shot_step, so a capture's
+                             true exposure is no longer a guess), die temperature (ToF
+                             ranging drifts ~0.1 mm/°C), and a per-frame health flag. -->
+                        <div class="hud-section-label" title="What the ToF sensor reports it actually ran this frame, decoded from the raw frame metadata.">ToF frame</div>
+                        <div class="hud-row" title="Integration time the sensor actually used, inverted from the nb_shot_step counts (AN6522). Independent of the requested exposure."><span>Exposure</span><span class="hud-val" id="tof-exposure">—</span></div>
+                        <div class="hud-row" title="Ranging mode the device ran: precision (7 integration steps) or ambient (6)."><span>Ranging mode</span><span class="hud-val" id="tof-mode">—</span></div>
+                        <div class="hud-row" title="ToF sensor die temperature. Runs a few °C above ambient from laser self-heating; ranging drifts ~0.1 mm/°C (datasheet). Raw u16, reads as °C."><span>Die temp</span><span class="hud-val" id="tof-die-temp">—</span></div>
+                        <div class="hud-row" title="Frame rate the device reports from its own frame_period, independent of host timing."><span>ToF fps</span><span class="hud-val" id="tof-fps">—</span></div>
+                        <div class="hud-row" title="DSS (dynamic SPAD selection) mode and zone binning the device ran."><span>DSS / binning</span><span class="hud-val" id="tof-dss">—</span></div>
+                        <div class="hud-row" title="Per-frame sensor error flag (error_status | error_code). 0 = clean."><span>Error</span><span class="hud-val" id="tof-error">—</span></div>
                     </div>
                 </details>
             </div>
