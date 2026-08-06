@@ -140,7 +140,7 @@ function drawCompass(canvas, heading) {
 
     // cardinal ticks + N label
     ctx.fillStyle = MUTED;
-    ctx.font = '9px "Inter", sans-serif';
+    ctx.font = '9px "Space Grotesk", sans-serif';
     ctx.textAlign = 'center';
     const cards = [['N', 0], ['E', 90], ['S', 180], ['W', 270]];
     for (const [lbl, deg] of cards) {

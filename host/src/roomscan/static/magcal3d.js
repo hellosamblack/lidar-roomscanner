@@ -268,7 +268,7 @@ function labelSprite(text, colorCss) {
     const c = document.createElement('canvas');
     c.width = 128; c.height = 48;
     const ctx = c.getContext('2d');
-    ctx.font = '600 26px Inter, sans-serif';
+    ctx.font = '600 26px "Space Grotesk", sans-serif';
     ctx.fillStyle = colorCss;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';

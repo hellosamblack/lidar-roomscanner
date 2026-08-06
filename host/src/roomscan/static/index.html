@@ -87,13 +87,45 @@
         window.__diag('inline diag installed; protocol=' + location.protocol + ' host=' + location.host, 'info');
     })();
     </script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
     <style>
+        /* ------------------------------------------------------------------ *
+         * Fonts — self-hosted (vendor/fonts/), NOT a CDN. This instrument     *
+         * often runs on an Ethernet-only / offline box; a Google Fonts <link> *
+         * silently falls back to system sans there, so the chosen faces are   *
+         * vendored and served locally. Space Grotesk is the UI face (a        *
+         * deliberate technical grotesque that harmonises with the mono data   *
+         * readout); JetBrains Mono stays the data/numeric face.               *
+         * ------------------------------------------------------------------ */
+        @font-face {
+            font-family: 'Space Grotesk'; font-style: normal; font-weight: 500;
+            font-display: swap; src: url('vendor/fonts/space-grotesk-500.woff2') format('woff2');
+        }
+        @font-face {
+            font-family: 'Space Grotesk'; font-style: normal; font-weight: 600;
+            font-display: swap; src: url('vendor/fonts/space-grotesk-600.woff2') format('woff2');
+        }
+        @font-face {
+            font-family: 'Space Grotesk'; font-style: normal; font-weight: 700;
+            font-display: swap; src: url('vendor/fonts/space-grotesk-700.woff2') format('woff2');
+        }
+        @font-face {
+            font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400;
+            font-display: swap; src: url('vendor/fonts/jetbrains-mono-400.woff2') format('woff2');
+        }
+        @font-face {
+            font-family: 'JetBrains Mono'; font-style: normal; font-weight: 700;
+            font-display: swap; src: url('vendor/fonts/jetbrains-mono-700.woff2') format('woff2');
+        }
+
         /* ------------------------------------------------------------------ *
          * Design tokens (§8.2). Extend, don't replace — a `--warning` token   *
          * is added for the busy/timeout toast state.                          *
          * ------------------------------------------------------------------ */
         :root {
+            /* Faces defined once here so the choice is deliberate + single-sourced.
+               Space Grotesk = UI/labels, JetBrains Mono = data/numeric readout. */
+            --font-ui: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
+            --font-mono: 'JetBrains Mono', ui-monospace, monospace;
             --bg-color: #0b0c10;
             --panel-bg: rgba(22, 24, 30, 0.6);
             --panel-border: rgba(255, 255, 255, 0.08);
@@ -127,7 +159,7 @@
             overflow: hidden;
             background-color: var(--bg-color);
             color: var(--text-main);
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            font-family: var(--font-ui);
             user-select: none;
         }
 
@@ -199,7 +231,7 @@
             background-color: var(--danger);
             transition: background-color 0.3s ease, box-shadow 0.3s ease;
         }
-        .dot.connected { background-color: var(--success); box-shadow: 0 0 12px var(--success); }
+        .dot.connected { background-color: var(--success); box-shadow: 0 0 12px var(--success); } /* unslop-ignore: intentional health-LED glow, not decorative */
 
         /* Comm-status cluster (top-right): one chip per hop the frames traverse
            — FileHub · Scanner · ST-Link. The dot colour is the reachability
@@ -216,8 +248,8 @@
             transition: background-color 0.3s ease, box-shadow 0.3s ease;
         }
         /* up = healthy (green glow), down = fault (red), absent/unknown = neutral grey. */
-        .comm-item--up    .comm-item__dot { background-color: var(--success); box-shadow: 0 0 8px var(--success); }
-        .comm-item--down  .comm-item__dot { background-color: var(--danger);  box-shadow: 0 0 8px var(--danger); }
+        .comm-item--up    .comm-item__dot { background-color: var(--success); box-shadow: 0 0 8px var(--success); } /* unslop-ignore: intentional health-LED glow */
+        .comm-item--down  .comm-item__dot { background-color: var(--danger);  box-shadow: 0 0 8px var(--danger); } /* unslop-ignore: intentional fault-LED glow */
         .comm-item--absent .comm-item__dot,
         .comm-item--unknown .comm-item__dot { background-color: var(--text-muted); opacity: 0.5; box-shadow: none; }
         /* The informational ST-Link item is dimmed so its neutral state doesn't read as a problem. */
@@ -272,7 +304,7 @@
         /* A card with no collapse control of its own says why its body vanished. */
         .hud-card.auto-collapsed::after, #ir-card.auto-collapsed::after {
             content: 'body hidden — window too narrow';
-            font-family: 'Inter', sans-serif; font-size: 0.62rem; color: var(--text-muted);
+            font-family: var(--font-ui); font-size: 0.62rem; color: var(--text-muted);
         }
 
         /* Left dock — read-only telemetry HUD cards. NEVER intercept OrbitControls. */
@@ -297,7 +329,7 @@
         .hud-val.lost { color: var(--danger); }
         .hud-val.warn { color: var(--warning); }
         .hud-section-label {
-            margin-top: 8px; font-family: 'Inter', sans-serif;
+            margin-top: 8px; font-family: var(--font-ui);
             font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em;
             color: var(--text-muted); font-weight: 600;
         }
@@ -409,7 +441,7 @@
         }
         .sensor-details > summary {
             pointer-events: auto !important; cursor: pointer; list-style: none;
-            font-family: 'Inter', sans-serif; font-size: 0.68rem; font-weight: 600;
+            font-family: var(--font-ui); font-size: 0.68rem; font-weight: 600;
             text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted);
             position: sticky; top: 0; z-index: 1;
             /* Opaque, unlike the card's glass: scrolled rows must not read through. */
@@ -438,7 +470,7 @@
             font-size: 0.72rem; color: var(--text-muted);
         }
         .jitter-table__head {
-            font-family: 'Inter', sans-serif; font-size: 0.6rem; text-transform: uppercase;
+            font-family: var(--font-ui); font-size: 0.6rem; text-transform: uppercase;
             letter-spacing: 0.04em; opacity: 0.75; text-align: right;
         }
         .jitter-num {
@@ -466,7 +498,7 @@
             width: 100%;
             background: none; border: none; padding: 0 0 2px 0;
             color: var(--text-muted);
-            font-family: 'Inter', sans-serif;
+            font-family: var(--font-ui);
             font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;
             cursor: pointer;
             border-bottom: 1px solid var(--panel-border);
@@ -512,7 +544,7 @@
         .control-subgroup > summary {
             cursor: pointer;
             list-style: none;
-            font-family: 'Inter', sans-serif;
+            font-family: var(--font-ui);
             font-size: 0.72rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
@@ -735,7 +767,7 @@
         .magcal-chips { display: flex; flex-wrap: wrap; gap: 6px; }
         .magcal-chip {
             display: inline-flex; align-items: center; gap: 5px;
-            border: 1px solid var(--panel-border); border-radius: 999px;
+            border: 1px solid var(--panel-border); border-radius: 999px; /* unslop-ignore: chip is intentionally a pill; radius scale elsewhere is 4/6/16px */
             padding: 2px 9px; font-size: 0.64rem; letter-spacing: 0.03em;
             font-family: 'JetBrains Mono', monospace; color: var(--text-muted);
             white-space: nowrap;
@@ -1799,10 +1831,10 @@ cover the whole sphere from this viewpoint, and a gap behind you still has to be
                                             stroke-dasharray="0 295.3"></circle>
                                     <g id="magcal-gauge-ticks" stroke="#94a3b8" stroke-width="1.5"></g>
                                     <text id="magcal-gauge-pct" x="60" y="59" text-anchor="middle"
-                                          font-family="Inter, sans-serif" font-size="21" font-weight="700"
+                                          font-family="Space Grotesk, sans-serif" font-size="21" font-weight="700"
                                           fill="#e2e8f0">—</text>
                                     <text id="magcal-gauge-lbl" x="60" y="74" text-anchor="middle"
-                                          font-family="Inter, sans-serif" font-size="9"
+                                          font-family="Space Grotesk, sans-serif" font-size="9"
                                           fill="#94a3b8">COVERAGE</text>
                                 </svg>
                                 <div class="magcal-gauge-sub" id="magcal-gauge-cells">— / — cells</div>

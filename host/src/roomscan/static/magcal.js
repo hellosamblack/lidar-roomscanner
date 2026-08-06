@@ -158,7 +158,7 @@ function drawDiscFrame(ctx, cx, cy, title) {
     ctx.stroke();
 
     ctx.fillStyle = MUTED;
-    ctx.font = '9px "Inter", sans-serif';
+    ctx.font = '9px "Space Grotesk", sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText('Front', cx, cy - DISC_R - 5);
     ctx.fillText('Back', cx, cy + DISC_R + 12);
@@ -168,7 +168,7 @@ function drawDiscFrame(ctx, cx, cy, title) {
     ctx.fillText('Left', cx - DISC_R - 4, cy + 3);
     ctx.textAlign = 'center';
     ctx.fillStyle = INK;
-    ctx.font = '10px "Inter", sans-serif';
+    ctx.font = '10px "Space Grotesk", sans-serif';
     ctx.fillText(title, cx, MAP_H - 8);
 }
 
@@ -235,7 +235,7 @@ function drawLegend(canvas) {
     ctx.strokeStyle = GRID; ctx.lineWidth = 1;
     ctx.strokeRect(barX + 0.5, barY + 0.5, barW - 1, barH - 1);
     ctx.fillStyle = MUTED;
-    ctx.font = '9px "Inter", sans-serif';
+    ctx.font = '9px "Space Grotesk", sans-serif';
     ctx.textAlign = 'left'; ctx.fillText('−30%', barX, barY + barH + 11);
     ctx.textAlign = 'center'; ctx.fillText('|B| correct', barX + barW / 2, barY + barH + 11);
     ctx.textAlign = 'right'; ctx.fillText('+30%', barX + barW, barY + barH + 11);
@@ -245,7 +245,7 @@ function drawLegend(canvas) {
     ctx.beginPath(); ctx.arc(x, barY + barH / 2, 6, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(148,163,184,0.75)'; ctx.fill();
     ctx.strokeStyle = SURFACE; ctx.lineWidth = 1.5; ctx.stroke();
-    ctx.fillStyle = INK; ctx.font = '10px "Inter", sans-serif'; ctx.textAlign = 'left';
+    ctx.fillStyle = INK; ctx.font = '10px "Space Grotesk", sans-serif'; ctx.textAlign = 'left';
     ctx.fillText('covered', x + 11, barY + barH / 2 + 3);
 
     x += 76;
@@ -335,7 +335,7 @@ function drawGauge(arcEl, ticksEl, pctEl, cellsEl, occupied, cells) {
             tx.setAttribute('y', (60 + Math.sin(a) * (GAUGE_R + 13) + 3).toFixed(2));
             tx.setAttribute('text-anchor', 'middle');
             tx.setAttribute('font-size', '8');
-            tx.setAttribute('font-family', 'Inter, sans-serif');
+            tx.setAttribute('font-family', 'Space Grotesk, sans-serif');
             tx.setAttribute('fill', '#94a3b8');
             tx.setAttribute('stroke', 'none');
             tx.textContent = `${Math.round(t * 100)}%`;
