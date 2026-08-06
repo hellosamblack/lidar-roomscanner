@@ -80,10 +80,10 @@ def test_state_ignores_other_streams():
 def test_state_history_bounded():
     st = SensorState(history=4)
     for i in range(10):
-        st.feed(_frame(StreamId.ENV, struct.pack("<5f", 1000.0 + i, 0, 0, 0, float(i))))
+        st.feed(_frame(StreamId.ENV, struct.pack("<5f", 101325.0 + i, 30.0, 0.0, 40.0, 20.0 + i)))
     p = st.pressure_history()
     assert len(p) == 4
-    assert p[-1] == pytest.approx(1009.0)  # newest retained
+    assert p[-1] == pytest.approx(101334.0)  # newest retained
 
 
 def test_tilt_compensated_heading_level_north():
@@ -692,3 +692,99 @@ def test_the_mounting_half_of_the_axis_convention_is_a_proper_rotation():
     assert MAG_FIELD_SIGN == -1.0
     assert np.allclose(AXIS_CONVENTION, MAG_FIELD_SIGN * MAG_MOUNT_ROTATION)
     assert np.linalg.det(AXIS_CONVENTION) == pytest.approx(-1.0)
+
+
+def test_bug082_valid_env_and_mag_validation():
+    from roomscan.protocol import is_valid_env, is_valid_mag
+    # Valid
+    assert is_valid_mag((30.0, 0.0, 40.0))
+    assert is_valid_env(101325.0, (30.0, 0.0, 40.0), 20.0)
+
+    # Zero or near-zero mag
+    assert not is_valid_mag((0.0, 0.0, 0.0))
+    assert not is_valid_mag((0.0001, 0.0001, 0.0001))
+    assert not is_valid_env(101325.0, (0.0, 0.0, 0.0), 20.0)
+
+    # Non-finite mag / env
+    assert not is_valid_mag((float("nan"), 0.0, 0.0))
+    assert not is_valid_mag((float("inf"), 0.0, 0.0))
+    assert not is_valid_env(float("nan"), (30.0, 0.0, 40.0), 20.0)
+    assert not is_valid_env(101325.0, (30.0, 0.0, 40.0), float("nan"))
+
+    # Out of physical bounds pressure / temp
+    assert not is_valid_env(1000.0, (30.0, 0.0, 40.0), 20.0)
+    assert not is_valid_env(200000.0, (30.0, 0.0, 40.0), 20.0)
+    assert not is_valid_env(101325.0, (30.0, 0.0, 40.0), -100.0)
+    assert not is_valid_env(101325.0, (30.0, 0.0, 40.0), 100.0)
+
+
+def test_bug082_yaw_fusion_invalid_mag_gated():
+    from roomscan.magcal import MagCalibration
+    from roomscan.sensors import YawFusion
+
+    cal = MagCalibration(**_CAL_2026_08_01)
+    fusion = YawFusion(calibration=cal)
+    q1, m1 = _NORTH_FACING_SAMPLES[0]
+    q2, m2 = _NORTH_FACING_SAMPLES[1]
+
+    # First update to initialize
+    fusion.update(q1, m1, 1000000)
+    assert fusion.status == "init"
+
+    # Next update with valid mag
+    fusion.update(q2, m2, 1040000)
+    assert fusion.status == "active"
+    delta_before = fusion._delta
+
+    # Update with zero mag
+    fusion.update(q2, (0.0, 0.0, 0.0), 1080000)
+    assert fusion.status == "gated:invalid-mag"
+    assert fusion._delta == delta_before  # delta remains unchanged
+
+
+def test_bug082_sensor_state_ignores_invalid_env():
+    st = SensorState()
+    # Feed valid ENV frame
+    valid_payload = struct.pack("<5f", 101325.0, 30.0, 0.0, 40.0, 20.0)
+    st.feed(_frame(StreamId.ENV, valid_payload))
+    assert st.latest_env() is not None
+    assert st.latest_env().mag_ut == (30.0, 0.0, 40.0)
+
+    # Feed invalid (zero mag) ENV frame
+    zero_mag_payload = struct.pack("<5f", 101325.0, 0.0, 0.0, 0.0, 20.0)
+    st.feed(_frame(StreamId.ENV, zero_mag_payload))
+
+    # Expect state retains the valid sample
+    assert st.latest_env().mag_ut == (30.0, 0.0, 40.0)
+
+
+def test_bug082_2_capture_replay_no_false_anomaly_gates():
+    from pathlib import Path
+    cap_path = Path("captures/BUG-082-2.bin")
+    if not cap_path.exists():
+        pytest.skip("BUG-082-2.bin fixture capture not found")
+
+    from roomscan.sources import FileSource
+    from roomscan.decoder import StreamDecoder
+    from roomscan.magcal import MagCalibration
+    from roomscan.sensors import YawFusion
+
+    cal = MagCalibration.load("mag_cal.json")
+    fusion = YawFusion(calibration=cal)
+    sensors = SensorState(fusion=fusion)
+
+    source = FileSource(str(cap_path))
+    decoder = StreamDecoder()
+    anomaly_count = 0
+
+    while True:
+        buf = source.read()
+        if not buf:
+            break
+        for frame in decoder.feed(buf):
+            sensors.feed(frame)
+            if fusion.status == "gated:anomaly":
+                anomaly_count += 1
+
+    assert anomaly_count == 0, f"Expected 0 anomaly gates in BUG-082-2 replay, got {anomaly_count}"
+

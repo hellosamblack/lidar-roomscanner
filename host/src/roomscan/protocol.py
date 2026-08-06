@@ -1,6 +1,7 @@
 """Wire protocol v2 — see docs/protocol.md. Keep in lockstep via protocol-change skill."""
 from __future__ import annotations
 
+import math
 import struct
 import zlib
 from dataclasses import dataclass
@@ -678,6 +679,25 @@ def decode_env(payload: bytes) -> tuple[float, tuple[float, float, float], float
         raise ProtocolError(f"ENV payload must be {ENV_SIZE} bytes, got {len(payload)}")
     pressure, mx, my, mz, temp = struct.unpack("<5f", payload)
     return pressure, (mx, my, mz), temp
+
+
+def is_valid_mag(mag: tuple[float, float, float] | list[float] | np.ndarray) -> bool:
+    """True if mag vector is finite and non-zero (> 1e-3 µT magnitude)."""
+    if len(mag) != 3:
+        return False
+    mx, my, mz = float(mag[0]), float(mag[1]), float(mag[2])
+    if not (math.isfinite(mx) and math.isfinite(my) and math.isfinite(mz)):
+        return False
+    return (mx * mx + my * my + mz * mz) > 1e-3
+
+
+def is_valid_env(pressure_pa: float, mag: tuple[float, float, float] | list[float] | np.ndarray, temp_c: float) -> bool:
+    """True if all ENV components are finite and within physical sensor bounds."""
+    if not (math.isfinite(pressure_pa) and 30000.0 <= pressure_pa <= 120000.0):
+        return False
+    if not (math.isfinite(temp_c) and -40.0 <= temp_c <= 85.0):
+        return False
+    return is_valid_mag(mag)
 
 
 # --- RAW_3DMD frame metadata tail (vl53l9_meta_t) ---------------------------

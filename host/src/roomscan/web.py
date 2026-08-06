@@ -1458,6 +1458,7 @@ _FUSION_LABELS = {
     "gated:motion": "Fast motion",
     "gated:anomaly": "Mag anomaly",
     "gated:no-field": "No horizontal field",
+    "gated:invalid-mag": "Invalid mag sample",
 }
 
 

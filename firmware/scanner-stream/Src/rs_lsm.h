@@ -15,7 +15,10 @@ typedef struct {
     float mag_ut[3];     /* LIS2MDL, [x, y, z] µT */
     float temp_c;        /* STTS22H, °C */
     uint8_t have_quat;   /* 1 if quat was updated this call */
-    uint8_t have_env;    /* 1 if env fields were updated this call */
+    uint8_t have_env;    /* 1 ONLY if ALL required env fields (pressure, mag, temp) are valid */
+    uint8_t have_press;  /* 1 if pressure was updated */
+    uint8_t have_mag;    /* 1 if mag was updated */
+    uint8_t have_temp;   /* 1 if temp was updated */
     /* WHEN `quat` is, on the LSM's own clock. `quat` is the MEAN of `quat_n` SFLP samples
      * spread across this drain (RS_LSM_SFLP_AVERAGE, shipped for BUG-027's 2.8x noise cut),
      * so the orientation it carries is the batch's MIDPOINT -- not the ToF frame's t_us, and
@@ -91,6 +94,12 @@ int rs_lsm_read_timestamp(uint32_t *ticks);
  * 21.7 us. `valid` is 0 until a successful read — the wire (stream 12) carries both. */
 extern int8_t  g_lsm_freq_fine;
 extern uint8_t g_lsm_freq_fine_valid;
+
+/* Diagnostic counters for sensor-hub and FIFO issues (BUG-082). */
+extern uint32_t g_lsm_shub_partial_batches;
+extern uint32_t g_lsm_shub_missing_tags;
+extern uint32_t g_lsm_shub_nacks;
+extern uint32_t g_lsm_shub_abort_partials;
 
 /* Poll the LSM's embedded Wake-Up function (auto-idle motion wake, 2026-08-03 -- see the
  * RS_LSM_WAKE_* tuning block in rs_lsm.c). One register read (WAKE_UP_SRC, 0x45), safe to call

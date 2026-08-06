@@ -89,6 +89,7 @@ const FUSION_HELP = {
     'gated:motion': 'Turning faster than 40°/s — slow the sweep.',
     'gated:anomaly': 'Field strength is >30% off the calibrated value — move away from metal/magnets; take it off the tripod.',
     'gated:no-field': 'The field is pointing straight down — no north to steer to. Expected only at a magnetic pole or inside shielding.',
+    'gated:invalid-mag': 'Magnetometer vector is zero, missing, or non-finite — check sensor connection or firmware stream.',
 };
 
 // Match index.html's design tokens (canvas can't read CSS vars directly).

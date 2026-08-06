@@ -100,6 +100,6 @@ records a date and a file reference where the problem lives.
 | [BUG-079](bugs/BUG-079.md) | fixed | host/web UI | Manual ranging fps/exposure UI inputs revert before they can be applied (debounce race) |
 | [BUG-080](bugs/BUG-080.md) | fixed | host/web | Web event log renders TX_QUEUE_STATS (EVENT code 7) as mojibake |
 | [BUG-081](bugs/BUG-081.md) | fixed | host/web UI | Manual ranging number fields revert mid-type — the ~4 Hz `ranging` echo re-seeds a focused field |
-| [BUG-082](bugs/BUG-082.md) | blocked | host/sensors | Heading wraparound at 360° triggers a false motion warning — does not reproduce against `YawFusion`/`StationarityGate` by static read or empirical replay of 5 captures; waiting on a fresh repro recording from the owner |
-| [BUG-083](bugs/BUG-083.md) | open | firmware/scanner-stream | Firmware emits `pressure = 0.0 Pa` on isolated ENV frames (`have_env` decoupled from pressure validity) — each dropout fabricates a ~2.45 m SLAM vertical step; host-mitigated by `baro_reject_m` |
+| [BUG-082](bugs/BUG-082.md) | fixed | firmware/host | Partial sensor-hub samples serialized as zero-filled ENV frames (causing false anomaly gates) & timestamp burst rate spikes — fixed via firmware complete-batch latch + validity masks + diagnostics and host defense in depth |
+| [BUG-083](bugs/BUG-083.md) | fixed (by BUG-082) | firmware/scanner-stream | Firmware emits `pressure = 0.0 Pa` on isolated ENV frames (`have_env` decoupled from pressure validity) — fixed by BUG-082's complete-batch latch and host validation |
 

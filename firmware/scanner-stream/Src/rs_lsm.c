@@ -389,8 +389,8 @@ static void rs_lsm_shub_demux(const lsm6dsv16x_fifo_out_raw_t *w, rs_lsm_sample_
         acc->press_n++;
 #else
         out->pressure_pa = pa;
+        out->have_press = 1;
 #endif
-        out->have_env = 1;
         break;
     }
     case LSM6DSV16X_SENSORHUB_SLAVE1_TAG: {  /* LIS2MDL mag x,y,z int16 LE */
@@ -405,8 +405,9 @@ static void rs_lsm_shub_demux(const lsm6dsv16x_fifo_out_raw_t *w, rs_lsm_sample_
         }
 #if RS_LSM_SHUB_AVERAGE
         acc->mag_n++;
+#else
+        out->have_mag = 1;
 #endif
-        out->have_env = 1;
         break;
     }
     case LSM6DSV16X_SENSORHUB_SLAVE2_TAG: {  /* STTS22H temp int16 LE */
@@ -417,8 +418,8 @@ static void rs_lsm_shub_demux(const lsm6dsv16x_fifo_out_raw_t *w, rs_lsm_sample_
         acc->temp_n++;
 #else
         out->temp_c = c;
+        out->have_temp = 1;
 #endif
-        out->have_env = 1;
         break;
     }
     default:
@@ -545,6 +546,19 @@ uint8_t g_lsm_freq_fine_valid = 0;    /* 1 once the register above has actually 
 uint16_t g_lsm_tag_hist[32] = { 0 };  /* diagnostic: FIFO tag histogram (bench probe reads it) */
 uint32_t g_lsm_fifo_ovr = 0;          /* diagnostic: drains that found FIFO_STATUS.FIFO_OVR_IA set */
 uint16_t g_lsm_raw_dropped = 0;       /* diagnostic: stream-11 words dropped for want of buffer */
+uint32_t g_lsm_shub_partial_batches = 0; /* diagnostic: partial sensor-hub batches */
+uint32_t g_lsm_shub_missing_tags = 0;    /* diagnostic: missing sensor-hub field tags */
+uint32_t g_lsm_shub_nacks = 0;           /* diagnostic: sensor-hub slave NACKs */
+uint32_t g_lsm_shub_abort_partials = 0;  /* diagnostic: abort-related partial drains */
+
+typedef struct {
+    float pressure_pa;
+    float mag_ut[3];
+    float temp_c;
+    uint8_t valid_mask; /* bit 0: press, bit 1: mag, bit 2: temp */
+} rs_lsm_shub_latch_t;
+
+static rs_lsm_shub_latch_t g_shub_latch = { 0 };
 
 uint8_t rs_lsm_shub_status_raw(void) {
     lsm6dsv16x_status_master_t st = { 0 };
@@ -632,6 +646,11 @@ static int rs_lsm_read_latest_raw_impl(rs_lsm_sample_t *out, rs_lsm_raw_word_t *
             bool frame_ready = false;
             (void)platform_get_event_status(PLATFORM_GPIO_IT_EVT, &frame_ready);
             if (frame_ready) {
+#if RS_LSM_ENABLE_SHUB && RS_LSM_SHUB_AVERAGE
+                if (shub_acc.press_n != 0 || shub_acc.mag_n != 0 || shub_acc.temp_n != 0) {
+                    g_lsm_shub_abort_partials++;
+                }
+#endif
                 break; /* remaining words stay queued in the LSM's hardware FIFO */
             }
         }
@@ -737,15 +756,41 @@ static int rs_lsm_read_latest_raw_impl(rs_lsm_sample_t *out, rs_lsm_raw_word_t *
 #endif
 #if RS_LSM_ENABLE_SHUB && RS_LSM_SHUB_AVERAGE
     if (shub_acc.press_n != 0) {
-        out->pressure_pa = shub_acc.press_acc / (float)shub_acc.press_n;
+        g_shub_latch.pressure_pa = shub_acc.press_acc / (float)shub_acc.press_n;
+        g_shub_latch.valid_mask |= (1u << 0);
+        out->have_press = 1;
     }
     if (shub_acc.mag_n != 0) {
         for (int k = 0; k < 3; k++) {
-            out->mag_ut[k] = shub_acc.mag_acc[k] / (float)shub_acc.mag_n;
+            g_shub_latch.mag_ut[k] = shub_acc.mag_acc[k] / (float)shub_acc.mag_n;
         }
+        g_shub_latch.valid_mask |= (1u << 1);
+        out->have_mag = 1;
     }
     if (shub_acc.temp_n != 0) {
-        out->temp_c = shub_acc.temp_acc / (float)shub_acc.temp_n;
+        g_shub_latch.temp_c = shub_acc.temp_acc / (float)shub_acc.temp_n;
+        g_shub_latch.valid_mask |= (1u << 2);
+        out->have_temp = 1;
+    }
+
+    if (shub_acc.press_n != 0 || shub_acc.mag_n != 0 || shub_acc.temp_n != 0) {
+        uint8_t sh_st = rs_lsm_shub_status_raw();
+        if (sh_st & 0x78u) {
+            g_lsm_shub_nacks++;
+        }
+        if ((g_shub_latch.valid_mask & 0x07u) == 0x07u) {
+            out->pressure_pa = g_shub_latch.pressure_pa;
+            memcpy(out->mag_ut, g_shub_latch.mag_ut, sizeof(out->mag_ut));
+            out->temp_c = g_shub_latch.temp_c;
+            out->have_env = 1;
+            g_shub_latch.valid_mask = 0u;
+        } else {
+            out->have_env = 0;
+            g_lsm_shub_partial_batches++;
+            if (!(g_shub_latch.valid_mask & (1u << 0))) g_lsm_shub_missing_tags++;
+            if (!(g_shub_latch.valid_mask & (1u << 1))) g_lsm_shub_missing_tags++;
+            if (!(g_shub_latch.valid_mask & (1u << 2))) g_lsm_shub_missing_tags++;
+        }
     }
 #endif
     if (raw_count != NULL) {

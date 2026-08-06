@@ -24,6 +24,8 @@ from .protocol import (
     decode_imu_cal,
     decode_imu_quat,
     decode_imu_raw,
+    is_valid_env,
+    is_valid_mag,
 )
 
 
@@ -74,17 +76,18 @@ class SensorState:
                     self._fusion.update(q, self._raw_mag, frame.header.t_us)
         elif sid == StreamId.ENV:
             pressure, mag, temp = decode_env(frame.payload)
-            sample = EnvSample(pressure, mag, temp, frame.header.t_us)
-            with self._lock:
-                self._env = sample
-                self._raw_mag = mag
-                self._pressure.append(pressure)
-                self._temp.append(temp)
-                if (self._last_spark_t is None
-                        or (frame.header.t_us - self._last_spark_t) >= self._spark_interval_us):
-                    self._pressure_spark.append(pressure)
-                    self._temp_spark.append(temp)
-                    self._last_spark_t = frame.header.t_us
+            if is_valid_env(pressure, mag, temp):
+                sample = EnvSample(pressure, mag, temp, frame.header.t_us)
+                with self._lock:
+                    self._env = sample
+                    self._raw_mag = mag
+                    self._pressure.append(pressure)
+                    self._temp.append(temp)
+                    if (self._last_spark_t is None
+                            or (frame.header.t_us - self._last_spark_t) >= self._spark_interval_us):
+                        self._pressure_spark.append(pressure)
+                        self._temp_spark.append(temp)
+                        self._last_spark_t = frame.header.t_us
         elif sid == StreamId.IMU_RAW:
             with self._lock:
                 tick_us = self._imu_tick_us
@@ -788,6 +791,10 @@ class YawFusion:
         ang = 2.0 * math.acos(max(0.0, min(1.0, abs(dot))))   # rad between orientations
         if (t_us - prev_t) >= self.MOTION_MIN_DT_US and math.degrees(ang) / dt > self.motion_rate_dps:
             self.status = "gated:motion"
+            self._last_t = t_us
+            return
+        if not is_valid_mag(raw_mag):
+            self.status = "gated:invalid-mag"
             self._last_t = t_us
             return
         # calibrate + axis-convention the mag, then anomaly gate on magnitude
