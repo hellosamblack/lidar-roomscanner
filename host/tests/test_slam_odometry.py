@@ -55,6 +55,50 @@ def test_6dof_leaves_rotation_free():
     assert np.allclose(res.pose[:3, 3], np.zeros(3), atol=1e-2)
 
 
+def test_rotation_angle_deg_measures_geodesic_magnitude():
+    from roomscan.slam.odometry import _rotation_angle_deg
+    assert _rotation_angle_deg(np.eye(3)) == pytest.approx(0.0, abs=1e-9)
+    th = np.radians(37.0)
+    Rz = np.array([[np.cos(th), -np.sin(th), 0], [np.sin(th), np.cos(th), 0], [0, 0, 1]])
+    assert _rotation_angle_deg(Rz) == pytest.approx(37.0, abs=1e-6)
+
+
+def test_adaptive_accepts_the_6dof_solve_when_confident():
+    # Well-constrained corner geometry, a clean fit: the confidence bar is met, so
+    # adaptive returns the LiDAR (6dof) solve itself -- the point cloud is trusted
+    # to override the IMU prior.
+    target = _corner_cloud()
+    src = _corner_cloud()
+    res = register(src, target, np.eye(4), mode="adaptive")
+    assert res.source == "lidar"
+    assert res.ok
+    ref6 = register(src, target, np.eye(4), mode="6dof")
+    assert np.allclose(res.pose, ref6.pose, atol=1e-6)     # it IS the 6dof solve
+
+
+def test_adaptive_falls_back_to_the_translation_solve_when_not_confident():
+    # Force the confidence gate to fail (an unreachable fitness bar): adaptive must
+    # fall back to the IMU-locked translation solve, byte-for-byte.
+    target = _plane_cloud(curvature=0.8)
+    src_pts = target.point.positions.numpy().copy() + np.array([0.03, -0.02, 0.04], np.float32)
+    source = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
+    source.point.positions = o3d.core.Tensor(src_pts)
+    res = register(source, target, np.eye(4), mode="adaptive", adapt_min_fitness=1.01)
+    assert res.source == "imu"
+    ref = register(source, target, np.eye(4), mode="translation")
+    assert np.allclose(res.pose, ref.pose, atol=1e-9)
+    assert np.allclose(res.pose[:3, :3], np.eye(3), atol=1e-9)   # rotation held at prior
+
+
+def test_adaptive_correction_ceiling_forces_fallback():
+    # Even a confident fit is rejected if the per-frame rotation correction exceeds
+    # the ceiling (divergence backstop): ceiling 0 => any correction => IMU fallback.
+    target = _corner_cloud()
+    src = _corner_cloud()
+    res = register(src, target, np.eye(4), mode="adaptive", adapt_max_corr_deg=-1.0)
+    assert res.source == "imu"
+
+
 def _corner_cloud(n=15):
     """Inside corner of a unit box: three mutually perpendicular faces
     (z=0, x=0, y=0), giving point normals along all three axes so 6dof

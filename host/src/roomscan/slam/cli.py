@@ -91,7 +91,7 @@ def _run(frames, width, height, cfg, mode, device=None):
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="roomscan-slam")
     ap.add_argument("capture")
-    ap.add_argument("--icp-mode", choices=["translation", "6dof"], default=None)
+    ap.add_argument("--icp-mode", choices=["translation", "6dof", "adaptive"], default=None)
     ap.add_argument("--device", default=None,
                     help='Open3D compute device, e.g. "CPU:0" or "CUDA:0" '
                          "(default: [slam].device in roomscan.toml, else CPU:0). "

@@ -184,6 +184,85 @@ def test_stationary_hold_dejitters_report_without_touching_map():
     assert on_step < off_step
 
 
+def test_imu_spike_pre_gate_holds_orientation_through_a_glitch():
+    """IMU spike pre-gate (2026-08-05-crazySLAM.bin): a physically-impossible
+    inter-frame SFLP rotation is a glitch, and in translation mode ICP holds
+    rotation at the prior and cannot disagree, so the glitch would come out as
+    fabricated translation. The gate must hold the LAST GOOD orientation as the
+    prior instead.
+
+    Asserted on the pose ROTATION, which is deterministic here: in translation
+    mode the ICP correction (init identity) carries rotation = identity, so the
+    final pose rotation is exactly `prior_rotation(quat_prior)` whether or not
+    the frame tracks -- no dependence on ICP fitness/lost behaviour.
+    """
+    from roomscan.slam.frames import prior_rotation
+
+    q = (0.70710678, 0.0, 0.70710678, 0.0)          # the true, steady orientation
+    q_spike = (0.0, 0.70710678, 0.0, 0.70710678)    # a glitch: 180 deg from q
+    dot = abs(float(np.dot(np.array(q), np.array(q_spike))))
+    assert math.degrees(2.0 * math.acos(min(1.0, dot))) > 30.0   # exceeds the ceiling
+
+    def run(spike_deg):
+        m = Mapper(W, H, voxel_size=0.02, icp_mode="translation", imu_spike_deg=spike_deg)
+        m.step(_textured_wall(1.20), q, 101325.0)               # bootstrap
+        m.step(_textured_wall(1.20), q, 101325.0)               # steady baseline
+        s = m.step(_textured_wall(1.20), q_spike, 101325.0)     # GLITCH frame
+        return m, s
+
+    m_gated, s_gated = run(30.0)
+    m_off, s_off = run(0.0)
+
+    # Gate on: caught the glitch and held q; the disabled gate followed the spike.
+    assert m_gated.imu_spike_count == 1
+    assert m_off.imu_spike_count == 0
+    assert np.allclose(s_gated.pose[:3, :3], prior_rotation(q), atol=1e-6)
+    assert np.allclose(s_off.pose[:3, :3], prior_rotation(q_spike), atol=1e-6)
+    # The held prior keeps the (unmoved) wall aligned, so the gated frame tracks
+    # cleanly. (The magnitude of the fabricated translation the raw spike causes
+    # is scene-dependent -- a symmetric synthetic wall maps roughly onto itself
+    # under a boresight spike -- so the jump REDUCTION is measured on the real
+    # capture via slam_ensemble, not asserted on this geometry.)
+    assert not s_gated.tracking_lost
+
+    # The gate did NOT advance `_quat_prev` to the glitch: a following good frame
+    # sees ~0 rotation and does not re-trigger.
+    s_next = m_gated.step(_textured_wall(1.20), q, 101325.0)
+    assert m_gated.imu_spike_count == 1
+    assert not s_next.tracking_lost
+
+
+def test_imu_spike_gate_does_not_fire_on_normal_motion():
+    # With the gate ENABLED (it ships off; enable explicitly here), a steady
+    # in-spec orientation sequence still never trips it. ~5 deg/frame is brisk pan.
+    m = Mapper(W, H, voxel_size=0.02, icp_mode="translation", imu_spike_deg=30.0)
+    quats = []
+    for i in range(6):
+        a = math.radians(5.0 * i) / 2.0            # 5 deg/frame about Y, well under 30
+        quats.append((math.cos(a), 0.0, math.sin(a), 0.0))
+    for q in quats:
+        m.step(_textured_wall(1.20), q, 101325.0)
+    assert m.imu_spike_count == 0
+
+
+def test_adaptive_mode_runs_and_classifies_each_tracked_frame():
+    # icp_mode="adaptive" must run end to end through the Mapper and classify each
+    # tracked (non-bootstrap, non-lost) frame as either LiDAR-accepted or
+    # IMU-fallback. Totals must be consistent with the trajectory length.
+    q = (0.70710678, 0.0, 0.70710678, 0.0)
+    m = Mapper(W, H, voxel_size=0.02, icp_mode="adaptive")
+    for _ in range(6):
+        m.step(_textured_wall(1.20), q, 98579.0)
+    total = m.icp_lidar_count + m.icp_imu_fallback_count
+    assert total >= 1
+    assert total <= len(m.trajectory)
+    # translation-mode counters stay zero (no adaptive classification there)
+    m2 = Mapper(W, H, voxel_size=0.02, icp_mode="translation")
+    m2.step(_textured_wall(1.20), q, 98579.0)
+    m2.step(_textured_wall(1.20), q, 98579.0)
+    assert m2.icp_lidar_count == 0 and m2.icp_imu_fallback_count == 0
+
+
 def test_mapper_accepts_explicit_cpu_device_string():
     # Device-configurability (Phase 6 follow-up): passing device="CPU:0"
     # explicitly must behave identically to the omitted-argument default --
@@ -380,6 +459,41 @@ def test_baro_authority_zero_disables_the_constraint():
     heights, steps = _drive_baro(m, np.linspace(101325.0, 101300.0, 500))
     assert np.all(steps == 0.0)
     assert m.baro_correction_m == 0.0
+
+
+def test_baro_rejects_zero_pressure_dropout():
+    """2026-08-05-crazySLAM.bin: 4 frames carried pressure == 0.0 Pa (a dropout),
+    which baro_height_m(0, ref) = 44330 m turns into a ~2.45 m vertical step each
+    -- the whole 8.6 m of that capture's fabricated vertical. The reject guard
+    must drop a 0.0 Pa sample entirely: no datum poisoning, no filter update, no
+    pose move. Without it the same dropout injects a metre-scale step."""
+    ref = 101325.0
+    warm = [ref] * 95                        # establish the datum (90) + a few
+    seq = warm + [0.0] + [ref] * 5           # one dropout, then good again
+
+    m_on = Mapper(W, H, voxel_size=0.02, baro_reject_m=50.0)
+    heights_on, steps_on = _drive_baro(m_on, seq)
+    assert m_on.baro_rejected == 1
+    assert np.abs(steps_on).max() < 0.01     # dropout ignored: no vertical jump
+    assert m_on._ref_pa == pytest.approx(ref)   # datum not poisoned by the 0.0
+
+    m_off = Mapper(W, H, voxel_size=0.02, baro_reject_m=0.0)   # rejection disabled
+    _, steps_off = _drive_baro(m_off, seq)
+    assert m_off.baro_rejected == 0
+    assert np.abs(steps_off).max() > 1.0     # unrejected dropout fabricates a step
+
+
+def test_baro_rejects_datum_relative_altitude_outlier():
+    # A physically-plausible pressure that still implies a huge altitude vs the
+    # datum (here ~600 m from a ~7 kPa offset) is a glitch for an indoor scan and
+    # is rejected; a nearby in-range value is not.
+    ref = 101325.0
+    m = Mapper(W, H, voxel_size=0.02, baro_reject_m=50.0)
+    _drive_baro(m, [ref] * 95)               # datum
+    _drive_baro(m, [ref - 7000.0])           # ~+600 m implied -> outlier
+    assert m.baro_rejected == 1
+    _drive_baro(m, [ref - 5.0])              # ~+0.4 m -> accepted
+    assert m.baro_rejected == 1
 
 
 def test_baro_longer_tau_rejects_more_noise():

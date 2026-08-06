@@ -1,12 +1,24 @@
-"""Point-to-plane ICP, frame-to-model. Two modes (docs spec 3.6):
-- 'translation': rotation held at the SFLP prior (init_pose rotation); a
-  genuine 3-DoF point-to-plane translation solve (Task 9.5 Lever 2) --
-  NOT the full 6-DoF ICP with the rotation discarded afterward. Cheaper
-  (3x3 normal equations vs 6x6 per iteration) and geometrically honest: gate
-  stats (fitness/rmse) reflect the actual translation-only alignment, not a
-  6-DoF fit that gets partially thrown away.
-- '6dof': full point-to-plane, init_pose as the initial guess (Open3D's
-  tensor ICP, unchanged).
+"""Point-to-plane ICP, frame-to-model. Three modes (docs spec 3.6):
+- 'translation' (DEFAULT): rotation held at the SFLP prior (init_pose rotation);
+  a genuine 3-DoF point-to-plane translation solve (Task 9.5 Lever 2) -- NOT the
+  full 6-DoF ICP with the rotation discarded afterward. Cheaper (3x3 normal
+  equations vs 6x6 per iteration) and geometrically honest: gate stats
+  (fitness/rmse) reflect the actual translation-only alignment, not a 6-DoF fit
+  that gets partially thrown away.
+- '6dof': full point-to-plane, init_pose as the initial guess (Open3D's tensor
+  ICP, unchanged). Disqualified on accuracy for live use (CUDA-ICP study: 8.0 m
+  closure vs 0.67) -- kept for study/benchmarking.
+- 'adaptive' (EXPERIMENTAL, opt-in, MEASURED WORSE -- do not default to it):
+  LiDAR-primary/IMU-gated -- try 6dof, accept its rotation only when strongly
+  confirmed AND rotationally observable, else fall back to the translation solve.
+  The intent (LiDAR overrides a bad IMU rotation prior) does NOT pay off on this
+  54x42 ToF: frame-to-model 6dof rotation is noisier than the SFLP IMU quaternion,
+  so on real captures it accepts LiDAR ~98% of frames and drifts far worse than
+  translation (17 m vs 0.63 m on captures/imuTranslationError.bin, a tripod whose
+  true translation is ~0). It stays because it is the honest realisation of the
+  LiDAR-primary idea and would earn its place on hardware whose ICP rotation beats
+  its IMU, or a scene/IMU-failure that no capture in hand exercises. See
+  docs/superpowers/plans (2026-08-05 crazySLAM) for the measurement.
 Target must carry normals (the raycast model does)."""
 from __future__ import annotations
 
@@ -103,12 +115,53 @@ def _solve_translation_step(a: np.ndarray, b: np.ndarray,
     return v @ ((v.T @ b) / w), cond
 
 
+def _rotation_angle_deg(R: np.ndarray) -> float:
+    """Geodesic magnitude of a rotation matrix, in degrees. Used by the adaptive
+    mode to measure how far the 6dof ICP solve wants to move OFF the IMU prior --
+    because ICP is initialised at identity in the local T_pred frame, the residual
+    rotation IS the ICP-vs-IMU disagreement."""
+    c = (float(np.trace(R[:3, :3])) - 1.0) / 2.0
+    return float(np.degrees(np.arccos(max(-1.0, min(1.0, c)))))
+
+
+def rotation_observability_cond(points: np.ndarray, normals: np.ndarray) -> float:
+    """Condition number of the point-to-plane ROTATION Hessian
+    ``H = sum_i (p_i x n_i)(p_i x n_i)^T`` (3x3), the quantity that says whether a
+    surface can constrain a full 3-DoF rotation at all.
+
+    This is the signal fitness/rmse cannot provide. A flat wall filling the FOV has
+    every normal parallel, so the cross products span only the 2 directions
+    perpendicular to that normal -- H is rank-2 and rotation ABOUT the wall normal
+    is unobservable, yet the plane still fits with fitness ~1.0 and near-zero rmse.
+    Trusting the 6dof rotation there accumulates garbage (an adaptive ensemble that
+    gated on fitness alone drifted 17.9 m on a tripod-vs-flat-wall capture whose true
+    motion is ~0). A corner or a cluttered room gives normals along all three axes,
+    H full rank, cond moderate -- there the LiDAR rotation is worth trusting.
+
+    Returns +inf on a degenerate/empty set (treated as unobservable)."""
+    if points.shape[0] < 3:
+        return float("inf")
+    cross = np.cross(points, normals)
+    H = cross.T @ cross
+    try:
+        c = float(np.linalg.cond(H))
+    except np.linalg.LinAlgError:
+        return float("inf")
+    return c if np.isfinite(c) else float("inf")
+
+
 @dataclass
 class RegistrationResult:
     pose: np.ndarray
     fitness: float
     rmse: float
     ok: bool
+    # Which solver produced this result: "translation" (rotation locked to the
+    # IMU prior), "6dof" (full ICP), or for adaptive mode "lidar" (6dof accepted,
+    # LiDAR overrode the prior) / "imu" (6dof rejected, fell back to the locked
+    # prior). Lets the Mapper count how often each source won, for tuning. New
+    # field WITH a default so every existing positional constructor is unaffected.
+    source: str = "translation"
 
 
 def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: np.ndarray,
@@ -170,7 +223,10 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
              init_pose: np.ndarray, mode: str = "translation", max_dist: float = 0.05,
              min_fitness: float = 0.3, max_rmse: float = 0.05,
              max_iter: int = 6, device: str | o3d.core.Device = "CPU:0",
-             cond_cap: float = _COND_CAP) -> RegistrationResult:
+             cond_cap: float = _COND_CAP,
+             adapt_min_fitness: float = 0.6, adapt_max_rmse: float = 0.03,
+             adapt_max_corr_deg: float = 20.0,
+             adapt_rot_cond_cap: float = 100.0) -> RegistrationResult:
     # max_iter=6 (Task 9.5): chosen for ACCURACY, not speed. Swept against the
     # real capture (docs/phase6-slam-validation.md "Post-optimization"): trajectory
     # drift is MONOTONICALLY WORSE with more iterations --
@@ -180,9 +236,46 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
     # accumulates drift, so fewer iterations track the true motion better. iter=6 is
     # the drift minimum; it also happens to sit near the ~35 ms/frame live-preview
     # target, but accuracy -- not that budget -- is why it's the default.
-    if mode not in ("translation", "6dof"):
+    if mode not in ("translation", "6dof", "adaptive"):
         raise ValueError(f"unknown mode {mode!r}")
     init_pose = np.asarray(init_pose, dtype=np.float64)
+
+    if mode == "adaptive":
+        # LiDAR-primary, IMU-gated (owner: "the LiDAR is our primary source of
+        # truth until confidence or blur causes us to lose faith, in which case
+        # the IMU takes over"). Try the full 6dof solve first: because ICP is
+        # initialised at identity in the local T_pred frame, its residual rotation
+        # is exactly how far the point cloud wants to move OFF the IMU prior.
+        # ACCEPT it (LiDAR wins, overriding a wrong prior) only when the fit is
+        # strongly confirmed -- a STRICTER bar than the base ok gate, because
+        # Open3D's 6dof reports fitness >= min_fitness even on the weak-geometry
+        # frames where it diverges (a pure-6dof ensemble died 2/3 of its runs on
+        # 2026-08-05-crazySLAM.bin). Otherwise fall back to the robust translation
+        # solve with rotation locked to the IMU prior -- the IMU takes over. The
+        # per-frame correction ceiling is a divergence backstop on top of fitness.
+        res6 = register(source, target, init_pose, mode="6dof", max_dist=max_dist,
+                        min_fitness=min_fitness, max_rmse=max_rmse, max_iter=max_iter,
+                        device=device, cond_cap=cond_cap)
+        corr_deg = _rotation_angle_deg(res6.pose)
+        # Rotational OBSERVABILITY is the gate fitness cannot be -- a flat wall
+        # fits perfectly yet cannot constrain rotation about its normal. Only
+        # trust the 6dof rotation when the target geometry actually constrains it.
+        if adapt_rot_cond_cap > 0.0:
+            tp = target.point.positions.cpu().numpy().astype(np.float64, copy=False)
+            tn = target.point.normals.cpu().numpy().astype(np.float64, copy=False)
+            observable = rotation_observability_cond(tp, tn) <= adapt_rot_cond_cap
+        else:
+            observable = True
+        confident = (observable and res6.ok and res6.fitness >= adapt_min_fitness
+                     and res6.rmse <= adapt_max_rmse and corr_deg <= adapt_max_corr_deg)
+        if confident:
+            res6.source = "lidar"
+            return res6
+        rest = register(source, target, init_pose, mode="translation", max_dist=max_dist,
+                        min_fitness=min_fitness, max_rmse=max_rmse, max_iter=max_iter,
+                        device=device, cond_cap=cond_cap)
+        rest.source = "imu"
+        return rest
 
     if mode == "translation":
         R = init_pose[:3, :3]
@@ -213,11 +306,11 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
         # FOV) -- Open3D raises rather than returning a degenerate result.
         # Degrade to tracking-lost instead of crashing the mapper.
         return RegistrationResult(pose=init_pose.copy(), fitness=0.0,
-                                  rmse=float("inf"), ok=False)
+                                  rmse=float("inf"), ok=False, source="6dof")
     T = result.transformation.cpu().numpy().copy()
     ok = bool(result.fitness >= min_fitness and result.inlier_rmse <= max_rmse)
     return RegistrationResult(pose=T, fitness=float(result.fitness),
-                              rmse=float(result.inlier_rmse), ok=ok)
+                              rmse=float(result.inlier_rmse), ok=ok, source="6dof")
 
 
 def register_escalating(source, target, init_pose, retry_dist: float = 0.0,

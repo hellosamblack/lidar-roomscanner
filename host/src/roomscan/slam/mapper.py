@@ -111,6 +111,8 @@ class Mapper:
                  icp_cond_cap: float = _COND_CAP,
                  min_fitness: float = 0.3, max_rmse: float = 0.05,
                  max_iter: int = 6,
+                 adapt_min_fitness: float = 0.6, adapt_max_rmse: float = 0.03,
+                 adapt_max_corr_deg: float = 20.0, adapt_rot_cond_cap: float = 100.0,
                  min_confidence: float | None = _DEFAULT_MIN_CONFIDENCE,
                  weight_threshold: float = 3.0,
                  device: str | o3d.core.Device = "CPU:0",
@@ -122,12 +124,36 @@ class Mapper:
                  stationary_coherence: float = 0.5,
                  stationary_step_ceiling: float = 0.03,
                  stationary_rot_ceiling: float = 0.3,
+                 imu_spike_deg: float = 0.0,
+                 baro_reject_m: float = 50.0,
                  clock=time.perf_counter):
         self.width, self.height = width, height
         self.icp_mode = icp_mode
         self.baro_authority = baro_authority
         self.baro_tau_frames = baro_tau_frames
         self.min_confidence = min_confidence
+        # IMU spike pre-gate ceiling, deg of inter-frame SFLP rotation. Above
+        # this the quat is treated as a glitch and the last good orientation is
+        # held as the prior (see step()). DEFAULT 0 = DISABLED: this is a
+        # defensive guard against a genuine per-frame rotation glitch, but no
+        # real capture here exercises it -- 2026-08-05-crazySLAM.bin looked like
+        # an IMU spike (capture_motion read 14737 deg/s) but the mapper sees only
+        # 2.9 deg/frame; that capture's fabrication was a BAROMETER dropout (see
+        # `baro_reject_m`). Shipping it active would be an unmeasured behaviour
+        # change, so it is off until a capture proves a threshold. ~30 deg/frame
+        # (900 deg/s) is a sane value if enabled. `imu_spike_count` reports hits.
+        self.imu_spike_deg = imu_spike_deg
+        self.imu_spike_count = 0
+        # Barometer outlier rejection (2026-08-05-crazySLAM.bin): a pressure
+        # dropout reads 0.0 Pa, which baro_height_m maps to 44330 m; a single
+        # such sample injects a ~2.45 m vertical step even at 0.05 authority, and
+        # 4 of them fabricated that capture's entire 8.6 m of vertical "motion".
+        # Reject any pressure whose implied altitude vs the datum exceeds
+        # `baro_reject_m` (an indoor handheld scan never moves that far
+        # vertically), plus a hard reject of non-physical pressure <= 0.
+        # 0 disables. `baro_rejected` reports how many samples were dropped.
+        self.baro_reject_m = baro_reject_m
+        self.baro_rejected = 0
         self._device = device if isinstance(device, o3d.core.Device) else o3d.core.Device(device)
         # Item 5 (2026-08-02): the device that runs ICP's nearest-neighbour
         # index, SEPARATE from the compute device above. Default "CPU:0" --
@@ -161,7 +187,15 @@ class Mapper:
                              block_count=block_count)
         self._gate = dict(max_dist=max_dist, min_fitness=min_fitness, max_rmse=max_rmse,
                           cond_cap=icp_cond_cap,
-                          max_iter=max(1, int(max_iter)))
+                          max_iter=max(1, int(max_iter)),
+                          adapt_min_fitness=adapt_min_fitness,
+                          adapt_max_rmse=adapt_max_rmse,
+                          adapt_max_corr_deg=adapt_max_corr_deg,
+                          adapt_rot_cond_cap=adapt_rot_cond_cap)
+        # icp_mode="adaptive" only: how often the point cloud (LiDAR) overrode the
+        # IMU rotation prior vs fell back to it. Both zero in translation/6dof mode.
+        self.icp_lidar_count = 0
+        self.icp_imu_fallback_count = 0
         self._retry_dist = icp_retry_dist
         # Frames where the tight radius failed and the wider retry was tried.
         # Expected to be ~0 on a clean scan; a non-trivial count means the scan
@@ -324,6 +358,11 @@ class Mapper:
         it earn its place again by moving a number we can measure."""
         if pressure_pa is None or self.baro_authority <= 0.0:
             return pose
+        if self._baro_is_outlier(pressure_pa):
+            # Drop a dropout/glitch BEFORE it reaches the datum or the low-pass:
+            # no _ref_acc update, no _baro_lp update, pose unchanged this frame.
+            self.baro_rejected += 1
+            return pose
         if self._ref_pa is None:
             self._ref_acc += pressure_pa
             self._ref_n += 1
@@ -347,6 +386,30 @@ class Mapper:
         out = pose.copy()
         out[:3, 3] = cur + step * up
         return out
+
+    def _baro_is_outlier(self, pressure_pa: float) -> bool:
+        """True for a pressure sample that is a sensor dropout/glitch rather than
+        a reading. Two rules:
+
+        * ``pressure_pa <= 0`` -- non-physical; the exact 2026-08-05-crazySLAM.bin
+          failure mode was `pressure == 0.0` (baro_height_m(0, ref) = 44330 m).
+        * implied altitude vs the datum (or, before the datum is fixed, the
+          running mean of accepted samples) beyond ``baro_reject_m`` -- an indoor
+          handheld scan never moves that far vertically in one frame.
+
+        Disabled by ``baro_reject_m <= 0``. The first sample (no datum, no running
+        mean yet) can only be judged by the ``<= 0`` rule -- there is nothing to
+        compare a plausible-but-wrong value against yet."""
+        if self.baro_reject_m <= 0.0:
+            return False
+        if pressure_pa <= 0.0:
+            return True
+        ref = self._ref_pa
+        if ref is None:
+            ref = self._ref_acc / self._ref_n if self._ref_n else None
+        if ref is None:
+            return False
+        return abs(baro_height_m(pressure_pa, ref)) > self.baro_reject_m
 
     def _gate_confidence(self, depth_mm: np.ndarray, confidence: np.ndarray | None) -> np.ndarray:
         """Invalidate (zero) depth pixels whose confidence is below
@@ -378,17 +441,40 @@ class Mapper:
         color = self._reflectance_color(reflectance) if reflectance is not None else None
         pts, valid = self._deproj.grid(depth_mm)
         n_valid = int(valid.sum())
-        T_pred = predict_pose(quat, self._t_prev)
-
-        # Per-frame rotation magnitude (deg) from the SFLP prior, for the
-        # stationarity gate: separates a still tripod (~0) from an actively
-        # aimed handheld scan. angle = 2*acos(|<q_prev, q>|).
+        # Per-frame rotation magnitude (deg) from the SFLP prior. Computed
+        # BEFORE predict_pose so the IMU spike pre-gate can act on it: the prior
+        # feeds both the pose AND the raycast viewpoint (T_pred below), so a
+        # glitch has to be caught here or it corrupts the model cloud too.
+        # angle = 2*acos(|<q_prev, q>|). Also the stationarity gate's rotation
+        # signal (separates a still tripod ~0 from an actively aimed scan).
         rot_delta_deg = 0.0
         if self._quat_prev is not None and quat is not None:
             dot = abs(float(np.dot(self._quat_prev, quat)))
             rot_delta_deg = float(np.degrees(2.0 * np.arccos(min(1.0, dot))))
-        if quat is not None:
+
+        # IMU spike pre-gate: a physically-impossible inter-frame rotation is an
+        # SFLP quaternion glitch, not motion -- this capture's SFLP stream spiked
+        # to 14737 deg/s (40 rev/s) while the operator moved smoothly. In
+        # translation mode ICP holds rotation at this prior and is structurally
+        # unable to disagree, so the glitch comes out as fabricated translation
+        # and is baked into the TSDF permanently (one frame here jumped 2.5 m).
+        # When the delta exceeds `imu_spike_deg`, hold the last good orientation
+        # as the prior instead; a physical-ceiling reject needs no point-cloud
+        # corroboration, so it is unambiguous and works even in translation mode.
+        # `imu_spike_deg <= 0` disables it, restoring the pre-gate behaviour
+        # exactly. The stricter, point-cloud-corroborated rejection (reject a
+        # spike the LiDAR does not confirm) is `icp_mode="adaptive"`.
+        quat_prior = quat
+        spike = (self._quat_prev is not None and quat is not None
+                 and self.imu_spike_deg > 0.0 and rot_delta_deg > self.imu_spike_deg)
+        if spike:
+            quat_prior = self._quat_prev            # hold last good orientation
+            rot_delta_deg = 0.0                     # nothing rotated this frame
+            self.imu_spike_count += 1
+        elif quat is not None:
             self._quat_prev = np.asarray(quat, dtype=np.float64)
+
+        T_pred = predict_pose(quat_prior, self._t_prev)
 
         lost = False
         held = False
@@ -443,6 +529,10 @@ class Mapper:
                 icp_ms = (self._clock() - t_icp0) * 1000.0
                 if escalated:
                     self.icp_escalations += 1
+                if res.source == "lidar":
+                    self.icp_lidar_count += 1
+                elif res.source == "imu":
+                    self.icp_imu_fallback_count += 1
                 fitness, rmse = res.fitness, res.rmse
                 if res.ok:
                     pose = self._apply_baro_z(T_pred @ res.pose, pressure_pa)

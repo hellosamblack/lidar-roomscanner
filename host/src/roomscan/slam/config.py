@@ -44,6 +44,10 @@ class SlamConfig:
     ``[slam]`` table; anything else is ignored.
     """
 
+    # "translation" (default, shipped): IMU-rotation + ICP-translation. "6dof":
+    # full ICP (study/benchmark only). "adaptive": EXPERIMENTAL LiDAR-primary --
+    # measured WORSE than translation on this sensor (its 6dof rotation is noisier
+    # than the SFLP IMU), kept opt-in only. See slam/odometry.py's module docstring.
     icp_mode: str = "translation"
     voxel_size: float = 0.01
     # BUG-037. `baro_weight` (a per-frame blend gain toward the RAW barometric
@@ -81,6 +85,24 @@ class SlamConfig:
     icp_cond_cap: float = 20.0
     min_fitness: float = 0.3
     max_rmse: float = 0.05
+    # icp_mode="adaptive" (LiDAR-primary, IMU-gated): the STRICTER bar the full
+    # 6dof solve must clear before its rotation is trusted over the IMU prior.
+    # Above these it falls back to the translation solve (rotation locked to the
+    # prior). Stricter than min_fitness/max_rmse on purpose -- Open3D's 6dof
+    # reports fitness >= min_fitness even where it diverges. `adapt_max_corr_deg`
+    # rejects an implausibly large per-frame rotation correction (divergence
+    # backstop). Unused unless icp_mode == "adaptive". Pinned to Mapper.__init__
+    # by test_mapper_kwargs_defaults_match_mapper_signature.
+    adapt_min_fitness: float = 0.6
+    adapt_max_rmse: float = 0.03
+    adapt_max_corr_deg: float = 20.0
+    # Rotational-observability gate for adaptive mode: max condition number of the
+    # point-to-plane rotation Hessian (sum (p x n)(p x n)^T) below which the 6dof
+    # rotation is trusted. A flat wall is rank-deficient here (rotation about its
+    # normal unobservable) and fits with fitness ~1 anyway, so fitness alone let
+    # the 6dof rotation drift 17.9 m on a flat-wall tripod capture; this defers to
+    # the IMU exactly when geometry cannot constrain rotation. 0 disables the gate.
+    adapt_rot_cond_cap: float = 100.0
     fov_h: float = 55.0
     fov_v: float = 42.0
     # Task 13 (data-quality): reflectance color + noise reduction, tuned against
@@ -95,6 +117,22 @@ class SlamConfig:
     stationary_coherence: float = 0.5
     stationary_step_ceiling: float = 0.03
     stationary_rot_ceiling: float = 0.3
+    # IMU spike pre-gate: inter-frame SFLP rotation (deg) above which the quat is
+    # held at the last good orientation instead of corrupting the raycast viewpoint
+    # and the pose. DEFAULT 0 = DISABLED (defensive-only): the capture that looked
+    # like an IMU spike (2026-08-05-crazySLAM.bin, capture_motion read 14737 deg/s)
+    # was actually a BAROMETER dropout -- the mapper sees only 2.9 deg/frame there --
+    # so there is no measured threshold to ship active. ~30 deg/frame is sane if
+    # enabled. Pinned to Mapper.__init__'s default by
+    # test_mapper_kwargs_defaults_match_mapper_signature.
+    imu_spike_deg: float = 0.0
+    # Barometer outlier rejection: drop a pressure sample whose implied altitude
+    # vs the datum exceeds this many metres (an indoor handheld scan never moves
+    # that far), plus a hard reject of non-physical pressure <= 0. A dropout reads
+    # 0.0 Pa -> 44330 m -> a ~2.45 m vertical step per sample; 4 of them fabricated
+    # 2026-08-05-crazySLAM.bin's entire 8.6 m of vertical "translation". 0 disables.
+    # See mapper._apply_baro_z / _baro_is_outlier.
+    baro_reject_m: float = 50.0
     # Compute device for the Open3D tensor pipeline (TsdfMap/pinhole/
     # source_cloud/register). "CPU:0" today -- the installed Open3D 0.19
     # build here has no CUDA support -- but "CUDA:0" (or any other
@@ -239,15 +277,21 @@ class SlamConfig:
             "icp_cond_cap": self.icp_cond_cap,
             "max_iter": self.max_iter,
             "min_fitness": self.min_fitness, "max_rmse": self.max_rmse,
+            "adapt_min_fitness": self.adapt_min_fitness,
+            "adapt_max_rmse": self.adapt_max_rmse,
+            "adapt_max_corr_deg": self.adapt_max_corr_deg,
+            "adapt_rot_cond_cap": self.adapt_rot_cond_cap,
             "min_confidence": self.min_confidence,
             "weight_threshold": self.weight_threshold,
             "baro_authority": self.baro_authority,
             "baro_tau_frames": self.baro_tau_frames,
+            "baro_reject_m": self.baro_reject_m,
             "stationary_hold": self.stationary_hold,
             "stationary_window": self.stationary_window,
             "stationary_coherence": self.stationary_coherence,
             "stationary_step_ceiling": self.stationary_step_ceiling,
             "stationary_rot_ceiling": self.stationary_rot_ceiling,
+            "imu_spike_deg": self.imu_spike_deg,
             "release_cache_every": self.release_cache_every,
             "block_count": self.block_count,
             "icp_device": self.icp_device,

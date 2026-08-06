@@ -250,7 +250,7 @@ def main(argv=None) -> int:
     ap.add_argument("--device", default=None)
     ap.add_argument("--voxel-size", type=float, default=None)
     ap.add_argument("--block-count", type=int, default=None)
-    ap.add_argument("--icp-mode", choices=["translation", "6dof"], default=None)
+    ap.add_argument("--icp-mode", choices=["translation", "6dof", "adaptive"], default=None)
     ap.add_argument("--max-frames", type=int, default=None)
     ap.add_argument("--baro-authority", type=float, default=None)
     ap.add_argument("--max-iter", type=int, default=None)
