@@ -4379,10 +4379,15 @@ async def _comm_probe_loop(state) -> None:
 
 
 def _ws_is_connected(ws: WebSocket) -> bool:
-    return (
-        getattr(ws, "client_state", None) == WebSocketState.CONNECTED
-        and getattr(ws, "application_state", None) == WebSocketState.CONNECTED
-    )
+    if getattr(ws, "closed", False):
+        return False
+    client_state = getattr(ws, "client_state", None)
+    app_state = getattr(ws, "application_state", None)
+    if client_state is not None and client_state != WebSocketState.CONNECTED:
+        return False
+    if app_state is not None and app_state != WebSocketState.CONNECTED:
+        return False
+    return True
 
 
 async def _drop_client(clients: set, ws: WebSocket) -> None:
