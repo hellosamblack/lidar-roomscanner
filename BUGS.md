@@ -104,4 +104,6 @@ records a date and a file reference where the problem lives.
 | [BUG-083](bugs/BUG-083.md) | fixed (by BUG-082) | firmware/scanner-stream | Firmware emits `pressure = 0.0 Pa` on isolated ENV frames (`have_env` decoupled from pressure validity) — fixed by BUG-082's complete-batch latch and host validation |
 | [BUG-084](bugs/BUG-084.md) | open | host/slam | `officeFullScanAug6.bin` forks near frame ~979: the ceiling drops below the previously established height, and Detailed SLAM reconstructs a separate set of rooms |
 | [BUG-085](bugs/BUG-085.md) | fixed | host/web | Web UI frozen with missing comm-status due to JS initialization errors (`Unexpected token 'var'` in `layout.js`, missing `setViewportMirror` in `scene.js`, undeclared `selectedDetail` / `scene` in `browser.js`) |
+| [BUG-086](bugs/BUG-086.md) | fixed | host/web | Server terminal flooded with `socket.send() raised exception.` warnings from Python 3.12 `asyncio` when WebSocket clients disconnect |
+
 

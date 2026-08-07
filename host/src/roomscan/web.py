@@ -41,6 +41,7 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.websockets import WebSocketState
 
 from .colors import gray, turbo
 from . import commstatus
@@ -4377,6 +4378,13 @@ async def _comm_probe_loop(state) -> None:
         await asyncio.sleep(COMM_PROBE_INTERVAL_S)
 
 
+def _ws_is_connected(ws: WebSocket) -> bool:
+    return (
+        getattr(ws, "client_state", None) == WebSocketState.CONNECTED
+        and getattr(ws, "application_state", None) == WebSocketState.CONNECTED
+    )
+
+
 async def _drop_client(clients: set, ws: WebSocket) -> None:
     """Remove a client and best-effort close it; never raises. Also arms the
     debounced sensor idle if that was the last active viewer (covers tabs
@@ -4390,18 +4398,23 @@ async def _drop_client(clients: set, ws: WebSocket) -> None:
     clients.discard(ws)
     state = app.state
     state.clients.discard(ws)
+    _magcal_clients(state).discard(ws)
     cid = getattr(state, "ws_client_id", {}).pop(ws, None)
     if cid is not None:
         getattr(state, "client_active", {}).pop(cid, None)
-    try:
-        await ws.close()
-    except Exception:
-        pass
+    if _ws_is_connected(ws):
+        try:
+            await ws.close()
+        except Exception:
+            pass
     await _viewer_left(state)
 
 
 async def _broadcast_bytes(clients: set, data: bytes) -> None:
     for ws in list(clients):
+        if not _ws_is_connected(ws):
+            await _drop_client(clients, ws)
+            continue
         try:
             await ws.send_bytes(data)
         except Exception:
@@ -4410,6 +4423,9 @@ async def _broadcast_bytes(clients: set, data: bytes) -> None:
 
 async def _broadcast_text(clients: set, text: str) -> None:
     for ws in list(clients):
+        if not _ws_is_connected(ws):
+            await _drop_client(clients, ws)
+            continue
         try:
             await ws.send_text(text)
         except Exception:
@@ -4486,10 +4502,11 @@ async def _drop_mesh_client(state, ws) -> None:
     dead mesh socket alone must not idle the sensor)."""
     _mesh_clients(state).pop(ws, None)
     getattr(state, "ws_client_id", {}).pop(ws, None)
-    try:
-        await ws.close()
-    except Exception:
-        pass
+    if _ws_is_connected(ws):
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
 
 async def _pump_mesh(state, now: float) -> None:
@@ -4514,6 +4531,9 @@ async def _pump_mesh(state, now: float) -> None:
         ready = (not flow.in_flight if flow.acked_ever
                  else now - flow.last_legacy_send >= LEGACY_MESH_INTERVAL_S)
         if not ready:
+            continue
+        if not _ws_is_connected(ws):
+            await _drop_mesh_client(state, ws)
             continue
         try:
             await ws.send_bytes(latest)
