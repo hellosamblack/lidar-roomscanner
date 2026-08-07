@@ -41,12 +41,12 @@
     }
 
     var CARD_ICONS = {
-        'telemetry': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4M12,6A6,6 0 0,0 6,12H8A4,4 0 0,1 12,8V6Z"/></svg>',
-        'sensors': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4M14.12,7.88L9.88,12.12L7.88,14.12L12.12,9.88L14.12,7.88Z"/></svg>',
+        'telemetry': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12,3C6.5,3 2,7.5 2,13C2,15.5 3,17.8 4.7,19.5L6.1,18.1C4.8,16.8 4,15 4,13C4,8.6 7.6,5 12,5C16.4,5 20,8.6 20,13C20,15 19.2,16.8 17.9,18.1L19.3,19.5C21,17.8 22,15.5 22,13C22,7.5 17.5,3 12,3M12,7C8.7,7 6,9.7 6,13C6,14.7 6.7,16.2 7.8,17.3L9.2,15.9C8.5,15.2 8,14.1 8,13C8,10.8 9.8,9 12,9C14.2,9 16,10.8 16,13C16,14.1 15.5,15.2 14.8,15.9L16.2,17.3C17.3,16.2 18,14.7 18,13C18,9.7 15.3,7 12,7M12,11A2,2 0 0,0 10,13A2,2 0 0,0 12,15A2,2 0 0,0 14,13A2,2 0 0,0 12,11Z"/></svg>',
+        'sensors': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71L12 2zm0 4.18l4.41 10.7-3.91-1.73-.5-.22-.5.22-3.91 1.73L12 6.18z"/></svg>',
         'slam-hud': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M21,16.5C21,16.88 20.79,17.21 20.47,17.38L12.57,21.82C12.41,21.94 12.21,22 12,22C11.79,22 11.59,21.94 11.43,21.82L3.53,17.38C3.21,17.21 3,16.88 3,16.5V7.5C3,7.12 3.21,6.79 3.53,6.62L11.43,2.18C11.59,2.06 11.79,2 12,2C12.21,2 12.41,2.06 12.57,2.18L20.47,6.62C20.79,6.79 21,7.12 21,7.5V16.5M12,4.15L5.04,8.05L12,11.95L18.96,8.05L12,4.15Z"/></svg>',
         'ir-view': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12,9A3,3 0 0,0 9,12A3,3 0 0,0 12,15A3,3 0 0,0 15,12A3,3 0 0,0 12,9M12,4.5C7,4.5 2.73,7.61 1,12C2.73,16.39 7,19.5 12,19.5C17,19.5 21.27,16.39 23,12C21.27,7.61 17,4.5 12,4.5M12,17.5A5.5,5.5 0 0,1 6.5,12A5.5,5.5 0 0,1 12,6.5A5.5,5.5 0 0,1 17.5,12A5.5,5.5 0 0,1 12,17.5Z"/></svg>',
-        'device': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M9,4V6H11V4H9M13,4V6H15V4H13M9,18V20H11V18H9M13,18V20H15V18H13M4,9H6V11H4V9M4,13H6V15H4V13M18,9H20V11H18V9M18,13H20V15H18V13Z"/></svg>',
-        'view': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22C13.1,22 14,21.1 14,20C14,19.5 13.8,19.05 13.47,18.7C13.12,18.33 12.92,17.84 12.92,17.3C12.92,16.2 13.82,15.3 14.92,15.3H16C19.31,15.3 22,12.61 22,9.3C22,5.27 17.52,2 12,2M6.5,11.5A1.5,1.5 0 0,1 5,10A1.5,1.5 0 0,1 6.5,8.5A1.5,1.5 0 0,1 8,10A1.5,1.5 0 0,1 6.5,11.5M9.5,7.5A1.5,1.5 0 0,1 8,6A1.5,1.5 0 0,1 9.5,4.5A1.5,1.5 0 0,1 11,6A1.5,1.5 0 0,1 9.5,7.5M14.5,7.5A1.5,1.5 0 0,1 13,6A1.5,1.5 0 0,1 14.5,4.5A1.5,1.5 0 0,1 16,6A1.5,1.5 0 0,1 14.5,7.5M17.5,11.5A1.5,1.5 0 0,1 16,10A1.5,1.5 0 0,1 17.5,8.5A1.5,1.5 0 0,1 19,10A1.5,1.5 0 0,1 17.5,11.5Z"/></svg>',
+        'device': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M6 2h12a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m3 2v2h2V4H9m4 0v2h2V4h-2m-4 14v2h2v-2H9m4 0v2h2v-2h-2M4 9h2v2H4V9m0 4h2v2H4v-2m14-4h2v2h-2V9m0 4h2v2h-2v-2z"/></svg>',
+        'view': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V4h-4zm-6 13l-5-3 5-3v6z"/></svg>',
         'capture': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M18,4L20,8H17L15,4H13L15,8H12L10,4H8L10,8H7L5,4H4A2,2 0 0,0 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V4H18M10,10L16,13L10,16V10Z"/></svg>',
         'transport': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M8,5.14V19.14L19,12.14L8,5.14Z"/></svg>',
         'browser': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M3,3H11V11H3V3M13,3H21V11H13V3M3,13H11V21H3V13M13,13H21V21H13V13Z"/></svg>',
@@ -57,7 +57,7 @@
     };
 
     var CARD_TITLES = {
-        'telemetry': 'Telemetry',
+        'telemetry': 'Stream',
         'sensors': 'Sensors',
         'slam-hud': 'SLAM HUD',
         'ir-view': 'IR Monitor',
@@ -72,49 +72,117 @@
         'log': 'Event Log'
     };
 
+    // Primary (left) and Secondary (right) bar visibility toggling
+    function togglePrimaryBar(show) {
+        var bar = $('primary-bar') || document.querySelector('.sidebar--left');
+        if (!bar) return;
+        var isHidden = (show === undefined) ? !bar.classList.contains('is-hidden') : !show;
+        bar.classList.toggle('is-hidden', isHidden);
+        try { localStorage.setItem('roomscan.bar.primary.hidden', isHidden ? '1' : '0'); } catch (e) {}
+        var btn = $('btn-toggle-primary-bar');
+        if (btn) btn.classList.toggle('is-active', !isHidden);
+    }
+
+    function toggleSecondaryBar(show) {
+        var bar = $('secondary-bar') || document.querySelector('.sidebar--right');
+        if (!bar) return;
+        var isHidden = (show === undefined) ? !bar.classList.contains('is-hidden') : !show;
+        bar.classList.toggle('is-hidden', isHidden);
+        try { localStorage.setItem('roomscan.bar.secondary.hidden', isHidden ? '1' : '0'); } catch (e) {}
+        var btn = $('btn-toggle-secondary-bar');
+        if (btn) btn.classList.toggle('is-active', !isHidden);
+    }
+
+    function setSidebarWidth(bar, width) {
+        if (!bar) return;
+        var minW = 220, maxW = Math.min(500, Math.floor(window.innerWidth * 0.45));
+        var clampedW = Math.max(minW, Math.min(maxW, width));
+        bar.style.width = clampedW + 'px';
+        return clampedW;
+    }
+
+    function initSidebarStates() {
+        try {
+            var priHidden = localStorage.getItem('roomscan.bar.primary.hidden');
+            if (priHidden === '1') togglePrimaryBar(false);
+            var secHidden = localStorage.getItem('roomscan.bar.secondary.hidden');
+            if (secHidden === '1') toggleSecondaryBar(false);
+
+            var priW = parseInt(localStorage.getItem('roomscan.bar.primary.width'), 10);
+            if (!isNaN(priW)) setSidebarWidth($('primary-bar'), priW);
+
+            var secW = parseInt(localStorage.getItem('roomscan.bar.secondary.width'), 10);
+            if (!isNaN(secW)) setSidebarWidth($('secondary-bar'), secW);
+        } catch (e) {}
+    }
+
+    function setupSidebarResizing() {
+        function attachHandle(handleId, barId, side) {
+            var handle = $(handleId);
+            var bar = $(barId);
+            if (!handle || !bar) return;
+
+            var startX = 0, startW = 0, dragged = false;
+
+            function onMouseMove(e) {
+                var dx = e.clientX - startX;
+                if (Math.abs(dx) > 3) dragged = true;
+                var newW = side === 'left' ? (startW + dx) : (startW - dx);
+                setSidebarWidth(bar, newW);
+                schedule();
+            }
+
+            function onMouseUp(e) {
+                window.removeEventListener('mousemove', onMouseMove);
+                window.removeEventListener('mouseup', onMouseUp);
+                handle.classList.remove('is-dragging');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+
+                if (dragged) {
+                    var finalW = bar.offsetWidth;
+                    try {
+                        localStorage.setItem('roomscan.bar.' + (side === 'left' ? 'primary' : 'secondary') + '.width', finalW);
+                    } catch (err) {}
+                }
+            }
+
+            handle.addEventListener('mousedown', function (e) {
+                e.preventDefault();
+                startX = e.clientX;
+                startW = bar.offsetWidth;
+                dragged = false;
+                handle.classList.add('is-dragging');
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+                window.addEventListener('mousemove', onMouseMove);
+                window.addEventListener('mouseup', onMouseUp);
+            });
+
+            handle.addEventListener('click', function (e) {
+                if (!dragged) {
+                    if (side === 'left') togglePrimaryBar();
+                    else toggleSecondaryBar();
+                    schedule();
+                }
+            });
+        }
+
+        attachHandle('primary-bar-handle', 'primary-bar', 'left');
+        attachHandle('secondary-bar-handle', 'secondary-bar', 'right');
+    }
+
+    window.__togglePrimaryBar = togglePrimaryBar;
+    window.__toggleSecondaryBar = toggleSecondaryBar;
+
     // The rail is a stable map of every panel that CAN exist, not a list of
     // what's missing: every registered card gets a permanent button, dimmed or
     // lit by its collapse state. `.hidden` is reserved for cards that are
     // genuinely absent from the DOM right now (e.g. slam-hud/slam-ctrl before
     // SLAM arms) -- a button for a card that cannot exist is a dead control.
     function updateSquircles() {
-        var docks = document.querySelectorAll('.dock');
-        for (var d = 0; d < docks.length; d++) {
-            var dock = docks[d];
-            var bar = dock.querySelector('.squircle-bar');
-            if (!bar) {
-                bar = document.createElement('div');
-                bar.className = 'squircle-bar';
-                dock.insertBefore(bar, dock.firstChild);
-            }
-
-            var cards = dock.querySelectorAll('[data-card-id]');
-            for (var i = 0; i < cards.length; i++) {
-                var card = cards[i];
-                var cardId = card.getAttribute('data-card-id');
-                if (!cardId || !CARD_ICONS[cardId]) continue;
-
-                var isCollapsed = card.classList.contains('collapsed');
-                var isHidden = card.classList.contains('hidden') || card.style.display === 'none';
-
-                var btn = bar.querySelector('.squircle-btn[data-for="' + cardId + '"]');
-                if (!btn) {
-                    btn = document.createElement('button');
-                    btn.type = 'button';
-                    btn.className = 'squircle-btn';
-                    btn.setAttribute('data-for', cardId);
-                    btn.innerHTML = CARD_ICONS[cardId];
-                    bar.appendChild(btn);
-                }
-
-                btn.classList.toggle('hidden', isHidden);
-                var isOpen = !isCollapsed && !isHidden;
-                btn.classList.toggle('is-open', isOpen);
-                btn.classList.toggle('is-dim', !isOpen);
-                var title = (CARD_TITLES[cardId] || cardId) + (isOpen ? ' (click to collapse)' : ' (click to expand)');
-                btn.setAttribute('title', title);
-            }
-        }
+        // Disabled: sidebars use clean section accordions instead of floating squircle buttons
+        return;
     }
 
     var HEADER_SELECTOR = '.control-group__header, .log-console__header, .ir-card__header';
@@ -141,6 +209,7 @@
      * Card collapse persistence & delegation                            *
      * ------------------------------------------------------------------ */
     function initCardStates() {
+        initSidebarStates();
         var cards = document.querySelectorAll('[data-card-id]');
         for (var i = 0; i < cards.length; i++) {
             var card = cards[i];
@@ -183,6 +252,29 @@
     }
 
     function setupCollapseDelegation() {
+        var btnPri = $('btn-toggle-primary-bar');
+        if (btnPri) {
+            btnPri.addEventListener('click', function () { togglePrimaryBar(); schedule(); });
+        }
+        var btnSec = $('btn-toggle-secondary-bar');
+        if (btnSec) {
+            btnSec.addEventListener('click', function () { toggleSecondaryBar(); schedule(); });
+        }
+
+        document.addEventListener('keydown', function (e) {
+            var tag = e.target && e.target.tagName ? e.target.tagName.toUpperCase() : '';
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (e.target && e.target.isContentEditable)) return;
+            if (e.ctrlKey || e.altKey || e.metaKey) return;
+
+            if (e.key === '[') {
+                togglePrimaryBar();
+                schedule();
+            } else if (e.key === ']') {
+                toggleSecondaryBar();
+                schedule();
+            }
+        });
+
         document.addEventListener('click', function (e) {
             var sqBtn = e.target.closest('.squircle-btn[data-for]');
             if (sqBtn) {
@@ -245,11 +337,13 @@
         return out;
     }
 
-    // Rightmost edge of anything in the left dock, leftmost edge of anything in
-    // the right dock. Infinities mean "that side is empty".
+    // Rightmost edge of anything in the left sidebar/dock, leftmost edge of anything in
+    // the right sidebar/dock. Infinities mean "that side is empty".
     function edges() {
         var l = -Infinity, r = Infinity, i;
-        var lc = shownChildren($('left-dock')), rc = shownChildren($('right-rail'));
+        var leftBar = $('primary-bar') || $('left-dock');
+        var rightBar = $('secondary-bar') || $('right-rail');
+        var lc = shownChildren(leftBar), rc = shownChildren(rightBar);
         for (i = 0; i < lc.length; i++) l = Math.max(l, lc[i].right);
         for (i = 0; i < rc.length; i++) r = Math.min(r, rc[i].left);
         return { left: l, right: r };
@@ -259,8 +353,8 @@
         var e = edges();
         var hasL = isFinite(e.left), hasR = isFinite(e.right);
         var w = window.innerWidth;
-        if (hasL && e.left > w - EDGE) return false;          // left dock ran off the right edge
-        if (hasR && e.right < EDGE) return false;             // right dock ran off the left edge
+        if (hasL && e.left > w - EDGE) return false;          // left bar ran off the right edge
+        if (hasR && e.right < EDGE) return false;             // right bar ran off the left edge
         if (hasL && hasR && e.left + GAP > e.right) return false;   // the two would overlap
         return true;
     }
@@ -282,7 +376,7 @@
         // 1. Keep the dock band flush with the real top bar / event-log console.
         //    Collapsing the console therefore gives its height back to the docks.
         var topbar = $('topbar'), logConsole = $('log-console');
-        root.style.setProperty('--dock-top', ((topbar ? topbar.offsetHeight : 48) + 16) + 'px');
+        root.style.setProperty('--dock-top', ((topbar ? topbar.offsetHeight : 48) + 12) + 'px');
         root.style.setProperty('--dock-bottom', ((logConsole ? logConsole.offsetHeight : 0) + 8) + 'px');
 
         // 2. Reset to the user's chosen state, then degrade only as far as needed.
@@ -290,16 +384,13 @@
             var el = $(AUTO[i]);
             if (el) el.classList.remove('auto-collapsed');
         }
-        var right = $('right-rail');
+        var right = $('secondary-bar') || $('right-rail');
         if (right) right.classList.remove('dock--scroll');
 
         if (fits()) return;
         if (right) { right.classList.add('dock--scroll'); if (fits()) return; }
         if (autoCollapse('ir-card') && fits()) return;
         autoCollapse('sensors-card');
-        // Nothing left to give: the viewport is narrower than one column a side.
-        // The docks stay put (blocks may clip) rather than stacking on top of
-        // each other — overlap is the one outcome this layout never allows.
     }
 
     /* ------------------------------------------------------------------ *
@@ -320,12 +411,8 @@
 
     function observe() {
         window.addEventListener('resize', schedule);
-        var docks = [$('left-dock'), $('right-rail')].filter(Boolean);
+        var docks = [$('primary-bar'), $('secondary-bar'), $('left-dock'), $('right-rail')].filter(Boolean);
 
-        // Size changes (a stream list growing, a group expanding, a capture list
-        // filling) are what move the columns — watch the blocks themselves.
-        // relayout() is idempotent from its clean baseline, so a pass triggered
-        // by its own class changes settles on the same result and stops.
         var ro = window.ResizeObserver ? new ResizeObserver(schedule) : null;
         function watch() {
             if (!ro) return;
@@ -335,8 +422,6 @@
         }
         watch();
 
-        // Class flips (hidden / collapsed) resize blocks without a size event on
-        // the observed node itself; children added or removed need re-watching.
         if (window.MutationObserver) {
             var mo = new MutationObserver(function () { watch(); schedule(); });
             for (var d = 0; d < docks.length; d++) {
@@ -346,7 +431,6 @@
             if (logConsole) mo.observe(logConsole, { attributes: true, attributeFilter: ['class'] });
         }
 
-        // Web fonts land after first paint and change every block's height.
         if (document.fonts && document.fonts.ready) document.fonts.ready.then(schedule).catch(function () {});
         window.addEventListener('load', schedule);
     }
@@ -354,9 +438,10 @@
     function init() {
         initCardStates();
         setupCollapseDelegation();
+        setupSidebarResizing();
         observe();
         schedule();
-        if (window.__diag) window.__diag('layout.js: dock layout manager ready');
+        if (window.__diag) window.__diag('layout.js: sidebar layout manager ready');
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

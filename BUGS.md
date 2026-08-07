@@ -102,4 +102,6 @@ records a date and a file reference where the problem lives.
 | [BUG-081](bugs/BUG-081.md) | fixed | host/web UI | Manual ranging number fields revert mid-type — the ~4 Hz `ranging` echo re-seeds a focused field |
 | [BUG-082](bugs/BUG-082.md) | fixed | firmware/host | Partial sensor-hub samples serialized as zero-filled ENV frames (causing false anomaly gates) & timestamp burst rate spikes — fixed via firmware complete-batch latch + validity masks + diagnostics and host defense in depth |
 | [BUG-083](bugs/BUG-083.md) | fixed (by BUG-082) | firmware/scanner-stream | Firmware emits `pressure = 0.0 Pa` on isolated ENV frames (`have_env` decoupled from pressure validity) — fixed by BUG-082's complete-batch latch and host validation |
+| [BUG-084](bugs/BUG-084.md) | open | host/slam | `officeFullScanAug6.bin` forks near frame ~979: the ceiling drops below the previously established height, and Detailed SLAM reconstructs a separate set of rooms |
+| [BUG-085](bugs/BUG-085.md) | fixed | host/web | Web UI frozen with missing comm-status due to JS initialization errors (`Unexpected token 'var'` in `layout.js`, missing `setViewportMirror` in `scene.js`, undeclared `selectedDetail` / `scene` in `browser.js`) |
 

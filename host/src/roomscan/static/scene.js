@@ -712,6 +712,36 @@ export function createScene(hub) {
         renderer.domElement.style.transformOrigin = 'center';
     }
 
+    // --- 3D Preview Card Mesh ---
+    const previewGeometry = new THREE.PlaneGeometry(1.2, 0.9);
+    const previewMaterial = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, transparent: true, opacity: 0.95 });
+    const previewMesh = new THREE.Mesh(previewGeometry, previewMaterial);
+    previewMesh.position.set(0, 0, -1.0);
+    previewMesh.visible = false;
+    scene.add(previewMesh);
+
+    const textureLoader = new THREE.TextureLoader();
+    let currentPreviewUrl = null;
+
+    function setPreviewTexture(url) {
+        if (!url || url === currentPreviewUrl) return;
+        currentPreviewUrl = url;
+        textureLoader.load(url, (tex) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            previewMaterial.map = tex;
+            previewMaterial.needsUpdate = true;
+            if (tex.image && tex.image.width && tex.image.height) {
+                const aspect = tex.image.width / tex.image.height;
+                previewMesh.scale.set(aspect, 1, 1);
+            }
+        });
+    }
+
+    function setPreviewVisible(on) {
+        previewMesh.visible = !!on;
+    }
+
     return { resetCamera, THREE, scene, camera, controls, setPointsVisible, setFollow,
-             setFollowTarget, trackTarget, setSlamPose, setViewportMirror, setRenderActive };
+             setFollowTarget, trackTarget, setSlamPose, setViewportMirror, setRenderActive,
+             setPreviewTexture, setPreviewVisible };
 }

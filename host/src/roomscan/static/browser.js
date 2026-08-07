@@ -28,7 +28,7 @@
 //              rename_capture / delete_captures / generate_detailed /
 //              regenerate_detailed.
 
-export function createBrowser(hub, capture) {
+export function createBrowser(hub, capture, scene) {
     const $ = (id) => document.getElementById(id);
 
     const browserCard = $('browser-card');
@@ -178,54 +178,41 @@ export function createBrowser(hub, capture) {
 
     // These two cards are the capture PICKER, and they sit over the middle of
     // the viewport -- which is exactly where a map is drawn. Measured on the
-    // rig in View + SLAM: 97% of the map's screen footprint was covered by
-    // #browser-card + #preview-card, leaving only the 14 px gutter between
-    // them, so a perfectly good reconstruction read as "nothing rendered".
-    // Live mode never had this because both cards hide when source != 'view'.
-    //
-    // Collapse (rail-recoverable in one click), never `.hidden`: you still have
-    // to be able to pick a different capture without leaving the map display.
-    // Fires ONLY on the transition into a map display -- `state` is re-broadcast
-    // on every unrelated setting change, so re-collapsing on each echo would
-    // fight the user every time they re-opened a card (the state-echo trap that
-    // killed the oscillate orbit's return leg).
     const MAP_DISPLAYS = new Set(['slam', 'detailed']);
     function collapseForMapDisplay(prevSource, prevDisplay) {
         const now = source === 'view' && MAP_DISPLAYS.has(display);
         const before = prevSource === 'view' && MAP_DISPLAYS.has(prevDisplay);
         if (!now || before) return;
-        for (const [card, id] of [[browserCard, 'browser'], [previewCard, 'preview']]) {
-            if (!card || card.classList.contains('collapsed')) continue;
-            card.classList.add('collapsed');
-            try { localStorage.setItem(`roomscan.card.${id}.collapsed`, '1'); } catch (err) {}
+        if (browserCard && !browserCard.classList.contains('collapsed')) {
+            browserCard.classList.add('collapsed');
+            try { localStorage.setItem('roomscan.card.browser.collapsed', '1'); } catch (err) {}
         }
         window.__relayout?.();
     }
 
     function renderPreview() {
         const c = captures.find((x) => x.name === previewed) || null;
-        previewCard?.classList.toggle('hidden', source !== 'view' || !c);
-        if (!c) {
+        if (!c || source !== 'view') {
+            previewCard?.classList.add('hidden');
             previewView?.classList.add('hidden');
+            const sceneHandle = scene || window.__scene;
+            sceneHandle?.setPreviewVisible?.(false);
             return;
         }
-        if (previewThumb) {
-            previewThumb.src = thumbUrl(c);
-            previewThumb.title = THUMB_NOTE;
-        }
+
+        previewCard?.classList.remove('hidden');
         if (previewName) previewName.textContent = c.name;
         if (previewFacts) {
             const s = c.slam;
             const rows = [
-                ['Duration', fmtTime(c.duration_s), 'Wall-clock length from the capture\'s own TIM2 frame timestamps'],
+                ['Duration', fmtTime(c.duration_s), 'Wall-clock length from timestamps'],
                 ['Frames', String(c.frames || 0), 'Depth frames in the capture'],
                 ['Size', fmtBytes(c.bytes), 'File size on disk'],
-                ['Orientation', c.has_stream_9 ? 'yes' : 'no', 'Stream 9 (SFLP quaternion). Without it a capture is point-cloud-playable only — no SLAM.'],
-                ['Distance', s ? num(s.path_m, ' m', 2) : '—', 'Path length of the reconstruction\'s trajectory. Only exists where a reconstruction does.'],
-                ['Area', s ? num(s.area_m2, ' m²', 1) : '—', 'Floor area covered: the reconstruction\'s vertices projected onto the ground plane and counted on a 0.1 m grid. Not mesh surface area.'],
-                ['Closure', s ? num(s.gap_m, ' m', 2) : '—', 'Start-to-end gap of the trajectory — the drift over a closed loop.'],
-                ['Reconstruction', s ? (s.current ? 'current' : 'stale') : 'none',
-                    'Whether results/<name>.slam.json matches this capture and the current preset.'],
+                ['Orientation', c.has_stream_9 ? 'yes' : 'no', 'Stream 9 quaternion'],
+                ['Distance', s ? num(s.path_m, ' m', 2) : '—', 'Trajectory length'],
+                ['Area', s ? num(s.area_m2, ' m²', 1) : '—', 'Floor area covered'],
+                ['Closure', s ? num(s.gap_m, ' m', 2) : '—', 'Loop closure gap'],
+                ['Reconstruction', s ? (s.current ? 'current' : 'stale') : 'none', 'Detailed status'],
             ];
             previewFacts.innerHTML = rows.map(([k, v, tip]) =>
                 `<dt title="${escapeHtml(tip)}">${escapeHtml(k)}</dt>` +
@@ -235,13 +222,19 @@ export function createBrowser(hub, capture) {
             const s = c.slam;
             btnBuild.textContent = s ? (s.current ? '⚙ Rebuild' : '⚙ Rebuild (stale)') : '⚙ Build';
         }
-        const showInViewport = source === 'view' && display === 'preview';
-        previewView?.classList.toggle('hidden', !showInViewport);
-        if (showInViewport) {
+
+        const showIn3D = source === 'view' && display === 'preview';
+        const sceneHandle = scene || window.__scene;
+        if (sceneHandle && sceneHandle.setPreviewVisible) {
+            sceneHandle.setPreviewVisible(showIn3D);
+            if (showIn3D && sceneHandle.setPreviewTexture) {
+                sceneHandle.setPreviewTexture(thumbUrl(c));
+            }
+        }
+        
+        previewView?.classList.toggle('hidden', !showIn3D);
+        if (showIn3D) {
             if (previewViewImage) previewViewImage.src = thumbUrl(c);
-            // Preview is a saved 2D thumbnail, so World and FPV have the same
-            // pixels. Mirror remains meaningful: it is the same left-right
-            // camera flip used by the 3D map view, scoped to the image only.
             if (previewViewImage) previewViewImage.style.transform =
                 viewMode === 'mirror' ? 'scaleX(-1)' : '';
             if (previewViewCaption) previewViewCaption.textContent =
