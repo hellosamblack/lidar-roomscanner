@@ -3,7 +3,9 @@ name = "roomscan"
 version = "0.1.0"
 description = "Host-side tools for the roomscanner ToF streamer"
 requires-python = ">=3.11,<3.13"  # upper bound: open3d wheel availability
-dependencies = ["numpy>=1.26", "pyserial>=3.5", "open3d>=0.18", "psutil>=5.9", "Pillow>=10", "zeroconf>=0.130"]
+# plyfile: standard INRIA-3DGS PLY reader, used by the splat-vs-scan compare tool
+# (roomscan.splat.compare) which is core, not part of the heavy [splat] build extra.
+dependencies = ["numpy>=1.26", "pyserial>=3.5", "open3d>=0.18", "psutil>=5.9", "Pillow>=10", "zeroconf>=0.130", "plyfile>=1.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.4"]
@@ -12,6 +14,15 @@ dev = ["pytest>=8", "ruff>=0.4"]
 monitor = ["nvidia-ml-py>=12"]
 # Optional KISS-ICP offline odometry benchmark (roomscan.slam.metrics.compare_kiss).
 slam = ["kiss-icp>=1.0"]
+# Offline Gaussian-splat reconstruction (roomscan.splat / roomscan-splat).
+# COLMAP SfM (pycolmap, CPU) + 3DGS training (torch + gsplat, CUDA). Heavy and
+# host-only -- unshippable on the M33, and only needed to BUILD a splat; the web
+# server and the light sidecar helpers import none of it. gsplat JIT-compiles its
+# CUDA kernels on first use, so a system nvcc + ninja must be on PATH the first
+# time a build runs (CUDA_HOME=/usr/local/cuda-<v>); torch bundles its own runtime.
+splat = ["torch>=2.4", "gsplat>=1.4", "pycolmap>=4.0", "imageio-ffmpeg>=0.5",
+         "transformers>=4.40"]  # transformers: optional monocular-depth prior (Depth-Anything-V2)
+         # (plyfile moved to core deps -- the compare tool needs it without this extra)
 # Web UI dependencies
 web = ["fastapi", "uvicorn", "websockets"]
 # Agent-facing MCP server (roomscan-mcp). Needs [web] too: the rig_* tools speak
@@ -23,6 +34,7 @@ roomscan-view = "roomscan.viewer:main"
 roomscan-panel = "roomscan.panel:main"   # DEPRECATED (Web Phase 5): legacy Open3D desktop panel; use roomscan-web
 roomscan-ctl = "roomscan.control:main"
 roomscan-slam = "roomscan.slam.cli:main"
+roomscan-splat = "roomscan.splat.cli:main"   # offline video -> Gaussian-splat reconstruction
 roomscan-web = "roomscan.web:main"        # primary UI: browser instrument, headless-capable
 roomscan-mcp = "roomscan.mcp_server.__main__:main"  # agent-facing MCP tool server
 
