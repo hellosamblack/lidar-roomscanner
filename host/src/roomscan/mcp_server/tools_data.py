@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .paths import CAPTURES, HOST, RECORDINGS, REPO, VENV_PY, WEB_WS, rel
+from .paths import CAPTURES, HOST, RECORDINGS, REPO, RESULTS, VENV_PY, WEB_WS, rel
 from .server import mcp
 
 sys.path.insert(0, str(HOST))  # `tools` is a top-level package rooted at host/
@@ -848,3 +848,134 @@ def slam_icp_bench(capture: str = "", what: str = "all", frames: int = 400,
     rep = json.loads(body)
     rep["ok"] = True
     return rep
+
+
+@mcp.tool()
+def splat_list() -> dict:
+    """List the offline Gaussian-splat room reconstructions built under results/splats/.
+
+    Each entry has the display `name`, `slug`, gaussian count, byte size, and the
+    `ply_url` the web viewer loads. These are the splats the Live/View/Splat
+    source offers. Light and torch-free -- it only reads manifests off disk.
+    """
+    from roomscan.splat import list_splats
+    return {"ok": True, "splats": list_splats(str(RESULTS))}
+
+
+@mcp.tool()
+def splat_build(video: str, name: str, force: bool = False, fps: float = 0.0,
+                iters: int = 0, max_gaussians: int = 0, timeout_s: int = 7200) -> dict:
+    """Reconstruct a navigable Gaussian splat from a video (frames -> COLMAP -> 3DGS).
+
+    This is the OFFLINE, standalone reconstruction: a *rough* room from phone video
+    alone, with no ToF fusion or hand-eye calibration (that is the blocked full
+    Phase 7). The result lands in `results/splats/<slug>/` and appears as the third
+    Live/View/Splat source in `roomscan-web`. `name` is the display name (e.g.
+    "Sam Office"); the slug is derived from it, so re-running the same name rebuilds
+    that splat (a matching, current build is skipped unless `force`).
+
+    It is a long, heavy, host-only job: COLMAP structure-from-motion runs on CPU and
+    3DGS training runs on the GPU (gsplat/CUDA), typically many minutes -- so it runs
+    as a subprocess (`roomscan-splat`), never in the server process, and reads the
+    run's `--json` report rather than scraping stdout. gsplat JIT-compiles its CUDA
+    kernels the first time on a fresh machine, which needs a system `nvcc` + `ninja`
+    on PATH (`CUDA_HOME=/usr/local/cuda`); this tool adds those best-effort.
+
+    Zero/omitted `fps`/`iters`/`max_gaussians` mean "use the [splat] preset default".
+    A returned `built: false` with `ok: true` means a current splat already existed;
+    pass `force=true` to rebuild. Check `stats.registered_ratio`: a low value means
+    COLMAP could register few frames (textureless scene / too-fast motion) and the
+    splat will be sparse.
+    """
+    import json
+    import os
+    import tempfile
+
+    vid = Path(video)
+    if not vid.is_absolute():
+        for base in (REPO, CAPTURES, RECORDINGS):
+            if (base / video).exists():
+                vid = base / video
+                break
+    if not vid.exists():
+        return {"ok": False, "error": f"video not found: {video}"}
+
+    env = dict(os.environ)
+    cuda = next((p for p in ("/usr/local/cuda", "/usr/local/cuda-13.3") if Path(p).exists()), None)
+    if cuda:
+        env["CUDA_HOME"] = cuda
+        env["PATH"] = f"{Path(VENV_PY).parent}:{cuda}/bin:" + env.get("PATH", "")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        report_path = Path(tmp) / "splat.json"
+        cmd = [str(VENV_PY), "-m", "roomscan.splat.cli", "--results-dir", str(RESULTS),
+               "--json", str(report_path), "build", str(vid), "--name", name]
+        if force:
+            cmd.append("--force")
+        for flag, value in (("--fps", fps), ("--iters", iters), ("--max-gaussians", max_gaussians)):
+            if value:
+                cmd += [flag, str(value)]
+        try:
+            p = subprocess.run(cmd, cwd=str(REPO), env=env, timeout=timeout_s,
+                               capture_output=True, text=True)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "cmd": " ".join(cmd),
+                    "error": f"timed out after {timeout_s}s -- raise timeout_s or lower iters/fps"}
+        if not report_path.exists():
+            return {"ok": False, "cmd": " ".join(cmd), "returncode": p.returncode,
+                    "stdout": p.stdout[-2000:], "stderr": p.stderr[-2000:]}
+        report = json.loads(report_path.read_text())
+    return report
+
+
+@mcp.tool()
+def splat_compare(capture: str, reference: str = "", opacity_min: float = 0.5,
+                  voxel: float = 0.03, allow_scale: bool = False,
+                  timeout_s: int = 900) -> dict:
+    """Diff a capture's SLAM reconstruction against a ground-truth splat (reverse Phase 7).
+
+    Instead of using the splat to improve the lidar, this treats a metric splat as
+    GROUND TRUTH to expose where our SLAM got the room SHAPE wrong -- e.g. BUG-084's
+    map fork on `officeFullScanAug6`, where the ceiling drops mid-scan and a second
+    displaced room appears. It rigidly aligns the two (both are metric, so a
+    scale/extent mismatch is a finding, not fit away) and reports alignment
+    fitness/RMSE, per-axis bounding-box extents + ratio, floor footprint, bidirectional
+    cloud-to-cloud distance, and a vertical/ceiling-fork analysis.
+
+    Needs the capture's Detailed-SLAM mesh (`results/<stem>.ply`) to exist -- build it
+    first with `slam_rerender`/Detailed SLAM if missing. With `reference` empty the best
+    *imported* ground-truth splat for this capture is auto-selected by name match (NOT
+    hardcoded to one splat; see `report.reference_selection`) -- pass a `.ply` path or a
+    `results/splats/` slug to override. Ground truth means an imported external splat
+    (e.g. Scaniverse); our own video builds are too rough to be truth.
+    `opacity_min` drops low-opacity splat floaters; `voxel` sets the downsample. Writes
+    `results/compare/<stem>__vs__<ref>/` (overlay.ply, error_heatmap.ply, floorplan.png,
+    elevation.png, report.json) -- the PNGs are served at `/results/compare/...`.
+
+    Runs as a subprocess (open3d, minutes on a big map), reading the `--json` report.
+    Key fields: `alignment.fitness` (low = the scan does not rigidly match truth),
+    `vertical.fork_suspected` / `vertical.scan_height_modes` (BUG-084), and
+    `extent_obb_m.ratio_scan_over_ref` (how far the scanned dimensions drift).
+    """
+    import json
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        report_path = Path(tmp) / "compare.json"
+        cmd = [str(VENV_PY), "-m", "roomscan.splat.cli", "--results-dir", str(RESULTS),
+               "--json", str(report_path), "compare", capture,
+               "--opacity-min", str(opacity_min), "--voxel", str(voxel)]
+        if reference:
+            cmd += ["--reference", reference]
+        if allow_scale:
+            cmd.append("--allow-scale")
+        try:
+            p = subprocess.run(cmd, cwd=str(REPO), timeout=timeout_s,
+                               capture_output=True, text=True)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "cmd": " ".join(cmd),
+                    "error": f"timed out after {timeout_s}s -- raise timeout_s or voxel"}
+        if not report_path.exists():
+            return {"ok": False, "cmd": " ".join(cmd), "returncode": p.returncode,
+                    "stdout": p.stdout[-2000:], "stderr": p.stderr[-2000:]}
+        return json.loads(report_path.read_text())

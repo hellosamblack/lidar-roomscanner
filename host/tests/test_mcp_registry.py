@@ -71,7 +71,8 @@ EXCLUDED: dict[str, str] = {
 }
 
 CONSOLE_EXPOSED = {"roomscan-web": ("rig_up",), "roomscan-ctl": ("rig_command",),
-                   "roomscan-slam": ("slam_rerender",)}
+                   "roomscan-slam": ("slam_rerender",),
+                   "roomscan-splat": ("splat_build",)}
 CONSOLE_EXCLUDED = {
     "roomscan-mcp": "this server itself; it cannot be one of its own tools",
     "roomscan-view": "desktop Open3D viewer; needs a display",

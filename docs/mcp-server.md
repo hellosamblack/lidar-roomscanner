@@ -149,7 +149,27 @@ ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, com
 `slam_ensemble(capture, n?, device?, voxel_size?, block_count?)`,
 `slam_stall_profile(capture, frames?, device?, decimate?)`,
 `slam_icp_bench(capture?, what?, frames?, raycast_frames?, ensemble_n?, device?, ab_pairs?, ab_frames?, baseline_icp_device?, candidate_icp_device?)`,
+`splat_list()`, `splat_build(video, name, force?, fps?, iters?, max_gaussians?)`,
+`splat_compare(capture, reference?, opacity_min?, voxel?, allow_scale?)`,
 `doctor()`, `orientation_probe(mode)`.
+
+`splat_build` reconstructs a navigable Gaussian splat from a video (offline
+frames -> COLMAP SfM -> gsplat 3DGS), landing it under `results/splats/<slug>/`
+where it becomes the third Live/View/Splat source in `roomscan-web`. It is a long,
+GPU-heavy, host-only job, so it shells out to `roomscan-splat` rather than pulling
+CUDA into the server; `splat_list` is the light, torch-free listing behind the
+web picker. This is the *standalone* Phase 7 subset -- a rough room from video
+alone, no ToF fusion / hand-eye calibration (that remains blocked on DC-I).
+
+`splat_compare` reverses Phase 7: it treats a metric ground-truth splat (an
+imported Scaniverse export, by default) as truth and diffs a capture's Detailed-SLAM
+mesh against it to expose where our lidar got the room *shape* wrong (e.g. BUG-084's
+mid-scan ceiling fork). It rigidly aligns the two -- both are metric, so a
+scale/extent mismatch is a finding, not fit away -- and reports alignment
+fitness/RMSE, per-axis extents + ratio, floor footprint, bidirectional cloud-to-cloud
+distance, and a vertical/ceiling-fork analysis, writing overlay/heatmap PLYs and
+floor-plan + elevation PNGs under `results/compare/<stem>__vs__<ref>/`. Torch-free
+(open3d + plyfile), shelled out to `roomscan-splat compare` like the other heavy jobs.
 
 `slam_stall_profile` answers "why does the live view feel frozen?" with a number.
 It replays a capture through the real Live-SLAM pipeline and reports, per stage,
