@@ -146,7 +146,7 @@ protocol (walking to park the device puts the operator in the FOV — owner, 202
 | **DC-F** | **Controlled pan set** — 3 takes × ~60 s | The two claims currently inferred from stationary data plus arithmetic: applying the measured **+7.76 ms quat phase lead** (on the wire since BUG-031, nothing consumes it — now the largest motion-error term), and the `imufusion` A/B (built, gated off, no capture carries orientation ground truth). Also resume-doc §4.5 | Brace against a repeatable start (a corner, taped marks), pan to a repeatable end, hold. One take each at roughly **slow ~20 °/s / medium ~50 °/s / fast ~100 °/s**. 10 s stationary at both ends of every take | Endpoints repeatable enough that A→B is the same rotation across takes; 0 CRC; stream 11 present. The stationary bookends give the noise floor for free | ⚠️ **gate PASSES, purpose NOT unblocked** (`DebugCapF.bin`, 2026-07-31) — collected above spec: **4** pans at 19/25/36/89 °/s with 5 bookend holds of ~11 s. Pans agree to **1.42°** of nominal 90°. But the bookends' own noise floor (0.3–1.7°) **exceeds** the predicted phase-lead effect (0.15–0.69°), so the rate-vs-error test is underpowered, not falsifying. Phase offset re-measured here as **+5.13 ms** (sign confirmed *lead*), vs the +7.76 ms on record |
 | **DC-G** | **Recorded magnetometer tumble** — 30–45 s | Magcal regression fixtures. The tumble that closed BUG-030 went straight through the modal, so **no capture contains one** — covered-shell tests still use a synthetic fixture (`tilt_sweep_20260729.bin` fills 2 of 92 cells, `web_20260729_061440.bin` fills 6) | Open the calibration modal, hit Record, free-tumble to good coverage, stop | ≥60 of 92 shell cells covered. Low priority — test data, not a decision | ⬜ open |
 | **DC-H** | **USB CDC connect transient** — 5 × 15 s | **BUG-005**: fix implemented 2026-07-30, **the code path has never executed**. `CAFE:4001` does not enumerate on the headless host (USB_USER is powered from the battery bridge) and `/dev/ttyACM*` return `root:root` mode 0 after every replug | Needs the board's USB_USER cable into a machine that can open the port (udev rule or run as root). Fresh connect, `host/tools/capture.py --seconds 15`, five times | `capture_analyze` reports **0** CRC failures in the connect region (today: exactly 1) and the first frame after connect is CALIB | ⬜ open |
-| **DC-I** | **Phase 7 seed set** | COLMAP pose priors + depth-regularized 3DGS | **Do not collect yet** — needs a rigid phone/webcam mount and a hand-eye extrinsic calibration, neither of which is designed. Listed so it is not a surprise when Phase 6 closes | — | ⬜ blocked on design |
+| **DC-I** | **Phase 7 seed set** | COLMAP pose priors + depth-regularized 3DGS | **Do not collect yet** — needs a rigid phone/webcam mount and a hand-eye extrinsic calibration, neither of which is designed. Listed so it is not a surprise when Phase 6 closes. *(2026-08-07: **OFFLINE-4** covers the phone-software half — an ARCore capture app giving posed 4K video + depth — and is deliberately **not** blocked on this row, because the video-only splat path needs no ToF fusion. The mount, the hand-eye extrinsic and the ARCore↔TIM2 clock alignment stay here.)* | — | ⬜ blocked on design |
 | **DC-J** | **Specular / mirror behaviour** — 42 s, room scan then dwell on a large mirror | Nothing in the repo analysed specular surfaces; "mirror" elsewhere means the **UI view mode**. Unplanned — the owner recorded it to see what would happen | Normal room scan, then point at a large mirror and dwell | *(added retroactively)* Does the map gain phantom geometry; does tracking survive | ✅ **characterized, no defect** (`DebugCapMirror.bin`, 2026-07-31) — see [roadmap-history: DC-J](docs/roadmap-history.md) |
 
 The full write-ups for **DC-B** (multi-room result + why 6.D is blocked) and **DC-J** (mirror
@@ -190,6 +190,18 @@ so existing references (`6.D`, `6.I`, …) still resolve.
 - **SLAM-7 — Native C++ Core Engine (`roomscan-native`)** *(proposed)*.
   Encapsulate UDP/CDC sensor stream reading, `small_gicp` odometry, `GTSAM` iSAM2 factor graph, and `nvblox` CUDA calls inside a single C++ library/daemon (`roomscan-native`). Pybind11 acts purely as a read-only interface exposing optimized trajectory and DLPack mesh pointers to FastAPI / Three.js. See [`references/software/framerworkExploration/researchResults.md`](references/software/framerworkExploration/researchResults.md#L130-L137).
 
+### Web UI (`WEB-`)
+
+- **WEB-1 — Simplify the Record controls.** Move the Record section to the top-right
+  controls instead of giving it a separate sidebar section.
+- **WEB-2 — Allow completed captures to be discarded.** Add an explicit discard action
+  to the completed-capture workflow, with confirmation and removal from the capture list.
+- **WEB-3 — Show FileHub battery in the top bar.** Add FileHub battery state beside
+  communication status, including unavailable/unknown handling.
+- **WEB-4 — Make View mode capture-focused.** When switching to View, minimize every
+  panel except the Captures pane so replay can be selected and controlled without
+  unrelated live controls. This complements **BUG-090**.
+
 ### Sensors / IMU (`SENS-`)
 
 - **SENS-1 — Apply the +7.76 ms quat-phase lead.** On the wire since BUG-031 (`quat_mid_ticks`).
@@ -227,6 +239,59 @@ so existing references (`6.D`, `6.I`, …) still resolve.
   Ingest GTSAM trajectory (`transforms.json`) and dToF seed cloud into `SuGaR` to optimize surface-aligned 3D Gaussians from 4K phone video without COLMAP SfM. Extract watertight, closed Poisson CAD surface meshes (`.ply`/`.obj`) via `extract_mesh.py --project_mesh_on_surface_points`, applying hand-eye extrinsic calibration $T_{\text{world\_camera}} = T_{\text{world\_lidar}} \times T_{\text{lidar\_camera}}$. See [`references/software/framerworkExploration/researchResults.md`](references/software/framerworkExploration/researchResults.md#L78-L85).
 - **OFFLINE-3 — Modular depth-regularized 3DGS framework (`Nerfstudio` / `Splatfacto`)** *(proposed)*.
   Benchmark `Nerfstudio`'s `depth-nerfstudio` / `splatfacto` using dToF metric depth priors for photorealistic novel view synthesis and rendering. See [`references/software/framerworkExploration/researchResults.md`](references/software/framerworkExploration/researchResults.md#L86-L90).
+- **OFFLINE-4 — Android capture app (Pixel 10 Pro XL) — high-res video + ARCore pose/depth** *(proposed, owner 2026-08-07)*.
+  A phone-side companion app on the [ARCore Android SDK](https://github.com/google-ar/arcore-android-sdk)
+  that records, in one take, **high-resolution video + per-frame camera pose + intrinsics + ARCore
+  depth/confidence**. The point is to hand OFFLINE-1/2/3 a *posed* image set instead of a bag of
+  frames, so the 3DGS pass no longer depends on COLMAP SfM succeeding on the featureless painted
+  walls this scanner is aimed at — the exact failure mode already measured in the standalone splat
+  pipeline (Sam Office registered **206 of 287 frames, 72%**; see `host/src/roomscan/splat/`).
+
+  **What it produces.** Two candidate outputs, to be decided by prototype, not up front:
+  1. **ARCore MP4 via the Recording & Playback API** — one container holding the CPU-image video,
+     the depth-map track, and **custom data tracks** (`Frame.recordTrackData` / `getUpdatedTrackData`)
+     carrying per-frame pose + timestamps. Self-describing and replayable on-device, but needs a
+     host-side demuxer.
+  2. **Plain video + a sidecar** — poses from `Camera.getDisplayOrientedPose()`, intrinsics from
+     `Camera.getImageIntrinsics()`, depth PNGs. Directly ingestible: it is already the shape
+     `roomscan.splat`'s trainer and Nerfstudio's `transforms.json` want.
+
+  **Depth is a regularizer here, not metric truth — verify before relying on it.** ARCore depth is
+  depth-from-motion + ML unless the device carries a hardware depth sensor; `Frame.acquireDepthImage16Bits`
+  / `acquireRawDepthImage16Bits` + `acquireRawDepthConfidenceImage` return DEPTH16 millimetres at a
+  small resolution (~160×120 raw), best between ~0.5–5 m, and explicitly imprecise on featureless
+  white walls. **Whether the Pixel 10 Pro XL has a hardware ToF at all is unverified** — check
+  `CameraConfig.getDepthSensorUsage()` on the actual handset rather than assuming; Pixel phones have
+  historically shipped without one. The rig's VL53L9CX stays the metric source.
+
+  **The real risk is 4K *concurrent with* an AR session, and it is a measurement.** ARCore owns the
+  camera configuration; simultaneous high-res capture goes through `SharedCamera` (Camera2 interop,
+  and the app must not issue its own `setRepeatingRequest`). Google documents only that high-end
+  phones support ~2 YUV CPU streams + 1 GPU stream at up to 1080p. **First task is therefore to
+  enumerate `CameraConfigFilter` on the handset and report the achievable (video resolution, fps,
+  depth on/off) combinations** — if 4K and live depth turn out to be mutually exclusive, that is a
+  finding to record, not a reason to fake either one.
+
+  **Sequencing — this is not blocked on DC-I.** The video-only path improves the shipped
+  `roomscan.splat` pipeline immediately (poses seed or replace SfM). ToF *fusion* still needs the
+  rigid mount + hand-eye extrinsic, and clock alignment between ARCore's `CLOCK_MONOTONIC`
+  nanoseconds and the rig's TIM2 µs frame clock — all of which stay under **DC-I**.
+
+  **Gates before it counts as done:** (a) a capture from a real room where ARCore-posed
+  reconstruction registers materially more frames than COLMAP-only on the *same* footage;
+  (b) the camera-config enumeration above written down; (c) an MCP/host ingest path, per CLAUDE.md's
+  "new capability lands as an MCP tool" rule.
+
+  **Alternative avenue — [8th Wall](https://github.com/8thwall/8thwall)** *(noted, unexplored,
+  2026-08-07)*. A WebAR SLAM engine (Niantic-owned), now self-hostable and open source, that runs in
+  the phone browser — no native app install, and cross-platform (iOS + Android) where ARCore is
+  Android-only. Worth a look if the native `SharedCamera` risk above (task-first: enumerate
+  `CameraConfigFilter`) turns out to block 4K+depth concurrency, or if an iOS capture path becomes
+  wanted later. Tradeoffs to weigh before committing: pose/depth come through its own JS API rather
+  than `Frame.acquireRawDepthImage16Bits`, and a browser capture pipeline has to solve the same
+  high-res-video-plus-pose recording problem ARCore's `Recording & Playback API` already solves
+  natively — unproven whether WebAR exposes an equivalent. Not prototyped; ARCore stays the primary
+  path above until/unless a concrete blocker there makes this worth spiking.
 
 ### Tooling / observability (`TOOL-`)
 
