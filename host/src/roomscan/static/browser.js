@@ -32,9 +32,13 @@ export function createBrowser(hub, capture, scene) {
     const $ = (id) => document.getElementById(id);
 
     const browserCard = $('browser-card');
-    const previewCard = $('preview-card');
+    // The capture-detail drawer now lives INLINE under the grid (`#browser-selected-
+    // detail`), not in a separate `#preview-card`. Same fields (`#preview-name` /
+    // `#preview-facts` / the load/rename/build buttons), so only this handle moved.
+    const previewCard = $('browser-selected-detail');
     const grid = $('cap-grid');
     const status = $('browser-status');
+    const filterInput = $('browser-filter');
     const segSort = $('seg-browser-sort');
     const segView = $('seg-browser-view');
     const chkThumbs = $('chk-browser-thumbs');
@@ -74,6 +78,10 @@ export function createBrowser(hub, capture, scene) {
     let playing = null;                // session.playback.capture_name
     let selected = new Set();          // ticked names — CLIENT-LOCAL
     let previewed = null;              // previewed name — CLIENT-LOCAL
+    // Name filter is a transient per-tab search, not server state (like the
+    // ticked set): it narrows what is rendered off the already-broadcast array
+    // and never triggers a directory rescan.
+    let filterText = '';
     // What the last `delete_captures` ACTUALLY did. Held across renders because
     // the server sends `deleted` and then immediately `captures`, whose render
     // would otherwise wipe the only report of a refusal off the screen a frame
@@ -109,14 +117,52 @@ export function createBrowser(hub, capture, scene) {
         return '/thumb/' + encodeURIComponent(c.name) + '?v=' + encodeURIComponent(c.mtime);
     }
 
-    // ---- sorting (client-side, off the broadcast array) -------------------
+    // ---- filter + sort (client-side, off the broadcast array) -------------
     function sorted() {
-        const items = captures.slice();
+        let items = captures.slice();
+        if (filterText) {
+            const q = filterText.toLowerCase();
+            items = items.filter((c) => c.name.toLowerCase().includes(q));
+        }
         if (prefs.sort === 'name') items.sort((a, b) => a.name.localeCompare(b.name));
         else if (prefs.sort === 'size') items.sort((a, b) => (b.bytes || 0) - (a.bytes || 0));
         else if (prefs.sort === 'duration') items.sort((a, b) => (b.duration_s || 0) - (a.duration_s || 0));
         else items.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
         return items;
+    }
+
+    // Date grouping only makes sense chronologically, so it rides the default
+    // "Recent" sort; the other orders (name/size/length) render one flat run.
+    // `mtime` is epoch SECONDS (web.py rounds st_mtime), so ×1000 for Date.
+    const startOfDay = (ms) => { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); };
+    function dateLabel(mtimeSec) {
+        const ms = (mtimeSec || 0) * 1000;
+        const days = Math.round((startOfDay(Date.now()) - startOfDay(ms)) / 86400000);
+        if (days <= 0) return 'Today';
+        if (days === 1) return 'Yesterday';
+        if (days < 7) return new Date(ms).toLocaleDateString(undefined, { weekday: 'long' });
+        return new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    }
+
+    function tileHtml(c) {
+        const cls = ['cap-tile'];
+        if (c.name === previewed) cls.push('is-selected');
+        if (c.name === playing) cls.push('is-playing');
+        const img = prefs.thumbs
+            ? `<img class="cap-tile__thumb" loading="lazy" alt="" src="${thumbUrl(c)}">`
+            : '';
+        const badge = c.slam ? '<span class="cap-tile__badge">3D</span>'
+            : (c.has_stream_9 ? '' : '<span class="cap-tile__badge">2D</span>');
+        const tip = `${c.name}\n${fmtTime(c.duration_s)} · ${c.frames || 0} frames · ` +
+            `${fmtBytes(c.bytes)}` + (c.has_stream_9 ? '' : '\nNo orientation stream — point cloud only') +
+            (prefs.thumbs ? '\n\n' + THUMB_NOTE : '');
+        return `<div class="${cls.join(' ')}" data-name="${escapeHtml(c.name)}" title="${escapeHtml(tip)}">` +
+            `<input class="cap-tile__check" type="checkbox" data-check="${escapeHtml(c.name)}"` +
+            `${selected.has(c.name) ? ' checked' : ''} title="Select for delete">` +
+            badge + img +
+            `<span class="cap-tile__name">${escapeHtml(c.name)}</span>` +
+            `<span class="cap-tile__meta">${fmtTime(c.duration_s)} · ${fmtBytes(c.bytes)}</span>` +
+            `</div>`;
     }
 
     // ---- render ------------------------------------------------------------
@@ -125,28 +171,22 @@ export function createBrowser(hub, capture, scene) {
         grid.classList.toggle('is-list', prefs.view === 'list');
         const items = sorted();
         if (!items.length) {
-            grid.innerHTML = '<div class="cap-status">no captures yet</div>';
+            grid.innerHTML = `<div class="cap-status">${filterText ? 'no captures match the filter' : 'no captures yet'}</div>`;
+        } else if (prefs.sort === 'recent') {
+            // Date-grouped: a full-width header per day, then that day's tiles.
+            let html = '';
+            let curLabel = null;
+            for (const c of items) {
+                const label = dateLabel(c.mtime);
+                if (label !== curLabel) {
+                    curLabel = label;
+                    html += `<div class="cap-group-header">${escapeHtml(label)}</div>`;
+                }
+                html += tileHtml(c);
+            }
+            grid.innerHTML = html;
         } else {
-            grid.innerHTML = items.map((c) => {
-                const cls = ['cap-tile'];
-                if (c.name === previewed) cls.push('is-selected');
-                if (c.name === playing) cls.push('is-playing');
-                const img = prefs.thumbs
-                    ? `<img class="cap-tile__thumb" loading="lazy" alt="" src="${thumbUrl(c)}">`
-                    : '';
-                const badge = c.slam ? '<span class="cap-tile__badge">3D</span>'
-                    : (c.has_stream_9 ? '' : '<span class="cap-tile__badge">2D</span>');
-                const tip = `${c.name}\n${fmtTime(c.duration_s)} · ${c.frames || 0} frames · ` +
-                    `${fmtBytes(c.bytes)}` + (c.has_stream_9 ? '' : '\nNo orientation stream — point cloud only') +
-                    (prefs.thumbs ? '\n\n' + THUMB_NOTE : '');
-                return `<div class="${cls.join(' ')}" data-name="${escapeHtml(c.name)}" title="${escapeHtml(tip)}">` +
-                    `<input class="cap-tile__check" type="checkbox" data-check="${escapeHtml(c.name)}"` +
-                    `${selected.has(c.name) ? ' checked' : ''} title="Select for delete">` +
-                    badge + img +
-                    `<span class="cap-tile__name">${escapeHtml(c.name)}</span>` +
-                    `<span class="cap-tile__meta">${fmtTime(c.duration_s)} · ${fmtBytes(c.bytes)}</span>` +
-                    `</div>`;
-            }).join('');
+            grid.innerHTML = items.map(tileHtml).join('');
         }
         renderStatus();
         // A `.bin` the renderer can't read (a firmware image parked in
@@ -171,7 +211,11 @@ export function createBrowser(hub, capture, scene) {
     function renderStatus() {
         if (!status) return;
         const total = captures.reduce((a, c) => a + (c.bytes || 0), 0);
-        const base = `${captures.length} captures · ${fmtBytes(total)}` +
+        const shown = filterText ? sorted().length : captures.length;
+        const count = filterText
+            ? `${shown} of ${captures.length} captures`
+            : `${captures.length} captures`;
+        const base = `${count} · ${fmtBytes(total)}` +
             (selected.size ? ` · ${selected.size} selected` : '');
         status.textContent = deleteNote ? base + ' — ' + deleteNote : base;
     }
@@ -279,6 +323,14 @@ export function createBrowser(hub, capture, scene) {
     });
     chkThumbs?.addEventListener('change', () =>
         hub.send({ type: 'set_browser', thumbs: chkThumbs.checked }));
+    // Filter is client-local — re-render off the already-broadcast array, no
+    // server round-trip. The input lives in the toolbar (outside `#cap-grid`),
+    // so render()'s innerHTML rewrite never steals its focus mid-type.
+    filterInput?.addEventListener('input', () => {
+        filterText = filterInput.value.trim();
+        deleteNote = null;
+        render();
+    });
     btnRefresh?.addEventListener('click', () => hub.send({ type: 'list_captures' }));
 
     btnLoad?.addEventListener('click', () => {

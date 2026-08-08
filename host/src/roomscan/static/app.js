@@ -17,6 +17,7 @@ import { createMagcal } from './magcal.js';
 import { createCapture } from './capture.js';
 import { createBrowser } from './browser.js';
 import { createSlam } from './slam.js';
+import { createSplat } from './splat.js';
 import { createAdmin } from './admin.js';
 import { createIdle } from './idle.js';
 import { createSpotlight } from './spotlight.js';
@@ -32,20 +33,22 @@ createHud(hub);
 createLog(hub);
 createControls(hub);
 createSensors(hub);
+const sceneApi = createScene(hub);
+window.__scene = sceneApi;   // diagnostics only, see scene.js's `controls` comment
+
 // browser.js takes capture.js's handle so the two share ONE rename dialog
 // (§12) instead of growing a second copy that drifts from it.
 const captureApi = createCapture(hub);
-createBrowser(hub, captureApi);
+createBrowser(hub, captureApi, sceneApi);
 createIr(hub);
 // Top-bar maintenance actions. Talks to /api/* over fetch, not the hub — it
 // takes `hub` only to watch 'conn' so the Restart button can clear its busy
 // state when the socket comes back.
 createAdmin(hub);
-// scene.js returns a handle (Three.js context + follow-camera hooks); slam.js
-// renders the SLAM mesh/trajectory into that same scene (web Phase 4).
-const sceneApi = createScene(hub);
-window.__scene = sceneApi;   // diagnostics only, see scene.js's `controls` comment
 createSlam(hub, sceneApi);
+// Splat source (Live/View/Splat): renders an offline Gaussian-splat
+// reconstruction into the SAME scene, drawn by the single render loop.
+window.__splat = createSplat(hub, sceneApi);   // diagnostics only (see scene.js `controls`)
 // Magnetometer-calibration modal (opened from the Sensors card). It takes the
 // scene handle only to PAUSE the main render while the modal occludes it — it
 // never draws into scene.js's context (it owns its own; see magcal3d.js §8.3).

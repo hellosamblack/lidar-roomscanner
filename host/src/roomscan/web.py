@@ -27,6 +27,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -39,7 +40,7 @@ from pathlib import Path
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketState
 
@@ -119,6 +120,8 @@ from .slam.meshprep import MeshPrep
 from .slam.metrics import write_tum
 from .slam.frames import baro_height_m
 from .slam.showcase import PostProcessWorker
+from .splat import list_splats as list_splats_on_disk
+from .splat import SplatPreset, list_source_videos, slugify, splat_defaults
 from .viewer import Stats, resolve_args
 from .weather import FALLBACK_MSL_PA, MslPressure
 
@@ -161,7 +164,7 @@ CAPTURES_DIR = "captures"          # where Record writes + the library browses
 RESULTS_DIR = "results"            # where Save writes the full-res map + trajectory
 _TRAJ_TAIL_MAX = 256               # trajectory positions shipped in each `slam` message
 _VALID_MODES = ("realtime", "slam")  # legacy inbound compatibility
-_VALID_SOURCES = ("live", "view")
+_VALID_SOURCES = ("live", "view", "splat")
 _VALID_DISPLAYS = ("point_cloud", "preview", "slam", "detailed")
 _VALID_WALL_MODES = ("solid", "split")
 # The playback speed segmented control maps ×0.5/×1/×2/Max onto these fps; a
@@ -362,9 +365,13 @@ class UiState:
     # clients. The Live/View model is source + display; only `display == slam`
     # arms the latest-wins live runner.
     mode: str = "realtime"
-    source: str = "live"              # "live" | "view" (not persisted)
+    source: str = "live"              # "live" | "view" | "splat" (not persisted)
     display: str = "point_cloud"      # "point_cloud" | "preview" | "slam" | "detailed"
     selected_capture: str | None = None
+    # Splat source (offline Gaussian-splat reconstruction). `selected_splat` is
+    # the slug of the splat the viewer renders; the reader is left untouched (a
+    # splat is static geometry the client draws, not a device/replay stream).
+    selected_splat: str | None = None
     slam_trajectory: bool = True
     slam_walls: str = "split"          # "solid" | "split" -> MeshPrep wall_mode
     slam_follow: bool = True
@@ -2174,7 +2181,8 @@ def _state_message(ui: UiState, controller=None, detailed=None,
             "orbit_mode": ui.orbit_mode,
             "orbit_amplitude_deg": ui.orbit_amplitude_deg,
             "mode": ui.mode, "source": ui.source, "display": ui.display,
-            "selected_capture": ui.selected_capture, "detailed": detail,
+            "selected_capture": ui.selected_capture,
+            "selected_splat": ui.selected_splat, "detailed": detail,
             "slam_available": slam_available,
             "slam_trajectory": ui.slam_trajectory,
             "slam_walls": ui.slam_walls, "slam_follow": ui.slam_follow,
@@ -2409,6 +2417,20 @@ def sanitize_new_capture_name(name, captures_dir) -> str | None:
     return base
 
 
+def sanitize_video_name(name, captures_dir) -> Path | None:
+    """Resolve an inbound source-video name to a real ``.mp4``/``.mov`` under
+    `captures_dir`, or None. Basename-only (no traversal), extension allow-list,
+    must exist -- the whole security surface for `/capture_video/{name}` and the
+    `build_splat` command (a WS peer is untrusted). Mirrors sanitize_capture_name."""
+    if not name or not isinstance(name, str):
+        return None
+    base = os.path.basename(name)
+    if base != name or os.path.splitext(base)[1].lower() not in (".mp4", ".mov"):
+        return None
+    p = Path(captures_dir) / base
+    return p if p.is_file() else None
+
+
 _CAPTURE_INFO_CACHE: dict[tuple[str, int, int], dict] = {}
 
 
@@ -2593,6 +2615,25 @@ def list_captures(captures_dir, results_dir=RESULTS_DIR,
 
 def build_captures_message(captures_dir) -> dict:
     return {"type": "captures", "items": list_captures(captures_dir)}
+
+
+def build_splats_message(results_dir=RESULTS_DIR) -> dict:
+    """The `splats` list for the Splat-source picker (built splats, newest first).
+
+    Each entry carries a `ply_url` under the existing `/results` static mount and
+    the levelling `transform`, so the client fetches + orients a splat with no new
+    binary tag or route.
+    """
+    return {"type": "splats", "items": list_splats_on_disk(results_dir)}
+
+
+def build_source_videos_message(captures_dir=CAPTURES_DIR, results_dir=RESULTS_DIR) -> dict:
+    """The `source_videos` list for the Splat-mode capture viewer: the phone videos
+    in `captures/`, each with the splats built from it, plus the `SplatPreset`
+    defaults that seed the build-settings form."""
+    return {"type": "source_videos",
+            "items": list_source_videos(captures_dir, results_dir),
+            "defaults": splat_defaults()}
 
 
 def build_capture_index(path) -> dict:
@@ -3326,6 +3367,205 @@ class DetailedRunner:
                     pass
 
 
+class SplatRunner:
+    """Server-owned offline Gaussian-splat build for one source video.
+
+    Unlike ``DetailedRunner`` (which owns an in-process Open3D worker) this spawns
+    the ``roomscan-splat`` CLI as a **subprocess**, exactly as the ``splat_build``
+    MCP tool does. That isolation is deliberate: gsplat/COLMAP JIT-compile CUDA
+    kernels and a CUDA OOM or mesher fault can crash the *process* uncatchably
+    (BUG-053), and the web server must survive it. Progress is read from a
+    ``--progress-file`` the child writes atomically; the ``--json`` report is the
+    completion marker. Only ONE build runs at a time -- the 8 GB card cannot hold
+    two trainings -- and the guard also refuses while the detached CLI build (or any
+    other ``roomscan.splat.cli``) holds the GPU.
+    """
+
+    # Global-progress emit throttle: the child's progress file updates at the CLI's
+    # cadence (~every 200 train steps), so re-broadcasting every 30 Hz tick would be
+    # pure spam. Emit on a fraction change or every this-many seconds (to keep
+    # elapsed/ETA ticking on the banner).
+    _EMIT_MIN_INTERVAL_S = 2.0
+
+    def __init__(self, *, bus: LogBus, results_dir=RESULTS_DIR, captures_dir=CAPTURES_DIR):
+        self._bus = bus
+        self.results_dir = Path(results_dir)
+        self.captures_dir = captures_dir
+        self._lock = threading.Lock()
+        self._proc = None
+        self._thread = None
+        self._workdir = None
+        self._progress_path = None
+        self._report_path = None
+        self._video = None
+        self._name = None
+        self._slug = None
+        self._started_at = None          # monotonic
+        self._done = False
+        self._error = None
+        self._report = None
+        self._elapsed_at_done = None
+        self._done_sent = False
+        self._last_emit_t = 0.0
+        self._last_emit_frac = -1.0
+
+    @staticmethod
+    def _external_build_running() -> bool:
+        """True if some OTHER ``roomscan.splat.cli`` process is running (the detached
+        Sam Office resume, or a build from another session). Only meaningful when we
+        hold no child of our own, so any match is external -- the GPU cross-process
+        guard the single-process lock can't see."""
+        try:
+            r = subprocess.run(["pgrep", "-f", "roomscan.splat.cli"],
+                               capture_output=True, text=True, timeout=5)
+            return bool(r.stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            return False   # no pgrep: fall back to the in-process lock alone
+
+    def _build_cmd(self, video: Path, name: str, params: dict, force: bool) -> list:
+        cmd = [sys.executable, "-m", "roomscan.splat.cli",
+               "--results-dir", str(self.results_dir),
+               "--json", str(self._report_path),
+               "--progress-file", str(self._progress_path),
+               "build", str(video), "--name", name]
+        if force:
+            cmd.append("--force")
+        for k, v in params.items():
+            cmd += [f"--{k.replace('_', '-')}", str(v)]
+        return cmd
+
+    def _spawn(self, cmd: list, env: dict):
+        """Overridable seam (tests inject a stub). Child stderr is a PIPE the watcher
+        MUST drain or a full buffer deadlocks the build."""
+        return subprocess.Popen(cmd, cwd=str(REPO_ROOT), env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+    def _cuda_env(self) -> dict:
+        env = dict(os.environ)
+        cuda_home = env.get("CUDA_HOME") or "/usr/local/cuda"
+        if Path(cuda_home).is_dir():
+            env["CUDA_HOME"] = cuda_home
+            env["PATH"] = os.pathsep.join(
+                [str(Path(sys.executable).parent), str(Path(cuda_home) / "bin"),
+                 env.get("PATH", "")])
+        # Fidelity-preserving VRAM safety: avoids fragmentation OOM at no quality cost.
+        env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+        return env
+
+    def start(self, video: Path, name: str, params: dict, *, force: bool) -> dict:
+        video = Path(video)
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is None:
+                return {"started": False, "reason": "a splat build is already running"}
+            if self._external_build_running():
+                return {"started": False,
+                        "reason": "another splat build is running (GPU busy); try again when it finishes"}
+            self._workdir = Path(tempfile.mkdtemp(prefix="splatrun-"))
+            self._progress_path = self._workdir / "progress.json"
+            self._report_path = self._workdir / "report.json"
+            self._video, self._name, self._slug = video.name, name, slugify(name)
+            self._started_at = time.monotonic()
+            self._done = self._done_sent = False
+            self._error = self._report = self._elapsed_at_done = None
+            self._last_emit_t, self._last_emit_frac = 0.0, -1.0
+            cmd = self._build_cmd(video, name, params, force)
+            try:
+                self._proc = self._spawn(cmd, self._cuda_env())
+            except OSError as exc:
+                self._done, self._error = True, f"could not launch build: {exc}"
+                return {"started": False, "reason": self._error}
+            self._thread = threading.Thread(target=self._watch, args=(self._proc,), daemon=True)
+            self._thread.start()
+        self._bus.publish(f"[splat] build started: {name} <- {video.name}")
+        return {"started": True, "type": "splat_build", "video": video.name,
+                "name": name, "slug": self._slug, "phase": "frames", "fraction": 0.0,
+                "done": False, "elapsed_s": 0.0, "eta_s": None}
+
+    def _watch(self, proc) -> None:
+        """Drain child stderr to the log bus, then finalise on exit."""
+        try:
+            if proc.stderr is not None:
+                for line in proc.stderr:
+                    line = line.rstrip()
+                    if line:
+                        self._bus.publish(f"[splat] {line}")
+            proc.wait()
+        finally:
+            report, error = None, None
+            try:
+                report = json.loads(self._report_path.read_text(encoding="utf-8"))
+                if not report.get("ok"):
+                    error = report.get("reason") or "build failed"
+            except (OSError, json.JSONDecodeError):
+                error = (f"build exited {proc.returncode} without a report"
+                         if proc.returncode else "build produced no report")
+            with self._lock:
+                self._report = report
+                self._error = error
+                self._done = True
+                if self._elapsed_at_done is None and self._started_at is not None:
+                    self._elapsed_at_done = time.monotonic() - self._started_at
+            shutil.rmtree(self._workdir, ignore_errors=True)
+            self._bus.publish(f"[splat] build {'failed: ' + error if error else 'done'}")
+
+    def _read_progress(self) -> dict | None:
+        try:
+            return json.loads(self._progress_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None   # absent / mid-write -> caller holds last
+
+    def poll(self) -> dict | None:
+        """A `splat_build` message when there's something new to say, else None.
+
+        Throttled so a 45-min build doesn't broadcast at 30 Hz: while running, emit
+        on a fraction change or every `_EMIT_MIN_INTERVAL_S`; on completion, emit the
+        terminal message exactly once."""
+        with self._lock:
+            if self._proc is None and self._report is None and self._error is None:
+                return None
+            done, error, report = self._done, self._error, self._report
+            video, name, slug = self._video, self._name, self._slug
+            started_at, elapsed_done = self._started_at, self._elapsed_at_done
+        if done:
+            if self._done_sent:
+                return None
+            self._done_sent = True
+            stats = (report or {}).get("stats") if report else None
+            msg = {"type": "splat_build", "video": video, "name": name, "slug": slug,
+                   "phase": "failed" if error else "done", "fraction": 1.0,
+                   "done": True, "elapsed_s": round(elapsed_done or 0.0, 1),
+                   "eta_s": 0.0, "stats": stats}
+            if error:
+                msg["error"] = error
+            return msg
+        prog = self._read_progress() or {}
+        frac = float(prog.get("fraction", 0.0))
+        elapsed_s = max(0.0, time.monotonic() - started_at) if started_at else 0.0
+        now = time.monotonic()
+        if abs(frac - self._last_emit_frac) < 1e-4 and (now - self._last_emit_t) < self._EMIT_MIN_INTERVAL_S:
+            return None
+        self._last_emit_t, self._last_emit_frac = now, frac
+        eta_s = elapsed_s * (1 - frac) / frac if frac > 1e-3 else None
+        return {"type": "splat_build", "video": video, "name": name, "slug": slug,
+                "phase": prog.get("phase", "frames"), "fraction": round(frac, 4),
+                "done": False, "elapsed_s": round(elapsed_s, 1),
+                "eta_s": round(eta_s, 1) if eta_s is not None else None}
+
+    def close(self) -> None:
+        with self._lock:
+            proc, thread, workdir = self._proc, self._thread, self._workdir
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        if thread is not None:
+            thread.join(timeout=5)
+        if workdir is not None:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
 def _applied_imu_env_rate_hz(state) -> float | None:
     """The IMU/env poll rate actually driving streams 9/10/11 right now, for
     `Mapper.set_imu_rate_hz()` (Task 8) -- never the ToF target FPS.
@@ -3864,6 +4104,9 @@ async def _lifespan(app: FastAPI):
     detailed = getattr(app.state, "detailed_runner", None)
     if detailed is not None:
         await asyncio.to_thread(detailed.close)
+    splat_runner = getattr(app.state, "splat_runner", None)
+    if splat_runner is not None:
+        await asyncio.to_thread(splat_runner.close)
 
 
 app = FastAPI(lifespan=_lifespan)
@@ -4134,6 +4377,20 @@ async def get_thumb(name: str) -> Response:
         return miss
     return Response(content=data, media_type="image/png",
                     headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+@app.get("/capture_video/{name}", include_in_schema=False)
+async def get_capture_video(name: str) -> Response:
+    """Stream a source phone video (`captures/<name>.mp4`) for in-browser preview.
+
+    `FileResponse` is Range-capable, so the browser `<video>` seeks and streams
+    without the server ever reading the multi-hundred-MB file into memory. A narrow
+    route (not a `captures/` static mount) keeps the surface to `sanitize_video_name`
+    and exposes no directory listing. Unknown/absent -> 404 + no-store."""
+    path = sanitize_video_name(name, _captures_dir_of(app.state))
+    if path is None:
+        return Response(status_code=404, headers={"Cache-Control": "no-store"})
+    return FileResponse(str(path), headers={"Cache-Control": "no-store"})
 
 
 # --- sensor auto-idle (SET_STANDBY, laser-wear reduction) -------------------
@@ -4604,6 +4861,20 @@ async def _broadcast_captures(state, ctrl) -> None:
     library (0.4 ms warm, cached on size+mtime) -- half a second of stalled
     broadcaster, and a just-stopped recording is guaranteed cache-cold."""
     msg = await asyncio.to_thread(build_captures_message, ctrl.captures_dir)
+    await _broadcast_text(state.clients, json.dumps(msg))
+
+
+async def _broadcast_splats(state) -> None:
+    """Push a fresh `splats` list (scanned off the event loop) to every tab."""
+    msg = await asyncio.to_thread(build_splats_message, RESULTS_DIR)
+    await _broadcast_text(state.clients, json.dumps(msg))
+
+
+async def _broadcast_source_videos(state) -> None:
+    """Push a fresh `source_videos` list (mp4/mov + their splats), scanned off the
+    event loop (a manifest scan over every splat dir)."""
+    msg = await asyncio.to_thread(build_source_videos_message,
+                                  _captures_dir_of(state), RESULTS_DIR)
     await _broadcast_text(state.clients, json.dumps(msg))
 
 
@@ -5121,6 +5392,19 @@ async def _broadcaster() -> None:
             if mesh_bytes is not None:
                 _cache_latest_mesh(state, mesh_bytes)
 
+        # Splat build progress. Polled every tick REGARDLESS of display (a build
+        # runs while the user sits on source==splat / display==point_cloud), but
+        # `poll()` is a cheap file stat that returns None unless there's a throttled
+        # update or a one-shot completion, so this costs ~nothing when idle.
+        splat_runner = getattr(state, "splat_runner", None)
+        if splat_runner is not None:
+            smsg = splat_runner.poll()
+            if smsg is not None:
+                await _broadcast_text(clients, json.dumps(smsg))
+                if smsg.get("done"):
+                    await _broadcast_source_videos(state)  # refresh the just-built row
+                    await _broadcast_splats(state)
+
         # Give every `/ws-mesh` flow its one credit if it's free and there is
         # something newer cached than what it last got (BUG-061 A3). Every
         # tick, regardless of display mode, so a flow doesn't wait on the next
@@ -5255,6 +5539,10 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_text(json.dumps(caps))
         saved = await asyncio.to_thread(build_saved_message, RESULTS_DIR)
         await websocket.send_text(json.dumps(saved))
+        # Splat-source picker: the built-splat list, so the Splat page is
+        # populated on first paint rather than after a `list_splats` round trip.
+        await websocket.send_text(json.dumps(
+            await asyncio.to_thread(build_splats_message, RESULTS_DIR)))
         # Ranging profile/IMU-env state (Task 10): a second/late-joining tab must
         # see the SAME server-authoritative state immediately, not wait for the
         # next tick or an unrelated control's echo.
@@ -5518,6 +5806,44 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         await _broadcast_session(state)
         await _broadcast_state(state)
 
+    elif mtype == "load_splat":
+        # Select which built splat the Splat source renders. Validated against the
+        # slugs actually on disk (basename-only, no path) so a stale/typo'd name
+        # can't point the client at an arbitrary URL. Selecting one implies the
+        # Splat source, so a click in the picker works from any source.
+        slug = msg.get("slug") or msg.get("name")
+        avail = {s["slug"] for s in await asyncio.to_thread(list_splats_on_disk, RESULTS_DIR)}
+        if slug not in avail:
+            log.warning("load_splat: unknown splat %r", slug)
+            return
+        ui.selected_splat, ui.source = slug, "splat"
+        await _broadcast_state(state)
+
+    elif mtype == "list_splats":
+        await _broadcast_splats(state)
+
+    elif mtype == "list_source_videos":
+        await _broadcast_source_videos(state)
+
+    elif mtype == "build_splat":
+        # Kick off an offline splat build (subprocess-isolated) for a source video.
+        # `video` is validated to a real .mp4/.mov under captures/; `params` is
+        # allow-listed to SplatPreset field names (a WS peer is untrusted, and the
+        # values become CLI flags). Only one build runs at a time (8 GB card).
+        runner = getattr(state, "splat_runner", None)
+        video = sanitize_video_name(msg.get("video"), _captures_dir_of(state))
+        name = (msg.get("name") or "").strip()
+        if runner is None or video is None or not name:
+            log.warning("build_splat: bad request video=%r name=%r", msg.get("video"), name)
+            return
+        allowed = set(splat_defaults())
+        params = {k: v for k, v in (msg.get("params") or {}).items()
+                  if k in allowed and v is not None}
+        result = await asyncio.to_thread(runner.start, video, name, params,
+                                         force=bool(msg.get("force")))
+        await _broadcast_text(state.clients, json.dumps({"type": "splat_build", **result}))
+        await _broadcast_source_videos(state)
+
     elif mtype == "transport" and ctrl is not None:
         action = msg.get("action")
         value = msg.get("value", 0)
@@ -5679,6 +6005,18 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         # so before switch_to_replay stops the recorder behind our back (which
         # would strand the file without a `last_name` for the rename modal).
         await _stop_slam_auto_record(state, ctrl)
+        if source == "splat":
+            # Splat is static geometry the client draws -- no device/replay reader
+            # to swap. The live/replay reader is left exactly as it was (as the
+            # empty-View branch does), so returning here is instant. The client
+            # hides the point cloud / SLAM objects and shows the loaded splat.
+            ui.source = "splat"
+            ui.display, ui.mode = "point_cloud", "realtime"
+            await _reset_slam(state)               # drop any live SLAM GPU work
+            await _broadcast_splats(state)         # populate the picker
+            await _broadcast_source_videos(state)  # populate the capture viewer
+            await _broadcast_state(state)
+            return
         if source == "live":
             await asyncio.to_thread(ctrl.switch_to_live)
             ui.source, ui.selected_capture = "live", None
@@ -6198,6 +6536,8 @@ def main(argv=None) -> int:
     app.state.magcal_view = "current"
     app.state.slam_runner = slam_runner
     app.state.detailed_runner = DetailedRunner(bus=bus, results_dir=RESULTS_DIR)
+    app.state.splat_runner = SplatRunner(bus=bus, results_dir=RESULTS_DIR,
+                                         captures_dir=CAPTURES_DIR)
     app.state.deproj = None
     # Latest ToF per-frame metadata (exposure/die-temp/health), decoded host-side
     # from the RAW tail in pipeline.py and cached here so the ~15 Hz sensor tick

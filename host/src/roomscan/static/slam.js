@@ -564,7 +564,9 @@ export function createSlam(hub, sceneApi) {
     function applyState() {
         const slamOn = state.display === 'slam' || state.display === 'detailed';
         group.visible = slamOn;
-        sceneApi.setPointsVisible(!slamOn && state.display !== 'preview');
+        // The Splat source draws its own geometry (splat.js); hide the live/replay
+        // point cloud there so the two don't overdraw each other.
+        sceneApi.setPointsVisible(!slamOn && state.display !== 'preview' && state.source !== 'splat');
         // FPV/Mirror are explicitly scanner-relative cameras, so they always
         // follow their pose. World retains the optional follow toggle for a
         // moving map overview.

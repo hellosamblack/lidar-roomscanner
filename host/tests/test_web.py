@@ -3567,8 +3567,7 @@ def test_rail_cards_data_attributes_and_default_collapsed_states():
         "sensors": True,     # Collapsed
         "slam-hud": True,    # Collapsed
         "resources": False,  # Expanded (only rendered at all in Live SLAM)
-        "browser": False,    # Expanded (§12: the View page's file browser)
-        "preview": False,    # Expanded (§12: rendered only with a tile selected)
+        "browser": False,    # Expanded (§12: the View page's file browser; preview drawer integrated inside)
         "ir-view": True,     # Collapsed
         "device": True,      # Collapsed
         "view": False,       # Expanded
@@ -3576,6 +3575,7 @@ def test_rail_cards_data_attributes_and_default_collapsed_states():
         "transport": False,  # Expanded (§11: Playback, rendered only in replay)
         "slam-ctrl": True,   # Collapsed
         "log": True,         # Collapsed
+        "splat": False,      # Splat-source picker (hidden until source == splat, not collapsed)
     }
 
     import re

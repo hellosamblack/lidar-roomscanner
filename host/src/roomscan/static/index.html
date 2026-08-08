@@ -135,8 +135,10 @@
             --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.26'/%3E%3C/svg%3E");
             --text-main: #e2e8f0;
             --text-muted: #94a3b8;
-            --accent: #3b82f6;
-            --accent-hover: #60a5fa;
+            --accent: #f59e0b;
+            --accent-hover: #fbbf24;
+            --accent-glow: 0 0 12px rgba(245, 158, 11, 0.45);
+            --accent-glow-strong: 0 0 18px rgba(245, 158, 11, 0.70);
             --danger: #ef4444;
             --success: #10b981;
             --warning: #f59e0b;
@@ -300,44 +302,51 @@
         .comm-item--absent { opacity: 0.6; }
         @media (max-width: 900px) { .comm-item__label { display: none; } }  /* dots only on narrow bars */
 
-        /* ================= docks: the anti-overlap layout =================
-         *
-         * Every floating block (telemetry, sensors, SLAM HUD, IR monitor,
-         * diagnostics, and each control group) is a child of one of two docks.
-         * A dock is a HEIGHT-BOUNDED, COLUMN-WRAPPING flex container spanning
-         * the band between the top bar and the event-log console: blocks stack
-         * top-down and, the moment the stack would run past the bottom of that
-         * band, the next block spills into a NEW COLUMN instead of overflowing
-         * onto whatever sits below. So blocks never overlap each other, the top
-         * bar, or the console. The one case CSS can't see — the left dock's
-         * columns marching into the right dock's — is resolved by layout.js,
-         * which degrades (collapse diagnostics -> scroll the right dock ->
-         * collapse IR -> collapse sensors) until the two sides clear.
-         *
-         * The dock box itself spans the viewport but is inert; only the blocks
-         * inside it take pointer events, so the canvas keeps the whole window.
-         */
-        .dock {
+        /* ================= sidebars: Primary (Left) & Secondary (Right) bars ================= */
+        .sidebar {
             position: fixed;
             top: var(--dock-top);
             height: calc(100vh - var(--dock-top) - var(--dock-bottom));
-            width: calc(100vw - 32px);
+            width: 320px;
+            max-width: calc(100vw - 32px);
             display: flex;
-            flex-flow: column wrap;
-            align-content: flex-start;          /* natural column widths, packed left */
-            gap: var(--dock-gap);
+            flex-direction: column;
+            gap: 8px;
             z-index: 12;
+            padding: 8px;
+            background-color: var(--panel-bg);
+            background-image: var(--grain);
+            background-blend-mode: soft-light;
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--panel-border);
+            border-radius: 14px;
+            box-shadow: 0 24px 48px -16px rgba(4, 6, 12, 0.60),
+                        0 2px 8px rgba(4, 6, 12, 0.40),
+                        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+            overflow-y: auto;
+            overflow-x: hidden;
+            transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.25s ease;
+            pointer-events: auto;
+        }
+        .sidebar--left { left: 16px; }
+        .sidebar--right { right: 16px; }
+
+        /* Hidden sidebar slide animation */
+        .sidebar--left.is-hidden {
+            transform: translateX(calc(-100% - 24px));
+            opacity: 0;
             pointer-events: none;
         }
-        .dock > * { flex: 0 0 auto; max-height: 100%; pointer-events: auto; }
-        .dock--left { left: 16px; }
-        /* wrap-reverse flips the cross axis: column 1 hugs the right edge and
-           extra columns grow leftwards (mirror image of the left dock). */
-        .dock--right { right: 16px; flex-flow: column wrap-reverse; }
-        /* Tight-viewport fallback (layout.js): stop wrapping, scroll instead.
-           Class-based (not #right-rail) so this out-specifies .dock--right. */
-        .dock.dock--scroll { flex-wrap: nowrap; overflow-y: auto; overflow-x: hidden; width: auto; }
-        .dock.dock--scroll > * { max-height: none; }
+        .sidebar--right.is-hidden {
+            transform: translateX(calc(100% + 24px));
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        /* Backward compatibility aliases */
+        .dock { display: flex; flex-direction: column; gap: 8px; }
+        .dock.dock--scroll { overflow-y: auto; }
 
         /* Collapsed body — user-driven (.collapsed) or layout-driven
            (.auto-collapsed, applied only to break a dock collision).
@@ -537,105 +546,91 @@
         }
         .hud-warn--transient.is-fading { opacity: 0; }
 
-        /* ---- component: control-group (collapsible card in the right dock) ---- */
-        .control-group {
-            display: flex; flex-direction: column; gap: 12px;
-            width: 300px; padding: 14px 16px; overflow: hidden;
+        /* ---- component: control-group & sidebar sections (Hierarchy & Weight) ---- */
+        .sidebar .card, .sidebar .control-group, .sidebar .hud-card {
+            width: 100%;
+            background: rgba(22, 24, 30, 0.45);
+            border: 1px solid rgba(255, 255, 255, 0.07);
+            border-left: 3px solid rgba(245, 158, 11, 0.4);
+            border-radius: 10px;
+            padding: 0;
+            backdrop-filter: none;
+            -webkit-backdrop-filter: none;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+            flex-shrink: 0;
+            overflow: hidden;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
         }
+        .sidebar .card:hover, .sidebar .control-group:hover, .sidebar .hud-card:hover {
+            border-color: rgba(245, 158, 11, 0.3);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+        }
+        .sidebar .card.collapsed {
+            border-left-color: rgba(255, 255, 255, 0.15);
+            opacity: 0.8;
+        }
+        /* Top-level main section headers carry prominent visual weight */
         .control-group__header {
             display: flex; align-items: center; justify-content: flex-start; gap: 8px;
             width: 100%;
-            background: none; border: none; padding: 0 0 2px 0;
-            color: var(--text-muted);
+            background: linear-gradient(90deg, rgba(245, 158, 11, 0.09) 0%, rgba(255, 255, 255, 0.02) 100%);
+            border: none;
+            padding: 8px 12px;
+            color: var(--text-main);
             font-family: var(--font-ui);
-            font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;
+            font-size: 0.80rem; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700;
             cursor: pointer;
-            border-bottom: 1px solid var(--panel-border);
+            border-bottom: 1px solid rgba(245, 158, 11, 0.22);
+            transition: background 0.15s ease, color 0.15s ease;
         }
-        .control-group__header:hover { color: var(--text-main); }
-        /* chevron is always the visually-last item; margin-left:auto pushes it to
-           the header's right edge regardless of whether a .card-icon was injected
-           before the title span (was justify-content:space-between, which only
-           worked for exactly 2 children). */
-        .control-group__header .chevron { transition: transform 0.2s ease; font-size: 0.7rem; margin-left: auto; }
+        .control-group__header:hover {
+            background: linear-gradient(90deg, rgba(245, 158, 11, 0.18) 0%, rgba(255, 255, 255, 0.05) 100%);
+            color: #ffffff;
+        }
+        .control-group__header .card-icon {
+            width: 16px; height: 16px; color: var(--accent);
+            filter: drop-shadow(0 0 4px rgba(245, 158, 11, 0.5));
+        }
+        .control-group__header .chevron { transition: transform 0.2s ease; font-size: 0.7rem; margin-left: auto; color: var(--text-muted); }
         .control-group.collapsed .chevron, .card.collapsed .chevron { transform: rotate(-90deg); }
-        /* min-height:0 + overflow-y lets a group taller than the dock band
-           scroll inside itself instead of pushing past the console. */
-        .control-group__body { display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+
+        .control-group__body, .hud-card .card-body {
+            display: flex; flex-direction: column; gap: 8px;
+            padding: 10px 12px; min-height: 0; overflow-y: visible; overflow-x: hidden;
+        }
         .control-group.collapsed .control-group__body { display: none; }
 
-        .field-label { font-size: 0.7rem; color: var(--text-muted); font-weight: 500; }
-        /* a sub-field under a group heading (the camera-framing sliders) */
-        .field-label--sub { padding-left: 8px; opacity: 0.85; }
+        /* Subsections & field labels carry distinct subordinate weight */
+        .field-label { font-size: 0.66rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
+        .field-label--sub { padding-left: 4px; opacity: 0.8; font-weight: 500; }
 
-        /* ---- component: debug-section (collapsed-by-default sub-group) ---- */
-        .debug-section { border-top: 1px solid var(--panel-border); padding-top: 8px; }
-        .debug-section > summary { cursor: pointer; list-style: none; }
-        .debug-section > summary::-webkit-details-marker { display: none; }
-        .debug-section > summary::after { content: ' \25B8'; font-size: 0.6rem; }
-        .debug-section[open] > summary::after { content: ' \25BE'; }
-        .debug-section__body { display: flex; flex-direction: column; gap: 10px; padding-top: 10px; }
-
-        /* ---- component: control-subgroup (collapsible sub-area inside cards) ---- */
-        .control-subgroup {
-            border-top: 1px solid var(--panel-border);
-            padding-top: 8px;
-            margin-top: 4px;
-            overflow-x: hidden;
-            width: 100%;
-            box-sizing: border-box;
+        /* ---- component: debug-section & subgroups (subordinate weight) ---- */
+        .control-subgroup, .debug-section {
+            border-top: 1px dashed rgba(255, 255, 255, 0.12);
+            padding-top: 6px; margin-top: 4px;
+            width: 100%; box-sizing: border-box;
         }
-        .control-subgroup:first-child {
-            border-top: none;
-            padding-top: 0;
-            margin-top: 0;
+        .control-subgroup:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+        .control-subgroup > summary, .debug-section > summary {
+            cursor: pointer; list-style: none;
+            font-family: var(--font-ui); font-size: 0.68rem; text-transform: uppercase;
+            letter-spacing: 0.04em; font-weight: 600; color: var(--text-muted);
+            display: flex; align-items: center; justify-content: space-between;
+            user-select: none; padding: 2px 0; opacity: 0.9;
         }
-        .control-subgroup > summary {
-            cursor: pointer;
-            list-style: none;
-            font-family: var(--font-ui);
-            font-size: 0.72rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            font-weight: 600;
-            color: var(--text-muted);
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            user-select: none;
-            padding: 2px 0;
-        }
-        .control-subgroup > summary:hover { color: var(--text-main); }
-        .control-subgroup > summary::-webkit-details-marker { display: none; }
+        .control-subgroup > summary:hover, .debug-section > summary:hover { color: var(--text-main); opacity: 1; }
+        .control-subgroup > summary::-webkit-details-marker, .debug-section > summary::-webkit-details-marker { display: none; }
         .control-subgroup > summary .chevron { transition: transform 0.2s ease; font-size: 0.7rem; }
         .control-subgroup:not([open]) > summary .chevron { transform: rotate(-90deg); }
-        .control-subgroup__body {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-            padding-top: 8px;
-            overflow-x: hidden;
-            width: 100%;
-            box-sizing: border-box;
+        .control-subgroup__body, .debug-section__body {
+            display: flex; flex-direction: column; gap: 6px; padding-top: 6px; overflow-x: hidden; width: 100%; box-sizing: border-box;
         }
 
-        /* Icon injected by layout.js's initCardStates() as the first child of
-           each card's header — reuses the exact CARD_ICONS SVG the squircle rail
-           draws (single source, see layout.js) so the two can't drift apart.
-           Sized down from the squircle's 20px so header rows don't grow. */
-        .card-icon { width: 14px; height: 14px; flex-shrink: 0; display: block; }
-
-        /* ---- squircle-bar (single horizontal row of collapsed card squircles at top of dock) ---- */
-        .squircle-bar {
-            display: flex; flex-direction: row; align-items: center; gap: 8px; flex-wrap: wrap;
-            width: max-content; max-width: 100%; pointer-events: auto; z-index: 15; margin-bottom: 4px;
-        }
-        .dock--left .squircle-bar { justify-content: flex-start; }
-        .dock--right .squircle-bar { justify-content: flex-end; }
-        .squircle-bar:empty { display: none; }
+        /* ---- squircle-bar (disabled in sidebar layout) ---- */
+        .squircle-bar { display: none !important; }
         .squircle-btn {
-            width: 42px; height: 42px; padding: 0;
-            border-radius: 12px;
+            width: 32px; height: 32px; padding: 0;
+            border-radius: 8px;
             background: var(--panel-bg);
             backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
             border: 1px solid var(--panel-border);
@@ -649,63 +644,49 @@
         }
         .squircle-btn:hover {
             background: rgba(255, 255, 255, 0.14);
-            border-color: rgba(255, 255, 255, 0.3);
+            border-color: rgba(245, 158, 11, 0.4);
             color: var(--text-main);
             transform: translateY(-1px);
             box-shadow: 0 6px 18px rgba(0,0,0,0.45);
         }
-        .squircle-btn svg { display: block; width: 20px; height: 20px; }
+        .squircle-btn svg { display: block; width: 16px; height: 16px; }
         .squircle-btn.hidden { display: none !important; }
-        /* is-open: the card is on screen right now -- full-strength colour/border,
-           like a pressed tab. is-dim: the card is collapsed -- muted, so the two
-           are readable at a glance without reading the tooltip. Clicking either
-           toggles (layout.js setupCollapseDelegation). */
         .squircle-btn.is-open {
-            background: rgba(255, 255, 255, 0.16);
-            border-color: var(--accent, rgba(255, 255, 255, 0.55));
-            color: var(--text-main);
-            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+            background: rgba(245, 158, 11, 0.16);
+            border-color: var(--accent);
+            color: var(--accent-hover);
+            box-shadow: 0 0 10px rgba(245, 158, 11, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.15);
         }
-        .squircle-btn.is-dim {
-            opacity: 0.45;
-            color: var(--text-muted);
-        }
+        .squircle-btn.is-dim { opacity: 0.45; color: var(--text-muted); }
         .squircle-btn.is-dim:hover { opacity: 0.85; }
-
-        /* User-collapsed top-level cards hide their main card container */
-        .dock .card.collapsed { display: none !important; }
 
         /* ---- component: button (default + primary) ---- */
         button {
             background: rgba(255, 255, 255, 0.05);
             border: 1px solid var(--panel-border);
             color: var(--text-main);
-            padding: 10px 16px;
-            border-radius: 8px;
+            padding: 4px 10px;
+            height: 26px;
+            border-radius: 6px;
             font-family: inherit;
-            font-size: 0.875rem;
+            font-size: 0.76rem;
             font-weight: 500;
             cursor: pointer;
-            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
             display: flex; justify-content: center; align-items: center;
         }
-        button:hover { background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 255, 255, 0.2); }
+        button:hover { background: rgba(255, 255, 255, 0.12); border-color: rgba(245, 158, 11, 0.3); }
         button:active { transform: translateY(1px); }
         button.primary {
-            /* Same-hue top sheen (a white overlay, NOT a two-colour AI gradient)
-               + a 1px inner highlight so the fill catches the overhead light. */
-            background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 42%), var(--accent);
-            border-color: var(--accent); color: white;
-            box-shadow: 0 4px 14px rgba(59, 130, 246, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+            background: linear-gradient(180deg, rgba(251, 191, 36, 0.35), rgba(245, 158, 11, 0.08) 40%), var(--accent);
+            border-color: var(--accent); color: #0b0c10; font-weight: 700;
+            box-shadow: 0 2px 12px rgba(245, 158, 11, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.35);
         }
         button.primary:hover {
-            background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0) 42%), var(--accent-hover);
-            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+            background: linear-gradient(180deg, rgba(251, 191, 36, 0.5), rgba(245, 158, 11, 0.18) 40%), var(--accent-hover);
+            box-shadow: 0 4px 18px rgba(245, 158, 11, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.45);
         }
 
-        /* Keyboard focus ring (a11y). Mouse/touch focus stays quiet; keyboard
-           focus gets a clear accent ring. Fixes the gap where inputs set
-           `outline: none` on plain :focus and nothing showed for keyboard users. */
         :focus:not(:focus-visible) { outline: none; }
         button:focus-visible, .segmented button:focus-visible, .topbar-btn:focus-visible,
         .squircle-btn:focus-visible, .cap-tile:focus-visible, .cap-row:focus-visible,
@@ -714,20 +695,37 @@
             outline: 2px solid var(--accent); outline-offset: 2px;
         }
 
-        /* two side-by-side action buttons (replaces the old one-off grid-2) */
-        .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 
-        /* ---- component: segmented-control (2–3-way mutually-exclusive row) ---- */
-        .segmented { display: flex; gap: 0; border: 1px solid var(--panel-border); border-radius: 8px; overflow: hidden; }
+        /* ---- component: segmented-control (overflow-resilient, high-density row) ---- */
+        .segmented { display: flex; gap: 0; border: 1px solid var(--panel-border); border-radius: 6px; overflow: hidden; background: rgba(0, 0, 0, 0.25); }
         .segmented button {
-            flex: 1; border: none; border-radius: 0; background: rgba(255,255,255,0.03);
-            padding: 8px 6px; font-size: 0.8rem;
+            flex: 1 1 0; min-width: 0; border: none; border-radius: 0; background: rgba(255,255,255,0.02);
+            padding: 3px 4px; font-size: 0.72rem; font-weight: 500; height: auto; min-height: 26px;
             border-right: 1px solid var(--panel-border);
+            /* Wrap only between words (e.g. "High Frame Rate"), never mid-word:
+               word-break:break-word split single-word labels into "Turb o" /
+               "Rece nt" / "Lengt h" when the toolbar got tight. */
+            white-space: normal; overflow-wrap: normal; word-break: normal; line-height: 1.1; hyphens: none; text-align: center;
+            display: flex; align-items: center; justify-content: center;
+            transition: all 0.15s ease;
         }
         .segmented button:last-child { border-right: none; }
-        .segmented button.active { background: var(--accent); color: white; }
-        .segmented button.active:hover { background: var(--accent-hover); }
-        .segmented--sm button { padding: 4px 8px; font-size: 0.7rem; }
+        .segmented button.active {
+            background: linear-gradient(180deg, rgba(251, 191, 36, 0.35), rgba(245, 158, 11, 0.08)), var(--accent);
+            color: #0b0c10; font-weight: 700;
+            box-shadow: 0 0 10px rgba(245, 158, 11, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+            text-shadow: 0 0 1px rgba(0,0,0,0.4);
+        }
+        .segmented button.active:hover {
+            background: linear-gradient(180deg, rgba(251, 191, 36, 0.45), rgba(245, 158, 11, 0.15)), var(--accent-hover);
+            box-shadow: 0 0 14px rgba(245, 158, 11, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+        }
+        .segmented--sm button { padding: 2px 4px; font-size: 0.68rem; min-height: 22px; }
+        /* e.g. the real-time view modes, which don't apply while SLAM owns the camera */
+        .segmented button:disabled,
+        .segmented button:disabled:hover { opacity: 0.35; cursor: default; background: transparent; }
+        .segmented button.active:disabled { background: var(--accent); opacity: 0.35; }
         /* e.g. the real-time view modes, which don't apply while SLAM owns the camera */
         .segmented button:disabled,
         .segmented button:disabled:hover { opacity: 0.35; cursor: default; background: transparent; }
@@ -919,9 +917,32 @@
            `.control-group card`, NOT `.hud-card`: `.dock > .hud-card { pointer-
            events: none }` (the read-only-telemetry rule above) would make every
            tile unclickable. This is the one left-dock card that is interactive. */
-        #browser-card { width: 420px; }
+        /* Fill the sidebar: full width (the fixed 420px overflowed a narrow rail
+           and never grew a wide one), and — when open — flex to claim the dock's
+           leftover vertical space so the grid isn't a short band over dead air. */
+        #browser-card { width: 100%; box-sizing: border-box; }
+        #browser-card:not(.collapsed) {
+            display: flex; flex-direction: column; flex: 1 1 auto; min-height: 260px;
+        }
+        #browser-card:not(.collapsed) > .control-group__body { flex: 1 1 auto; min-height: 0; }
+        .browser-filter {
+            width: 100%; box-sizing: border-box; margin-bottom: 2px;
+            padding: 5px 8px; border: 1px solid var(--panel-border); border-radius: 6px;
+            background: rgba(0, 0, 0, 0.25); color: var(--text-main);
+            font-family: 'JetBrains Mono', monospace; font-size: 0.72rem;
+        }
+        .browser-filter::placeholder { color: var(--text-muted); }
+        .browser-filter:focus { outline: none; border-color: var(--accent); }
         .browser-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
         .browser-toolbar .segmented { flex: 0 0 auto; }
+        /* Full-width day separator inside the (3-col grid | 1-col list) container. */
+        .cap-group-header {
+            grid-column: 1 / -1; margin-top: 4px;
+            font-family: var(--font-ui); font-size: 0.62rem; font-weight: 600;
+            text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted);
+            border-bottom: 1px solid var(--panel-border); padding-bottom: 3px;
+        }
+        .cap-group-header:first-child { margin-top: 0; }
         /* grid-auto-rows: max-content is load-bearing — without it the default
            `auto` rows are stretched to divide the container's max-height between
            however many captures exist, so a 37-file library renders 37 squashed
@@ -929,7 +950,11 @@
         .browser-grid {
             display: grid; grid-template-columns: repeat(3, 1fr);
             grid-auto-rows: max-content; align-content: start; gap: 8px;
-            max-height: 42vh; overflow-y: auto; overflow-x: hidden;
+            /* flex:1 so the grid claims the card's leftover height (see
+               #browser-card above); min-height keeps it usable when the dock is
+               short, and it stays independently scrollable. */
+            flex: 1 1 auto; min-height: 140px; max-height: 60vh;
+            overflow-y: auto; overflow-x: hidden;
         }
         .browser-grid.is-list { grid-template-columns: 1fr; gap: 4px; }
         /* A capture the renderer can't read (a firmware image that happens to
@@ -1062,25 +1087,42 @@
         #seek { width: 100%; accent-color: var(--accent); cursor: pointer; }
 
         /* ---- component: toggle / checkbox ---- */
-        .toggle { display: flex; align-items: center; gap: 8px; font-size: 0.82rem; color: var(--text-muted); cursor: pointer; }
-        .toggle input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
-        .toggle--sm { font-size: 0.72rem; }
+        .toggle { display: flex; align-items: center; gap: 8px; font-size: 0.76rem; color: var(--text-muted); cursor: pointer; }
+        .toggle input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; filter: drop-shadow(0 0 3px rgba(245, 158, 11, 0.4)); }
+        .toggle--sm { font-size: 0.70rem; }
 
-        /* IR monitor canvas card (left dock). 300px so the header's colormap +
-           freeze + close controls all fit on one line. */
+        /* ---- component: sidebar drag & resize handle ---- */
+        .sidebar-handle {
+            position: absolute;
+            top: 0; bottom: 0;
+            width: 8px;
+            z-index: 25;
+            cursor: col-resize;
+            display: flex; align-items: center; justify-content: center;
+            transition: background 0.15s ease, box-shadow 0.15s ease;
+        }
+        .sidebar-handle::after {
+            content: "";
+            width: 2px; height: 32px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.2);
+            transition: background 0.15s ease, box-shadow 0.15s ease;
+        }
+        .sidebar-handle--right { right: 0; }
+        .sidebar-handle--left { left: 0; }
+        .sidebar-handle:hover, .sidebar-handle.is-dragging {
+            background: rgba(245, 158, 11, 0.15);
+        }
+        .sidebar-handle:hover::after, .sidebar-handle.is-dragging::after {
+            background: var(--accent);
+            box-shadow: 0 0 8px var(--accent);
+        }
+
+        /* IR monitor canvas card */
         #ir-card {
-            width: 300px;
-            padding: 10px;
-            display: flex; flex-direction: column; gap: 8px;
+            width: 100%;
         }
         #ir-card.hidden { display: none; }
-        .ir-card__header { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-        .ir-card__title { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600; flex: 1; }
-        .ir-card__close {
-            background: none; border: none; color: var(--text-muted);
-            font-size: 1.1rem; line-height: 1; padding: 0 4px; width: auto;
-        }
-        .ir-card__close:hover { color: var(--text-main); background: none; }
         /* The pane is gravity-rolled, so the image spins inside a SQUARE frame of
            fixed size: the card never changes shape as the board rolls, and the
            whole field of view stays visible (corners go empty at intermediate
@@ -1179,6 +1221,70 @@
         .toast--ok { border-color: var(--success); color: var(--success); }
         .toast--busy, .toast--timeout { border-color: var(--warning); color: var(--warning); }
         .toast--error { border-color: var(--danger); color: var(--danger); }
+
+        /* ---- Splat-source picker (§ Live/View/Splat) ---- */
+        .splat-list { display: flex; flex-direction: column; gap: 6px; }
+        .splat-item {
+            display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+            width: 100%; padding: 8px 10px; text-align: left;
+            border: 1px solid var(--panel-border); border-radius: 6px;
+            background: rgba(0, 0, 0, 0.22); color: inherit; cursor: pointer;
+        }
+        .splat-item:hover { border-color: rgba(255, 255, 255, 0.18); }
+        .splat-item.active { border-color: var(--accent); background: rgba(245, 158, 11, 0.1); }
+        .splat-item__name { font-weight: 600; }
+        .splat-item__meta { font-family: var(--mono, monospace); font-size: 0.72rem; color: var(--text-dim, #9aa); }
+        .splat-empty, .splat-hint { color: var(--text-dim, #9aa); font-size: 0.76rem; line-height: 1.4; margin: 4px 0; }
+        .splat-empty code { font-family: var(--mono, monospace); font-size: 0.72rem; }
+        .splat-section-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em;
+            color: var(--text-dim, #9aa); margin: 10px 0 4px; }
+        .splat-section-label:first-child { margin-top: 0; }
+        .splat-video-list { display: flex; flex-direction: column; gap: 6px; }
+        .splat-video { border: 1px solid var(--panel-border); border-radius: 6px;
+            background: rgba(0, 0, 0, 0.22); padding: 8px 10px; }
+        .splat-video__name { font-weight: 600; word-break: break-all; }
+        .splat-video__meta { font-family: var(--mono, monospace); font-size: 0.72rem;
+            color: var(--text-dim, #9aa); margin-top: 2px; }
+        .splat-video__builds { display: flex; flex-direction: column; gap: 3px; margin: 6px 0; }
+        .splat-video__build { display: flex; justify-content: space-between; align-items: baseline;
+            gap: 8px; font-size: 0.74rem; }
+        .splat-video__actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+        .splat-btn { font-size: 0.72rem; padding: 4px 9px; border-radius: 5px; cursor: pointer;
+            border: 1px solid var(--panel-border); background: rgba(255, 255, 255, 0.04); color: inherit; }
+        .splat-btn:hover { border-color: rgba(255, 255, 255, 0.2); }
+        .splat-btn--primary { border-color: var(--accent); color: var(--accent); }
+        .splat-badge { font-family: var(--mono, monospace); font-size: 0.64rem; padding: 1px 5px;
+            border-radius: 4px; border: 1px solid currentColor; }
+        .splat-badge--stale { color: #e0a34a; }
+        .splat-badge--imported { color: #7aa2f7; }
+        .splat-settings { margin: 6px 0; font-size: 0.76rem; }
+        .splat-settings > summary { cursor: pointer; color: var(--text-dim, #9aa); }
+        .splat-settings__grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin: 8px 0; }
+        .splat-settings__grid label { display: flex; flex-direction: column; gap: 2px;
+            font-size: 0.7rem; color: var(--text-dim, #9aa); }
+        .splat-settings__grid input, .splat-settings__grid select {
+            background: rgba(0, 0, 0, 0.3); border: 1px solid var(--panel-border); border-radius: 4px;
+            color: inherit; padding: 3px 5px; font-family: var(--mono, monospace); font-size: 0.74rem; }
+        /* Controls that don't apply in the current source/display (e.g. device +
+           colour/surface settings while viewing a static Splat): greyed and inert,
+           but still visible so the setting is discoverable. Toggled by splat.js. */
+        .mode-off { opacity: 0.38; pointer-events: none; filter: grayscale(0.4); }
+        /* Splat load overlay (centered over the viewport). */
+        #splat-loading { position: fixed; inset: 0; display: flex; align-items: center;
+            justify-content: center; pointer-events: none; z-index: 40; }
+        #splat-loading.hidden { display: none; }
+        .splat-loading__box { background: rgba(10, 12, 16, 0.82); border: 1px solid var(--panel-border);
+            border-radius: 10px; padding: 18px 24px; min-width: 240px; text-align: center;
+            backdrop-filter: blur(6px); }
+        .splat-loading__spinner { width: 26px; height: 26px; margin: 0 auto 10px;
+            border: 3px solid rgba(255, 255, 255, 0.15); border-top-color: var(--accent);
+            border-radius: 50%; animation: splat-spin 0.8s linear infinite; }
+        @keyframes splat-spin { to { transform: rotate(360deg); } }
+        #splat-loading-label { font-size: 0.82rem; margin-bottom: 8px; }
+        .splat-loading__track { height: 4px; background: rgba(255, 255, 255, 0.1);
+            border-radius: 2px; overflow: hidden; }
+        #splat-loading-bar { height: 100%; width: 0%; background: var(--accent);
+            transition: width 0.15s ease; }
     </style>
 </head>
 <body>
@@ -1206,13 +1312,52 @@
         <div id="detailed-build-detail">The mesh will appear here as it is reconstructed.</div>
     </section>
 
-    <!-- Top bar (§8.1): title · reserved mode-switch slot · connection status -->
+    <!-- Splat build progress. Mirrors #detailed-build-status and REUSES its
+         detailed-build__*/detailed-resource* classes; only the ids differ. Driven by
+         the `splat_build` message + the shared `metrics.resources`. -->
+    <section id="splat-build-status" class="card hidden" aria-live="polite" aria-atomic="true">
+        <div class="detailed-build__header">
+            <span id="splat-build-title">Building splat</span>
+            <span id="splat-build-progress">Preparing</span>
+        </div>
+        <div class="detailed-build__track">
+            <div id="splat-build-bar" role="progressbar" aria-label="Splat reconstruction progress"
+                 aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+        </div>
+        <div class="detailed-build__resources" aria-label="Current host resource usage">
+            <div class="detailed-resource"><div class="detailed-resource__label"><span>GPU</span><span id="splat-resource-gpu-value" class="detailed-resource__value">n/a</span></div><div class="detailed-resource__track"><div id="splat-resource-gpu" class="detailed-resource__fill"></div></div></div>
+            <div class="detailed-resource"><div class="detailed-resource__label"><span>CPU</span><span id="splat-resource-cpu-value" class="detailed-resource__value">n/a</span></div><div class="detailed-resource__track"><div id="splat-resource-cpu" class="detailed-resource__fill"></div></div></div>
+            <div class="detailed-resource"><div class="detailed-resource__label"><span>RAM</span><span id="splat-resource-ram-value" class="detailed-resource__value">n/a</span></div><div class="detailed-resource__track"><div id="splat-resource-ram" class="detailed-resource__fill"></div></div></div>
+            <div class="detailed-resource"><div class="detailed-resource__label"><span>VRAM</span><span id="splat-resource-vram-value" class="detailed-resource__value">n/a</span></div><div class="detailed-resource__track"><div id="splat-resource-vram" class="detailed-resource__fill"></div></div></div>
+        </div>
+        <div id="splat-build-time">Elapsed 0:00 · calculating ETA</div>
+        <div id="splat-build-detail">COLMAP + GPU training runs out-of-process; one build at a time.</div>
+    </section>
+
+    <!-- Splat load overlay: a large .ply (a reference splat can be 600 MB) takes
+         several seconds to fetch + parse, during which the viewport is blank. This
+         centered progress overlay is the "not dead" feedback. Driven by splat.js
+         from the vendor's addSplatScene onProgress callback. -->
+    <div id="splat-loading" class="splat-loading hidden" aria-live="polite">
+        <div class="splat-loading__box">
+            <div class="splat-loading__spinner"></div>
+            <div id="splat-loading-label">Loading splat…</div>
+            <div class="splat-loading__track"><div id="splat-loading-bar"></div></div>
+        </div>
+    </div>
+
+    <!-- Top bar (§8.1): title · reserved mode-switch slot · connection status · sidebar toggles -->
     <div id="topbar" class="card">
+        <button id="btn-toggle-primary-bar" class="topbar-btn bar-toggle-btn" title="Toggle Primary Sidebar ( Shortcut: [ )" aria-label="Toggle Primary Sidebar">
+            <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M3,3H21A2,2 0 0,1 23,5V19A2,2 0 0,1 21,21H3A2,2 0 0,1 1,19V5A2,2 0 0,1 3,3M3,5V19H9V5H3Z"/></svg>
+            <span class="bar-toggle-btn__label">Primary</span>
+        </button>
         <span class="app-title">Roomscan</span>
         <div id="mode-switch-slot">
             <div class="segmented segmented--sm" id="seg-source">
                 <button data-source="live" class="active" title="Use the wire device as the source">Live</button>
                 <button data-source="view" title="View a recorded capture">View</button>
+                <button data-source="splat" title="Navigate an offline Gaussian-splat room reconstruction">Splat</button>
             </div>
             <div class="segmented segmented--sm" id="seg-display">
                 <button data-display="point_cloud" class="active" title="Show the raw deprojected point cloud">Point cloud</button>
@@ -1238,14 +1383,17 @@
             <span id="conn-text">Offline</span>
             <div class="dot" id="conn-dot"></div>
         </div>
+        <button id="btn-toggle-secondary-bar" class="topbar-btn bar-toggle-btn" title="Toggle Secondary Sidebar ( Shortcut: ] )" aria-label="Toggle Secondary Sidebar">
+            <span class="bar-toggle-btn__label">Controls</span>
+            <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M3,3H21A2,2 0 0,1 23,5V19A2,2 0 0,1 21,21H3A2,2 0 0,1 1,19V5A2,2 0 0,1 3,3M15,5V19H21V5H15Z"/></svg>
+        </button>
     </div>
 
-    <!-- Left dock (§7.4/§8.1): telemetry HUD cards · IR monitor · diagnostics.
-         Blocks flow top-down and wrap into a new column when the band between
-         the top bar and the event-log console runs out — never overlapping. -->
-    <div id="left-dock" class="dock dock--left">
+    <!-- Primary Bar (Left Sidebar): telemetry HUD cards · IR monitor · sensors · resources -->
+    <aside id="primary-bar" class="sidebar sidebar--left" data-sidebar="primary">
+        <div id="primary-bar-handle" class="sidebar-handle sidebar-handle--right" title="Drag to resize Primary Sidebar, click to toggle"></div>
         <div id="left-rail" class="card hud-card control-group" data-card-id="telemetry">
-            <button class="control-group__header" type="button"><span>Telemetry</span><span class="chevron">&#9662;</span></button>
+            <button class="control-group__header" type="button"><span>Stream</span><span class="chevron">&#9662;</span></button>
             <div class="card-body control-group__body">
                 <div class="hud-row" title="How fast this browser is painting the 3D view. Independent of the sensor — a low number here is a rendering limit, not a data one."><span>View FPS</span><span class="hud-val" id="hud-view-fps">--</span></div>
                 <div class="hud-row" title="How fast depth frames are arriving from the scanner. The sensor's ceiling is about 28 fps."><span>Device FPS</span><span class="hud-val" id="hud-device-fps">--</span></div>
@@ -1483,18 +1631,18 @@
 
         <!-- IR monitor canvas card (§7.3), independently toggleable. -->
         <div id="ir-card" class="card collapsed" data-card-id="ir-view">
-            <div class="ir-card__header control-group__header">
-                <span class="ir-card__title">IR Monitor</span>
-                <div class="segmented segmented--sm" id="ir-card-colormap">
-                    <button data-colormap="gray" title="Grayscale IR intensity">Gray</button>
-                    <button data-colormap="turbo" title="Turbo false-color IR heatmap">Turbo</button>
+            <button class="control-group__header" type="button"><span>IR Monitor</span><span class="chevron">&#9662;</span></button>
+            <div class="card-body control-group__body">
+                <div class="ir-card-controls" style="display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%; margin-bottom:6px;">
+                    <div class="segmented segmented--sm" id="ir-card-colormap">
+                        <button data-colormap="gray" title="Grayscale IR intensity">Gray</button>
+                        <button data-colormap="turbo" title="Turbo false-color IR heatmap">Turbo</button>
+                    </div>
+                    <label class="toggle toggle--sm" title="Lock the IR intensity range instead of auto-scaling"><input type="checkbox" id="ir-card-freeze"><span>Freeze</span></label>
                 </div>
-                <label class="toggle toggle--sm" title="Lock the IR intensity range instead of auto-scaling"><input type="checkbox" id="ir-card-freeze"><span>Freeze</span></label>
-                <span class="chevron">&#9662;</span>
-                <button class="ir-card__close" id="ir-card-close" title="Hide the IR monitor card">&times;</button>
-            </div>
-            <div id="ir-frame" class="card-body">
-                <canvas id="ir-canvas" width="1" height="1"></canvas>
+                <div id="ir-frame">
+                    <canvas id="ir-canvas" width="1" height="1"></canvas>
+                </div>
             </div>
         </div>
 
@@ -1503,9 +1651,47 @@
              preview. Replaces the cramped `#cap-list` that used to live inside
              the right rail's Capture card. Shown only when state.source ===
              "view"; every tile's data comes from the server's `captures` echo. -->
+        <!-- Splat-source picker. Visibility is driven by splat.js (source ===
+             'splat'), not browser.js's View gate, so it is a self-contained card. -->
+        <div id="splat-card" class="control-group card hidden" data-card-id="splat">
+            <button class="control-group__header"><span>Splat rooms</span><span class="chevron">&#9662;</span></button>
+            <div class="control-group__body">
+                <!-- Capture viewer: the source phone videos in captures/, each with
+                     Generate / Regenerate / View / Play. Rendered by splat.js from the
+                     `source_videos` message. -->
+                <div class="splat-section-label">Source videos</div>
+                <div id="splat-video-list" class="splat-video-list"></div>
+                <p id="splat-video-empty" class="splat-empty" style="display:none">No
+                    <code>.mp4</code>/<code>.mov</code> videos in <code>captures/</code>.</p>
+                <details id="splat-settings" class="splat-settings">
+                    <summary>Build settings</summary>
+                    <div class="splat-settings__grid">
+                        <label>fps<input type="number" step="0.5" min="0.5" data-param="fps"></label>
+                        <label>max frames<input type="number" step="1" min="8" data-param="max_frames"></label>
+                        <label>long edge<input type="number" step="100" min="400" data-param="long_edge"></label>
+                        <label>matcher<select data-param="matcher"><option value="">default</option><option value="sequential">sequential</option><option value="exhaustive">exhaustive</option></select></label>
+                        <label>iters<input type="number" step="500" min="500" data-param="iters"></label>
+                        <label>max gaussians<input type="number" step="100000" min="50000" data-param="max_gaussians"></label>
+                        <label>SH degree<input type="number" step="1" min="0" max="3" data-param="sh_degree"></label>
+                        <label title="Monocular depth prior weight; 0 = off (photometry only)">depth λ<input type="number" step="0.05" min="0" data-param="depth_lambda"></label>
+                    </div>
+                    <p class="splat-hint">Blank = preset default. These are recorded as metadata on the built splat.</p>
+                </details>
+                <div class="splat-section-label">Built splats</div>
+                <p id="splat-empty" class="splat-empty">No splats built yet &mdash; generate one from a source video above.</p>
+                <div id="splat-list" class="splat-list"></div>
+                <p class="splat-hint">Drag to orbit, scroll to zoom. A rough photogrammetric
+                    reconstruction from phone video &mdash; a ground-truth reference to eyeball
+                    against, not a metric ToF scan.</p>
+            </div>
+        </div>
+
         <div id="browser-card" class="control-group card hidden" data-card-id="browser">
             <button class="control-group__header"><span>Captures</span><span class="chevron">&#9662;</span></button>
             <div class="control-group__body">
+                <input type="search" id="browser-filter" class="browser-filter" autocomplete="off"
+                       placeholder="Filter captures by name…"
+                       title="Filter the list to captures whose name contains this text (this tab only)">
                 <div class="browser-toolbar">
                     <div class="segmented segmented--sm" id="seg-browser-sort">
                         <button data-sort="recent" title="Newest capture first">Recent</button>
@@ -1523,34 +1709,25 @@
                 </div>
                 <div class="browser-grid" id="cap-grid"></div>
                 <div class="cap-status" id="browser-status"></div>
-            </div>
-        </div>
 
-        <!-- Preview (§12): the one selected capture, big. Its thumbnail is the
-             SAME /thumb/<name> the tile uses, so opening a preview costs no
-             extra generation. -->
-        <div id="preview-card" class="control-group card hidden" data-card-id="preview">
-            <button class="control-group__header"><span>Preview</span><span class="chevron">&#9662;</span></button>
-            <div class="control-group__body">
-                <img id="preview-thumb" class="preview-thumb" alt="">
-                <div class="cap-status" id="preview-name">&mdash;</div>
-                <dl class="preview-facts" id="preview-facts"></dl>
-                <button class="primary" id="btn-preview-load" title="Load this capture into the 3D view and start playback">&#9654; Load into view</button>
-                <div class="btn-row">
-                    <button id="btn-preview-rename" title="Rename this capture; its reconstruction and thumbnail follow it">&#9998; Rename</button>
-                    <button id="btn-preview-build" title="Build (or rebuild) the offline Detailed reconstruction for this capture">&#9881; Build</button>
+                <!-- Integrated Capture Details Drawer -->
+                <div id="browser-selected-detail" class="control-subgroup hidden" style="border-top: 1px dashed rgba(255,255,255,0.12); padding-top: 8px; margin-top: 6px;">
+                    <div class="cap-status" id="preview-name" style="font-weight: 700; color: var(--text-main); margin-bottom: 4px;">&mdash;</div>
+                    <dl class="preview-facts" id="preview-facts" style="margin-bottom: 8px;"></dl>
+                    <button class="primary" id="btn-preview-load" title="Load this capture into the 3D view and start playback" style="width: 100%; margin-bottom: 6px;">&#9654; Load into view</button>
+                    <div class="btn-row">
+                        <button id="btn-preview-rename" title="Rename this capture; its reconstruction and thumbnail follow it">&#9998; Rename</button>
+                        <button id="btn-preview-build" title="Build (or rebuild) the offline Detailed reconstruction for this capture">&#9881; Build</button>
+                    </div>
                 </div>
             </div>
         </div>
 
-        <!-- Diagnostics no longer have a dedicated pane: window.__diag folds them
-             into the bottom event-log console (#log-lines), so client-side faults
-             and device events read in one place (owner ask, 2026-08-05). -->
-    </div>
+    </aside>
 
-    <!-- Right dock (§8.1): interactive control panel — one card per collapsible
-         group, wrapping into extra columns (rightwards-anchored) when tall. -->
-    <div id="right-rail" class="dock dock--right">
+    <!-- Secondary Bar (Right Sidebar): interactive control panel — collapsible control sections -->
+    <aside id="secondary-bar" class="sidebar sidebar--right" data-sidebar="secondary">
+        <div id="secondary-bar-handle" class="sidebar-handle sidebar-handle--left" title="Drag to resize Secondary Sidebar, click to toggle"></div>
         <div class="control-group card collapsed" data-card-id="device">
             <button class="control-group__header"><span>Device</span><span class="chevron">&#9662;</span></button>
             <div class="control-group__body">
@@ -1702,7 +1879,12 @@
                         </div>
                         <div class="field-label field-label--sub">Oscillate Amplitude <span class="hud-val" id="orbit-amplitude-val">45&deg;</span></div>
                         <input type="range" class="slider" id="sl-orbit-amplitude" min="5" max="180" step="1" value="45" title="Oscillate mode: how far the camera swings each side of the start azimuth (degrees)">
-                        <button id="btn-reset-cam" title="Reset the 3D camera to the default viewpoint">Reset Camera</button>
+                <button id="btn-reset-cam" title="Reset the 3D camera to the default viewpoint">Reset Camera</button>
+                        <!-- See-Through lives here (a visibility control, not a colour one)
+                             so it stays usable in Splat mode while Colour/Surface are gated
+                             off. Same ids, so controls.js / scene.js / splat.js are unchanged. -->
+                        <div class="field-label">See-Through <span class="hud-val" id="see-through-val">Off</span></div>
+                        <input type="range" class="slider" id="sl-see-through" min="0" max="1" step="0.05" value="0" title="Look through whatever is in front: hidden geometry is blended back over its occluder at this strength. Applies to points, surface, the SLAM map, and splats; 0 is fully opaque">
                     </div>
                 </details>
 
@@ -1724,8 +1906,6 @@
                         <div class="field-label">Point Size <span class="hud-val" id="point-size-val">0.025 m @1 m</span></div>
                         <input type="range" class="slider" id="sl-point-size" min="0.005" max="0.15" step="0.005" value="0.025" title="Adjust 3D point size — in Auto this is the size at 1 m of range">
                         <label class="toggle" title="Scale each point with its distance from the sensor, so near and far surfaces get equal coverage"><input type="checkbox" id="chk-point-auto" checked><span>Auto (scale with range)</span></label>
-                        <div class="field-label">See-Through <span class="hud-val" id="see-through-val">Off</span></div>
-                        <input type="range" class="slider" id="sl-see-through" min="0" max="1" step="0.05" value="0" title="Look through whatever is in front: anything hidden behind nearer geometry is blended back over it at this strength. Applies to points, surface and the SLAM map; 0 is fully opaque">
                     </div>
                 </details>
 
@@ -1823,7 +2003,7 @@
                 <div class="cap-list" id="saved-list"></div>
             </div>
         </div>
-    </div>
+    </aside>
 
     <!-- Bottom (§7.1): collapsible full-width event-log console. -->
     <div id="log-console" class="card collapsed" data-card-id="log">
@@ -2101,7 +2281,8 @@ cover the whole sphere from this viewpoint, and a gap behind you still has to be
     {
         "imports": {
             "three": "/static/vendor/three/three.module.js",
-            "three/addons/": "/static/vendor/three/addons/"
+            "three/addons/": "/static/vendor/three/addons/",
+            "@mkkellogg/gaussian-splats-3d": "/static/vendor/gaussian-splats-3d/gaussian-splats-3d.module.js"
         }
     }
     </script>

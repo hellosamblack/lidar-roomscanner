@@ -53,7 +53,8 @@
         'preview': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M4,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4M4,6V18H20V6H4M6,8H18V10H6V8M6,12H14V14H6V12Z"/></svg>',
         'slam-ctrl': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12,2L4.5,20.29L5.21,21L12,18L18.79,21L19.5,20.29L12,2Z"/></svg>',
         'resources': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M4,2H20A2,2 0 0,1 22,4V20A2,2 0 0,1 20,22H4A2,2 0 0,1 2,20V4A2,2 0 0,1 4,2M6,6V18H8V6H6M10,10V18H12V10H10M14,8V18H16V8H14M18,13V18H20V13H18Z"/></svg>',
-        'log': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M19,3H5C3.89,3 3,3.89 3,5V19C3,20.1 3.89,21 5,21H19C20.1,21 21,20.1 21,19V5C21,3.89 20.1,3 19,3M7,7H17V9H7V7M7,11H17V13H7V11M7,15H14V17H7V15Z"/></svg>'
+        'log': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M19,3H5C3.89,3 3,3.89 3,5V19C3,20.1 3.89,21 5,21H19C20.1,21 21,20.1 21,19V5C21,3.89 20.1,3 19,3M7,7H17V9H7V7M7,11H17V13H7V11M7,15H14V17H7V15Z"/></svg>',
+        'splat': '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M5 5a2 2 0 1 1 0 4 2 2 0 0 1 0-4m14 0a2 2 0 1 1 0 4 2 2 0 0 1 0-4M12 10a2 2 0 1 1 0 4 2 2 0 0 1 0-4M5 15a2 2 0 1 1 0 4 2 2 0 0 1 0-4m14 0a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z"/></svg>'
     };
 
     var CARD_TITLES = {
@@ -69,7 +70,8 @@
         'preview': 'Preview',
         'slam-ctrl': 'SLAM',
         'resources': 'Resources',
-        'log': 'Event Log'
+        'log': 'Event Log',
+        'splat': 'Splat rooms'
     };
 
     // Primary (left) and Secondary (right) bar visibility toggling
