@@ -1,4 +1,6 @@
 # Recent Milestones
+- Fixed **BUG-086**: Suppressed terminal warning flood (`socket.send() raised exception.`) when WebSocket connections drop by validating `WebSocketState` in broadcast loops and gating `ws.close()`.
+- Fixed **BUG-085**: Web UI frozen with missing comm status fixed by correcting JS module initialization errors in `layout.js`, `scene.js`, and `browser.js`.
 - Archived the 2026-08-04 stationary flat-field study under `calibration/flatfield/2026-08-04`; all nine raw captures are checksum-verified, and the mode-specific correction maps remain engineering candidates pending the panned-wall calibration.
 - Phase 5 (Transport cutover to Ethernet) completed.
 - Implemented robust Ethernet hot-plug recovery, ensuring that cable replugs gracefully restart DHCP and mDNS without firmware hard-faults.
@@ -16,3 +18,4 @@
   the magnetometer correction permanently and `absolute_heading` carried an 18.4° systematic error at
   the operating pose. Gate deleted, BUG-048 closed, verified live on the rig.
 - Proposed sub-phase **6.H** (audible coverage cue / buzzer, owner idea) in ROADMAP Phase 6.
+- Landed **BUG-082** and **BUG-083** fix: firmware sensor-hub batch latching in `rs_lsm.c` prevents zero-filled partial `ENV` frames, paired with host defense-in-depth (`is_valid_env`/`is_valid_mag`). Eliminates false anomaly gates in `YawFusion` and barometer dropouts in SLAM.
