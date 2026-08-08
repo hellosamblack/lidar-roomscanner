@@ -46,6 +46,9 @@ dist/
 *.raw
 *.bag
 captures/
+# Bug-report screenshots often depict the owner's room (a scan rendering) and
+# are large binaries — keep them local; the bug's BUG-NNN.md text is tracked.
+bugs/**/*.png
 
 # Editor / OS
 .vscode/

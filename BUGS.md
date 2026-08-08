@@ -105,5 +105,12 @@ records a date and a file reference where the problem lives.
 | [BUG-084](bugs/BUG-084.md) | open | host/slam | `officeFullScanAug6.bin` forks near frame ~979: the ceiling drops below the previously established height, and Detailed SLAM reconstructs a separate set of rooms |
 | [BUG-085](bugs/BUG-085.md) | fixed | host/web | Web UI frozen with missing comm-status due to JS initialization errors (`Unexpected token 'var'` in `layout.js`, missing `setViewportMirror` in `scene.js`, undeclared `selectedDetail` / `scene` in `browser.js`) |
 | [BUG-086](bugs/BUG-086.md) | fixed | host/web | Server terminal flooded with `socket.send() raised exception.` warnings from Python 3.12 `asyncio` when WebSocket clients disconnect |
-
+| [BUG-087](bugs/BUG-087.md) | open | host/web UI | Every capture shows the same tooltip text instead of capture-specific help |
+| [BUG-088](bugs/BUG-088.md) | open | host/web UI | Capture and IR-monitor selectors wrap within a single word because their spacing is too tight |
+| [BUG-089](bugs/BUG-089.md) | open | host/web UI | Captures pane does not grow horizontally with the primary sidebar |
+| [BUG-090](bugs/BUG-090.md) | open | host/web | View mode can display current live data instead of only the loaded capture |
+| [BUG-091](bugs/BUG-091.md) | open | host/slam | Rewinding or fast-forwarding a capture makes ephemeral SLAM non-deterministic |
+| [BUG-092](bugs/BUG-092.md) | open | host/web UI | Critical: selecting a capture does not surface its load/build action pane |
+| [BUG-093](bugs/BUG-093.md) | open | host/web UI | Sidepane grandchildren have the same visual weight as their parents' direct children |
+| [BUG-094](bugs/BUG-094.md) | open | host/slam | Gaussian splat reconstruction does not resemble the room |
 
