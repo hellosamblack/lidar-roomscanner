@@ -113,4 +113,8 @@ records a date and a file reference where the problem lives.
 | [BUG-092](bugs/BUG-092.md) | open | host/web UI | Critical: selecting a capture does not surface its load/build action pane |
 | [BUG-093](bugs/BUG-093.md) | open | host/web UI | Sidepane grandchildren have the same visual weight as their parents' direct children |
 | [BUG-094](bugs/BUG-094.md) | open | host/slam | Gaussian splat reconstruction does not resemble the room |
+| [BUG-095](bugs/BUG-095.md) | open | host/web | In splat mode, the see-through slider in the View panel does nothing |
+| [BUG-096](bugs/BUG-096.md) | open | host/web | Oscillate orbit mode does nothing; oscillation slider should be disabled when oscillate is off |
+| [BUG-097](bugs/BUG-097.md) | open | host/web | Camera default position not at human eye level (6 feet) in splat/detailed modes |
+| [BUG-098](bugs/BUG-098.md) | open | host/web | Preview mode shows vertical point cloud instead of horizontal floorplan |
 

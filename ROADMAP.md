@@ -202,6 +202,26 @@ so existing references (`6.D`, `6.I`, …) still resolve.
 - **WEB-4 — Make View mode capture-focused.** When switching to View, minimize every
   panel except the Captures pane so replay can be selected and controlled without
   unrelated live controls. This complements **BUG-090**.
+- **WEB-5 — WASD free-camera navigation.** Add keyboard controls for 3D navigation:
+  **W/A/S/D** for forward/left/backward/right, **Spacebar** for vertical ascent,
+  **Ctrl/C** for vertical descent. Decouple camera from auto-follow when any key is
+  pressed; restore auto-follow on release of all navigation keys.
+- **WEB-6 — Floating playback panel at 3D view bottom.** Move playback controls
+  (seek bar, play/pause, speed) from the sidebar to a new floating panel docked at
+  the bottom of the 3D viewport, styled like a video player. Complements the planned
+  Record-on-top-bar (WEB-1) and Discard-completed (WEB-2) features.
+- **WEB-7 — Floorplan view with dimensions and measure tool.** Add a floorplan display
+  mode showing a top-down orthographic projection of the reconstructed space with
+  estimated dimensions, grid overlay, and an interactive measure tool (click two points
+  to measure distance). Useful for room planning and area estimation.
+- **WEB-8 — Compact side-rail layout with progress-bar metrics.** Reorganize Sensors
+  and Streams cards to reduce vertical footprint: (a) **Sensors** uses a 2×2 grid layout
+  showing roll/tilt/heading/fusion corrections in one row instead of flat rows; (b) each
+  metric visualized as a horizontal progress bar (like bandwidth gauge) with **jitter**
+  and **worst-case** statistics displayed inline; (c) add a **Reset Stats** button to
+  zero the worst-case counters. Reduces scroll burden on the dock band while improving
+  signal visibility. Related: **BUG-033** (Sensors card outgrew the dock; this is the
+  deliberate reorg answer).
 
 ### Sensors / IMU (`SENS-`)
 
