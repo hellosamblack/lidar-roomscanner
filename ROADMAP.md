@@ -48,6 +48,20 @@ measured outcomes moved to [`docs/roadmap-history.md`](./docs/roadmap-history.md
   But I3C readout at 12.5 MHz makes 100 Hz raw unreachable on this board anyway (realistic I3C
   ceiling ~60-80 Hz, estimate; the sensor's CSI-2 output is its true 100 Hz path but the H5 has no CSI-2
   receiver). Ethernet was implemented in Phase 5 to remove cable limits and prep for PTP sync.
+- **Host transform builds from STSW-IMG053 (vl53l9-transform-c 1.5.0), with `VL53L9_TRANSFORM_LIGHT=0`
+  pinned (2026-08-10).** `firmware/vendor/stsw-img053/` (the STM32N6570-DK package) carries 1.5.0 where
+  the 53L9A1 reference carries 1.3.1; `host/transform/CMakeLists.txt` selects between them with
+  `RS_TRANSFORM_PKG` and defaults to the newer. The upgrade is **bit-identical** to the 1.3.1 output we
+  shipped (1800 frames, three captures, both ranging modes, all four planes) — but *only* because of the
+  LIGHT pin. `vl53l9_transform.h` self-defines `VL53L9_TRANSFORM_LIGHT (1)` when the caller leaves it
+  undefined, so every build of the shim before this date was a LIGHT build without saying so; under 1.5.0
+  that flips `bypass-tnr-algo` and `bypass-flying-pixel-filter` to default-true, which would have silently
+  disabled the temporal denoiser (worth 2.9× depth temporal noise and 0.65 → 0.83 m of SLAM closure).
+  1.5.0 also adds binning 6/8/12/24 support and a reworked sharpener with optional glare recovery, both
+  unused so far. Detail + the bisect: `docs/transform-streams.md` → "Library upgrade 1.3.1 → 1.5.0".
+  Re-run the gate with `host/tests/compare_transform_versions.py` on the next vendor drop.
+  *(The firmware fork still compiles 1.3.1 and does not define LIGHT — harmless, since LIGHT is
+  string-only in 1.3.1 and `CONF_TRANSFORM_ONBOARD = 0`.)*
 - **Deferred on-device optimizations** (recorded in case the on-MCU transform path is ever revived):
   `powf(x, const)` → multiplies in `ratenorm.c`/`sharpener.c` shadowed copies (verified `powf` survives
   in the ELF; est. 0.3-2 ms/frame), `-flto` (est. low single-digit %), SRAM bank placement for

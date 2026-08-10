@@ -342,3 +342,60 @@ addition** (e.g. `printf("min=%lu max=%lu\n", min, max)` right after the
 existing min/max computation) and a re-capture — flagged here as follow-up
 work rather than done silently, since Task 7's brief is to capture the
 *unmodified* fork's boot dump.
+
+---
+
+## Library upgrade 1.3.1 → 1.5.0, and the `VL53L9_TRANSFORM_LIGHT` default (2026-08-10)
+
+`firmware/vendor/stsw-img053/` (the STM32N6570-DK package, added 2026-08-10) ships
+**vl53l9-transform-c 1.5.0**; the 53L9A1 reference we had been building against is **1.3.1**.
+`host/transform/CMakeLists.txt` now selects between them with `RS_TRANSFORM_PKG`
+(`STSW-IMG053` — the default — or `53L9A1`); the shim compiles unmodified against either,
+since the public API and the media-object include layout are unchanged.
+
+**The upgrade is output-neutral, but only because of an explicit `-DVL53L9_TRANSFORM_LIGHT=0`.**
+
+`vl53l9_transform.h` self-defines `VL53L9_TRANSFORM_LIGHT (1)` when the caller leaves it
+undefined, so **every build of this shim before 2026-08-10 was a LIGHT build without ever
+saying so** — which is why the boot dump above shows blank `Description:` fields. Under 1.3.1
+that was the whole effect: LIGHT blanked the control nick/description strings and made three
+query methods return `MEDIA_ERROR_UNIMPLEMENTED`. Under 1.5.0 it *additionally* flips the
+**defaults** of `bypass-tnr-algo` and `bypass-flying-pixel-filter` to `true`, silently
+disabling the temporal denoiser and the flying-pixel filter.
+
+That is not a knob we want. TNR-off measures 2.9× the depth temporal noise on a static scene
+and *worse* SLAM closure (0.65 → 0.83 m on `coffeeRoomCircuitNoMnt`, n=5) — see the
+`transform-algo-toggles-ab` A/B. Left at the default, 1.5.0 diverged from 1.3.1 on ~95% of
+pixels: depth p99 10.5 mm (max 11.2 m on outliers the flying-pixel filter had been catching),
+and confidence stuck flat at ~54 where 1.3.1 climbs to ~290 as TNR integrates. Frame 0 is
+identical in both — TNR passes the first frame through — so the divergence starts at frame 1,
+which is the signature to look for.
+
+With `VL53L9_TRANSFORM_LIGHT=0` pinned, **1.5.0 is bit-identical to the 1.3.1 output we
+shipped**: 1800 frames across `coffeeRoomCircuitNoMnt`, `ambientRegular8msFFpanLarge` and
+`officeFullScanAug6` (both ranging modes), all four output planes, zero differing values.
+`tests/test_equivalence.py` (PC-vs-MCU golden pairs) also still passes. Setting it explicitly
+is a no-op for 1.3.1 — verified bit-identical — so both `RS_TRANSFORM_PKG` values stay
+directly comparable.
+
+Bisected by reverting individual 1.5.0 files into an out-of-tree copy: `ratenorm.c`,
+`radial_to_perp.c` and `sharpener.c` each changed **nothing**, and only reverting
+`vl53l9_transform.c` (which carries the LIGHT-gated control defaults) restored 1.3.1 exactly.
+Compiler flags are not a factor — `-O2` and `-O3` builds of the same sources are bit-identical.
+
+### What 1.5.0 brings that 1.3.1 lacks
+
+- **Sharpener** rewritten (Python algo R_1.4.0 → R_1.6.2). Now also takes `reflectance` and
+  `confidence` as inputs, and gains `recover_mode` (glare recovery around retro-reflective
+  "aggressor" pixels, `reflectance > 300`), `th_peak_dominance_ratio` (a single hot pixel no
+  longer sets its group's signal scale) and `exp_optim` (Taylor `exp`). All default off, and
+  measured inert here — reverting the whole file changed no output value. `MAX_IMAGE_SIZE`
+  grew 2268 → 9072 and `group_id[]` is a stack array, so this costs ~27 KB of stack if the
+  library is ever built for the M33 again.
+- **Binning 6/8/12/24 supported end-to-end**: new stream caps for 18×14, 12×10, 8×6 and 4×4
+  with matching I3C raw sizes 1738/880/516/204 B. 1.3.1 accepted only binning 2 and 4.
+- **`radial_to_perp`** binning distortion changed from `(b==2)?1.0:|√2·((b²/4)−(b/2))|` to
+  `b²/4`. Both evaluate to 1.0 at binning 2 — no effect on our deprojection — but they diverge
+  at binning ≥4 (b=4: 2.83 → 4.0), which matters only if the item above is ever acted on.
+- **`dmax`** defaults moved (`ambient_clip` 2.0 → 7.0, new `amb_min_median` floor) but
+  `_process_dmax` is still a stub in 1.5.0, so this remains inert.
