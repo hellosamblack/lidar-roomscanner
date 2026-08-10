@@ -29,9 +29,11 @@ F:\git\personal\lidar\
 │  ├─ firmware\            ← our firmware forks (scanner-stream; created by Phase 1 Task 6) + vendored deps
 │  │  └─ vendor\
 │  │     ├─ tinyusb\  lwip\                   ← vendored USB CDC + TCP/IP stacks
-│  │     └─ 53L9A1\                           ← ST reference package (READ-ONLY reference), vendored in-repo
-│  │        ├─ Drivers\  Middlewares\ST\  Utilities\vl53l9-common\
-│  │        └─ Projects\NUCLEO-H563ZI\Applications\53L9A1\53L9A1_PostprocessSingle\  ← the firmware app
+│  │     ├─ 53L9A1\                           ← ST reference package (READ-ONLY reference), vendored in-repo
+│  │     │  ├─ Drivers\  Middlewares\ST\  Utilities\vl53l9-common\
+│  │     │  └─ Projects\NUCLEO-H563ZI\Applications\53L9A1\53L9A1_PostprocessSingle\  ← the firmware app
+│  │     └─ stsw-img053\                      ← ST's STM32N6570-DK VL53L9 package (READ-ONLY reference)
+│  │        └─ vl53l9-stm32n6570-dk-1.0.1\lib\transform\  ← vl53l9-transform-c **1.5.0** (53L9A1 has 1.3.1)
 │  ├─ host\                ← PC Python package `roomscan` (created by Phase 1 Task 1)
 │  └─ references\
 │     ├─ roadmapResearch.md                  ← architecture design + critical review
@@ -41,7 +43,13 @@ F:\git\personal\lidar\
 Follow `docs/engineering-practices.md` for all work here. Known bugs in the reference firmware (do not
 inherit them into forks) are catalogued in `ROADMAP.md` → "Reference-firmware bugs". Note the vendored `53L9A1/`
 package ships **no USB middleware** (`Middlewares/ST/` = media-object + vl53l9-transform-c only) — USB CDC
-work vendors TinyUSB (see the Phase 1 plan).
+work vendors TinyUSB (see the Phase 1 plan). **Two vendor packages now carry `vl53l9-transform-c`** —
+53L9A1 has 1.3.1, stsw-img053 has 1.5.0 — and `host/transform/CMakeLists.txt` picks between them with
+`RS_TRANSFORM_PKG` (default: the newer). It also pins **`-DVL53L9_TRANSFORM_LIGHT=0`**, which is
+load-bearing: the vendor header self-defines that macro to `1`, and under 1.5.0 LIGHT silently bypasses
+TNR and the flying-pixel filter. Never assume a vendor build flag is off because you did not pass `-D`.
+Re-run `host/tests/compare_transform_versions.py` on the next vendor drop; background in
+`docs/transform-streams.md` → "Library upgrade 1.3.1 → 1.5.0".
 
 **Self-improvement rule (owner, 2026-07-08):** after every milestone (phase completion / major merge),
 run the `milestone-retro` skill BEFORE starting the next phase — convert the push's friction into
