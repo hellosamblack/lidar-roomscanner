@@ -760,16 +760,22 @@ def test_bug082_sensor_state_ignores_invalid_env():
 
 def test_bug082_2_capture_replay_no_false_anomaly_gates():
     from pathlib import Path
-    cap_path = Path("captures/BUG-082-2.bin")
-    if not cap_path.exists():
-        pytest.skip("BUG-082-2.bin fixture capture not found")
+    # Anchored on this file, not the cwd: pytest runs from host/, so the
+    # cwd-relative "captures/..." this used to carry resolved to host/captures/
+    # and skipped every run even with the capture sitting in the repo root.
+    # Same trap as mag_cal.json (BUG-030), which is why that is anchored too.
+    repo = Path(__file__).resolve().parents[2]
+    cap_path = repo / "captures" / "BUG-082-2.bin"
+    cal_path = repo / "mag_cal.json"
+    if not cap_path.exists() or not cal_path.exists():
+        pytest.skip("BUG-082-2.bin / mag_cal.json fixture not found")
 
     from roomscan.sources import FileSource
     from roomscan.decoder import StreamDecoder
     from roomscan.magcal import MagCalibration
     from roomscan.sensors import YawFusion
 
-    cal = MagCalibration.load("mag_cal.json")
+    cal = MagCalibration.load(str(cal_path))
     fusion = YawFusion(calibration=cal)
     sensors = SensorState(fusion=fusion)
 

@@ -392,6 +392,17 @@ Compiler flags are not a factor — `-O2` and `-O3` builds of the same sources a
   measured inert here — reverting the whole file changed no output value. `MAX_IMAGE_SIZE`
   grew 2268 → 9072 and `group_id[]` is a stack array, so this costs ~27 KB of stack if the
   library is ever built for the M33 again.
+  **`recover_mode` A/B'd 2026-08-10 — leave it off, and note there is no knob for it anyway.**
+  `_process_sharpener` sets only `mode` and the two range thresholds, so `recover_mode` stays at
+  its `init_default_params` value; it is *not* a `transform_set_control` control, and enabling it
+  would need a vendor edit. Forced on in an out-of-tree copy it changes **nothing** on
+  `officeFullScanAug6` or `coffeeRoomCircuitNoMnt` (400 frames each, all four planes bit-identical),
+  because our scenes contain no aggressors: reflectance p99 is 82–102 and the `>300` threshold is
+  crossed by 0.0001% of pixels on one capture and 0% on the other four checked. The RF32 output
+  plane is the same buffer the sharpener compares (`vl53l9_transform.c` `memcpy`s it straight out),
+  so that threshold comparison is in the right units. **Positive control** (the knob is live, not
+  dead): dropping `refl_aggressor_threshold` to 50 makes it fire on 3.8% of pixels, moving them by
+  ~11 m — i.e. 300 is deliberately set for real retro-reflectors, which rooms do not contain.
 - **Binning 6/8/12/24 supported end-to-end**: new stream caps for 18×14, 12×10, 8×6 and 4×4
   with matching I3C raw sizes 1738/880/516/204 B. 1.3.1 accepted only binning 2 and 4.
 - **`radial_to_perp`** binning distortion changed from `(b==2)?1.0:|√2·((b²/4)−(b/2))|` to
