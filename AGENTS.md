@@ -1,6 +1,10 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Canonical agent-guidance file for this repository, read by Claude Code (claude.ai/code) and Codex.
+`CLAUDE.md` (repo root) and `.agents/AGENTS.md` are relative symlinks to this file — canonicalization
+was inverted to `.agents/` on 2026-08-11 (issue #163). Edit this file; both names resolve to it.
+Phrasing below often says "Claude" because that is the primary driver, but the guidance applies to
+any coding agent working here.
 
 ## What this is
 

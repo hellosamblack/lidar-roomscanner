@@ -15,7 +15,10 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
 - **Docs move with the code (status-sync rule).** Any commit that advances/closes a work item,
   clears a deferred item, changes a measured number, or invalidates a prediction updates `ROADMAP.md`
   (and `CLAUDE.md`/memory when status changes) **in the same commit** — follow the `status-sync` skill
-  checklist. "Docs later" is how the 2026-07-10 drift happened.
+  checklist. "Docs later" is how the 2026-07-10 drift happened. The commit that *closes* the session's
+  governing issue (`Closes #NNN`) then hands off to the `session-end` skill in the same turn — enforced
+  by a `Stop`-hook backstop (`.claude/hooks/session-end-guard.sh`); `status-sync` still runs on every
+  landing, including mid-session ones that only `Refs #NNN`.
 - **Tracker layout (hot vs cold).** `ROADMAP.md` is the *current-state* doc — standing decisions, the
   reference-firmware bug ledger, cross-cutting risks, and the plans/specs register. Completed-work
   narratives live in `docs/roadmap-history.md` (they keep their `Phase N` names). Keep `ROADMAP.md`
