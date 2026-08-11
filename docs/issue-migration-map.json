@@ -1,0 +1,962 @@
+{
+  "repo": "hellosamblack/lidar-roomscanner",
+  "entries": [
+    {
+      "legacy_id": "BUG-001",
+      "issue_number": 12,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/12",
+      "state": "closed",
+      "source": "bugs/BUG-001.md"
+    },
+    {
+      "legacy_id": "BUG-002",
+      "issue_number": 13,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/13",
+      "state": "closed",
+      "source": "bugs/BUG-002.md"
+    },
+    {
+      "legacy_id": "BUG-003",
+      "issue_number": 14,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/14",
+      "state": "closed",
+      "source": "bugs/BUG-003.md"
+    },
+    {
+      "legacy_id": "BUG-004",
+      "issue_number": 15,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/15",
+      "state": "closed",
+      "source": "bugs/BUG-004.md"
+    },
+    {
+      "legacy_id": "BUG-005",
+      "issue_number": 16,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/16",
+      "state": "open",
+      "source": "bugs/BUG-005.md"
+    },
+    {
+      "legacy_id": "BUG-006",
+      "issue_number": 17,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/17",
+      "state": "closed",
+      "source": "bugs/BUG-006.md"
+    },
+    {
+      "legacy_id": "BUG-007",
+      "issue_number": 18,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/18",
+      "state": "closed",
+      "source": "bugs/BUG-007.md"
+    },
+    {
+      "legacy_id": "BUG-008",
+      "issue_number": 19,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/19",
+      "state": "closed",
+      "source": "bugs/BUG-008.md"
+    },
+    {
+      "legacy_id": "BUG-009",
+      "issue_number": 20,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/20",
+      "state": "closed",
+      "source": "bugs/BUG-009.md"
+    },
+    {
+      "legacy_id": "BUG-010",
+      "issue_number": 21,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/21",
+      "state": "closed",
+      "source": "bugs/BUG-010.md"
+    },
+    {
+      "legacy_id": "BUG-011",
+      "issue_number": 22,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/22",
+      "state": "closed",
+      "source": "bugs/BUG-011.md"
+    },
+    {
+      "legacy_id": "BUG-012",
+      "issue_number": 23,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/23",
+      "state": "closed",
+      "source": "bugs/BUG-012.md"
+    },
+    {
+      "legacy_id": "BUG-013",
+      "issue_number": 24,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/24",
+      "state": "closed",
+      "source": "bugs/BUG-013.md"
+    },
+    {
+      "legacy_id": "BUG-014",
+      "issue_number": 25,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/25",
+      "state": "closed",
+      "source": "bugs/BUG-014.md"
+    },
+    {
+      "legacy_id": "BUG-015",
+      "issue_number": 26,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/26",
+      "state": "closed",
+      "source": "bugs/BUG-015.md"
+    },
+    {
+      "legacy_id": "BUG-016",
+      "issue_number": 27,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/27",
+      "state": "closed",
+      "source": "bugs/BUG-016.md"
+    },
+    {
+      "legacy_id": "BUG-017",
+      "issue_number": 28,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/28",
+      "state": "closed",
+      "source": "bugs/BUG-017.md"
+    },
+    {
+      "legacy_id": "BUG-018",
+      "issue_number": 29,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/29",
+      "state": "closed",
+      "source": "bugs/BUG-018.md"
+    },
+    {
+      "legacy_id": "BUG-019",
+      "issue_number": 30,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/30",
+      "state": "closed",
+      "source": "bugs/BUG-019.md"
+    },
+    {
+      "legacy_id": "BUG-020",
+      "issue_number": 31,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/31",
+      "state": "closed",
+      "source": "bugs/BUG-020.md"
+    },
+    {
+      "legacy_id": "BUG-021",
+      "issue_number": 32,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/32",
+      "state": "closed",
+      "source": "bugs/BUG-021.md"
+    },
+    {
+      "legacy_id": "BUG-022",
+      "issue_number": 33,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/33",
+      "state": "closed",
+      "source": "bugs/BUG-022.md"
+    },
+    {
+      "legacy_id": "BUG-023",
+      "issue_number": 34,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/34",
+      "state": "closed",
+      "source": "bugs/BUG-023.md"
+    },
+    {
+      "legacy_id": "BUG-024",
+      "issue_number": 35,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/35",
+      "state": "closed",
+      "source": "bugs/BUG-024.md"
+    },
+    {
+      "legacy_id": "BUG-025",
+      "issue_number": 36,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/36",
+      "state": "closed",
+      "source": "bugs/BUG-025.md"
+    },
+    {
+      "legacy_id": "BUG-026",
+      "issue_number": 37,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/37",
+      "state": "closed",
+      "source": "bugs/BUG-026.md"
+    },
+    {
+      "legacy_id": "BUG-027",
+      "issue_number": 38,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/38",
+      "state": "closed",
+      "source": "bugs/BUG-027.md"
+    },
+    {
+      "legacy_id": "BUG-028",
+      "issue_number": 39,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/39",
+      "state": "closed",
+      "source": "bugs/BUG-028.md"
+    },
+    {
+      "legacy_id": "BUG-029",
+      "issue_number": 40,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/40",
+      "state": "closed",
+      "source": "bugs/BUG-029.md"
+    },
+    {
+      "legacy_id": "BUG-030",
+      "issue_number": 41,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/41",
+      "state": "closed",
+      "source": "bugs/BUG-030.md"
+    },
+    {
+      "legacy_id": "BUG-031",
+      "issue_number": 42,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/42",
+      "state": "closed",
+      "source": "bugs/BUG-031.md"
+    },
+    {
+      "legacy_id": "BUG-032",
+      "issue_number": 43,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/43",
+      "state": "closed",
+      "source": "bugs/BUG-032.md"
+    },
+    {
+      "legacy_id": "BUG-033",
+      "issue_number": 44,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/44",
+      "state": "closed",
+      "source": "bugs/BUG-033.md"
+    },
+    {
+      "legacy_id": "BUG-034",
+      "issue_number": 45,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/45",
+      "state": "closed",
+      "source": "bugs/BUG-034.md"
+    },
+    {
+      "legacy_id": "BUG-035",
+      "issue_number": 46,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/46",
+      "state": "closed",
+      "source": "bugs/BUG-035.md"
+    },
+    {
+      "legacy_id": "BUG-036",
+      "issue_number": 47,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/47",
+      "state": "closed",
+      "source": "bugs/BUG-036.md"
+    },
+    {
+      "legacy_id": "BUG-037",
+      "issue_number": 48,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/48",
+      "state": "closed",
+      "source": "bugs/BUG-037.md"
+    },
+    {
+      "legacy_id": "BUG-038",
+      "issue_number": 49,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/49",
+      "state": "closed",
+      "source": "bugs/BUG-038.md"
+    },
+    {
+      "legacy_id": "BUG-039",
+      "issue_number": 50,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/50",
+      "state": "closed",
+      "source": "bugs/BUG-039.md"
+    },
+    {
+      "legacy_id": "BUG-040",
+      "issue_number": 51,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/51",
+      "state": "closed",
+      "source": "bugs/BUG-040.md"
+    },
+    {
+      "legacy_id": "BUG-041",
+      "issue_number": 52,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/52",
+      "state": "closed",
+      "source": "bugs/BUG-041.md"
+    },
+    {
+      "legacy_id": "BUG-042",
+      "issue_number": 53,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/53",
+      "state": "closed",
+      "source": "bugs/BUG-042.md"
+    },
+    {
+      "legacy_id": "BUG-043",
+      "issue_number": 54,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/54",
+      "state": "closed",
+      "source": "bugs/BUG-043.md"
+    },
+    {
+      "legacy_id": "BUG-044",
+      "issue_number": 55,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/55",
+      "state": "closed",
+      "source": "bugs/BUG-044.md"
+    },
+    {
+      "legacy_id": "BUG-045",
+      "issue_number": 56,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/56",
+      "state": "closed",
+      "source": "bugs/BUG-045.md"
+    },
+    {
+      "legacy_id": "BUG-046",
+      "issue_number": 57,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/57",
+      "state": "open",
+      "source": "bugs/BUG-046.md"
+    },
+    {
+      "legacy_id": "BUG-047",
+      "issue_number": 58,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/58",
+      "state": "closed",
+      "source": "bugs/BUG-047.md"
+    },
+    {
+      "legacy_id": "BUG-048",
+      "issue_number": 59,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/59",
+      "state": "closed",
+      "source": "bugs/BUG-048.md"
+    },
+    {
+      "legacy_id": "BUG-049",
+      "issue_number": 60,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/60",
+      "state": "open",
+      "source": "bugs/BUG-049.md"
+    },
+    {
+      "legacy_id": "BUG-050",
+      "issue_number": 61,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/61",
+      "state": "closed",
+      "source": "bugs/BUG-050.md"
+    },
+    {
+      "legacy_id": "BUG-051",
+      "issue_number": 62,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/62",
+      "state": "closed",
+      "source": "bugs/BUG-051.md"
+    },
+    {
+      "legacy_id": "BUG-052",
+      "issue_number": 63,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/63",
+      "state": "closed",
+      "source": "bugs/BUG-052.md"
+    },
+    {
+      "legacy_id": "BUG-053",
+      "issue_number": 64,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/64",
+      "state": "closed",
+      "source": "bugs/BUG-053.md"
+    },
+    {
+      "legacy_id": "BUG-054",
+      "issue_number": 65,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/65",
+      "state": "closed",
+      "source": "bugs/BUG-054.md"
+    },
+    {
+      "legacy_id": "BUG-055",
+      "issue_number": 66,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/66",
+      "state": "closed",
+      "source": "bugs/BUG-055.md"
+    },
+    {
+      "legacy_id": "BUG-056",
+      "issue_number": 67,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/67",
+      "state": "closed",
+      "source": "bugs/BUG-056.md"
+    },
+    {
+      "legacy_id": "BUG-057",
+      "issue_number": 68,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/68",
+      "state": "closed",
+      "source": "bugs/BUG-057.md"
+    },
+    {
+      "legacy_id": "BUG-058",
+      "issue_number": 69,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/69",
+      "state": "closed",
+      "source": "bugs/BUG-058.md"
+    },
+    {
+      "legacy_id": "BUG-059",
+      "issue_number": 70,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/70",
+      "state": "closed",
+      "source": "bugs/BUG-059.md"
+    },
+    {
+      "legacy_id": "BUG-060",
+      "issue_number": 71,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/71",
+      "state": "closed",
+      "source": "bugs/BUG-060.md"
+    },
+    {
+      "legacy_id": "BUG-061",
+      "issue_number": 72,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/72",
+      "state": "closed",
+      "source": "bugs/BUG-061.md"
+    },
+    {
+      "legacy_id": "BUG-062",
+      "issue_number": 73,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/73",
+      "state": "closed",
+      "source": "bugs/BUG-062.md"
+    },
+    {
+      "legacy_id": "BUG-063",
+      "issue_number": 74,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/74",
+      "state": "open",
+      "source": "bugs/BUG-063.md"
+    },
+    {
+      "legacy_id": "BUG-064",
+      "issue_number": 75,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/75",
+      "state": "closed",
+      "source": "bugs/BUG-064.md"
+    },
+    {
+      "legacy_id": "BUG-065",
+      "issue_number": 76,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/76",
+      "state": "closed",
+      "source": "bugs/BUG-065.md"
+    },
+    {
+      "legacy_id": "BUG-066",
+      "issue_number": 77,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/77",
+      "state": "closed",
+      "source": "bugs/BUG-066.md"
+    },
+    {
+      "legacy_id": "BUG-067",
+      "issue_number": 78,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/78",
+      "state": "closed",
+      "source": "bugs/BUG-067.md"
+    },
+    {
+      "legacy_id": "BUG-068",
+      "issue_number": 79,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/79",
+      "state": "closed",
+      "source": "bugs/BUG-068.md"
+    },
+    {
+      "legacy_id": "BUG-069",
+      "issue_number": 80,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/80",
+      "state": "closed",
+      "source": "bugs/BUG-069.md"
+    },
+    {
+      "legacy_id": "BUG-070",
+      "issue_number": 81,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/81",
+      "state": "open",
+      "source": "bugs/BUG-070.md"
+    },
+    {
+      "legacy_id": "BUG-071",
+      "issue_number": 82,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/82",
+      "state": "open",
+      "source": "bugs/BUG-071.md"
+    },
+    {
+      "legacy_id": "BUG-072",
+      "issue_number": 83,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/83",
+      "state": "closed",
+      "source": "bugs/BUG-072.md"
+    },
+    {
+      "legacy_id": "BUG-073",
+      "issue_number": 84,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/84",
+      "state": "open",
+      "source": "bugs/BUG-073.md"
+    },
+    {
+      "legacy_id": "BUG-074",
+      "issue_number": 85,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/85",
+      "state": "closed",
+      "source": "bugs/BUG-074.md"
+    },
+    {
+      "legacy_id": "BUG-075",
+      "issue_number": 86,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/86",
+      "state": "open",
+      "source": "bugs/BUG-075.md"
+    },
+    {
+      "legacy_id": "BUG-076",
+      "issue_number": 87,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/87",
+      "state": "closed",
+      "source": "bugs/BUG-076.md"
+    },
+    {
+      "legacy_id": "BUG-077",
+      "issue_number": 88,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/88",
+      "state": "closed",
+      "source": "bugs/BUG-077.md"
+    },
+    {
+      "legacy_id": "BUG-078",
+      "issue_number": 89,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/89",
+      "state": "open",
+      "source": "bugs/BUG-078.md"
+    },
+    {
+      "legacy_id": "BUG-079",
+      "issue_number": 90,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/90",
+      "state": "closed",
+      "source": "bugs/BUG-079.md"
+    },
+    {
+      "legacy_id": "BUG-080",
+      "issue_number": 91,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/91",
+      "state": "closed",
+      "source": "bugs/BUG-080.md"
+    },
+    {
+      "legacy_id": "BUG-081",
+      "issue_number": 92,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/92",
+      "state": "closed",
+      "source": "bugs/BUG-081.md"
+    },
+    {
+      "legacy_id": "BUG-082",
+      "issue_number": 93,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/93",
+      "state": "closed",
+      "source": "bugs/BUG-082.md"
+    },
+    {
+      "legacy_id": "BUG-083",
+      "issue_number": 94,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/94",
+      "state": "closed",
+      "source": "bugs/BUG-083.md"
+    },
+    {
+      "legacy_id": "BUG-084",
+      "issue_number": 95,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/95",
+      "state": "open",
+      "source": "bugs/BUG-084.md"
+    },
+    {
+      "legacy_id": "BUG-085",
+      "issue_number": 96,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/96",
+      "state": "closed",
+      "source": "bugs/BUG-085.md"
+    },
+    {
+      "legacy_id": "BUG-086",
+      "issue_number": 97,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/97",
+      "state": "closed",
+      "source": "bugs/BUG-086.md"
+    },
+    {
+      "legacy_id": "BUG-087",
+      "issue_number": 98,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/98",
+      "state": "open",
+      "source": "bugs/BUG-087.md"
+    },
+    {
+      "legacy_id": "BUG-088",
+      "issue_number": 99,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/99",
+      "state": "open",
+      "source": "bugs/BUG-088.md"
+    },
+    {
+      "legacy_id": "BUG-089",
+      "issue_number": 100,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/100",
+      "state": "open",
+      "source": "bugs/BUG-089.md"
+    },
+    {
+      "legacy_id": "BUG-090",
+      "issue_number": 101,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/101",
+      "state": "open",
+      "source": "bugs/BUG-090.md"
+    },
+    {
+      "legacy_id": "BUG-091",
+      "issue_number": 102,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/102",
+      "state": "open",
+      "source": "bugs/BUG-091.md"
+    },
+    {
+      "legacy_id": "BUG-092",
+      "issue_number": 103,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/103",
+      "state": "open",
+      "source": "bugs/BUG-092.md"
+    },
+    {
+      "legacy_id": "BUG-093",
+      "issue_number": 104,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/104",
+      "state": "open",
+      "source": "bugs/BUG-093.md"
+    },
+    {
+      "legacy_id": "BUG-094",
+      "issue_number": 105,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/105",
+      "state": "closed",
+      "source": "bugs/BUG-094.md"
+    },
+    {
+      "legacy_id": "BUG-095",
+      "issue_number": 106,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/106",
+      "state": "open",
+      "source": "bugs/BUG-095.md"
+    },
+    {
+      "legacy_id": "BUG-096",
+      "issue_number": 107,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/107",
+      "state": "open",
+      "source": "bugs/BUG-096.md"
+    },
+    {
+      "legacy_id": "BUG-097",
+      "issue_number": 108,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/108",
+      "state": "open",
+      "source": "bugs/BUG-097.md"
+    },
+    {
+      "legacy_id": "BUG-098",
+      "issue_number": 109,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/109",
+      "state": "open",
+      "source": "bugs/BUG-098.md"
+    },
+    {
+      "legacy_id": "DC-A",
+      "issue_number": 137,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/137",
+      "state": "closed",
+      "source": "ROADMAP.md#data-collection-queue"
+    },
+    {
+      "legacy_id": "DC-B",
+      "issue_number": 138,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/138",
+      "state": "open",
+      "source": "ROADMAP.md#data-collection-queue"
+    },
+    {
+      "legacy_id": "DC-C",
+      "issue_number": 139,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/139",
+      "state": "closed",
+      "source": "ROADMAP.md#data-collection-queue"
+    },
+    {
+      "legacy_id": "DC-D",
+      "issue_number": 140,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/140",
+      "state": "closed",
+      "source": "ROADMAP.md#data-collection-queue"
+    },
+    {
+      "legacy_id": "DC-D2",
+      "issue_number": 141,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/141",
+      "state": "open",
+      "source": "ROADMAP.md#data-collection-queue"
+    },
+    {
+      "legacy_id": "DC-E",
+      "issue_number": 142,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/142",
+      "state": "open",
+      "source": "ROADMAP.md#data-collection-queue"
+    },
+    {
+      "legacy_id": "DC-F",
+      "issue_number": 143,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/143",
+      "state": "open",
+      "source": "ROADMAP.md#data-collection-queue"
+    },
+    {
+      "legacy_id": "DC-G",
+      "issue_number": 144,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/144",
+      "state": "open",
+      "source": "ROADMAP.md#data-collection-queue"
+    },
+    {
+      "legacy_id": "DC-H",
+      "issue_number": 145,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/145",
+      "state": "open",
+      "source": "ROADMAP.md#data-collection-queue"
+    },
+    {
+      "legacy_id": "DC-I",
+      "issue_number": 146,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/146",
+      "state": "open",
+      "source": "ROADMAP.md#data-collection-queue"
+    },
+    {
+      "legacy_id": "DC-J",
+      "issue_number": 147,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/147",
+      "state": "closed",
+      "source": "ROADMAP.md#data-collection-queue"
+    },
+    {
+      "legacy_id": "FW-1",
+      "issue_number": 131,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/131",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "OFFLINE-1",
+      "issue_number": 132,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/132",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "OFFLINE-2",
+      "issue_number": 133,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/133",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "OFFLINE-3",
+      "issue_number": 134,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/134",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "OFFLINE-4",
+      "issue_number": 135,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/135",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "SENS-1",
+      "issue_number": 126,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/126",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "SENS-2",
+      "issue_number": 127,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/127",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "SENS-3",
+      "issue_number": 128,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/128",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "SENS-4",
+      "issue_number": 129,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/129",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "SLAM-1",
+      "issue_number": 110,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/110",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "SLAM-2",
+      "issue_number": 111,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/111",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "SLAM-3",
+      "issue_number": 112,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/112",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "SLAM-4",
+      "issue_number": 113,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/113",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "SLAM-5",
+      "issue_number": 114,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/114",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "SLAM-6",
+      "issue_number": 115,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/115",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "SLAM-7",
+      "issue_number": 116,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/116",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "SLAM-8",
+      "issue_number": 117,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/117",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "TOOL-1",
+      "issue_number": 136,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/136",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "WEB-1",
+      "issue_number": 118,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/118",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "WEB-2",
+      "issue_number": 119,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/119",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "WEB-3",
+      "issue_number": 120,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/120",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "WEB-4",
+      "issue_number": 121,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/121",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "WEB-5",
+      "issue_number": 122,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/122",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "WEB-6",
+      "issue_number": 123,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/123",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "WEB-7",
+      "issue_number": 124,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/124",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "WEB-8",
+      "issue_number": 125,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/125",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "XPORT-1",
+      "issue_number": 130,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/130",
+      "state": "open",
+      "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "XPORT-2",
+      "source": "ROADMAP.md#work-item-register",
+      "alias_of": "BUG-049"
+    }
+  ]
+}
