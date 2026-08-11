@@ -17,7 +17,7 @@ F:\git\personal\lidar\
 │  ├─ ROADMAP.md           ← current-state doc: standing decisions, reference-firmware bug ledger, risks, plans register. Forward-looking work + defects are GitHub Issues (see "Work tracking" in ROADMAP.md) — labels bug/work-item/data-collection + area/* + status/*
 │  ├─ docs\roadmap-history.md ← completed-phase narratives + measured outcomes (they keep their Phase-N names); ROADMAP.md links here
 │  ├─ BUGS.md              ← stub pointing at GitHub Issues (`gh issue list --label bug`); old BUG-NNN → issue mapping in docs\issue-migration-map.md
-│  ├─ .claude\skills\      ← project skills: firmware-loop (build/flash/monitor), protocol-change (wire-change checklist), status-sync (MANDATORY at ship time — docs move with the code), stack-electrical (jumpers/SBs/bus routing across the board stack)
+│  ├─ .claude\skills\      ← project skills: session-start (MANDATORY before writing code — anchor to a GitHub Issue), firmware-loop (build/flash/monitor), protocol-change (wire-change checklist), status-sync (MANDATORY at ship time — docs move with the code), stack-electrical (jumpers/SBs/bus routing across the board stack)
 │  ├─ docs\
 │  │  ├─ engineering-practices.md            ← binding conventions (repo rules, protocol rules, firmware/host standards)
 │  │  ├─ protocol.md                         ← wire protocol spec (created by Phase 1 Task 1)
@@ -51,6 +51,12 @@ load-bearing: the vendor header self-defines that macro to `1`, and under 1.5.0 
 TNR and the flying-pixel filter. Never assume a vendor build flag is off because you did not pass `-D`.
 Re-run `host/tests/compare_transform_versions.py` on the next vendor drop; background in
 `docs/transform-streams.md` → "Library upgrade 1.3.1 → 1.5.0".
+
+**Issue-anchored sessions (owner, 2026-08-11):** every session that writes code must run the
+`session-start` skill **before the first edit** — find or create the governing GitHub Issue, check
+for in-progress conflicts in the same area, post a session-start comment, and emit the commit-prefix
+template (`Refs #NNN`). `status-sync` (run at wrap-up) handles the close side. `gh issue create`,
+`gh issue comment`, and `gh issue close` are all unblocked in auto-mode (`.claude/settings.local.json`).
 
 **Self-improvement rule (owner, 2026-07-08):** after every milestone (phase completion / major merge),
 run the `milestone-retro` skill BEFORE starting the next phase — convert the push's friction into
