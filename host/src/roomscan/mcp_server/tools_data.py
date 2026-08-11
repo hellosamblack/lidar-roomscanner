@@ -979,3 +979,195 @@ def splat_compare(capture: str, reference: str = "", opacity_min: float = 0.5,
             return {"ok": False, "cmd": " ".join(cmd), "returncode": p.returncode,
                     "stdout": p.stdout[-2000:], "stderr": p.stderr[-2000:]}
         return json.loads(report_path.read_text())
+
+
+@mcp.tool()
+def splat_vram_sweep(video: str = "", model_dir: str = "", image_dir: str = "",
+                     budget_gib: float = 0.0, margin_gib: float = 0.8,
+                     reserve_gib: float = 0.0, ladder: str = "", sh_degree: int = 3,
+                     long_edge: int = 0, depth_lambda: float = 0.0, worst_k: int = 0,
+                     safety_factor: float = 2.0, timeout_s: int = 3600) -> dict:
+    """Find the max MCMC cap_max (gaussian count) that fits VRAM on this 8 GB card.
+
+    Answers "how dense a splat can we get away with on THIS capture?" by MEASURING
+    peak VRAM on the REAL COLMAP model + REAL frames at forced gaussian counts,
+    cycling every view to catch the worst-case frame's backward -- the thing that
+    OOMs. This is the honest replacement for the discredited synthetic probe, which
+    built a uniform cube and under-reported the true peak by ~2x. The count is
+    forced to exactly N (never grown by MCMC) using the real cloud; fit is decided on
+    reserved / device-wide NVML, never max_memory_allocated. IMPORTANT: the clone-at-N
+    measurement is itself a LOWER BOUND on the real TRAINING peak (it skips the MCMC
+    densification that fragments the allocator and raises tile overlap -- calibrated
+    ~2x low against a real build), so the recommendation multiplies by `safety_factor`
+    (default 2.0). The ground truth is still a real build's `vram=` log.
+
+    Give a `video` (runs frames+SfM once) OR an existing `model_dir` + `image_dir`
+    (skips SfM). Zero args mean the preset default. `budget_gib=0` -> NVML total
+    minus `margin_gib` (CUDA context + fragmentation) minus `reserve_gib` (headroom
+    for a co-resident process; 0 = the build runs isolated, which it does). Match
+    `long_edge`/`sh_degree`/`depth_lambda` to the target build or the cap is
+    meaningless. `worst_k>0` measures only the k nearest-depth views -- faster but
+    optimistic-risk (it can miss the true worst frame); default 0 = all views.
+
+    Read `recommended_cap`, `capture_limited`, and `caveats`. A `capture_limited`
+    scene (low `registered_ratio`) is SfM-bound, not VRAM-bound: a higher cap adds
+    no gaussians -- run `splat_sfm_probe` instead. Heavy/GPU/minutes -> runs as a
+    subprocess, never in the server process; the returned cap is the ISOLATED cap.
+
+    Wraps `host/tools/splat_vram_sweep.py`.
+    """
+    import json
+    import os
+
+    cmd = [str(VENV_PY), str(HOST / "tools" / "splat_vram_sweep.py")]
+    if model_dir:
+        if not image_dir:
+            return {"ok": False, "error": "model_dir needs image_dir"}
+        cmd += ["--model-dir", model_dir, "--image-dir", image_dir]
+    elif video:
+        vid = Path(video)
+        if not vid.is_absolute():
+            for base in (REPO, CAPTURES, RECORDINGS):
+                if (base / video).exists():
+                    vid = base / video
+                    break
+        if not vid.exists():
+            return {"ok": False, "error": f"video not found: {video}"}
+        cmd.append(str(vid))
+    else:
+        return {"ok": False, "error": "give a video, or model_dir + image_dir"}
+
+    if budget_gib:
+        cmd += ["--budget-gib", str(budget_gib)]
+    cmd += ["--margin-gib", str(margin_gib), "--reserve-gib", str(reserve_gib),
+            "--sh-degree", str(sh_degree), "--depth-lambda", str(depth_lambda),
+            "--worst-k", str(worst_k), "--safety-factor", str(safety_factor)]
+    if ladder:
+        cmd += ["--ladder", ladder]
+    if long_edge:
+        cmd += ["--long-edge", str(long_edge)]
+    cmd.append("--json")
+
+    env = dict(os.environ)
+    cuda = next((p for p in ("/usr/local/cuda", "/usr/local/cuda-13.3") if Path(p).exists()), None)
+    if cuda:
+        env["CUDA_HOME"] = cuda
+        env["PATH"] = f"{Path(VENV_PY).parent}:{cuda}/bin:" + env.get("PATH", "")
+    try:
+        proc = subprocess.run(cmd, cwd=str(REPO), env=env, timeout=timeout_s,
+                              capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "cmd": " ".join(cmd),
+                "error": f"timed out after {timeout_s}s -- shorten the ladder or raise timeout_s"}
+    if proc.returncode != 0 or "{" not in proc.stdout:
+        return {"ok": False, "cmd": " ".join(cmd), "returncode": proc.returncode,
+                "stdout": proc.stdout[-2000:], "stderr": proc.stderr[-2000:]}
+    rep = json.loads(proc.stdout[proc.stdout.index("{"):])
+    return rep
+
+
+@mcp.tool()
+def splat_sfm_probe(video: str, configs: str = "", fps: float = 0.0, max_frames: int = 0,
+                    long_edge: int = 0, timeout_s: int = 5400) -> dict:
+    """Find why a splat is sparse: how many frames/points SfM can actually register.
+
+    Density has two ceilings -- VRAM (`splat_vram_sweep`) and REGISTRATION -- and
+    for a room walkthrough the binding one is usually registration. `run_sfm`
+    matches sequentially and keeps only the largest connected sub-model, silently
+    discarding the rest; a long video thinned to 300 frames gets large inter-frame
+    baselines, sequential overlap breaks, the reconstruction fragments, and most
+    frames are thrown away (the new Sam Office 2 video registered only 16%).
+
+    Extracts frames ONCE, then runs SfM under several configs on the SAME frames
+    and reports, per config, `registered_ratio`, `n_submodels`, `largest_ratio`
+    (largest sub-model / total -- the fragmentation this exposes), `points3D`,
+    track length, reprojection error, and wall seconds. Recommends the config that
+    maximizes single-connected registration. `configs` is a comma-separated subset
+    of the built-in names (default: all); the built-ins vary matcher
+    (sequential/exhaustive), sequential overlap, SIFT feature count, and frame
+    density. Heavy CPU (COLMAP), minutes -> subprocess, never in the server process.
+
+    Wraps `host/tools/splat_sfm_probe.py::probe_sfm()`.
+    """
+    import json
+
+    vid = Path(video)
+    if not vid.is_absolute():
+        for base in (REPO, CAPTURES, RECORDINGS):
+            if (base / video).exists():
+                vid = base / video
+                break
+    if not vid.exists():
+        return {"ok": False, "error": f"video not found: {video}"}
+
+    cmd = [str(VENV_PY), str(HOST / "tools" / "splat_sfm_probe.py"), str(vid), "--json"]
+    if configs:
+        cmd += ["--configs", configs]
+    for flag, value in (("--fps", fps), ("--max-frames", max_frames), ("--long-edge", long_edge)):
+        if value:
+            cmd += [flag, str(value)]
+    try:
+        proc = subprocess.run(cmd, cwd=str(REPO), timeout=timeout_s,
+                              capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "cmd": " ".join(cmd),
+                "error": f"timed out after {timeout_s}s -- fewer configs or raise timeout_s"}
+    if proc.returncode != 0 or "{" not in proc.stdout:
+        return {"ok": False, "cmd": " ".join(cmd), "returncode": proc.returncode,
+                "stdout": proc.stdout[-2000:], "stderr": proc.stderr[-2000:]}
+    return json.loads(proc.stdout[proc.stdout.index("{"):])
+
+
+@mcp.tool()
+def splat_render(ply: str, out: str, transform: str = "", azimuth: float = 35.0,
+                 elevation: float = 35.0, opacity_min: float = 0.0, core_pct: float = 100.0,
+                 iso_scale: float = 0.0, width: int = 1280, height: int = 960,
+                 views: int = 1, timeout_s: int = 600) -> dict:
+    """Render a Gaussian-splat .ply to a PNG on the GPU, headless -- so results are SEEN.
+
+    This box has no display and llvmpipe can't drive the browser splat viewer at these
+    counts, so this rasterizes the splat directly with gsplat on CUDA (base/DC color)
+    and writes a PNG the caller then Reads. Use it to SHOW a splat build's result
+    rather than only reporting gaussian counts.
+
+    `ply` is a splat point_cloud.ply (repo-relative ok); `out` the PNG path. Pass a
+    splat `transform` (its manifest.json) for a correctly-levelled camera. The camera
+    auto-frames the cloud; `azimuth`/`elevation` orbit it and `views>1` writes
+    `out_<i>.png` around the scene. For a clean COVERAGE comparison (how much of the
+    room reconstructed, floaters/needles removed) set `iso_scale` ~0.015 (renders every
+    gaussian as a round blob), `opacity_min` ~0.3 and `core_pct` ~95 (drops the floater
+    halo). Runs as a subprocess on the GPU.
+
+    Wraps `host/tools/splat_render.py`.
+    """
+    import json
+    import os
+
+    p = (REPO / ply) if not Path(ply).is_absolute() else Path(ply)
+    if not p.is_file():
+        return {"ok": False, "error": f"no such ply: {ply}"}
+    outp = (REPO / out) if not Path(out).is_absolute() else Path(out)
+    cmd = [str(VENV_PY), str(HOST / "tools" / "splat_render.py"), str(p), str(outp),
+           "--azimuth", str(azimuth), "--elevation", str(elevation),
+           "--opacity-min", str(opacity_min), "--core-pct", str(core_pct),
+           "--iso-scale", str(iso_scale), "--width", str(width), "--height", str(height),
+           "--views", str(views)]
+    if transform:
+        tp = (REPO / transform) if not Path(transform).is_absolute() else Path(transform)
+        cmd += ["--transform", str(tp)]
+    env = dict(os.environ)
+    cuda = next((c for c in ("/usr/local/cuda", "/usr/local/cuda-13.3") if Path(c).exists()), None)
+    if cuda:
+        env["CUDA_HOME"] = cuda
+        env["PATH"] = f"{Path(VENV_PY).parent}:{cuda}/bin:" + env.get("PATH", "")
+    try:
+        proc = subprocess.run(cmd, cwd=str(REPO), env=env, timeout=timeout_s,
+                              capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "cmd": " ".join(cmd), "error": f"timed out after {timeout_s}s"}
+    if proc.returncode != 0:
+        return {"ok": False, "cmd": " ".join(cmd), "returncode": proc.returncode,
+                "stderr": proc.stderr[-2000:]}
+    outs = ([str(outp.with_name(f"{outp.stem}_{i}{outp.suffix}")) for i in range(views)]
+            if views > 1 else [str(outp)])
+    return {"ok": True, "outputs": [rel(Path(o)) for o in outs], "gaussians_ply": rel(p)}

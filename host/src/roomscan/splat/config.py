@@ -30,10 +30,23 @@ class SplatPreset:
     fps: float = 3.0                 # frames sampled per second of video
     max_frames: int = 300            # hard cap after fps sampling (COLMAP is O(n^2)-ish)
     long_edge: int = 1600            # downscale so the long image edge is this many px
-    matcher: str = "sequential"      # "sequential" (walkthrough) | "exhaustive" (few frames)
+    # "exhaustive" (all frame pairs) | "sequential" (adjacent-only, O(n) but fragile).
+    # Measured 2026-08-08 (splat_sfm_probe on the new Sam Office 2 video): a long
+    # walkthrough thinned to 300 frames has large inter-frame baselines, so sequential
+    # overlap breaks and COLMAP fragments the scene into disconnected sub-models,
+    # keeping only the largest -- 18% of frames registered. Exhaustive reconnects it:
+    # 70% registered, 4.6x the seed points. At the 300-frame cap the O(n^2) cost is
+    # ~8.6 min (vs 3.6), trivial against a 30-45 min build; drop to "sequential" only
+    # if max_frames is raised far past 300.
+    matcher: str = "exhaustive"
     sequential_overlap: int = 10     # sequential matcher: match each frame to the next N
     sh_degree: int = 3               # spherical-harmonic bands (view-dependent colour)
-    max_gaussians: int = 2_000_000   # MCMC cap; the VRAM governor on this 8 GB box
+    # MCMC cap; the VRAM governor on this 8 GB box. Lowered 2M->1M (2026-08-08): 2M
+    # OOMs the real trainer (splat-vram-ceiling), and splat_vram_sweep's clone-at-N
+    # measurement is a ~2x-2.8x LOWER BOUND on the real training peak (worse with the
+    # depth prior's RGB+ED channel -- a 1.3M depth build OOM'd isolated at 6.59 GiB).
+    # 1M non-depth fits with margin; depth or a larger room want an even lower cap.
+    max_gaussians: int = 1_000_000
     iters: int = 15_000              # training steps
     # Anti-"snowglobe" controls (BUG-094 follow-up). Photometry-only 3DGS from a
     # single video leaves most gaussians as faint, oversized floaters (measured:

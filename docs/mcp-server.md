@@ -151,6 +151,9 @@ ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, com
 `slam_icp_bench(capture?, what?, frames?, raycast_frames?, ensemble_n?, device?, ab_pairs?, ab_frames?, baseline_icp_device?, candidate_icp_device?)`,
 `splat_list()`, `splat_build(video, name, force?, fps?, iters?, max_gaussians?)`,
 `splat_compare(capture, reference?, opacity_min?, voxel?, allow_scale?)`,
+`splat_vram_sweep(video?, model_dir?, image_dir?, budget_gib?, margin_gib?, reserve_gib?, ladder?, sh_degree?, long_edge?, depth_lambda?, worst_k?)`,
+`splat_sfm_probe(video, configs?, fps?, max_frames?, long_edge?)`,
+`splat_render(ply, out, transform?, azimuth?, elevation?, opacity_min?, core_pct?, iso_scale?, width?, height?, views?)`,
 `doctor()`, `orientation_probe(mode)`.
 
 `splat_build` reconstructs a navigable Gaussian splat from a video (offline
@@ -170,6 +173,31 @@ fitness/RMSE, per-axis extents + ratio, floor footprint, bidirectional cloud-to-
 distance, and a vertical/ceiling-fork analysis, writing overlay/heatmap PLYs and
 floor-plan + elevation PNGs under `results/compare/<stem>__vs__<ref>/`. Torch-free
 (open3d + plyfile), shelled out to `roomscan-splat compare` like the other heavy jobs.
+
+`splat_vram_sweep` and `splat_sfm_probe` answer "how dense a splat can we get away
+with on THIS capture?" — density has two independent ceilings and each tool measures
+one. `splat_vram_sweep` finds the largest MCMC `cap_max` (gaussian count) that fits
+VRAM, by measuring peak on the *real* COLMAP scene + frames at forced counts, cycling
+every view to catch the worst-case frame's backward. It is the honest replacement for
+the discredited synthetic probe, which built a uniform cube and under-reported the true
+peak ~2×: the count is forced to exactly N (never grown by MCMC, which under-measures)
+using the real cloud's untrained knn scales (a conservative over-estimate), and the fit
+is decided on reserved / device-wide NVML, never `max_memory_allocated`. A
+`capture_limited` result (low `registered_ratio`) means the VRAM cap is *not* binding.
+`splat_sfm_probe` measures the other ceiling — registration — by extracting frames once
+and running SfM under several configs (sequential/exhaustive, overlap, SIFT feature
+count, loop closure) on the same frames, reporting per config `largest_ratio`,
+`total_placed_ratio`, and `n_submodels` so sub-model *fragmentation* (COLMAP splitting a
+walkthrough and the build keeping only the largest piece) is visible; it recommends the
+config that registers the most single-connected frames. Both run as subprocesses (GPU /
+CPU minutes) and never bind the device.
+
+`splat_render` rasterizes a splat `.ply` to a PNG on the GPU (gsplat, base/DC color) so
+a build's result can be SEEN on this display-less, llvmpipe box where the browser splat
+viewer can't cope at these counts. It auto-frames the cloud (pass the manifest's
+`transform` for a levelled camera; `azimuth`/`elevation`/`views` orbit it), and
+`iso_scale`+`opacity_min`+`core_pct` turn it into a clean colored *coverage* cloud
+(needles/floaters removed) for before/after comparisons.
 
 `slam_stall_profile` answers "why does the live view feel frozen?" with a number.
 It replays a capture through the real Live-SLAM pipeline and reports, per stage,
