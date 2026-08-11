@@ -66,7 +66,7 @@ The PR flow is retired. **Land work by committing straight to `main`, no PR.**
   are briefed on the feature, not on the planning docs, so their commit will land the code with no
   ROADMAP/CLAUDE.md delta and you inherit the drift. On 2026-07-29 a 3D calibration view merged and
   *none* of `ROADMAP.md`, `CLAUDE.md`, or the task's resume doc mentioned it — the resume doc would
-  have sent a fresh session hunting for a 2D-only modal. Caught only by a second wrap-up. Either brief
+  have sent a fresh session hunting for a 2D-only modal. Caught only by a second session-end. Either brief
   the subagent to include the doc deltas, or do the checklist as part of the merge commit.
 
 ## Rationalizations (all mean: do the checklist now)
@@ -85,3 +85,12 @@ The PR flow is retired. **Land work by committing straight to `main`, no PR.**
 - Landing code with no doc delta in the same commit when a phase status / measured number changed.
 - A memory description contradicting what you just verified.
 - `gh pr create` / `gh pr merge` in your plan — the PR flow is retired; commit to `main` instead.
+
+## After the final commit — hand off to `session-end`
+
+If the commit you just landed **closes the session's governing issue** — its message contains
+`Closes #NNN` — that is the session's final commit. **Continue directly into the `session-end`
+skill in this same turn**; do not stop and wait to be told to wrap up. Mid-session landings that
+only `Refs #NNN` do not trigger this — run this checklist and keep working. (A `Stop`-hook backstop,
+`.claude/hooks/session-end-guard.sh`, will block the turn and remind you if you forget — but don't
+rely on it.)

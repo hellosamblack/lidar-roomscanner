@@ -1,14 +1,29 @@
 ---
-name: wrap-up
-description: Use when user says "wrap up", "close session", "end session",
-  "wrap things up", "close out this task", or invokes /wrap-up — runs
-  end-of-session checklist for shipping, memory, and self-improvement
+name: session-end
+description: The end-of-session bookend to session-start — runs the checklist for
+  shipping, memory, and self-improvement. Trigger when the user says "wrap up",
+  "close session", "end session", "wrap things up", "close out this task", or
+  invokes /wrap-up; AND automatically, in the same turn, right after landing the
+  commit that closes the session's governing issue (message contains `Closes #NNN`).
 ---
 
-# Session Wrap-Up
+# Session End
 
-Run three phases in order. All phases auto-apply without asking; present a
-consolidated report at the end.
+The close-side bookend to `session-start`. Run the four phases in order. All phases
+auto-apply without asking; present a consolidated report at the end.
+
+## When this runs automatically
+
+If you have just landed a commit whose message contains `Closes #NNN` — the session's
+final commit, per the `session-start` convention — **continue straight into this skill
+in the same turn**. Do not stop and wait to be told to wrap up: the closing commit *is*
+the signal that the session is ending. (A `Stop`-hook backstop,
+`.claude/hooks/session-end-guard.sh`, will block the turn and remind you if you miss it —
+but the point is not to need it.)
+
+`status-sync` remains its own skill for the per-commit doc-sync you run on *every* landing,
+including mid-session ones that only `Refs #NNN`; this skill calls it (Phase 1) and adds the
+once-per-session Remember / Review / Handoff phases on top.
 
 ## Phase 1: Ship It
 
@@ -17,7 +32,7 @@ consolidated report at the end.
 2. Run the `status-sync` skill checklist — the commit must include the doc
    deltas the work implies (ROADMAP.md status, superseded annotations, memory)
 3. **Stage only what this session's task actually touched — never a blanket
-   `git add -A`/`git add .`** (added 2026-07-29 after a wrap-up almost swept a
+   `git add -A`/`git add .`** (added 2026-07-29 after a session wrap-up almost swept a
    concurrently-edited, unrelated feature into the same commit as the session's
    fix). `git status` can show modified files that predate this session or —
    on a box the owner is also actively using — are being edited *right now* in
@@ -173,6 +188,23 @@ Provide the owner with a clear forward-looking summary covering three areas:
 All three sections can be brief if the session was a small bug fix or
 maintenance task with no forward-looking implications. If none apply, say
 "No forward-looking items" and proceed to the closing summary.
+
+## Closing action — mark this session done (idempotency)
+
+As the very last step, record the current HEAD so the `Stop`-hook backstop does not
+re-prompt on later turns:
+
+```bash
+git rev-parse HEAD > .git/session-end-done
+```
+
+`.git/` is per-clone and untracked, so this is local state, never committed. The hook
+(`.claude/hooks/session-end-guard.sh`) fires only when HEAD carries `Closes #NNN` **and**
+this marker does not already equal HEAD — so writing it here is what closes the loop.
+
+---
+
+Worked example of Phases 3–4 output:
 
 Findings (applied):
 

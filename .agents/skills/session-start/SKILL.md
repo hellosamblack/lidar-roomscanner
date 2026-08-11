@@ -128,13 +128,14 @@ Use `Refs #NNN` in every commit that advances the issue without closing it. Use
 
 ## At session end
 
-`status-sync` (run as part of `wrap-up`) handles the close side: outcome comment on the
-issue and `gh issue close` if the work is done. You do not close the issue in this skill.
+The `session-end` skill handles the close side: outcome comment on the issue and `gh issue close`
+if the work is done (via the `status-sync` checklist it runs). You do not close the issue in this
+skill. `session-end` fires automatically in the same turn once you land the `Closes #NNN` commit.
 
 ## Special cases
 
 **Multiple issues touched by one session** — name all of them in the session-start comment
-and in `Refs` lines of each commit. `status-sync` will prompt you to update each at wrap-up.
+and in `Refs` lines of each commit. `session-end` will prompt you to update each at session end.
 
 **Data-collection task** — these require the hardware physically present. Read the issue body
 for capture protocol requirements before starting; they are often blocking (`status/blocked`).

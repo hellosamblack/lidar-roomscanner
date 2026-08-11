@@ -1,5 +1,5 @@
 {
   "entries": [
-    { "path": "../.claude/skills" }
+    { "path": "./skills" }
   ]
 }
