@@ -765,6 +765,13 @@
       "source": "ROADMAP.md#data-collection-queue"
     },
     {
+      "legacy_id": "DC-K",
+      "issue_number": 161,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/161",
+      "state": "open",
+      "source": "docs/rtabmap-study.md"
+    },
+    {
       "legacy_id": "FW-1",
       "issue_number": 131,
       "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/131",
@@ -800,6 +807,27 @@
       "source": "ROADMAP.md#work-item-register"
     },
     {
+      "legacy_id": "OFFLINE-5",
+      "issue_number": 158,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/158",
+      "state": "open",
+      "source": "docs/rtabmap-study.md"
+    },
+    {
+      "legacy_id": "OFFLINE-6",
+      "issue_number": 159,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/159",
+      "state": "open",
+      "source": "docs/rtabmap-study.md"
+    },
+    {
+      "legacy_id": "OFFLINE-7",
+      "issue_number": 160,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/160",
+      "state": "open",
+      "source": "docs/rtabmap-study.md"
+    },
+    {
       "legacy_id": "SENS-1",
       "issue_number": 126,
       "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/126",
@@ -826,6 +854,13 @@
       "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/129",
       "state": "open",
       "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "SENS-5",
+      "issue_number": 155,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/155",
+      "state": "open",
+      "source": "docs/rtabmap-study.md"
     },
     {
       "legacy_id": "SLAM-1",
@@ -882,6 +917,48 @@
       "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/117",
       "state": "open",
       "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "SLAM-9",
+      "issue_number": 149,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/149",
+      "state": "open",
+      "source": "docs/rtabmap-study.md"
+    },
+    {
+      "legacy_id": "SLAM-10",
+      "issue_number": 150,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/150",
+      "state": "open",
+      "source": "docs/rtabmap-study.md"
+    },
+    {
+      "legacy_id": "SLAM-11",
+      "issue_number": 151,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/151",
+      "state": "open",
+      "source": "docs/rtabmap-study.md"
+    },
+    {
+      "legacy_id": "SLAM-12",
+      "issue_number": 152,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/152",
+      "state": "open",
+      "source": "docs/rtabmap-study.md"
+    },
+    {
+      "legacy_id": "SLAM-13",
+      "issue_number": 153,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/153",
+      "state": "open",
+      "source": "docs/rtabmap-study.md"
+    },
+    {
+      "legacy_id": "SLAM-14",
+      "issue_number": 154,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/154",
+      "state": "open",
+      "source": "docs/rtabmap-study.md"
     },
     {
       "legacy_id": "TOOL-1",
@@ -945,6 +1022,20 @@
       "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/125",
       "state": "open",
       "source": "ROADMAP.md#work-item-register"
+    },
+    {
+      "legacy_id": "WEB-9",
+      "issue_number": 156,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/156",
+      "state": "open",
+      "source": "docs/rtabmap-study.md"
+    },
+    {
+      "legacy_id": "WEB-10",
+      "issue_number": 157,
+      "issue_url": "https://github.com/hellosamblack/lidar-roomscanner/issues/157",
+      "state": "open",
+      "source": "docs/rtabmap-study.md"
     },
     {
       "legacy_id": "XPORT-1",

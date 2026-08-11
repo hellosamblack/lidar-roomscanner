@@ -114,16 +114,26 @@ re-run the generator if `docs/issue-migration-map.json` changes.
 | DC-H | [#145](https://github.com/hellosamblack/lidar-roomscanner/issues/145) | open |
 | DC-I | [#146](https://github.com/hellosamblack/lidar-roomscanner/issues/146) | open |
 | DC-J | [#147](https://github.com/hellosamblack/lidar-roomscanner/issues/147) | closed |
+| DC-K | [#161](https://github.com/hellosamblack/lidar-roomscanner/issues/161) | open |
 | FW-1 | [#131](https://github.com/hellosamblack/lidar-roomscanner/issues/131) | open |
 | OFFLINE-1 | [#132](https://github.com/hellosamblack/lidar-roomscanner/issues/132) | open |
 | OFFLINE-2 | [#133](https://github.com/hellosamblack/lidar-roomscanner/issues/133) | open |
 | OFFLINE-3 | [#134](https://github.com/hellosamblack/lidar-roomscanner/issues/134) | open |
 | OFFLINE-4 | [#135](https://github.com/hellosamblack/lidar-roomscanner/issues/135) | open |
+| OFFLINE-5 | [#158](https://github.com/hellosamblack/lidar-roomscanner/issues/158) | open |
+| OFFLINE-6 | [#159](https://github.com/hellosamblack/lidar-roomscanner/issues/159) | open |
+| OFFLINE-7 | [#160](https://github.com/hellosamblack/lidar-roomscanner/issues/160) | open |
 | SENS-1 | [#126](https://github.com/hellosamblack/lidar-roomscanner/issues/126) | open |
 | SENS-2 | [#127](https://github.com/hellosamblack/lidar-roomscanner/issues/127) | open |
 | SENS-3 | [#128](https://github.com/hellosamblack/lidar-roomscanner/issues/128) | open |
 | SENS-4 | [#129](https://github.com/hellosamblack/lidar-roomscanner/issues/129) | open |
+| SENS-5 | [#155](https://github.com/hellosamblack/lidar-roomscanner/issues/155) | open |
 | SLAM-1 | [#110](https://github.com/hellosamblack/lidar-roomscanner/issues/110) | open |
+| SLAM-10 | [#150](https://github.com/hellosamblack/lidar-roomscanner/issues/150) | open |
+| SLAM-11 | [#151](https://github.com/hellosamblack/lidar-roomscanner/issues/151) | open |
+| SLAM-12 | [#152](https://github.com/hellosamblack/lidar-roomscanner/issues/152) | open |
+| SLAM-13 | [#153](https://github.com/hellosamblack/lidar-roomscanner/issues/153) | open |
+| SLAM-14 | [#154](https://github.com/hellosamblack/lidar-roomscanner/issues/154) | open |
 | SLAM-2 | [#111](https://github.com/hellosamblack/lidar-roomscanner/issues/111) | open |
 | SLAM-3 | [#112](https://github.com/hellosamblack/lidar-roomscanner/issues/112) | open |
 | SLAM-4 | [#113](https://github.com/hellosamblack/lidar-roomscanner/issues/113) | open |
@@ -131,8 +141,10 @@ re-run the generator if `docs/issue-migration-map.json` changes.
 | SLAM-6 | [#115](https://github.com/hellosamblack/lidar-roomscanner/issues/115) | open |
 | SLAM-7 | [#116](https://github.com/hellosamblack/lidar-roomscanner/issues/116) | open |
 | SLAM-8 | [#117](https://github.com/hellosamblack/lidar-roomscanner/issues/117) | open |
+| SLAM-9 | [#149](https://github.com/hellosamblack/lidar-roomscanner/issues/149) | open |
 | TOOL-1 | [#136](https://github.com/hellosamblack/lidar-roomscanner/issues/136) | open |
 | WEB-1 | [#118](https://github.com/hellosamblack/lidar-roomscanner/issues/118) | open |
+| WEB-10 | [#157](https://github.com/hellosamblack/lidar-roomscanner/issues/157) | open |
 | WEB-2 | [#119](https://github.com/hellosamblack/lidar-roomscanner/issues/119) | open |
 | WEB-3 | [#120](https://github.com/hellosamblack/lidar-roomscanner/issues/120) | open |
 | WEB-4 | [#121](https://github.com/hellosamblack/lidar-roomscanner/issues/121) | open |
@@ -140,5 +152,6 @@ re-run the generator if `docs/issue-migration-map.json` changes.
 | WEB-6 | [#123](https://github.com/hellosamblack/lidar-roomscanner/issues/123) | open |
 | WEB-7 | [#124](https://github.com/hellosamblack/lidar-roomscanner/issues/124) | open |
 | WEB-8 | [#125](https://github.com/hellosamblack/lidar-roomscanner/issues/125) | open |
+| WEB-9 | [#156](https://github.com/hellosamblack/lidar-roomscanner/issues/156) | open |
 | XPORT-1 | [#130](https://github.com/hellosamblack/lidar-roomscanner/issues/130) | open |
 | XPORT-2 | alias of BUG-049 -> #60 | open |
