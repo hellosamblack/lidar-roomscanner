@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented in phases described by `docs/superpowers/plans/2026-07-31-web-live-view-detailed.md`.
+Implemented in phases described by `docs/superpowers/plans/completed/2026-07-31-web-live-view-detailed.md`.
 
 ## Product model
 

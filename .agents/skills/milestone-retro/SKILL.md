@@ -10,8 +10,17 @@ major effort, before the next phase's plan executes.
 
 ## Procedure
 
-1. **Mine the evidence** (don't rely on memory): read the phase's section of
-   `.superpowers/sdd/progress.md` and skim the task reports (`.superpowers/sdd/*-report.md`). Look for:
+1. **Mine the evidence** (don't rely on memory). The four sources, in order of signal:
+   - The milestone's **plan and spec** under `docs/superpowers/{plans,specs}/` — especially any
+     status/handoff header, which usually records what fought back.
+   - The **closed GitHub Issues** for the push: `gh issue list --state closed --label area/<area>
+     --search "closed:>=<date>"`, and read their comment threads — the session-start/outcome comment
+     pairs are where the friction was narrated at the time.
+   - The **commit log** for the range (`git log --oneline <base>..HEAD`), which shows the retries,
+     reverts, and "actually, …" follow-ups that the prose smoothed over.
+   - `.remember/recent.md`, if the push wrote to it.
+
+   Look for:
    - Rituals rebuilt from prose by multiple subagents (capture scripts, reset/retry loops, bench
      harnesses, flash-and-measure sequences).
    - Environment facts learned the hard way (tool locations, port behaviors, timing windows, race
@@ -29,8 +38,10 @@ major effort, before the next phase's plan executes.
      script that should stay CLI-only goes in `EXCLUDED` with its reason — the test fails on
      anything that is neither. See `docs/mcp-server.md` → "Adding a tool".
    - **Skill update**: new facts/steps into the governing skill (`firmware-loop`, `protocol-change`, …);
-     a genuinely new activity gets a new skill (follow superpowers:writing-skills). Put long supporting
-     material in the skill's `references/`, runnable helpers in its `scripts/`.
+     a genuinely new activity gets a new skill under `.agents/skills/`, matching the structure of the
+     ones already there (frontmatter `name`/`description` with concrete trigger phrases, then a short
+     imperative body). Put long supporting material in the skill's `references/`, runnable helpers in
+     its `scripts/`.
    - **Doc fix**: corrections to `docs/engineering-practices.md`, `ROADMAP.md` risk lists, etc.
 3. **Prune while you're there**: stale skill lines (changed baud rates, moved files, dead knobs) get
    corrected — a skill that lies is worse than none.
@@ -61,6 +72,15 @@ major effort, before the next phase's plan executes.
   touched parser of host↔device bytes needs a same-write burst (data larger than the parser's buffer)
   and a corrupted/malformed-input case exercised on hardware, not just a single well-formed sample
   (caught in Phase 3 Task 2's parse-while-draining rework).
+
+---
+
+# Executed retros (historical record)
+
+The records below are dated snapshots of what each retro extracted — read them for precedent, not as
+current procedure. Anything they describe as *tracked in `BUGS.md`* or as a `BUG-NNN`/`SLAM-N`/`DC-<letter>`
+predates the **2026-08-10 migration to GitHub Issues**: `BUGS.md` is now a stub, and those IDs resolve
+to `#NNN` via `docs/issue-migration-map.md`.
 
 ## Executed 2026-08-04 (High Frame-Rate & Manual Ranging Modes — 12-task milestone retro)
 

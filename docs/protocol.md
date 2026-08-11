@@ -451,7 +451,7 @@ specced with the Phase 4 transport work).
   host-compilable); that formula was instead verified by direct source reading and matches
   Python's decode bit-for-bit (`detail = high_water | (transport << 8) | (pending << 16)`).
 - **v2** (2026-08-03): **layout change — version bump.** Five new command codes (8-12,
-  `docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md` Task 2):
+  `docs/superpowers/plans/completed/2026-07-31-high-framerate-and-manual-ranging-modes.md` Task 2):
   `SET_RANGING_PROFILE` (8), `SET_MANUAL_PARAMS` (9), `GET_RANGING_CONFIG` (10),
   `SET_IMU_ENV_RATE` (11), `GET_IMU_ENV_RATE` (12). Commands 8, 10, 11, 12 reuse the
   existing 8-byte cmd+param COMMAND shape and 12-byte legacy ACK shape unchanged. Command

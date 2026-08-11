@@ -10,9 +10,12 @@
 # Idempotent + loop-safe via two guards:
 #   - `stop_hook_active`: once we've blocked and Claude has continued, the next
 #     Stop carries this flag -> we let it stop.
-#   - `.git/session-end-done`: session-end writes HEAD's sha here as its last
-#     step, so a later Stop on the same HEAD does not re-fire. `.git/` is
-#     per-clone and untracked -> correct home for local state.
+#   - `$(git rev-parse --git-dir)/session-end-done`: session-end writes HEAD's sha
+#     here as its last step, so a later Stop on the same HEAD does not re-fire.
+#     The git dir is per-clone and untracked -> correct home for local state.
+#     Resolve it with `--git-dir`, never as a literal `.git/`: in a linked
+#     worktree `.git` is a *file*, so a hardcoded redirect would overwrite the
+#     worktree pointer itself.
 #
 # The hook only ever *reminds*; it never edits files or commits.
 
@@ -45,7 +48,7 @@ if [ -f "$marker" ] && [ "$(cat "$marker" 2>/dev/null)" = "$head_sha" ]; then
 fi
 
 num=$(printf '%s' "$msg" | grep -Eoi 'closes[[:space:]]+#[0-9]+' | grep -Eo '[0-9]+' | head -1)
-reason="HEAD closes a governing issue (Closes #${num:-?}) but session-end has not run for this commit. Run the session-end skill now — ship checks, memory, self-improvement, handoff — which records .git/session-end-done as its final step."
+reason="HEAD closes a governing issue (Closes #${num:-?}) but session-end has not run for this commit. Run the session-end skill now — ship checks, memory, self-improvement, handoff — which records \$(git rev-parse --git-dir)/session-end-done as its final step."
 
 # Emit a Stop-hook block decision; Claude Code feeds `reason` back into the turn.
 python3 -c '

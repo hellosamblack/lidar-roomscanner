@@ -116,4 +116,7 @@ The project is organized into several layers. Start here, and follow the links t
 *   [**`ROADMAP.md`**](ROADMAP.md) - Current-state doc: standing decisions, architecture, and risks. Forward-looking work + defects are [GitHub Issues](https://github.com/hellosamblack/lidar-roomscanner/issues).
 *   [**`docs/roadmap-history.md`**](docs/roadmap-history.md) - Completed-phase narratives and measured outcomes (the historical record behind the roadmap).
 *   [**`BUGS.md`**](BUGS.md) - Pointer to GitHub Issues (`bug` label); old `BUG-NNN` → issue mapping in [`docs/issue-migration-map.md`](docs/issue-migration-map.md).
-*   [**`CLAUDE.md`**](CLAUDE.md) - The primary system guidance and agentic instructions for working in this repo. Read this first if you are an agent contributing to the codebase.
+*   [**`AGENTS.md`**](AGENTS.md) - The primary system guidance and agentic instructions for working in this repo. Read this first if you are an agent contributing to the codebase. (`CLAUDE.md` is a symlink to it, as is `.agents/AGENTS.md`; project skills live in [`.agents/skills/`](.agents/skills), which `.claude/skills/` and `.codex/skills/` symlink to.)
+*   [**`docs/engineering-practices.md`**](docs/engineering-practices.md) - Binding conventions: repo rules, protocol rules, firmware/host standards, and the status-sync + milestone-retro rules.
+*   [**`docs/protocol.md`**](docs/protocol.md) - The binary wire protocol spec (frame layout, stream ids, golden vectors).
+*   [**`docs/mcp-server.md`**](docs/mcp-server.md) - The `roomscan-mcp` agent-facing tool surface.

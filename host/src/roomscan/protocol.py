@@ -259,7 +259,7 @@ def parse_event(payload: bytes) -> tuple[int, int, str]:
 
 # --- EVENT code TX_QUEUE_STATS (7): Ethernet TX-pacer queue telemetry (Task 6) --------
 #
-# docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md Task 6
+# docs/superpowers/plans/completed/2026-07-31-high-framerate-and-manual-ranging-modes.md Task 6
 # step 2: "prove zero, don't infer it" -- the firmware emits this on the same 64-frame
 # cadence as the periodic CALIB retransmit (firmware/scanner-stream/Src/vl53l9_app.c,
 # rs_send_tx_queue_stats_event()) so a 60 s hardware capture at any rate samples it many

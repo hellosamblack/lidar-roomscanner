@@ -35,10 +35,14 @@ session pays to rediscover (the 2026-07-10 retro burned a full session correctin
 4. **Ledgers** — Reference-firmware bug list, "Considered and rejected" (both stay in `ROADMAP.md`
    prose, not GitHub Issues — vendor-package bugs we don't own, and rejected proposals aren't tracked
    work): move or annotate affected entries; don't create a duplicate entry elsewhere.
-5. **CLAUDE.md** — Only if a phase status or an architecture decision changed; keep the summary
-   consistent with `ROADMAP.md` and the open GitHub Issues.
-6. **Memory** — Any auto-memory file (and its `MEMORY.md` index line) whose description states a
-   now-changed status ("STILL OPEN", "blocked", "draft PR") gets reconciled.
+5. **`AGENTS.md`** (repo root — `CLAUDE.md` and `.agents/AGENTS.md` are symlinks to it) — Only if a
+   phase status or an architecture decision changed; keep the summary consistent with `ROADMAP.md`
+   and the open GitHub Issues.
+6. **Memory** — Any auto-memory file whose description states a now-changed status ("STILL OPEN",
+   "blocked", "draft PR") gets reconciled, along with its index line. These live **outside the
+   repo**, at `~/.claude/projects/-home-sam-git-personal-lidar-roomscanner/memory/` with the
+   `MEMORY.md` index in that same directory — so they are never part of the commit, and reconciling
+   them is a separate write you must not skip just because `git status` looks clean.
 7. **New files** — repo-relative paths ≤150 chars (longer breaks `git worktree add` and fresh
    clones on Windows).
 8. **MCP surface** — did this work add an agent-facing capability, or a script under `host/tools/`?

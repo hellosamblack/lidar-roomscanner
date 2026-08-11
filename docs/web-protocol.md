@@ -461,7 +461,7 @@ exact body-axis rotation above, plus a countdown of the cells left in the gap be
 
 ## Ranging profiles & manual sensor control (Task 10, 2026-08-03)
 
-`docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md` Task 10. Two
+`docs/superpowers/plans/completed/2026-07-31-high-framerate-and-manual-ranging-modes.md` Task 10. Two
 server-owned, device-authoritative state objects — `web.RangingState` (the ranging profile: Room
 Mapping / Precision / High Frame-Rate / Manual) and `web.ImuEnvRateState` (the independent
 streams-9/10/11 poll rate, cmd 11/12) — both broadcast together on **one** outbound `ranging`

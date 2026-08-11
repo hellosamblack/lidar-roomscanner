@@ -1,6 +1,6 @@
 # Handoff — High Frame-Rate & Manual Ranging Modes implementation (2026-08-04, rev 5)
 
-**Plan:** `docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md` (status
+**Plan:** `docs/superpowers/plans/completed/2026-07-31-high-framerate-and-manual-ranging-modes.md` (status
 header there summarizes; this doc is the authoritative resume state, superseding rev 3 of this file).
 **Working model:** orchestrator + Sonnet subagents (owner directive: preserve usage limits); agents
 edit + test, never commit — the orchestrator verifies (focused tests + ruff on touched files) and

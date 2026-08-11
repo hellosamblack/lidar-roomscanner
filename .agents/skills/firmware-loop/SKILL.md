@@ -8,6 +8,10 @@ description: Use when building, flashing, or monitoring STM32 firmware in this p
 Firmware validation is on-target only — no simulator, no unit tests. Every firmware change ends with
 flash-and-observe.
 
+> **`BUG-NNN` below are legacy IDs.** Defects live in GitHub Issues since the 2026-08-10 migration and
+> the prefixes were stripped from issue titles — resolve an ID to its `#NNN` via
+> `docs/issue-migration-map.md`, and file anything new as `gh issue create --label bug` with no prefix.
+
 > **Prefer the MCP tools where they exist** (`docs/mcp-server.md`) — they return structured results
 > and already encode the host quirks the command lines below spell out:
 >
@@ -29,11 +33,13 @@ flash-and-observe.
 - Reference (read-only, flash-ok, edit-never):
   `firmware/vendor/53L9A1/Projects/NUCLEO-H563ZI/Applications/53L9A1/53L9A1_PostprocessSingle/`
 
-## Build
+## Build — ARCHIVED (retired Windows box)
 
-> **On the current headless Linux dev box, skip to "Build + flash on Linux" below.** The
-> STM32CubeIDE/`STM32_Programmer_CLI` paths in the next two sections are from the retired Windows box
-> and do not exist here.
+> **On the current headless Linux dev box, skip to "Build + flash on Linux" below.** This section and
+> the "Flash — ARCHIVED" one that follows describe the **retired Windows box**: every path in them
+> (`C:\ST\STM32CubeIDE_2.2.0\…`, `STM32_Programmer_CLI.exe`, `COM14`/`COM15`, the `NOD_H563ZI`
+> drag-drop drive) **does not exist here**. They are kept only as a record of the equivalent
+> invocations. The FLASH/SRAM budget note at the end of this section still applies everywhere.
 
 Requires `arm-none-eabi-gcc` on PATH, CMake ≥3.22, Ninja. On this machine the toolchain is NOT on the
 default PATH — it ships with STM32CubeIDE 2.2.0; prepend
@@ -49,10 +55,11 @@ Success = `.bin` produced and size printed. FLASH is 2 MB / SRAM 640 KB — curr
 around 84 KB FLASH (~4%) / 8 KB RAM (~1%); if `size` climbs sharply, stop and rethink buffers before
 flashing.
 
-## Flash
+## Flash — ARCHIVED (retired Windows box)
 
-ST-Link (on-board V3EC) via STM32CubeProgrammer CLI. The full path (not always on `PATH` on this
-machine — overridable via env `ROOMSCAN_PROGRAMMER`, same variable `host/tools/capture.py` reads):
+ST-Link (on-board V3EC) via STM32CubeProgrammer CLI. The full path (overridable via env
+`ROOMSCAN_PROGRAMMER`, the same variable `host/tools/capture.py` reads — that variable is still live
+on Linux, only the path below is Windows-specific):
 
 ```
 C:\ST\STM32CubeIDE_2.2.0\STM32CubeIDE\plugins\com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.win32_2.2.500.202603051304\tools\bin\STM32_Programmer_CLI.exe
@@ -132,7 +139,7 @@ CDC port discovery by VID/PID, boot-hang retry, timed raw capture, decode-and-re
 rebuilt from prose by every `[HW]` task:
 
 ```sh
-host/.venv/Scripts/python host/tools/capture.py --reset --seconds 15 --out captures/foo.bin
+host/.venv/bin/python host/tools/capture.py --reset --seconds 15 --out captures/foo.bin
 ```
 
 Report includes: frame counts by stream, fps under **both** conventions (labeled — see below), CRC

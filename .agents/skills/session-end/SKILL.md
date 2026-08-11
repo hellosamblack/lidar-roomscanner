@@ -2,8 +2,8 @@
 name: session-end
 description: The end-of-session bookend to session-start — runs the checklist for
   shipping, memory, and self-improvement. Trigger when the user says "wrap up",
-  "close session", "end session", "wrap things up", "close out this task", or
-  invokes /wrap-up; AND automatically, in the same turn, right after landing the
+  "close session", "end session", "wrap things up", "close out this task";
+  AND automatically, in the same turn, right after landing the
   commit that closes the session's governing issue (message contains `Closes #NNN`).
 ---
 
@@ -88,38 +88,51 @@ once-per-session Remember / Review / Handoff phases on top.
     > /tmp/web-live.log 2>&1 < /dev/null &` with `dangerouslyDisableSandbox` (the sandbox kills
     listeners — see the `agent-sandbox-port-binding` memory).
 
+**Release the issue claim:**
+12. Drop the `status/in-progress` label `session-start` added, on every issue this session claimed —
+    whether or not the work finished. A stale claim makes the next session either duplicate the
+    check or steer around work nobody is doing:
+
+    ```bash
+    gh issue edit NNN --repo hellosamblack/lidar-roomscanner --remove-label "status/in-progress"
+    ```
+
+    If the session is ending with the issue still open and unfinished, say so in the outcome comment
+    (Phase 4's handoff) — the comment is the handoff, the label is not.
+
 **Task cleanup:**
-12. Check the task list for in-progress or stale items
-13. Mark completed tasks as done, flag orphaned ones
+13. Check the task list for in-progress or stale items
+14. Mark completed tasks as done, flag orphaned ones
 
 ## Phase 2: Remember It
 
 Review what was learned during the session. Decide where each piece of
 knowledge belongs in the memory hierarchy:
 
-**Memory placement guide:**
-- **Auto memory** (Claude writes for itself) — Debugging insights, patterns
-  discovered during the session, project quirks. Tell Claude to save these:
-  "remember that..." or "save to memory that..."
-- **CLAUDE.md** (instructions for Claude) — Permanent project rules,
-  conventions, commands, architecture decisions that should guide all future
-  sessions
-- **`.claude/rules/`** (modular project rules) — Topic-specific instructions
-  that apply to certain file types or areas. Use `paths:` frontmatter to scope
-  rules to relevant files (e.g., testing rules scoped to `tests/**`)
-- **`CLAUDE.local.md`** (private per-project notes) — Personal WIP context,
-  local URLs, sandbox credentials, current focus areas that shouldn't be
-  committed
-- **`@import` references** — When a CLAUDE.md would benefit from referencing
-  another file rather than duplicating its content
+**Memory placement guide** — this project has three durable destinations, plus one
+short-horizon one:
+- **Auto memory** (Claude writes for itself, one fact per file) — debugging insights,
+  patterns discovered during the session, project quirks. Lives **outside the repo**, at
+  `~/.claude/projects/-home-sam-git-personal-lidar-roomscanner/memory/`, with a one-line
+  pointer per file in that directory's `MEMORY.md` index. Before writing, check for an
+  existing file that already covers it and update that instead of duplicating.
+- **`AGENTS.md`** (repo root; instructions every agent reads) — permanent project rules,
+  conventions, architecture decisions, owner directives. `CLAUDE.md` and `.agents/AGENTS.md`
+  are symlinks to it, so edit the one file. Anything binding and long-form belongs in
+  `docs/engineering-practices.md` instead, which `AGENTS.md` points at.
+- **A skill under `.agents/skills/`** — when the knowledge is procedural (a checklist, a
+  build/flash ritual, an environment fact needed at a specific moment) rather than a fact.
+  This is the `milestone-retro` rule's preferred destination.
+- **`.remember/now.md` / `.remember/recent.md`** (gitignored, shared with Codex) —
+  short-horizon operational state: what is mid-flight right now. Not durable memory.
 
 **Decision framework:**
-- Is it a permanent project convention? → CLAUDE.md or `.claude/rules/`
-- Is it scoped to specific file types? → `.claude/rules/` with `paths:`
-  frontmatter
-- Is it a pattern or insight Claude discovered? → Auto memory
-- Is it personal/ephemeral context? → `CLAUDE.local.md`
-- Is it duplicating content from another file? → Use `@import` instead
+- Is it a permanent project convention or owner directive? → `AGENTS.md` (or
+  `docs/engineering-practices.md` if it needs more than a paragraph)
+- Is it procedural — something to do at a particular moment? → the governing skill
+- Is it a pattern or insight discovered this session? → auto memory (+ its `MEMORY.md` line)
+- Is it in-flight state for the next few hours? → `.remember/now.md`
+- Is it already recorded by the code, tests, or git history? → don't write it anywhere
 
 Note anything important in the appropriate location.
 
@@ -143,12 +156,14 @@ was done.
 - **Automation** — Repetitive patterns that could become skills, hooks, or
   scripts
 
-**Action types:**
-- **CLAUDE.md** — Edit the relevant project or global CLAUDE.md
-- **Rules** — Create or update a `.claude/rules/` file
-- **Auto memory** — Save an insight for future sessions
-- **Skill / Hook** — Document a new skill or hook spec for implementation
-- **CLAUDE.local.md** — Create or update per-project local memory
+**Action types** (same destinations as Phase 2):
+- **`AGENTS.md`** — Edit the canonical project guidance (repo root)
+- **`docs/engineering-practices.md`** — Add a binding convention that needs more than a paragraph
+- **Skill** — Create or update a skill under `.agents/skills/`; add a hook under `.claude/hooks/`
+  (and register it in `.claude/settings.json`) when the behavior must fire without being remembered
+- **Auto memory** — Save an insight for future sessions, with its `MEMORY.md` index line
+- **Tool** — Land the capability as an MCP tool under `host/src/roomscan/mcp_server/`
+  (the `AGENTS.md` "New tools land in the MCP server" rule), not only as a `host/tools/` script
 
 Present a summary after applying, in two sections — applied items first,
 then no-action items. **If Phase 1 step 3 found out-of-scope changes left
@@ -195,10 +210,14 @@ As the very last step, record the current HEAD so the `Stop`-hook backstop does 
 re-prompt on later turns:
 
 ```bash
-git rev-parse HEAD > .git/session-end-done
+git rev-parse HEAD > "$(git rev-parse --git-dir)/session-end-done"
 ```
 
-`.git/` is per-clone and untracked, so this is local state, never committed. The hook
+Derive the path with `git rev-parse --git-dir`, never hardcode `.git/` — in a linked worktree
+(which `status-sync` explicitly sanctions) `.git` is a *file*, so a hardcoded redirect fails and
+the hook, which resolves the same way to `.git/worktrees/<name>/`, would keep re-prompting.
+
+The git dir is per-clone and untracked, so this is local state, never committed. The hook
 (`.claude/hooks/session-end-guard.sh`) fires only when HEAD carries `Closes #NNN` **and**
 this marker does not already equal HEAD — so writing it here is what closes the loop.
 

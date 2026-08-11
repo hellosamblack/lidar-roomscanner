@@ -11,6 +11,11 @@ reconstruction is measured against it to find where the scanner got the room *sh
 The engine is the `splat_compare` MCP tool (`roomscan.splat.compare`); this skill is how to
 drive it and read the result.
 
+> **The `BUG-NNN` failure classes below are legacy IDs** (pre-2026-08-10, when defects moved to GitHub
+> Issues and the title prefixes were stripped). Resolve one to its `#NNN` via
+> `docs/issue-migration-map.md` — `gh issue list --search "BUG-084"` only matches the `Legacy ID:`
+> line in the body.
+
 ## When to use
 
 A capture's Detailed/live SLAM map looks off — dimensions wrong, walls skewed, floor/ceiling

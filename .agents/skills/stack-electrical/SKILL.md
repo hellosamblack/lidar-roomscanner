@@ -32,8 +32,11 @@ matters is **I3C1 on PB8 (SCL) / PB9 (SDA)**, level-shifted onto each board.
 connectors + the functional ICs on the signal path and abstracts on-board LDOs,
 decoupling, ST-LINK/USB/Ethernet, and the morpho pass-through. Never state a pin
 map, SB↔net, or address you haven't confirmed in a schematic page or the firmware
-— cite the page/file. PDF text extracts via `pymupdf` (installed) if you can't
-render pages (`pdftoppm`/poppler is NOT installed on this machine).
+— cite the page/file. To read a PDF on this host, use **poppler**, which is present:
+`pdftotext -f <page> -l <page> <pdf> -` for text, `pdftoppm -png -r 150 -f <page>
+-l <page> <pdf> /tmp/page` to render a page you then Read as an image. (`pymupdf`
+is **not** installed — an older revision of this skill claimed the opposite of both
+facts; verify a tool before reaching for it.)
 
 ## Mental model for electrical decisions
 
@@ -74,7 +77,8 @@ The schematic is generated, not hand-drawn — edit the generator, don't hand-ed
 `.kicad_sch`:
 
 ```sh
-# generator: references/kicad/roomscanner-stack/generate_stack.py  (uses kiutils, installed)
+# generator: references/kicad/roomscanner-stack/generate_stack.py  (needs kiutils:
+#   host/.venv/bin/pip install kiutils — NOT installed on this host by default)
 python references/kicad/roomscanner-stack/generate_stack.py    # rewrites .kicad_sch/.kicad_sym/.kicad_pro + re-copies datasheets
 ```
 
@@ -85,10 +89,17 @@ for the pattern: SPDT with COM/INT/EXT, wired so the netlist reflects the defaul
 Expansion-board refs are offset +100 (IKS4A1) / +200 (53L9A1); `= CNx`/`= Ux` text
 gives the real silk name.
 
-**Always validate with KiCad 10 CLI after regenerating** (KiCad is installed):
+**Always validate with the KiCad CLI after regenerating.** ⚠️ **`kicad-cli` is NOT
+available on this Linux host** (the path below is from the retired Windows box, kept
+because it documents the exact invocations). Regenerating the model therefore needs
+either KiCad installed here first, or the checked-in `.net` treated as read-only
+ground truth — in which case **read** `roomscanner-stack.net` and the schematic PDFs
+instead of regenerating, and say so rather than reporting an unvalidated regeneration:
 
 ```sh
+# Retired Windows box:
 KCLI="/c/Users/hello/AppData/Local/Programs/KiCad/10.0/bin/kicad-cli.exe"
+# On a Linux host with KiCad 10 installed, KCLI=kicad-cli and the rest is identical:
 "$KCLI" sch erc roomscanner-stack.kicad_sch -o roomscanner-stack-erc.rpt   # expect 0 violations
 "$KCLI" sch export netlist -o roomscanner-stack.net roomscanner-stack.kicad_sch
 "$KCLI" sch export pdf -o roomscanner-stack.pdf roomscanner-stack.kicad_sch

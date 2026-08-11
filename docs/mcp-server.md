@@ -353,7 +353,7 @@ direction — both estimates share the quaternion and the calibration, so a rota
 (DT0103) moves them together; that is still ROADMAP DC-E's braced sweep.
 
 `capture_profile_probe` is the measurement half of the ranging-profile contract in
-`docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md` —
+`docs/superpowers/plans/completed/2026-07-31-high-framerate-and-manual-ranging-modes.md` —
 `roomscan.profiles` says what a requested configuration should do, this says what a
 recorded capture actually did. `fps_within_tolerance` applies the plan's own +/-2%
 acceptance gate to the measured vs. requested rate; `stream_pairing` still assumes

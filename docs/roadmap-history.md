@@ -453,7 +453,7 @@ maps for their Ambient modes.
 > data link in production). BUG-079 (manual UI edit revert) was found by the Task 12 UI pass and fixed
 > the same session.
 > The reviewed
-> [implementation plan](docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md)
+> [implementation plan](docs/superpowers/plans/completed/2026-07-31-high-framerate-and-manual-ranging-modes.md)
 > is being executed; Tasks 1–11 are on `main` (`d2c4148` profiles contract, `2b8a9ee` protocol
 > v2 cmds 8–12, `414adaa` typed control, `7598fde` atomic firmware profiles, `b10f44d` autonomous
 > sync + BUG-072, `5c23270` SLAM-ingest split, `8cc9239` web ranging UI, `896c7a8` model refinement,
@@ -593,7 +593,7 @@ maps for their Ambient modes.
 > `ranging` re-broadcast outruns `controls.js`'s 300 ms `MANUAL_DEBOUNCE_MS` and reverts the field
 > before it sends (presets, the IMU/env control, and `set_manual_params` over `/ws` are all
 > unaffected). Full resume state:
-> `docs/superpowers/plans/2026-08-03-high-framerate-implementation-handoff.md` (rev 5).
+> `docs/superpowers/plans/completed/2026-08-03-high-framerate-implementation-handoff.md` (rev 5).
 >
 > **Device robustness** (Task 5): `rs_send_event()` emits EVENT frames
 > (`SENSOR_INIT_FAIL`/`TRIGGER_TIMEOUT`/`DMA_TIMEOUT`/`SENSOR_ERROR_STATUS`) on every fault path,

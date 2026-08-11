@@ -632,7 +632,7 @@ def test_every_fusion_status_has_a_label_and_a_remedy():
 
 # ---------------------------------------------------------------------------
 # Ranging profiles / manual sensor control / IMU-env poll rate (Task 10,
-# docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md).
+# docs/superpowers/plans/completed/2026-07-31-high-framerate-and-manual-ranging-modes.md).
 # ---------------------------------------------------------------------------
 #
 # Numeric bounds are imported from `roomscan.profiles` (the single host-side

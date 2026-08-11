@@ -1,6 +1,7 @@
 # Engineering Practices — roomscanner
 
-Conventions for all work in this workspace. CLAUDE.md points here; keep this doc short and binding.
+Conventions for all work in this workspace. `AGENTS.md` (repo root; `CLAUDE.md` is a symlink to it)
+points here; keep this doc short and binding.
 
 ## Repository rules
 
@@ -8,7 +9,8 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
   `ROADMAP.md` → "Reference-firmware bugs"). Our firmware fork lives in `firmware/scanner-stream/` and references the
   package's Drivers/Middlewares/Utilities in place via CMake paths (`PKG_ROOT`).
 - Layout: `firmware/` (STM32 apps), `host/` (PC Python package `roomscan`), `docs/` (specs, plans,
-  captures), `references/` (imported research, read-only), `.claude/skills/` (project skills).
+  captures), `references/` (imported research, read-only), `.agents/skills/` (project skills —
+  `.claude/skills/` and `.codex/skills/` are symlinks to it).
 - Commit style: conventional-commit-ish prefixes (`feat:`, `fix:`, `docs:`, `test:`, `chore:`), small and
   frequent. Never commit `build/` output or captured binary streams >1 MB (put large captures in
   `captures/` — gitignored — and check in only the small golden fixtures under `host/tests/fixtures/`).
@@ -266,9 +268,10 @@ proven otherwise. The 2026-07-28 orientation-noise pass produced three wrong num
 - **After every milestone** (a phase completing, or any major merge to main), run a retrospective BEFORE
   starting the next phase — follow the `milestone-retro` skill. The question is always: *what would have
   made this push easier, done as a reusable artifact?*
-- Convert findings into durable tooling, not notes: new/updated **skills** under `.claude/skills/` (with
+- Convert findings into durable tooling, not notes: new/updated **skills** under `.agents/skills/` (with
   `references/` and `scripts/` subdirectories where they earn their keep), shared **scripts** under
-  `host/tools/`, and corrections to existing docs. Follow superpowers:writing-skills conventions.
+  `host/tools/`, and corrections to existing docs. Match the structure of the skills already there —
+  frontmatter `name`/`description` with concrete trigger phrases, then a short imperative body.
 - Hard rules of thumb: any hardware ritual performed from prose by more than two subagents becomes a
   script; any environment fact discovered the hard way (tool paths, port quirks, timing windows) becomes
   a line in the relevant skill; any repeated review finding becomes a checklist item in the skill that

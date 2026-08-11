@@ -3,8 +3,8 @@
 Covers all four profile definitions, enum wire values, FPS<->period conversion,
 DSS/context rules, the transport warning threshold, and invalid manual
 combinations, with explicit boundary cases at 1/60/61/90/100 fps and 1/16 ms
-exposure (Task 1 of docs/superpowers/plans/2026-07-31-high-framerate-and-manual-
-ranging-modes.md).
+exposure (Task 1 of docs/superpowers/plans/completed/
+2026-07-31-high-framerate-and-manual-ranging-modes.md).
 """
 from __future__ import annotations
 
@@ -216,8 +216,8 @@ def test_ambient_lux_reaches_the_estimate_and_not_just_the_power_function():
 # (Task 5's on-target sweep found 90 fps requests deliver only ~44.85 fps -- a clean
 # 2x period multiple, not 1:1 -- so the preset moved to 46 fps, the measured 1x
 # ceiling at 4 ms exposure. See profiles.py module docstring "Measured hardware
-# ceiling" and docs/superpowers/specs/2026-07-31-high-framerate-and-manual-ranging-
-# modes.md Sec 2.1/8.)
+# ceiling" and docs/superpowers/specs/completed/
+# 2026-07-31-high-framerate-and-manual-ranging-modes.md Sec 2.1/8.)
 
 
 def test_high_framerate_preset_is_46fps_not_90fps():

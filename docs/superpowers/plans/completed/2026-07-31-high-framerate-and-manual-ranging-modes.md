@@ -18,7 +18,7 @@
 > concurrent investigation, is now RESOLVED — Position A upheld** (our `STANDBY_DSS_MODE` toggle is
 > ranging-quality only; ST's 100+ fps mode is unreachable on this hardware/transform path; the 46 Hz
 > ceiling stands). Task 12 is unblocked. See
-> `docs/superpowers/plans/2026-08-03-high-framerate-implementation-handoff.md` (rev 5) for per-task
+> `docs/superpowers/plans/completed/2026-08-03-high-framerate-implementation-handoff.md` (rev 5) for per-task
 > commits, the DSS adjudication, and precise resume instructions. **Task 11 landed 2026-08-04**
 > (`rig_profile`/`rig_imu_env_rate`/`profile_estimate`, verified-readback waits, live round trips on
 > the rig). **Task 12 is COMPLETE:** full host suite 1895 passed / 1 skipped (expected
@@ -44,7 +44,7 @@
 > `ranging` re-broadcast outruns the 300 ms UI debounce and reverts the field); presets/IMU-env/
 > `set_manual_params`-over-wire are unaffected.
 
-> **Source specification:** `docs/superpowers/specs/2026-07-31-high-framerate-and-manual-ranging-modes.md`
+> **Source specification:** `docs/superpowers/specs/completed/2026-07-31-high-framerate-and-manual-ranging-modes.md`
 >
 > **Required project skills while executing:** `protocol-change` for Tasks 2–3,
 > `firmware-loop` for every task marked **[HW]**, `status-sync` before landing, and
@@ -185,7 +185,7 @@ These are implementation constraints, not optional refinements:
 
 **Files:**
 
-- Modify: `docs/superpowers/specs/2026-07-31-high-framerate-and-manual-ranging-modes.md`
+- Modify: `docs/superpowers/specs/completed/2026-07-31-high-framerate-and-manual-ranging-modes.md`
 - Create: `host/src/roomscan/profiles.py`
 - Create: `host/tests/test_profiles.py`
 - Create: `host/tools/profile_probe.py`

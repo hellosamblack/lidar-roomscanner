@@ -20,16 +20,29 @@ done it, do it now before the next change.**
 
 | Work involves | Label |
 |---|---|
-| STM32 firmware (`firmware/`) | `area/firmware` |
+| STM32 firmware, general | `area/firmware` |
+| Firmware build / CMake | `area/firmware-build` |
+| The `firmware/scanner-stream/` fork | `area/firmware-scanner-stream` |
+| Firmware Ethernet / lwIP | `area/firmware-eth` |
+| The firmware↔host boundary (protocol, joint fixes) | `area/firmware-host` |
 | SLAM pipeline (`roomscan.slam`) | `area/host-slam` |
 | Web UI (`roomscan-web`, `*.js`, `*.html`) | `area/host-web` |
-| USB / Ethernet transport | `area/host-transport` |
+| USB / Ethernet transport (sources, protocol decode) | `area/host-transport` |
 | IMU / sensor fusion / mag cal | `area/host-sensors` |
-| Offline splat, COLMAP | `area/host-splat` |
-| MCP server, CLI tools | `area/host-tools` |
-| Offline non-splat tools | `area/host-offline` |
+| Offline splat pipeline (`roomscan.splat`) | `area/host-splat` |
+| Offline post-processing (COLMAP / 3DGS / ARCore) | `area/host-offline` |
+| MCP server, `host/tools/` scripts | `area/host-tools` |
+| Viewer (`roomscan` desktop viewer) | `area/host-viewer` |
+| The deprecated desktop panel (`panel.py`) | `area/host-panel` |
+| The `vl53l9-transform-c` pipeline | `area/transform-lib` |
+| An operating-environment / procedure issue, not code | `area/environment` |
 
-If the task spans multiple areas, list all of them — they all get a `Refs #NNN` in the commit.
+`gh label list` is the live vocabulary if this table drifts; `docs/engineering-practices.md` carries
+the same list. If the task spans multiple areas, list all of them — they all get a `Refs #NNN` in
+the commit.
+
+Also set a **priority** label on any issue you create: `priority/now` (critical path or
+owner-critical), `priority/next` (queued, or one unblock away), `priority/later` (parked/proposed).
 
 ## Step 2 — List open issues in the area
 
@@ -62,7 +75,7 @@ Pick the best match:
 gh issue create \
   --repo hellosamblack/lidar-roomscanner \
   --title "<verb>: <what>" \
-  --label "work-item" --label "area/<area>" \
+  --label "work-item" --label "area/<area>" --label "priority/<now|next|later>" \
   --body "## What
 
 <one paragraph — what this does and why>
@@ -80,13 +93,24 @@ legacy-ID prefixes from issue titles`). It carries **no** `BUG-NNN:`/`SLAM-N:`/`
 prefix — that legacy scheme was stripped (2026-08-11) because it collided with GitHub's own
 `#NNN`. The issue **type** is denoted by a label — `bug`, `work-item`, or `data-collection` —
 and the **area** by `area/*`; never re-encode either in the title. The only identifier is
-GitHub's `#NNN`. (Historical legacy IDs still resolve via `docs/issue-migration-map.json` and
-the `Legacy ID:` line preserved in each migrated body; regenerate title cleanup with
+GitHub's `#NNN`. (Historical legacy IDs still resolve via `docs/issue-migration-map.md` — the
+human-readable table to cite, generated from `docs/issue-migration-map.json`, which is the
+machine-readable source of truth the tooling and `host/tests/test_doc_links.py` read — and via the
+`Legacy ID:` line preserved in each migrated body; regenerate title cleanup with
 `host/tools/migrate_issues.py strip-prefixes`.)
 
 ## Step 4 — Check for in-progress conflicts
 
-If any issue in the same area carries a `status/in-progress` label, **stop and read it**:
+Other sessions (human and agent) share this checkout. Find anything actively being worked:
+
+```bash
+gh issue list --repo hellosamblack/lidar-roomscanner \
+  --label "status/in-progress" --state open \
+  --json number,title,labels,updatedAt
+```
+
+For any hit in the same area — and for any issue in the area whose most recent comment is a
+**Session start** with no matching outcome comment — **stop and read it**:
 
 ```bash
 gh issue view NNN --repo hellosamblack/lidar-roomscanner --comments
@@ -94,6 +118,15 @@ gh issue view NNN --repo hellosamblack/lidar-roomscanner --comments
 
 Check whether it covers overlapping files or logic. If it does, coordinate before
 proceeding — don't write on top of active work.
+
+Then claim your own governing issue, so the next session sees you the same way:
+
+```bash
+gh issue edit NNN --repo hellosamblack/lidar-roomscanner --add-label "status/in-progress"
+```
+
+`session-end` removes the label when it closes out the session. If a session dies without
+cleaning up, the stale label is exactly the signal you want — read the thread, then clear it.
 
 ## Step 5 — Post a session-start comment
 

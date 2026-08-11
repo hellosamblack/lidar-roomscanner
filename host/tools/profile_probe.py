@@ -3,7 +3,7 @@
     host/.venv/bin/python host/tools/profile_probe.py captures/web_20260803_121735.bin
     host/.venv/bin/python host/tools/profile_probe.py <capture> --requested-fps 30 --json
 
-Task 1 of docs/superpowers/plans/2026-07-31-high-framerate-and-manual-ranging-modes.md:
+Task 1 of docs/superpowers/plans/completed/2026-07-31-high-framerate-and-manual-ranging-modes.md:
 `roomscan.profiles` says what a requested configuration is EXPECTED to do; this tool
 says what a recorded capture ACTUALLY did, so a "90 Hz" claim can be checked against
 the plan's +-2% acceptance gate instead of taken on faith. It will be reused, unchanged
