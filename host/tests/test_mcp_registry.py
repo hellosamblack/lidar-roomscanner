@@ -68,6 +68,8 @@ EXCLUDED: dict[str, str] = {
     "build_flatfield.py": "one-shot: builds a calibration .npz from a panned capture",
     "roll_capture.py": "one-shot: rewrites a capture's quaternions",
     "measure_scene.py": "one-shot: physical deprojection validation",
+    "migrate_issues.py": "one-shot: migrated BUGS.md/bugs/ + ROADMAP.md's tracker sections "
+                          "to GitHub Issues (2026-08-10); not an ongoing agent capability",
 }
 
 CONSOLE_EXPOSED = {"roomscan-web": ("rig_up",), "roomscan-ctl": ("rig_command",),

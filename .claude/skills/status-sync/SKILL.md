@@ -13,23 +13,28 @@ session pays to rediscover (the 2026-07-10 retro burned a full session correctin
 
 ## The checklist (fill every slot; write "n/a — <why>" where truly not applicable)
 
-1. **ROADMAP.md — work-item register.** Does this work advance/close a work item
-   (`SLAM-`/`SENS-`/`XPORT-`/`FW-`/`OFFLINE-`/`TOOL-`/`DC-`), clear a deferred item, change a measured
-   number, or invalidate a prediction? Update the register entry **in this commit**, with measured
-   numbers in their convention (interval vs wall-clock fps). Completed-work narratives belong in
-   `docs/roadmap-history.md` (keep the `Phase N` names) with only a stub left behind — don't let
-   ROADMAP.md grow back into a history dump.
-2. **BUGS.md + `bugs/`.** New defect → next free `BUG-NNN`, write the full entry as `bugs/BUG-NNN.md`,
-   and add a row to the `BUGS.md` index table. Closing one → flip the status in its index row; the
-   entry file stays as the record. Post-mortems live in the entry file, never inline in the index.
+1. **GitHub Issues — work items.** Does this work advance/close a `work-item`-labeled issue, clear a
+   deferred item, change a measured number, or invalidate a prediction? Update the issue **in this
+   commit's** neighborhood (`gh issue comment <n> --body "..."` with measured numbers in their
+   convention — interval vs wall-clock fps — and `gh issue close <n> --reason completed` if it's
+   done). Completed-work narratives that deserve a durable write-up belong in
+   `docs/roadmap-history.md` (keep the `Phase N` names); a closed issue's own comment thread is
+   usually enough on its own.
+2. **GitHub Issues — defects.** New defect → `gh issue create --label bug --label area/<area>`
+   (`docs/engineering-practices.md` has the area list). Closing one → `gh issue close <n> --reason
+   completed` (or `"not planned"` for by-design/anomaly/investigated, with the matching `status/*`
+   label). The issue body is the permanent record — add a comment for a later addendum rather than
+   editing the original report away.
 3. **Superseded content — annotate while open, move on close.** While an item is *open*, annotate what
-   you proved wrong in place (strikethrough + what shipped). On *close*, the record moves to its
-   archive (the bug's entry file / `docs/roadmap-history.md`) instead of accreting strikethrough
-   forever. Never silently delete it; never leave it stale.
-4. **Ledgers** — Reference-firmware bug list, "Considered and rejected", the data-collection queue:
-   move or annotate affected entries; don't create a duplicate entry elsewhere.
+   you proved wrong (a follow-up comment on the issue, or strikethrough in `ROADMAP.md` prose for
+   standing-decision content). On *close*, the record is the closed issue (or
+   `docs/roadmap-history.md` for phase-level work) — don't accrete strikethrough forever. Never
+   silently delete it; never leave it stale.
+4. **Ledgers** — Reference-firmware bug list, "Considered and rejected" (both stay in `ROADMAP.md`
+   prose, not GitHub Issues — vendor-package bugs we don't own, and rejected proposals aren't tracked
+   work): move or annotate affected entries; don't create a duplicate entry elsewhere.
 5. **CLAUDE.md** — Only if a phase status or an architecture decision changed; keep the summary
-   consistent with ROADMAP.md.
+   consistent with `ROADMAP.md` and the open GitHub Issues.
 6. **Memory** — Any auto-memory file (and its `MEMORY.md` index line) whose description states a
    now-changed status ("STILL OPEN", "blocked", "draft PR") gets reconciled.
 7. **New files** — repo-relative paths ≤150 chars (longer breaks `git worktree add` and fresh

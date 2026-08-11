@@ -17,13 +17,22 @@ Conventions for all work in this workspace. CLAUDE.md points here; keep this doc
   (and `CLAUDE.md`/memory when status changes) **in the same commit** — follow the `status-sync` skill
   checklist. "Docs later" is how the 2026-07-10 drift happened.
 - **Tracker layout (hot vs cold).** `ROADMAP.md` is the *current-state* doc — standing decisions, the
-  reference-firmware bug ledger, the plans/specs register, the data-collection queue, and the
-  forward-looking **Work-item register** (type-prefixed IDs grouped by subsystem: `SLAM-`, `SENS-`,
-  `XPORT-`, `PIPE-`, `WEB-`, `FW-`, `OFFLINE-`, `TOOL-`, `DC-`; per-type counter, next free ID, never
-  reused). Completed-work narratives live in `docs/roadmap-history.md` (they keep their `Phase N`
-  names). Defects live in `BUGS.md`, which is an **index table**: file a new bug as `bugs/BUG-NNN.md`
-  and add a row; close one by flipping its row status (the entry file stays). Keep the hot docs small —
-  when a piece is done, move its write-up to the archive and leave a one-line stub, don't accrete it.
+  reference-firmware bug ledger, cross-cutting risks, and the plans/specs register. Completed-work
+  narratives live in `docs/roadmap-history.md` (they keep their `Phase N` names). Keep `ROADMAP.md`
+  small — when a piece is done, move its write-up to the archive and leave a one-line stub, don't
+  accrete it.
+- **Forward-looking work and defects are GitHub Issues** (moved off `BUGS.md`/`bugs/`/ROADMAP's
+  Work-item register 2026-08-10; `docs/issue-migration-map.md` has the old-ID → issue mapping). File
+  one: `gh issue create --repo hellosamblack/lidar-roomscanner --label bug|work-item|data-collection
+  --label area/<area>` (area labels mirror the old `Area` vocabulary: `area/host-viewer`, `-panel`,
+  `-sensors`, `-slam`, `-web`, `-transport`, `-tools`, `-offline`, `-splat`, `area/firmware`, `-eth`,
+  `-scanner-stream`, `-build`, `-host`, `area/transform-lib`, `area/environment`). Close one:
+  `gh issue close <n> --reason completed` (a code change shipped) or `"not planned"` (by-design,
+  anomaly, investigated — nothing is going to change); add the matching `status/*` label
+  (`status/by-design`, `-anomaly`, `-vendor`, `-mitigated`, `-investigated`, `-fix-unverified`,
+  `-blocked`, `-partial`) when the close reason alone doesn't carry the nuance. `bug` is for defects,
+  `work-item` for forward-looking work (was the `SLAM-`/`SENS-`/`XPORT-`/`FW-`/`OFFLINE-`/`TOOL-`
+  register), `data-collection` for owner-collected-capture items (was the `DC-*` queue).
 - **Branch discipline (owner workflow, 2026-07-16).** Land work by **committing straight to `main`
   and closing any feature/worktree branch without a PR** (the PR flow is retired — no `gh pr create`,
   no `gh pr merge`). A short-lived branch/worktree for isolation is fine; finish by getting the commit
