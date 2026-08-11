@@ -39,6 +39,9 @@ EXPOSED: dict[str, tuple[str, ...]] = {
     "slam_ensemble.py": ("slam_ensemble",),
     "slam_icp_bench.py": ("slam_icp_bench",),
     "slam_stall_profile.py": ("slam_stall_profile",),
+    "splat_vram_sweep.py": ("splat_vram_sweep",),
+    "splat_sfm_probe.py": ("splat_sfm_probe",),
+    "splat_render.py": ("splat_render",),
     "ws_probe.py": ("rig_ws_probe",),
     "web_ui_shot.py": ("ui_screenshot", "ui_eval", "ui_wait_for", "ui_reset"),
 }
@@ -69,7 +72,8 @@ EXCLUDED: dict[str, str] = {
     "roll_capture.py": "one-shot: rewrites a capture's quaternions",
     "measure_scene.py": "one-shot: physical deprojection validation",
     "migrate_issues.py": "one-shot: migrated BUGS.md/bugs/ + ROADMAP.md's tracker sections "
-                          "to GitHub Issues (2026-08-10); not an ongoing agent capability",
+                          "to GitHub Issues (2026-08-10) + strip-prefixes title cleanup; "
+                          "not an ongoing agent capability",
 }
 
 CONSOLE_EXPOSED = {"roomscan-web": ("rig_up",), "roomscan-ctl": ("rig_command",),

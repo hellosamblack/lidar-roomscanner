@@ -75,6 +75,15 @@ gh issue create \
 
 Record the number — this is `#NNN` for the rest of the session.
 
+**Title convention — no ID prefix.** A title is a plain `<verb>: <what>` (e.g. `Strip
+legacy-ID prefixes from issue titles`). It carries **no** `BUG-NNN:`/`SLAM-N:`/`DC-<letter>:`-style
+prefix — that legacy scheme was stripped (2026-08-11) because it collided with GitHub's own
+`#NNN`. The issue **type** is denoted by a label — `bug`, `work-item`, or `data-collection` —
+and the **area** by `area/*`; never re-encode either in the title. The only identifier is
+GitHub's `#NNN`. (Historical legacy IDs still resolve via `docs/issue-migration-map.json` and
+the `Legacy ID:` line preserved in each migrated body; regenerate title cleanup with
+`host/tools/migrate_issues.py strip-prefixes`.)
+
 ## Step 4 — Check for in-progress conflicts
 
 If any issue in the same area carries a `status/in-progress` label, **stop and read it**:

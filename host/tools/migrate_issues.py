@@ -5,6 +5,7 @@ Data-collection queue -> GitHub Issues.
     host/.venv/bin/python host/tools/migrate_issues.py migrate --source all --dry-run
     host/.venv/bin/python host/tools/migrate_issues.py migrate --source bugs --only BUG-001,BUG-094
     host/.venv/bin/python host/tools/migrate_issues.py render-map
+    host/.venv/bin/python host/tools/migrate_issues.py strip-prefixes --dry-run
 
 WHY A SCRIPT, NOT 137 MANUAL CALLS
 
@@ -22,10 +23,12 @@ WHAT KEEPS OLD CITATIONS RESOLVABLE
 Hundreds of files cite bare `BUG-042`, `SLAM-4`, `DC-E`, etc. in historical
 prose (code comments, docstrings, CLAUDE.md). Rewriting all of that text is
 its own high-risk project and out of scope here (see the plan). Instead:
-every migrated issue's title is prefixed with its legacy ID, so GitHub's own
-title/body search finds it; and every migration writes an entry to
-`docs/issue-migration-map.json`, which `host/tests/test_doc_links.py` checks
-every repo reference against (offline, no network in CI).
+every migration writes an entry to `docs/issue-migration-map.json`, which
+`host/tests/test_doc_links.py` checks every repo reference against (offline, no
+network in CI). `migrate` seeds new issues with a `<legacy-id>: ` title prefix;
+`strip-prefixes` later removes those prefixes (the type is denoted by labels,
+and the prefix only collides with GitHub's own `#NNN`) while preserving the
+legacy ID in each body so GitHub's search still resolves it.
 
 RESUMABILITY
 
@@ -363,6 +366,29 @@ def build_title(legacy_id: str, title: str) -> str:
     return f"{legacy_id}: {_short_title(title)}"
 
 
+def strip_title_prefix(legacy_id: str, title: str) -> str:
+    """Remove the leading `<legacy_id>: ` that build_title() prepended.
+
+    The type is carried by labels now, not the title. Idempotent: a title with
+    no such prefix is returned unchanged.
+    """
+    prefix = f"{legacy_id}: "
+    return title[len(prefix):] if title.startswith(prefix) else title
+
+
+def ensure_legacy_id_in_body(legacy_id: str, body: str) -> str:
+    """Keep the legacy ID findable in the body once it leaves the title.
+
+    Prepends a `**Legacy ID:** <id>` line unless the ID is already present as a
+    whole token (so re-running is a no-op, and bodies that already cite it in a
+    header aren't doubled up). Whole-token match avoids treating `SLAM-1` as
+    present just because the body mentions `SLAM-14`.
+    """
+    if re.search(rf"(?<![\w-]){re.escape(legacy_id)}(?![\w-])", body):
+        return body
+    return f"**Legacy ID:** {legacy_id}\n\n{body}"
+
+
 def build_body(body: str, source: str, extra_note: str = "", full_title: str | None = None) -> str:
     header = ""
     if full_title is not None:
@@ -470,6 +496,27 @@ def gh_create_issue(title: str, body: str, labels: list[str]) -> tuple[int, str]
 
 def gh_close_issue(number: int, reason: str) -> None:
     _run(["gh", "issue", "close", str(number), "--repo", GH_REPO, "--reason", reason])
+
+
+def gh_list_issues() -> dict[int, dict]:
+    """Every issue (open + closed) as {number: {'number','title','body'}}."""
+    raw = _run(["gh", "issue", "list", "--repo", GH_REPO, "--state", "all",
+                "--limit", "1000", "--json", "number,title,body"])
+    return {i["number"]: i for i in json.loads(raw)}
+
+
+def gh_edit_issue(number: int, title: str | None = None, body: str | None = None) -> None:
+    cmd = ["gh", "issue", "edit", str(number), "--repo", GH_REPO]
+    if title is not None:
+        cmd += ["--title", title]
+    body_path = None
+    if body is not None:
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(body)
+            body_path = f.name
+        cmd += ["--body-file", body_path]
+    _run(cmd)
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +668,53 @@ def cmd_migrate(args: argparse.Namespace) -> None:
         time.sleep(args.sleep)
 
 
+def cmd_strip_prefixes(args: argparse.Namespace) -> None:
+    """Strip the legacy-ID title prefix from every migrated issue.
+
+    The issue type is denoted by labels (`bug`/`work-item`/`data-collection`)
+    and the area by `area/*`, so `BUG-098: `/`SLAM-14: `/`DC-K: ` prefixes only
+    collide with GitHub's own `#NNN`. The legacy ID is preserved in the body so
+    GitHub search still resolves it; `docs/issue-migration-map.json` remains the
+    authoritative map. Idempotent.
+    """
+    only = set(args.only.split(",")) if args.only else None
+    entries = load_map()
+    issues = {} if args.dry_run and args.offline else gh_list_issues()
+
+    n_title = n_body = n_skip = 0
+    for lid, e in sorted(entries.items()):
+        if only and lid not in only:
+            continue
+        if e.alias_of or e.issue_number is None:
+            continue  # aliases (e.g. XPORT-2 -> BUG-049) have no issue of their own
+        issue = issues.get(e.issue_number)
+        if issue is None:
+            print(f"WARN {lid}: issue #{e.issue_number} not found on GitHub")
+            continue
+        cur_title, cur_body = issue["title"], issue.get("body") or ""
+        new_title = strip_title_prefix(lid, cur_title)
+        new_body = ensure_legacy_id_in_body(lid, cur_body)
+        title_change, body_change = new_title != cur_title, new_body != cur_body
+        if not title_change and not body_change:
+            n_skip += 1
+            continue
+        n_title += title_change
+        n_body += body_change
+        if args.dry_run:
+            print(f"DRY {lid} #{e.issue_number}"
+                  + (f"\n    title: {cur_title!r} -> {new_title!r}" if title_change else "")
+                  + ("\n    body : + legacy-id marker" if body_change else ""))
+            continue
+        gh_edit_issue(e.issue_number,
+                      title=new_title if title_change else None,
+                      body=new_body if body_change else None)
+        print(f"{lid} -> #{e.issue_number} (title={title_change} body={body_change})")
+        time.sleep(args.sleep)
+
+    print(f"\n{'DRY: ' if args.dry_run else ''}titles={n_title} bodies={n_body} "
+          f"already-clean={n_skip}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -638,6 +732,16 @@ def main() -> None:
     p_migrate.set_defaults(func=cmd_migrate)
 
     sub.add_parser("render-map").set_defaults(func=lambda a: render_map())
+
+    p_strip = sub.add_parser(
+        "strip-prefixes",
+        help="remove the legacy-ID prefix from issue titles (type is on labels)")
+    p_strip.add_argument("--only", help="comma-separated legacy IDs")
+    p_strip.add_argument("--dry-run", action="store_true")
+    p_strip.add_argument("--offline", action="store_true",
+                         help="with --dry-run, skip the gh list call (no titles shown)")
+    p_strip.add_argument("--sleep", type=float, default=0.7)
+    p_strip.set_defaults(func=cmd_strip_prefixes)
 
     args = ap.parse_args()
     args.func(args)

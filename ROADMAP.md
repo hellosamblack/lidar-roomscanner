@@ -144,11 +144,14 @@ Forward-looking work and open defects moved to **GitHub Issues** (2026-08-10):
 and, where the legacy status needed more than open/closed, a `status/<nuance>` label
 (`by-design`, `anomaly`, `vendor`, `mitigated`, `investigated`, `fix-unverified`, `blocked`,
 `partial`). All 98 bug write-ups and the register/DC-queue entries were migrated verbatim as issue
-bodies, title-prefixed with their old ID (`BUG-042: ...`, `SLAM-4: ...`, `DC-E: ...`) so GitHub's
-own search still finds them by it. Old-ID → issue mapping:
+bodies. Titles carry **no** ID prefix: the old `BUG-042:`/`SLAM-4:`/`DC-E:` prefixes were stripped
+(2026-08-11, `migrate_issues.py strip-prefixes`) because they collided with GitHub's own `#NNN` —
+the type is now denoted by the label alone. Each body keeps a `Legacy ID:` line so GitHub's search
+still finds the old ID, and old-ID → issue mapping stays authoritative in
 [`docs/issue-migration-map.md`](docs/issue-migration-map.md).
 
-File a new item: `gh issue create --label bug|work-item|data-collection --label area/<area>`.
+File a new item: `gh issue create --label bug|work-item|data-collection --label area/<area>` with a
+plain `<verb>: <what>` title (no ID prefix — the label is the type, `#NNN` is the only ID).
 Close one: `gh issue close <n> --reason completed` (or `"not planned"` for a by-design/anomaly/
 investigated call — add the matching `status/*` label).
 

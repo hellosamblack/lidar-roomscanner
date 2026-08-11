@@ -24,7 +24,9 @@ session pays to rediscover (the 2026-07-10 retro burned a full session correctin
    (`docs/engineering-practices.md` has the area list). Closing one → `gh issue close <n> --reason
    completed` (or `"not planned"` for by-design/anomaly/investigated, with the matching `status/*`
    label). The issue body is the permanent record — add a comment for a later addendum rather than
-   editing the original report away.
+   editing the original report away. **Titles carry no `BUG-NNN:` prefix** — the `bug` label is the
+   type and `#NNN` is the only ID (the legacy prefixes were stripped 2026-08-11; see the
+   `session-start` skill's title convention).
 3. **Superseded content — annotate while open, move on close.** While an item is *open*, annotate what
    you proved wrong (a follow-up comment on the issue, or strikethrough in `ROADMAP.md` prose for
    standing-decision content). On *close*, the record is the closed issue (or
