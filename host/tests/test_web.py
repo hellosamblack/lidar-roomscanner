@@ -17,7 +17,7 @@ import socket
 import struct
 import threading
 import time
-from dataclasses import fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 import pathlib
 
@@ -26,6 +26,7 @@ import pytest
 from types import SimpleNamespace
 
 from roomscan import panel, web
+from roomscan.web import UiState
 from roomscan.control import CommandDispatcher
 from roomscan.deproject import Deprojector
 from roomscan.ir_image import reflectance_to_rgb
@@ -355,6 +356,46 @@ def test_resolve_command_usecase_carries_id():
 def test_resolve_command_ping_and_unknown():
     assert web.resolve_command("ping", 0) == (CommandCode.PING, 0, "ping")
     assert web.resolve_command("bogus", 0) is None
+
+
+@pytest.mark.parametrize(
+    "level",
+    [0, 1, 2],
+)
+def test_resolve_command_standby_levels(level):
+    assert web.resolve_command("standby", level) == (
+        CommandCode.SET_STANDBY,
+        level,
+        f"standby {level}",
+    )
+
+
+def test_handle_inbound_generic_standby_dispatches():
+    """Dispatch-level regression: generic standby command path reaches the
+    dispatcher with the correct code and label. This pins the actual
+    BUG-071 failure mode (inbound JSON -> dispatcher call) rather than only
+    testing resolve_command in isolation."""
+    bus = LogBus()
+    handle = bus.subscribe()
+    disp = CommandDispatcher(client=None, on_message=bus.publish)
+
+    # Simulate the state and dispatcher wiring that _handle_inbound uses
+    @dataclass
+    class FakeState:
+        bus: LogBus
+        dispatcher: CommandDispatcher
+        ui_state: "UiState" = field(default_factory=lambda: UiState())
+        command_labels: set = field(default_factory=set)
+
+    state = FakeState(bus=bus, dispatcher=disp)
+
+    # Drive the inbound path with a generic standby command
+    asyncio.run(web._handle_inbound(state, {"type": "cmd", "name": "standby", "param": 1}))
+
+    lines = list(bus.drain(handle))
+    assert len(lines) > 0
+    # In replay mode (client=None), the dispatcher emits "standby 1 -> not available in replay"
+    assert lines[0] == "standby 1 -> not available in replay"
 
 
 # =============================================================================

@@ -1688,6 +1688,9 @@ def resolve_command(name: str, param) -> tuple[CommandCode, int, str] | None:
         return CommandCode.SET_FRAME_PERIOD_US, int(param), f"period {int(param)}"
     if name == "exposure":
         return CommandCode.SET_EXPOSURE_MS, int(param), f"exposure {int(param)}"
+    if name == "standby":
+        level = int(param)
+        return CommandCode.SET_STANDBY, level, f"standby {level}"
     return None
 
 
