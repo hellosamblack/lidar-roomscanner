@@ -109,10 +109,19 @@ top score, and #57 at 85) into a wave when both were already in the operator que
 issues repo-wide. One `operator_queue(detailed=False)` call at Step 2 removes the whole class. Treat
 an outstanding `needs/operator` as a **veto** — somebody is already waiting on the owner for it.
 
-**Distrust `prior_work` credit; open the thread.** The planner doubles an issue's score for prior
-work, and on the same run credited #158 with *"prior work x2 (implementation plan comment)"* when
-**the issue had no comments at all** — a phantom signal promoting it into the wave. Confirm the
-comments exist before letting that multiplier decide anything. (Both defects are filed as #177.)
+**Probe the tracker with `--json`, or you will invent a defect.** `gh issue view N --comments -q
+'...'` fails with *"cannot use `--jq` without specifying `--json`"* — and with `2>/dev/null` on the
+end it prints **nothing at all**, which reads exactly like "this issue has no comments." On
+2026-08-12 that cost a wrongly-filed planner defect: #158 was reported as credited *"prior work x2
+(implementation plan comment)"* with no comments to justify it, and the worker sent to fix it
+correctly found `has_prior_work()` only ever reads `comments`, never `body`. It could not reproduce
+the bug because there was no bug — #158 has a real `## Implementation plan` comment. Use
+`--json comments -q '.comments | length'`, and never `2>/dev/null` a probe whose emptiness is your
+evidence.
+
+**A worker's "I could not reproduce this" is data, not an obstacle.** That worker refused to invent
+a mechanism, hardened the invariant instead, and said plainly it could not confirm the root cause.
+It was right and the orchestrator was wrong. Re-run your own probe before overriding it.
 
 **Check the data the issue needs actually exists on this box.** #158 also wanted RTAB-Map exports:
 the rtabmap checkout's `data/samples.zip` is bag-of-words vocabulary imagery, not an export, and the

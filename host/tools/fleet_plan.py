@@ -411,13 +411,21 @@ def resources_for(issue: dict, footprint: dict[str, str]) -> set[str]:
 def has_prior_work(issue: dict) -> tuple[bool, list[str]]:
     """Whether someone has already done real thinking on this issue, and the evidence.
 
-    Deliberately reads only `issue["comments"]`, never `issue["body"]` (#177: an issue
-    with zero comments must never be credited "implementation plan comment" off a
-    plan-shaped body -- prior work doubles the score, so a phantom match is a phantom
-    2x). Every evidence string below says "comment" because that is the only source
-    this function is allowed to cite; if a future change wants a plan written straight
-    into the body to count too, it must add that as its own tier with its own wording,
-    not fold it into these strings.
+    Deliberately reads only `issue["comments"]`, never `issue["body"]`: an issue with
+    zero comments must never be credited "implementation plan comment" off a plan-shaped
+    body, because prior work doubles the score and a phantom match is a phantom 2x.
+    Every evidence string below says "comment" because that is the only source this
+    function is allowed to cite; if a future change wants a plan written straight into
+    the body to count too, it must add that as its own tier with its own wording, not
+    fold it into these strings.
+
+    **This was never actually broken** -- #177 originally alleged it was, and the tests
+    below were written to pin the invariant. The report was wrong: `gh issue view N
+    --comments -q ...` errors with "cannot use `--jq` without specifying `--json`", and
+    the probe that "found" #158 to have no comments had swallowed that error with
+    `2>/dev/null`. #158 has a real `## Implementation plan` comment and the credit was
+    correct. Kept as a regression guard, not as a fix. If you are here hunting the bug,
+    it is in the probe, not in this function -- use `--json comments`.
     """
     evidence = []
     for c in issue.get("comments") or []:
