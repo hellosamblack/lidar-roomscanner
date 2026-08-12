@@ -155,6 +155,15 @@ plain `<verb>: <what>` title (no ID prefix — the label is the type, `#NNN` is 
 Close one: `gh issue close <n> --reason completed` (or `"not planned"` for a by-design/anomaly/
 investigated call — add the matching `status/*` label).
 
+**Working several issues at once (2026-08-12, #170).** The `issue-fleet` skill runs a fleet of
+subagent workers across open issues, one git worktree each, under an owner-declared usage ceiling;
+`fleet_plan()` picks a batch whose file footprints do not collide and `fleet_budget()` gates it.
+This carries the one **exception to "subagents don't commit"**: a fleet worker commits `Refs #NNN`
+on its own branch inside its own worktree, and the orchestrator still owns review, rebase,
+`merge --ff-only`, every doc delta, every `gh` call and the single `Closes` commit. The rule and its
+carve-out are stated in `docs/engineering-practices.md` → Branch discipline and in the `status-sync`
+skill.
+
 ## Completed phases
 
 Full narratives, with measured outcomes, are in [`docs/roadmap-history.md`](docs/roadmap-history.md)

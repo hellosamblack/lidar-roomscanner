@@ -138,6 +138,12 @@ Use the `fleet-worker` (Sonnet) or `fleet-worker-mech` (Haiku) agent type, defin
 issue number, its worktree **absolute** path, its assigned port, and the plan's footprint as a
 starting map — not as a limit.
 
+**If the agent type is not found, you are in the session that created it.** Agent definitions are
+loaded at session start, exactly like the MCP server pinning the code it started with — so a
+definition written this session is invisible until the next one. Fall back to `subagent_type:
+"claude"` with an explicit `model:` and paste the contract into the spawn prompt; the contract is the
+load-bearing part, the agent file is only how it stops being retyped. Verified 2026-08-12.
+
 The contract, restated in the spawn prompt because it is load-bearing:
 
 - **Absolute paths for everything.** A subagent's cwd is the main checkout even when its worktree is
@@ -206,6 +212,25 @@ closing commit at HEAD, one marker write, and `session-end`'s own invariants hol
 
 Finally, drop `status/in-progress` from every issue you claimed — including the ones you yielded or
 deferred mid-run.
+
+## Verified end to end, 2026-08-12 (issue #170)
+
+One full round trip, one Haiku worker, on this repo:
+
+- `git worktree add` + both symlinks → the **full suite from inside the worktree passed 2081 tests
+  with 0 skips** in 6:29. Without the `host/transform/build` symlink 15 of those skip.
+- The worker committed `Refs #170` on its own branch using `git -C <abs worktree>`. The Step-0
+  tripwire held: main's HEAD and porcelain were byte-identical before and after.
+- The review gate **earned its place** — the worker's first commit carried a comment claiming
+  `AREA_GLOBS_EXCLUDED` was "used by `expand_footprint()`" when nothing referenced it. Sent back to
+  the same worker, corrected in one round. A cheap tier will write a plausible false comment; read
+  the diff, do not read the report.
+- `rebase` (already up to date) → `merge --ff-only` → symlinks removed → `worktree remove` →
+  `branch -d`, clean.
+- `fleet_plan()` against the live tracker: 65 open, 17 candidates, 3 selected, and it correctly
+  excluded #170 itself as `claimed by another session` — the claim written in Step 3.
+- `fleet_budget()` cross-checked: ccusage and the native reader agreed to 1.6 points on the 5-hour
+  window (51.2% vs 52.8%) and 0.7 on the rolling week, with the same reset time and verdict.
 
 ## Red flags
 
