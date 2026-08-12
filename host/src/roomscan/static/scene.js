@@ -494,8 +494,20 @@ export function createScene(hub) {
         oscLastAzimuth = cur;
         oscUnwrappedDeg += step * 180 / Math.PI;
         const n = Math.max(1e-6, orbitAmplitudeDeg);
-        if (oscUnwrappedDeg >= n) oscDir = -1;
-        else if (oscUnwrappedDeg <= -n) oscDir = 1;
+        // Sign convention, MEASURED on the rig (issue #107, not derived): the
+        // autoRotate path calls OrbitControls.rotateLeft(), so a POSITIVE
+        // `autoRotateSpeed` makes getAzimuthalAngle() DECREASE -- positive
+        // `oscDir` drives `oscUnwrappedDeg` NEGATIVE. The negative threshold
+        // must therefore select the negative direction, and vice versa.
+        // Swapped (as they were until now), each branch re-asserts the
+        // direction the wave is already travelling, so it never turns around:
+        // it latches and orbits continuously forever. That is exactly what
+        // this issue reported as "oscillate does nothing" -- the wave was
+        // running the whole time, it just could not reverse. Measured live:
+        // 80.1 deg of travel in 9 s at an 18 deg amplitude, 0 reversals,
+        // autoRotateSpeed pinned at a single sign throughout.
+        if (oscUnwrappedDeg >= n) oscDir = 1;
+        else if (oscUnwrappedDeg <= -n) oscDir = -1;
         // Re-assert direction every frame rather than only on a crossing: an
         // unrelated `state` echo may have overwritten autoRotateSpeed since the
         // last frame, and one frame of wrong-way travel is visible.

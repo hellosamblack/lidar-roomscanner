@@ -887,6 +887,43 @@ def test_oscillate_amplitude_slider_disabled_unless_oscillate_is_the_active_mode
         f"amplitude disabled-binding dropped the World-only gate: {expr!r}")
 
 
+def test_oscillate_reversal_maps_each_threshold_to_the_opposite_travel_direction():
+    """Issue #107 claim 1: Oscillate orbited forever instead of swinging.
+
+    `updateOscillate` was running the whole time -- forcing `autoRotateSpeed`
+    negative on the live rig saw it re-asserted positive within 500 ms -- but it
+    could never reverse, because the two threshold branches were swapped.
+
+    The convention is measured, not derived: OrbitControls' autoRotate calls
+    `rotateLeft()`, so a POSITIVE `autoRotateSpeed` makes `getAzimuthalAngle()`
+    DECREASE. Positive `oscDir` therefore drives `oscUnwrappedDeg` NEGATIVE, and
+    the `<= -n` branch must select -1 while the `>= n` branch selects +1. With
+    them swapped each branch re-asserted the direction the wave was already
+    travelling, so it latched: measured live at an 18 deg amplitude, 80.1 deg of
+    travel in 9 s with 0 reversals and `autoRotateSpeed` pinned at one sign.
+    After the swap, the same 9 s window gives 1 reversal bounded to
+    -20.4..+21.2 deg.
+
+    This is a guard against a silent re-swap, not a behavioural test -- the
+    behaviour is only observable with a real OrbitControls in a browser, and was
+    verified there. Reintroducing the swap makes this fail.
+    """
+    js = (STATIC / "scene.js").read_text(encoding="utf-8")
+    pos = re.search(r"if\s*\(\s*oscUnwrappedDeg\s*>=\s*n\s*\)\s*oscDir\s*=\s*(-?1)\s*;", js)
+    neg = re.search(r"if\s*\(\s*oscUnwrappedDeg\s*<=\s*-\s*n\s*\)\s*oscDir\s*=\s*(-?1)\s*;", js)
+    assert pos is not None, "no `oscUnwrappedDeg >= n` reversal branch found in scene.js"
+    assert neg is not None, "no `oscUnwrappedDeg <= -n` reversal branch found in scene.js"
+    assert pos.group(1) != neg.group(1), (
+        "both oscillate thresholds select the same direction, so the wave can never "
+        f"turn around: >=n -> {pos.group(1)}, <=-n -> {neg.group(1)}")
+    assert pos.group(1) == "1", (
+        "crossing +n must select oscDir=+1 (positive autoRotateSpeed decreases the "
+        f"azimuth, sending the wave back down); got {pos.group(1)}")
+    assert neg.group(1) == "-1", (
+        "crossing -n must select oscDir=-1 (negative autoRotateSpeed increases the "
+        f"azimuth, sending the wave back up); got {neg.group(1)}")
+
+
 def test_profile_blurbs_carry_no_hardcoded_consequence_numbers():
     """Like the button tooltips, the static benefit blurbs must not bake in
     fps/exposure numbers that would stale on a preset retune -- the live config is
