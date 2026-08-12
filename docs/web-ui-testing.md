@@ -49,13 +49,21 @@ are actually serving with `ls -l /proc/<pid>/cwd` — **not** by hashing the ser
 file, which is identical to main's until your first edit. Run pytest directly:
 `cd <worktree>/host && <main>/host/.venv/bin/python -m pytest`.
 
-**`ui_screenshot`'s `width`/`height` do not resize the viewport** (2026-08-11, #103;
-tracked as #168). `innerWidth`/`innerHeight` stayed 1600x1000 and the image
-was unchanged, so the narrow-viewport sizes below cannot be exercised that way —
-check `ui_eval("window.innerWidth")` before believing a narrow-viewport result. To
-squeeze a sidebar card without a viewport change, expand the *other* cards in the
-same dock: the card under test drops to its `min-height` floor, which is the same
-constraint a short viewport imposes and is reached through real in-app state.
+**`ui_screenshot`'s `width`/`height` now really do resize the viewport** (fixed
+2026-08-12, #168). Both session paths — Playwright (`page.set_viewport_size`) and
+the raw-CDP fallback (`Emulation.setDeviceMetricsOverride`) — re-apply the
+requested size on *every* call; the bug was an early return once the browser was
+already up, which made every call after the first silently keep the launch size,
+so the three narrow sizes below "passed" three times at 1600x1000. Verified on
+2026-08-12 by requesting 1100x560, 820x700 and 1280x800 in one session and
+reading back `innerWidth`/`innerHeight` after each: three distinct, exact matches.
+
+Still worth `ui_eval("(() => ({w: innerWidth, h: innerHeight}))()")` between shots
+when a result surprises you — a check that cannot fail is what made this invisible
+for a week. And to squeeze a sidebar card *without* a viewport change, expanding
+the *other* cards in the same dock still works: the card under test drops to its
+`min-height` floor, the same constraint a short viewport imposes, reached through
+real in-app state.
 
 **`renavigate=True` is a navigation, not a cache bypass** (2026-07-30). Chrome
 happily re-served a just-edited `index.html` from its cache across two full

@@ -75,7 +75,7 @@ in-process call meanwhile.
 | `rig_status()` | start here: server up?, source, fps, playback frame, streams |
 | `rig_up(replay?, replay_fps?)` | starts the server detached; `replay` for deterministic checks |
 | `rig_down()` | terminates it and drops the `/ws` connection |
-| `rig_command(name, param?)` | device COMMAND/ACK; `ok=false` when the ACK is an error |
+| `rig_command(name, param?, timeout?)` | device COMMAND/ACK, matched to the command sent; `ok=false` when the ACK is an error. `timeout` defaults to 5 s, except `standby` at 20 s — it powers the ToF laser down/up and does not ACK inside 5 s (#171) |
 | `rig_idle(auto_idle?, level?, wake?)` | wake the ToF laser and/or control the laser-wear auto-idle; disable `auto_idle` before recording a static scene (else the laser parks mid-capture and only IMU is recorded), restore it after |
 | `rig_record(on)` | records via the server, returning the capture path |
 | `rig_set(...)` | legacy display options; verifies the echo before reporting success |
@@ -451,7 +451,7 @@ during verification, every one of them returning a confident wrong answer:
 | `rig_record(on=True)` | `ok` in replay, where `start_record()` is a no-op | check `active`, explain why |
 | `rig_record(on=True)` | **`ok=False` while 734 clean frames were recorded** | poll `session` for `active == on` |
 | `rig_command` | `ok` for `status="timeout"` — device never answered | only `status == "ok"` is success |
-| `rig_command` | **`ok` carrying the *previous* command's late ACK** (#171, open) | check `ack.label` matches what you sent |
+| `rig_command` | **`ok` carrying the *previous* command's late ACK** (#171, fixed 2026-08-12) | now matched on `resolve_command()`'s label; a non-matching ACK seen while waiting is surfaced as `unmatched_acks`, never accepted as the answer |
 
 The last two were found on real hardware, against a board that had stopped
 responding. `_await_state` / `_await_session` exist for exactly this: a broadcast
