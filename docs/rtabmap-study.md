@@ -75,11 +75,19 @@ hardware-synced IMU beats 2268 depth points on a blank wall. That is the same co
 
 ## 4. Two things worth flagging as traps
 
-**The pose interpolation is the right shape, and our fixed-offset plan is not.** BUG-031 measured a
-+7.76 ms quat-phase lead and put `quat_mid_ticks` on the wire; #126 proposes applying it as a
-constant. A constant is correct only if the phase is constant, and BUG-031's own data says it is not
-(CALIB-carrying frames drain 655 µs later, Welch t = −5.8). An interpolating buffer absorbs that.
-→ #155.
+**The pose interpolation is the right shape, and our fixed-offset plan was not.** BUG-031 measured a
++7.76 ms quat-phase lead and put `quat_mid_ticks` on the wire; #126 applied it as a constant
+(default-off, measured worse and bistable on `imuTranslationError`). A constant is correct only if
+the phase is constant, and it is not — beyond BUG-031's own load-dependence (CALIB-carrying frames
+drain 655 µs later, Welch t = −5.8), the 2026-08-12 survey of stream-13 distributions found today's
+captures at **+5.1 ± 0.7 ms** (not 7.76), breathing over a ~4 ms range within a capture, and
+`officeFullScanAug6.bin` at **−3.9 ms** — the opposite *sign*, where any positive constant pushes
+orientation the wrong way by twice the skew. **Shipped (#155, 2026-08-12):** `roomscan.sensor_time`'s
+`TimestampedQuaternionBuffer` + the `_load_frames(quat_interp=)` collect-then-align pass SLERP each
+depth frame's orientation at its own frame-ready instant from exact-group stream-9/13 pairs, wrap-safe
+on the LSM clock, never extrapolating; still gated by `[slam] apply_quat_phase` (default off), with
+the fixed rollback demoted to per-frame fallback. See
+`docs/superpowers/plans/2026-08-12-155-pose-buffer-session.md` for the validation campaign.
 
 **Their culling is the version ours should have been.** We set `frustumCulled = false` on all six SLAM
 objects after BUG-033 (stale zero-radius bounding sphere) and BUG-065 (fractional

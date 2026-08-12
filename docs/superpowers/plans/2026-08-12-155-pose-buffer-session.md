@@ -107,6 +107,24 @@ Runner: `/tmp/155/run_campaign.sh` → `/tmp/155/<tag>_{base,on,refl}.json`, log
 `/tmp/155/campaign.log`; addendum `/tmp/155/run_campaign2.sh` (DebugCapC) after it.
 Tags: tripod, office, panset (DebugCapF), web0803 (stationary null), roll, web0801, capc.
 
+## Measured quat-lead distributions (2026-08-12, /tmp/155/lead_stats.py) — the premise, proven
+
+| capture | lead ms mean ± sd | range |
+|---|---|---|
+| imuTranslationError | **+5.12 ± 0.69** | 4.27..8.21 |
+| DebugCapF | +5.13 ± 0.68 | 4.20..8.19 |
+| DebugCapC | +5.10 ± 0.67 | 4.27..8.14 |
+| NorthFacingRoll | +5.10 ± 0.69 | 4.27..7.97 |
+| web_20260803_121735 | +5.10 ± 0.67 | 4.27..8.79 |
+| officeFullScanAug6 | **−3.87 ± 0.69** | −4.84..+0.55 (NEGATIVE — quat mid BEFORE frame-ready) |
+
+Three facts that kill any constant: (1) today's rigs measure +5.1 ms, not the +7.76 ms on
+record (the #126 lever's number); (2) within a capture it breathes ±0.7 ms sd over a ~4 ms
+range (CALIB-load + latch tails); (3) **officeFullScanAug6 has the opposite SIGN** — a fixed
++7.76 ms rollback there would move orientation ~11.6 ms the wrong way. Interpolation consumes
+the timestamps and needs no assumption; negative leads just bracket [mid_N, mid_N+1] instead
+of [mid_N−1, mid_N] (edge cost: the LAST frame falls back instead of the first).
+
 ## Validation results (fill in; mean ± sd horizontal_closure_m; n=10 CUDA:0; check died/saturated)
 
 | capture | baseline | interp on | reflected | verdict/notes |

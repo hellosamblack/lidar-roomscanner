@@ -145,6 +145,14 @@ Hypothesis, not yet fixed: the IMU FIFO is drained *later* in the loop than the 
 stamp, so the offset breathes with processing load. Principled fix is to capture the LSM timestamp
 **at the frame-ready moment**. **Verification requires real motion** — invisible on a stationary rig.
 
+*(2026-08-12 update, #155: the frame-ready latch shipped long since as stream 13, and the offline
+consumer no longer assumes any constant — `roomscan.sensor_time.TimestampedQuaternionBuffer`
+SLERPs each depth frame's quat at its own frame-ready instant from exact-group stream-9/13 pairs
+(`[slam] apply_quat_phase`, still default-off). Measured why a constant could never work: the lead
+is +5.1 ± 0.7 ms on current captures — not the +7.76 ms on record — and NEGATIVE (−3.9 ms) on
+`officeFullScanAug6.bin`. Campaign + decision log:
+`docs/superpowers/plans/2026-08-12-155-pose-buffer-session.md`.)*
+
 ### 4.4 Allan-variance characterisation (deferred, tool not written)
 `captures/stationary_stream11_20260728_190311.bin` (900 s, 428 MB, stationary, stream 11) is
 recorded and waiting. Compute overlapping Allan deviation on the GY_NC series: slope −1 =
