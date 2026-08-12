@@ -402,7 +402,7 @@ is in.
 | tool | notes |
 |---|---|
 | `fleet_plan(max_agents?, priorities?, exclude_areas?, include_unknown?)` | ranks open issues (priority, ×2 for prior work, bonus for gating others) and returns the highest-scoring batch whose file footprints do not collide. Read `notes`: soft conflicts and prose-inferred dependencies are surfaced for your judgement, never applied silently |
-| `fleet_budget(ceiling_pct?, limit_basis?, limit_tokens?, forecast_agents?, forecast_minutes?, source?)` | current 5h block and **rolling** 168h window against a declared ceiling, with a `go`/`reduce`/`stop` verdict on the *projected* load. Always read `limit_basis` and `coverage.includes_subagents` before trusting the percentage |
+| `fleet_budget(ceiling_pct?, observed_week_pct?, observed_block_pct?, limit_basis?, limit_tokens?, forecast_agents?, forecast_minutes?, source?)` | current 5h block and **rolling** 168h window against a declared ceiling, with a `go`/`reduce`/`stop` verdict on the *projected* load of the **worst** window. **Ask the owner for their percentages and pass them** — without `observed_week_pct` the weekly figure is `None` and the verdict covers the 5h block only. Read `binding_window`, `limit_basis`, `seven_day.pct_basis` and `coverage.includes_subagents` before trusting anything |
 
 Three things `fleet_plan` encodes that a prose rubric kept getting wrong:
 
@@ -429,6 +429,28 @@ and the store repeats records, so summing without deduplicating on
 `(message.id, requestId)` overcounts by ~80%. With both fixed, a native read
 reproduced `ccusage blocks --json` exactly on entry count and on three of its four
 token fields.
+
+**It is a relative meter, not an absolute one (#172, 2026-08-12).** Calibrating it
+against the owner's own reported figures is what established this: two readings of the
+same 5h window on the same day implied allowances **1.6x apart** (96.2M read as 85% by
+the owner → 113M; 40.9M read as 22% → 186M), because the weighted token this module
+computes is its own invention (`CACHE_READ_WEIGHT`, `OUTPUT_WEIGHT`, a per-model table)
+and does not track however the real limit counts. Change the model/cache/output mix, as
+one wave does versus another, and the conversion moves. So percentages are **anchored**
+on `observed_week_pct` / `observed_block_pct` rather than derived, and the weekly figure
+comes back `None` — with a loud note — when there is no anchor, instead of guessing.
+
+What *is* reliable is the delta, so the forecast projects forward from the owner's
+figure at a measured **~25M weighted tokens per weekly point** (the conservative bound;
+a 3-worker Sonnet wave with review, one full suite and browser checks ran ~40M, a
+2-worker wave ~10.5M). Two things this replaced, both wrong since the module was
+written: the weekly denominator was `peak_block * 168/5` — 33.6 back-to-back peak
+blocks, i.e. the assumption that no weekly cap exists — which reported 12.4% against an
+owner-read 72%; and `decide()` took only the 5h numbers, so an entire multi-wave run
+returned `go` at every check while the weekly ceiling was nearly spent. The 5h window
+resets every five hours and is nearly always cheap right afterwards; the weekly one is
+what actually runs out, which is why `binding_window` now names the window that drove
+the verdict — a `stop` on the 5h clears in hours, a `stop` on the weekly does not.
 
 ## Two invariants
 

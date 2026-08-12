@@ -272,6 +272,60 @@ def test_verdict_uses_the_projection_not_just_the_present():
     assert fb.decide(10.0, 95.0, 80.0) == "stop"
 
 
+def test_verdict_stops_on_the_weekly_window_even_when_the_5h_block_is_idle():
+    """#172, the defect this whole family exists to prevent: `decide()` used to take
+    only the 5h numbers, so a run just after a block reset looked completely free while
+    the WEEKLY ceiling was nearly spent. Measured on 2026-08-12 -- the tool returned
+    `go` at every check across a multi-wave run while the owner sat at 70-72% of a
+    weekly ceiling declared as 80%. The 5h window resets every five hours; the weekly
+    one is what actually runs out."""
+    assert fb.decide(2.0, 3.0, 80.0, week_pct=85.0, projected_week_pct=85.0) == "stop"
+    # ... and the projection over the weekly window counts too, not just its present.
+    assert fb.decide(2.0, 3.0, 80.0, week_pct=70.0, projected_week_pct=95.0) == "stop"
+    # With no weekly anchor there is nothing to compare, and 5h alone still decides.
+    assert fb.decide(2.0, 3.0, 80.0, week_pct=None, projected_week_pct=None) == "go"
+
+
+def test_binding_window_names_the_window_that_drove_the_verdict():
+    """A bare "projected 81%" does not say whether to wait five hours or five days."""
+    assert fb.binding_window(2.0, 3.0, 85.0, 85.0) == "seven_day"
+    assert fb.binding_window(90.0, 91.0, 10.0, 10.0) == "five_hour"
+    assert fb.binding_window(2.0, 3.0, None, None) == "five_hour"
+
+
+def test_weekly_percentage_is_none_without_an_anchor_and_says_so():
+    """Rather than swap one invented denominator for another. The old code derived it
+    as `peak_block * 168/5` -- 33.6 back-to-back peak blocks, i.e. no weekly cap at all
+    -- and reported 12.4% against an owner-read 72%."""
+    r = fb.fleet_budget(source="transcripts", limit_basis="owner", limit_tokens=1_000_000,
+                        now=NOW, root=TRANSCRIPTS)
+    assert r["seven_day"]["pct"] is None
+    assert r["seven_day"]["weighted_tokens"] > 0, "the token count is still a real measurement"
+    assert "no anchor" in r["seven_day"]["pct_basis"]
+    assert any("WEEKLY LOAD IS UNKNOWN" in n for n in r["notes"])
+
+
+def test_weekly_anchor_is_reported_verbatim_and_the_forecast_adds_to_it():
+    """The anchor is the owner's figure, not something we recompute; the forecast moves
+    it by measured tokens-per-point rather than by a re-derived percentage."""
+    r = fb.fleet_budget(source="transcripts", limit_basis="owner", limit_tokens=1_000_000,
+                        observed_week_pct=72.0, forecast_agents=3, forecast_minutes=45,
+                        now=NOW, root=TRANSCRIPTS)
+    assert r["seven_day"]["pct"] == 72.0
+    assert r["seven_day"]["projected_pct"] >= 72.0
+    assert "anchored on owner-reported 72%" in r["seven_day"]["pct_basis"]
+
+
+def test_observed_block_pct_overrides_the_peak_denominator():
+    """Anchoring the 5h block on a reported percentage must actually move the number,
+    and must name itself in `limit_basis` -- the standing rule that a percentage never
+    appears without its denominator."""
+    anchored = fb.fleet_budget(source="transcripts", observed_block_pct=22.0,
+                               now=NOW, root=TRANSCRIPTS)
+    assert anchored["five_hour"]["pct"] == pytest.approx(22.0, abs=0.1)
+    assert "anchored on owner-reported 22%" in anchored["limit_basis"]
+
+
 def test_forecast_grows_with_agents_and_minutes():
     base = fb.forecast(100, agents=0, minutes=30, burn_per_minute=10)
     more = fb.forecast(100, agents=3, minutes=30, burn_per_minute=10)

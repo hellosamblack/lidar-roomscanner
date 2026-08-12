@@ -51,6 +51,44 @@ SUBAGENT_GLOB = "*/*/subagents/*.jsonl"
 BLOCK_HOURS = 5
 WEEK_HOURS = 168  # rolling, not calendar -- see `rolling_window`
 
+#: THIS MODULE IS A RELATIVE METER, NOT AN ABSOLUTE ONE. Calibrated against the owner's
+#: own reported figures on 2026-08-12, and the attempt is what proves the point:
+#:
+#:   moment          weighted tokens   this tool   owner   => implied 5h allowance
+#:   session start        96,234,076       63.4%     85%            113,000,000
+#:   ~8.5h later          40,938,630       27.0%     22%            186,100,000
+#:
+#: Two readings of the SAME window, 1.6x apart. No single denominator reconciles them,
+#: so the error is not in the denominator -- it is in the numerator's UNITS. The
+#: weighted token below (`CACHE_READ_WEIGHT`, `OUTPUT_WEIGHT`, the per-model table) is
+#: this module's own invention and does not track however the real limit counts; change
+#: the model/cache/output mix, as one wave does versus another, and the conversion
+#: moves. Do not "fix" this by hardcoding an owner-calibrated limit: an absolute number
+#: fitted to one work mix is wrong for the next, and it will read as authoritative.
+#:
+#: What IS sound is the DELTA. Over that same session the rolling-7d sum rose 581.6M ->
+#: 632.1M (+50.5M) while the owner's weekly moved 70% -> 72%. A rolling window only ever
+#: drops records as it slides, so a net rise is a LOWER BOUND on tokens added -- which
+#: also refutes any weekly allowance small enough to make 2 points cost less than 50.5M.
+#: Measured per-wave, on this project, with subagents counted:
+#:
+#:   a 3-worker Sonnet wave + review + one full suite + browser checks   ~= 40M weighted
+#:   a 2-worker wave (one Haiku), same overheads                        ~= 10.5M weighted
+#:
+#: Two estimates of the cost of one weekly point disagree, and the disagreement is the
+#: honest range: the whole session gives >=25.2M/point (50.5M over ~2 points, a lower
+#: bound because of window slide), while wave 2 alone gives ~40M/point (~40M over the
+#: 71%->72% step). We adopt the LOWER bound deliberately -- it converts a given wave into
+#: MORE weekly points, so the tool errs toward stopping early rather than overrunning a
+#: ceiling. At 25M/point the 3-worker wave above bills as ~1.6 points, not 1.
+#:
+#: So: anchor on a percentage the OWNER reports, then use this module's delta to project
+#: forward from it. That is what `observed_week_pct` / `observed_block_pct` are for, and
+#: why a weekly percentage is reported as `None` rather than guessed when absent.
+#: Re-measure `TOKENS_PER_WEEK_POINT` whenever the plan or the typical work mix changes.
+TOKENS_PER_WEEK_POINT = 25_000_000.0
+CALIBRATED_ON = "2026-08-12"
+
 #: Cache reads are an order of magnitude cheaper than fresh input, so counting them at
 #: face value makes a long cached session look like a runaway. Named and testable
 #: rather than buried in an expression; it is a heuristic, not a measured constant.
@@ -303,14 +341,34 @@ def burn_rate_from_block(block: dict, now: datetime) -> float:
     return block["weighted_tokens"] / elapsed
 
 
-def decide(pct: float, projected_pct: float, ceiling_pct: float) -> str:
-    """`go` / `reduce` / `stop` from the projected load, not the current load."""
-    worst = max(pct, projected_pct)
+def decide(pct: float, projected_pct: float, ceiling_pct: float,
+           week_pct: float | None = None,
+           projected_week_pct: float | None = None) -> str:
+    """`go` / `reduce` / `stop` from the projected load of the WORST window.
+
+    The weekly arguments are not optional decoration. Until 2026-08-12 this function
+    took only the 5h numbers, so an entire multi-wave fleet run returned `go` at every
+    check while the owner sat at ~70-72% of a **weekly** ceiling declared as 80% -- the
+    binding constraint was computed, returned in the payload, and then never consulted.
+    The 5h window resets every five hours and is nearly always cheap just after a reset;
+    the weekly one is the one that actually runs out. They are `None` only when no
+    weekly anchor was supplied, in which case there is genuinely nothing to compare.
+    """
+    worst = max([v for v in (pct, projected_pct, week_pct, projected_week_pct)
+                 if v is not None])
     if worst >= ceiling_pct:
         return "stop"
     if worst >= ceiling_pct * 0.75:
         return "reduce"
     return "go"
+
+
+def binding_window(pct: float, projected_pct: float,
+                   week_pct: float | None, projected_week_pct: float | None) -> str:
+    """Which window drives the verdict -- so a `stop` says what to wait for."""
+    five = max(pct, projected_pct)
+    week = max([v for v in (week_pct, projected_week_pct) if v is not None] or [-1.0])
+    return "seven_day" if week > five else "five_hour"
 
 
 # --------------------------------------------------------------------------------
@@ -382,6 +440,8 @@ def fleet_budget(ceiling_pct: float = 80.0,
                  limit_tokens: float | None = None,
                  forecast_agents: int = 0,
                  forecast_minutes: int = 0,
+                 observed_week_pct: float | None = None,
+                 observed_block_pct: float | None = None,
                  source: str = "auto",
                  now: datetime | None = None,
                  root: Path = PROJECTS_ROOT,
@@ -459,16 +519,47 @@ def fleet_budget(ceiling_pct: float = 80.0,
                       f"({denominator:,.0f} weighted tokens) — an observed high-water mark, "
                       f"not a published limit")
 
+    if observed_block_pct and observed_block_pct > 0:
+        # Anchor on what the owner can actually see. Locally valid: it converts THIS
+        # reading's tokens at THIS work mix, which is the only regime the weighting
+        # heuristic is trustworthy over.
+        denominator = block["weighted_tokens"] / (observed_block_pct / 100.0)
+        basis_text = (f"anchored on owner-reported {observed_block_pct:g}% of the {BLOCK_HOURS}h "
+                      f"block at this reading ({denominator:,.0f} weighted tokens implied)")
     pct = round(block["weighted_tokens"] / denominator * 100, 1)
-    week_denominator = denominator * (WEEK_HOURS / BLOCK_HOURS)
-    week_pct = round(week_tokens / week_denominator * 100, 1)
 
     burn = recent_burn_rate(records, now) if records else burn_rate_from_block(block, now)
     projected = forecast(block["weighted_tokens"], agents=forecast_agents,
                          minutes=forecast_minutes, burn_per_minute=burn)
     projected_pct = round(projected / denominator * 100, 1)
+    added = max(0.0, projected - block["weighted_tokens"])
 
-    verdict = decide(pct, projected_pct, ceiling_pct)
+    # The weekly percentage is ANCHORED, never derived. The old code computed it as
+    # `week_tokens / (peak_block * 168/5)` -- 33.6 back-to-back peak blocks, i.e. the
+    # assumption that no weekly cap exists -- and reported 12.4% against an owner-read
+    # 72%. Rather than swap one invented denominator for another (see the calibration
+    # note at the top of this file: two readings of the same window implied allowances
+    # 1.6x apart), report `None` when there is no anchor and say so.
+    if observed_week_pct and observed_week_pct > 0:
+        week_pct = round(float(observed_week_pct), 1)
+        projected_week_pct = round(week_pct + added / TOKENS_PER_WEEK_POINT, 1)
+        week_basis = (f"anchored on owner-reported {observed_week_pct:g}%; the forecast adds "
+                      f"{added:,.0f} weighted tokens at {TOKENS_PER_WEEK_POINT:,.0f}/point "
+                      f"(measured {CALIBRATED_ON}, deliberately the conservative bound)")
+    else:
+        week_pct = None
+        projected_week_pct = None
+        week_basis = ("no anchor — pass `observed_week_pct` with the figure the owner reads "
+                      "off their client. This module's weighted token does not convert to a "
+                      "real weekly percentage (see the calibration note in fleet_budget.py); "
+                      "the token count below is a real measurement, the percentage is not "
+                      "derivable from it")
+        notes.append("WEEKLY LOAD IS UNKNOWN: the verdict reflects the 5h block only. The "
+                     "weekly window is usually the binding one — ask the owner for their "
+                     "current weekly percentage and pass it as `observed_week_pct`.")
+
+    verdict = decide(pct, projected_pct, ceiling_pct, week_pct, projected_week_pct)
+    binding = binding_window(pct, projected_pct, week_pct, projected_week_pct)
     if not coverage.get("includes_subagents"):
         notes.append("no subagent transcripts were found — if a fleet is running, this "
                      "number is orchestrator-only and understates the real load")
@@ -481,25 +572,41 @@ def fleet_budget(ceiling_pct: float = 80.0,
         "ceiling_pct": ceiling_pct,
         "five_hour": {**block, "pct": pct},
         "seven_day": {"weighted_tokens": week_tokens, "pct": week_pct,
+                      "projected_pct": projected_week_pct,
+                      "pct_basis": week_basis,
                       "window_start": (now - timedelta(hours=WEEK_HOURS)).isoformat(),
                       "rolling": True},
         "burn_per_minute": round(burn, 1),
         "projected_pct": projected_pct,
-        "headroom_pct": round(ceiling_pct - max(pct, projected_pct), 1),
+        "headroom_pct": round(ceiling_pct - max(
+            [v for v in (pct, projected_pct, week_pct, projected_week_pct)
+             if v is not None]), 1),
+        "binding_window": binding,
         "verdict": verdict,
-        "reason": _verdict_reason(verdict, pct, projected_pct, ceiling_pct),
+        "reason": _verdict_reason(verdict, pct, projected_pct, ceiling_pct,
+                                  week_pct, projected_week_pct, binding),
         "notes": notes,
     }
 
 
-def _verdict_reason(verdict: str, pct: float, projected: float, ceiling: float) -> str:
+def _verdict_reason(verdict: str, pct: float, projected: float, ceiling: float,
+                    week_pct: float | None = None,
+                    projected_week_pct: float | None = None,
+                    binding: str = "five_hour") -> str:
+    """Name the WINDOW the number came from. A bare "projected 81%" gave no clue
+    whether to wait five hours or five days, which is the only actionable part."""
+    worst = max([v for v in (pct, projected, week_pct, projected_week_pct)
+                 if v is not None])
+    where = "weekly" if binding == "seven_day" else "5h block"
+    if week_pct is None:
+        where += ", weekly UNKNOWN"
     if verdict == "stop":
-        return (f"projected {max(pct, projected):.1f}% of the declared ceiling "
-                f"({ceiling:.0f}%) — do not start another wave")
+        return (f"projected {worst:.1f}% of the declared ceiling ({ceiling:.0f}%) on the "
+                f"{where} — do not start another wave")
     if verdict == "reduce":
-        return (f"projected {max(pct, projected):.1f}% against a {ceiling:.0f}% ceiling — "
+        return (f"projected {worst:.1f}% against a {ceiling:.0f}% ceiling on the {where} — "
                 f"shrink the wave or drop to cheaper tiers")
-    return f"projected {max(pct, projected):.1f}% against a {ceiling:.0f}% ceiling"
+    return f"projected {worst:.1f}% against a {ceiling:.0f}% ceiling on the {where}"
 
 
 def _render(r: dict) -> str:
@@ -531,13 +638,22 @@ def main(argv: list[str] | None = None) -> int:
                     help="required with --basis owner: weighted tokens per 5h block")
     ap.add_argument("--agents", type=int, default=0, help="agents to forecast")
     ap.add_argument("--minutes", type=int, default=0, help="minutes to forecast them running")
+    ap.add_argument("--observed-week-pct", type=float, default=None,
+                    help="the weekly percentage the owner reads off their client — without "
+                         "it the weekly number is None and the verdict covers the 5h block "
+                         "only, which is usually NOT the binding window")
+    ap.add_argument("--observed-block-pct", type=float, default=None,
+                    help="the 5h-block percentage the owner reads off their client")
     ap.add_argument("--source", choices=("auto", "ccusage", "transcripts"), default="auto")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
     result = fleet_budget(ceiling_pct=args.ceiling, limit_basis=args.basis,
                           limit_tokens=args.limit_tokens, forecast_agents=args.agents,
-                          forecast_minutes=args.minutes, source=args.source)
+                          forecast_minutes=args.minutes,
+                          observed_week_pct=args.observed_week_pct,
+                          observed_block_pct=args.observed_block_pct,
+                          source=args.source)
     print(json.dumps(result, indent=2) if args.json else _render(result))
     return 0 if result.get("verdict") != "unknown" else 1
 

@@ -50,22 +50,32 @@ def fleet_plan(max_agents: int = 3, priorities: str = "now,next",
 @mcp.tool()
 def fleet_budget(ceiling_pct: float = 80.0, limit_basis: str = "peak",
                  limit_tokens: float = 0.0, forecast_agents: int = 0,
-                 forecast_minutes: int = 0, source: str = "auto") -> dict:
+                 forecast_minutes: int = 0, observed_week_pct: float = 0.0,
+                 observed_block_pct: float = 0.0, source: str = "auto") -> dict:
     """Estimate Claude usage against a not-to-exceed ceiling before starting a wave.
 
-    Reports the current 5-hour block and a **rolling** 168-hour window (not a calendar
-    week), plus a `go` / `reduce` / `stop` verdict compared against the *projected*
-    load once `forecast_agents` run for `forecast_minutes` -- parallel workers are
-    invisible until they return, so judging on current load alone can wave through a
-    batch that lands well past the ceiling.
+    **ASK THE OWNER FOR THEIR CURRENT PERCENTAGES AND PASS THEM.** `observed_week_pct`
+    and `observed_block_pct` are the figures they read off their own client. Without
+    `observed_week_pct` the weekly percentage comes back `None` and the verdict covers
+    the 5-hour block ONLY -- which is nearly always the *non*-binding window, because it
+    resets every five hours. On 2026-08-12 this tool returned `go` at every check across
+    a whole multi-wave run while the owner sat at ~70-72% of a weekly ceiling declared
+    as 80%; the weekly number was computed, returned, and never consulted by the verdict.
 
-    Every reading is an estimate: no quota API is reachable from an agent on this box.
-    Read two fields before trusting a number. `limit_basis` names the denominator --
-    either this account's heaviest completed block (`"peak"`) or an owner-supplied
-    figure (`limit_basis="owner"` with `limit_tokens`), because a percentage of an
-    invented denominator is a fabricated number. `coverage.includes_subagents` says
-    whether worker transcripts were actually counted; they live one directory deeper
-    than the main ones, and for a fleet they are most of the spend.
+    Percentages are ANCHORED on those observations, not derived. This module's
+    "weighted token" is its own invention, and calibration proved it does not convert to
+    a real percentage: two readings of the same 5-hour window on the same day implied
+    allowances 1.6x apart, because the model/cache/output mix differed. What IS reliable
+    is the *delta* -- so the forecast projects forward from the owner's figure at a
+    measured ~25M weighted tokens per weekly point (the conservative bound; a 3-worker
+    Sonnet wave with review, one full suite and browser checks ran ~40M).
+
+    Read `binding_window` to know which window drives the verdict -- a `stop` on the
+    5-hour clears in hours, a `stop` on the weekly does not. `limit_basis` and
+    `seven_day.pct_basis` name every denominator, and `coverage.includes_subagents`
+    says whether worker transcripts were counted (for a fleet they are most of the
+    spend). `forecast_agents`/`forecast_minutes` matter because parallel workers are
+    invisible until they return.
 
     Any failure returns `verdict: "unknown"` with a reason, never a number.
     """
@@ -73,4 +83,6 @@ def fleet_budget(ceiling_pct: float = 80.0, limit_basis: str = "peak",
     return _budget(ceiling_pct=ceiling_pct, limit_basis=limit_basis,
                    limit_tokens=limit_tokens or None,
                    forecast_agents=forecast_agents, forecast_minutes=forecast_minutes,
+                   observed_week_pct=observed_week_pct or None,
+                   observed_block_pct=observed_block_pct or None,
                    source=source)
