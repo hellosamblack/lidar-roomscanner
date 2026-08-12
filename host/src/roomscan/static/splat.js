@@ -217,17 +217,30 @@ export function createSplat(hub, sceneApi) {
 
     // Stride-sample a loaded SplatMesh's own centers, transformed into scene
     // space (`true` = apply the scene transform -- same as the raw-box call
-    // this replaces). `mesh` only needs `getSplatCount()` /
-    // `getSplatCenter(i, out, true)`, duck-typed so this is unit-testable
-    // with a plain fake and no THREE mock: the vendor's own
-    // `SplatBuffer.getSplatCenter` just assigns `outCenter.x/.y/.z`, no
-    // Vector3 methods used.
-    function sampleSplatCenters(mesh, targetSamples = SPLAT_TRIM_TARGET_SAMPLES) {
+    // this replaces).
+    //
+    // `out` MUST be a real THREE.Vector3, not a plain `{x, y, z}`. This was
+    // originally written duck-typed, on the belief that the vendor's
+    // `getSplatCenter` "just assigns outCenter.x/.y/.z" -- it does not. With
+    // `applySceneTransform = true` it calls `outCenter.applyMatrix4(...)`, so
+    // a plain object throws `outCenter.applyMatrix4 is not a function`. The
+    // caller's try/catch swallowed that and fell back to the RAW box, which
+    // made the whole of #176 inert in the real viewer while all 11 unit tests
+    // passed against a fake that only assigned the three fields. Measured:
+    // camera distance stayed at 16.12 m for `sam-office`, exactly the raw-box
+    // value, instead of the intended ~8 m.
+    //
+    // `makeVec` is injectable purely so the test can pass a vendor-faithful
+    // stand-in (one that also implements `applyMatrix4`) and thereby actually
+    // exercise this contract -- see test_splat_extent_trim.py. It is NOT an
+    // invitation to pass a plain object at runtime.
+    function sampleSplatCenters(mesh, targetSamples = SPLAT_TRIM_TARGET_SAMPLES,
+                                makeVec = () => new THREE.Vector3()) {
         const count = mesh && typeof mesh.getSplatCount === 'function' ? mesh.getSplatCount() : 0;
         if (!count) return null;
         const stride = Math.max(1, Math.floor(count / targetSamples));
         const out = [];
-        const tmp = { x: 0, y: 0, z: 0 };
+        const tmp = makeVec();
         for (let i = 0; i < count; i += stride) {
             mesh.getSplatCenter(i, tmp, true);
             out.push(tmp.x, tmp.y, tmp.z);
@@ -256,7 +269,14 @@ export function createSplat(hub, sceneApi) {
         try {
             const samples = mesh ? sampleSplatCenters(mesh) : null;
             box = samples ? trimmedCentersBBox(samples) : null;
-        } catch (e) { /* vendor internals changed -- fall back below */ }
+        } catch (e) {
+            // Fall back below, but SAY SO. This catch silently hid #176's own
+            // bug for a whole review cycle: the trim threw on every frame and
+            // the raw box was used instead, which looks exactly like "the fix
+            // did nothing". A fallback that cannot be observed is a fallback
+            // that cannot be debugged.
+            hub.emit('log', { line: `[splat] extent trim failed, using raw box: ${e && e.message || e}` });
+        }
         if (!box && mesh && typeof mesh.computeBoundingBox === 'function') {
             const raw = mesh.computeBoundingBox(true, 0);
             box = raw && {

@@ -78,7 +78,10 @@ def _extract_splat_trim_source() -> str:
     return _extract_braced_block(
         text,
         "const SPLAT_TRIM_PERCENT = 1;",
-        "function sampleSplatCenters(mesh, targetSamples = SPLAT_TRIM_TARGET_SAMPLES) {",
+        # NB: this marker must end at `sampleSplatCenters`' own opening brace.
+        # The signature is multi-line since the `makeVec` parameter was added
+        # (the fix for the inert-trim defect), so match its LAST line.
+        "makeVec = () => new THREE.Vector3()) {",
     )
 
 
@@ -279,6 +282,38 @@ def test_end_to_end_trimmed_camera_sits_closer_than_raw():
 # --------------------------------------------------------------------------
 
 
+# The vendor's `SplatBuffer.getSplatCenter(i, out, applySceneTransform)` calls
+# `out.applyMatrix4(...)` when the transform flag is set -- it does NOT merely
+# assign `.x/.y/.z`. The first version of this suite faked it as a plain
+# assignment and a plain `{x, y, z}` scratch object, so all 11 tests passed
+# while the real viewer threw `outCenter.applyMatrix4 is not a function` on
+# every frame, silently fell back to the raw bounding box, and left #176
+# completely inert (camera distance stayed at the raw 16.12 m for `sam-office`
+# instead of the intended ~8 m).
+#
+# So the fake must be faithful to the part of the contract the code depends on.
+# `makeVec` here is the minimum vendor-shaped scratch object; a fake that
+# accepts a plain object would re-open exactly the hole this closes.
+_VENDOR_FAITHFUL_FAKE = """
+    const makeVec = () => ({
+        x: 0, y: 0, z: 0,
+        applyMatrix4() { return this; },   // identity: the vendor's transform hook
+    });
+    function makeFakeMesh(base, nBase, count) {
+        return {
+            getSplatCount: () => count,
+            getSplatCenter: (i, out, applySceneTransform) => {
+                const b = (i % nBase) * 3;
+                out.x = base[b]; out.y = base[b + 1]; out.z = base[b + 2];
+                // Faithful to the vendor: this is what throws on a plain object.
+                if (applySceneTransform) out.applyMatrix4(null);
+                return out;
+            },
+        };
+    }
+"""
+
+
 def _sample_and_trim(splat_count, target_samples=None):
     """Run `sampleSplatCenters` + `trimmedCentersBBox` from splat.js against
     a fake mesh (duck-typed: `getSplatCount`/`getSplatCenter`) backed by the
@@ -291,17 +326,12 @@ def _sample_and_trim(splat_count, target_samples=None):
     target_arg = json.dumps(target_samples) if target_samples is not None else ""
     harness = f"""
     {src}
+    {_VENDOR_FAITHFUL_FAKE}
     const base = {json.dumps(base)};
     const nBase = {n_base};
     const count = {splat_count};
-    const mesh = {{
-        getSplatCount: () => count,
-        getSplatCenter: (i, out) => {{
-            const b = (i % nBase) * 3;
-            out.x = base[b]; out.y = base[b + 1]; out.z = base[b + 2];
-        }},
-    }};
-    const samples = sampleSplatCenters(mesh{', ' + target_arg if target_arg else ''});
+    const mesh = makeFakeMesh(base, nBase, count);
+    const samples = sampleSplatCenters(mesh, {target_arg or 'undefined'}, makeVec);
     const box = trimmedCentersBBox(samples);
     console.log(JSON.stringify({{ sampleCount: samples.length / 3, box }}));
     """
@@ -378,3 +408,43 @@ def test_against_real_manifest_data():
     assert r_raw > 6.0, f"raw radius should match the issue's own ~7.0 measurement, got {r_raw:.2f}"
     assert 2.5 < r_trimmed < 4.5, f"trimmed radius should be near the issue's own ~3.6 measurement, got {r_trimmed:.2f}"
     assert r_raw / r_trimmed > 1.5
+
+
+def test_sampling_requires_a_vector3_like_scratch_object():
+    """Regression guard for the defect that made #176 inert on landing.
+
+    `sampleSplatCenters` passes ONE scratch object to the vendor's
+    `getSplatCenter(i, out, true)`. With the transform flag set the vendor
+    calls `out.applyMatrix4(...)`, so a plain `{x, y, z}` throws
+    `outCenter.applyMatrix4 is not a function` -- which `frameCamera`'s
+    try/catch swallowed, falling back to the raw box. Every unit test passed
+    and the camera never moved.
+
+    This asserts the failure is REAL against a vendor-faithful fake, so the
+    duck-typed version cannot come back. It is the mirror of
+    `test_stride_sampling_still_recovers_the_extent`, which proves the
+    Vector3-like path works.
+    """
+    src = _extract_splat_trim_source()
+    harness = f"""
+    {src}
+    {_VENDOR_FAITHFUL_FAKE}
+    const mesh = makeFakeMesh([0,0,0, 1,1,1], 2, 40);
+    let plainErr = null, vecOk = null;
+    try {{
+        sampleSplatCenters(mesh, undefined, () => ({{ x: 0, y: 0, z: 0 }}));
+    }} catch (e) {{ plainErr = e.message; }}
+    try {{
+        const s = sampleSplatCenters(mesh, undefined, makeVec);
+        vecOk = s.length / 3;
+    }} catch (e) {{ vecOk = 'THREW: ' + e.message; }}
+    console.log(JSON.stringify({{ plainErr, vecOk }}));
+    """
+    out = json.loads(_run_node(harness))
+    assert out["plainErr"] is not None, (
+        "a plain {x,y,z} scratch object must throw against a vendor-faithful "
+        "getSplatCenter -- if it does not, the fake has drifted from the vendor "
+        "again and this suite has no power over the real code path"
+    )
+    assert "applyMatrix4" in out["plainErr"]
+    assert out["vecOk"] == 40, f"Vector3-like scratch must sample all 40 centers, got {out['vecOk']!r}"
