@@ -60,6 +60,29 @@ historical peak. A percentage without its denominator is a fabricated number.
 
 `verdict: "unknown"` means stop and ask. It never means proceed.
 
+**Always pass BOTH `observed_week_pct` and `observed_block_pct`.** The weekly is almost always the
+binding window, and without its anchor the verdict silently covers the 5h block only.
+
+**If the `roomscan` MCP tools are not exposed in your session, drive the CLI front ends instead** —
+verified 2026-08-12, when a whole fleet run had *no* MCP tools available (no `fleet_*`, no `run_tests`,
+no `ui_*`), though `.mcp.json` was correctly configured. Same code, same fields:
+
+```bash
+host/.venv/bin/python host/tools/fleet_budget.py --ceiling 80 --agents 3 --minutes 45 \
+    --observed-week-pct 73 --observed-block-pct 33 --json
+host/.venv/bin/python host/tools/fleet_plan.py --max-agents 3 --priorities "now,next" --json
+```
+
+Check this at Step 1 rather than discovering it at Step 8.5 — **whether the MCP tools exist decides
+which issues you may claim at all**, because they are how the orchestrator does its own verification.
+
+**Re-checking the budget mid-run re-forecasts; it does not re-measure.** `seven_day.pct` is pinned to
+the `observed_week_pct` you passed, so it will read the same at every wave boundary. The measured
+quantity is `seven_day.weighted_tokens` — diff it between invocations to see what the fleet actually
+spent (2026-08-12: a 2-worker wave with one review round-trip and one full suite cost 8.0M weighted
+tokens ≈ 0.32 weekly points). Report the percentage as *the owner's figure* and the delta as *the
+measurement*; presenting a re-read of the anchor as evidence the run is on budget is circular.
+
 ## Step 2 — Plan the batch
 
 ```
@@ -88,6 +111,20 @@ scans from a firmware TX-pacer stall — and #84 came back `orchestrator-only`. 
 `suggested_model: orchestrator-only` as a **veto, not advice**: it means firmware or transform work
 that needs the rig, whose error paths spin forever instead of returning. Veto by hand, say why, and
 leave the issue unclaimed rather than half-claimed.
+
+**Veto anything whose acceptance needs a verification THIS session cannot perform.** Workers drive no
+browser and call no MCP tools, so the check always falls to you (Step 8.5) — and if your own session
+lacks the tools, nobody can do it. On 2026-08-12 the second-ranked cluster was four `area/host-web`
+issues (#106–#109: splat transparency slider, oscillate orbit, camera eye-level, floorplan preview)
+whose acceptance is *entirely* "does it look right in the viewport", in a session with no `ui_*`
+tools. Landing that code unverified would have shipped a green diff nobody had ever seen run. Also
+veto issues the body itself parks on someone else: #127 says **blocked on orientation ground truth
+(DC-F)**, and the `data-collection` issues (#128, #142–#144) are owner captures, not code.
+
+Ask of each candidate: *what would prove this fixed, and can I run it today?* If the honest answer is
+no, leave it and say so — a run that lands three unverifiable diffs is worse than a run that lands one
+verified fix. Prefer issues whose acceptance is **pytest-shaped**: a named function, a stated
+mechanism, and a test the body already specifies.
 
 Where the planner reports a soft conflict, **assign the contested file exclusively** instead of
 hoping. Name it in both spawn prompts — "X owns `foo.py`; you stop and report rather than edit it" —
