@@ -25,6 +25,38 @@ quoting), and `ui_wait_for` waits on a **real condition** instead of a fixed sle
 which this doc has always warned is the trap. Backed by Playwright
 (`channel="chrome"`), with the raw-CDP path as fallback.
 
+**From a git worktree these tools verify the WRONG CHECKOUT** (2026-08-11, #103).
+The MCP server is launched from the session's original cwd (`.mcp.json`), so
+`rig_up` serves the **main** checkout's `static/` and `run_tests` cannot see a test
+you just added in the worktree (it reports `file or directory not found`). Front-end
+work in a worktree can therefore be "verified" against code you did not edit. Start
+your own server *from the worktree* and let the `ui_*` tools — which only drive a
+browser at a URL — hit it:
+
+```bash
+# from <worktree>/, with dangerouslyDisableSandbox (a plain call exits 144)
+ROOMSCAN_NO_BROWSER=1 \
+ROOMSCAN_TRANSFORM_DLL=<main>/host/transform/build/libroomscan_transform.so \
+PYTHONPATH=host/src:host \
+  nohup setsid <main>/host/.venv/bin/python -m roomscan.web \
+  --replay captures/<something>.bin --replay-fps 20 >/tmp/wt-web.log 2>&1 </dev/null &
+```
+
+A fresh worktree also needs `captures -> ../../../captures` and
+`host/transform/build -> <main>/host/transform/build` symlinked in, or the library is
+empty and 15 tests skip as "native transform DLL not built". Confirm which tree you
+are actually serving with `ls -l /proc/<pid>/cwd` — **not** by hashing the served
+file, which is identical to main's until your first edit. Run pytest directly:
+`cd <worktree>/host && <main>/host/.venv/bin/python -m pytest`.
+
+**`ui_screenshot`'s `width`/`height` do not resize the viewport** (2026-08-11, #103;
+tracked as #168). `innerWidth`/`innerHeight` stayed 1600x1000 and the image
+was unchanged, so the narrow-viewport sizes below cannot be exercised that way —
+check `ui_eval("window.innerWidth")` before believing a narrow-viewport result. To
+squeeze a sidebar card without a viewport change, expand the *other* cards in the
+same dock: the card under test drops to its `min-height` floor, which is the same
+constraint a short viewport imposes and is reached through real in-app state.
+
 **`renavigate=True` is a navigation, not a cache bypass** (2026-07-30). Chrome
 happily re-served a just-edited `index.html` from its cache across two full
 reloads, so a shipped copy change read as "not landed" until a `?cb=` query string
