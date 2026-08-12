@@ -289,6 +289,20 @@ before you do, check what the tool you are about to verify with is actually runn
   Confirm the restart took by looking for a field the new code adds, not by the process being up.
 - Prefer a check whose failure is visible: for #101 the proof was the viewport empty and Device FPS
   `-` *while the event log showed the device still emitting*, then data returning on capture load.
+- **A worker's "could not reproduce — the code looks correct" on a *behavioural* claim is not a
+  negative result. It is a request for this step.** Verified 2026-08-12 on #107 ("Oscillate does
+  nothing"): the worker traced the whole path, checked every known trap in this repo, and reported
+  the implementation complete and internally consistent. It was right about every line and the bug
+  was still real — the defect was a wrong assumption about *three.js*, not about our code
+  (a positive `autoRotateSpeed` **decreases** the azimuth, so both reversal branches re-asserted the
+  direction the wave was already travelling and it orbited forever). Static reading cannot see a
+  library's sign convention. Measure it: 80.1° of travel in 9 s at an 18° amplitude with 0 reversals
+  before, 1 reversal bounded to ±21° after. Do not let a confident static "cannot reproduce" close
+  the row — and do not re-read the source harder, which is the same reasoning that produced the bug.
+- Splitting "never runs" from "runs and decides wrong" is one probe, not a bisect: find a value the
+  loop **re-asserts every tick**, force it to something the loop would never choose, and see whether
+  it snaps back. On #107 that collapsed the search space in a single reading and proved the wave was
+  live before any code was changed.
 
 ## Step 9 — Close out once, at the end
 

@@ -50,13 +50,27 @@ file, which is identical to main's until your first edit. Run pytest directly:
 `cd <worktree>/host && <main>/host/.venv/bin/python -m pytest`.
 
 **`ui_screenshot`'s `width`/`height` now really do resize the viewport** (fixed
-2026-08-12, #168). Both session paths — Playwright (`page.set_viewport_size`) and
-the raw-CDP fallback (`Emulation.setDeviceMetricsOverride`) — re-apply the
-requested size on *every* call; the bug was an early return once the browser was
-already up, which made every call after the first silently keep the launch size,
-so the three narrow sizes below "passed" three times at 1600x1000. Verified on
-2026-08-12 by requesting 1100x560, 820x700 and 1280x800 in one session and
-reading back `innerWidth`/`innerHeight` after each: three distinct, exact matches.
+2026-08-12, #168, in two rounds). Both session paths — Playwright
+(`page.set_viewport_size`) and the raw-CDP fallback
+(`Emulation.setDeviceMetricsOverride`) — re-apply the requested size on *every*
+call. There were two defects, and the second was **created by the fix for the
+first**: an early return once the browser was already up made every call after
+the first keep the launch size, so the three narrow sizes below "passed" three
+times at 1600x1000; removing that early return then gave teeth to the argless
+`self.start()` calls inside `goto`/`evaluate`/`wait_for`/`screenshot`, which
+reasserted the 1600x1000 default microseconds *before* the pixels were captured.
+`width`/`height` now default to `None`, meaning "keep the last explicitly
+requested size", so a future argless caller cannot silently reintroduce this.
+
+The first round was declared verified by driving `CdpSession.start()` directly
+and reading back `innerWidth` — which is exactly why it could not see the
+regression it had just introduced: `start()` is not the path `ui_screenshot`
+takes to a pixel. **Assert through the tool, not through `session.py`.**
+Confirmed 2026-08-12 by requesting 1280x800, 1100x560 and 820x700 through
+`ui_screenshot` in a *fresh Python process* — the long-lived `roomscan-mcp`
+pins the modules it booted with, so verifying a fix to the MCP layer *through*
+the MCP layer just runs the old code — and reading back `innerWidth`/
+`innerHeight` after each: three exact matches.
 
 Still worth `ui_eval("(() => ({w: innerWidth, h: innerHeight}))()")` between shots
 when a result surprises you — a check that cannot fail is what made this invisible
