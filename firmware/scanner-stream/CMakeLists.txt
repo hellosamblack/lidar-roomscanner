@@ -28,6 +28,15 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
+# Run the vl53l9 transform on the MCU and emit DEPTH frames instead of the production raw-only
+# stream. OFF is the shipped configuration; the DebugOnboardTransform preset turns it ON for
+# golden-vector regeneration and DSS-off validation. The value is forced onto the compiler command
+# line below so that passing -DCONF_TRANSFORM_ONBOARD can never silently fall back to raw-only.
+option(CONF_TRANSFORM_ONBOARD
+    "Run the VL53L9 transform on the MCU and emit DEPTH frames (default: OFF, raw-only)"
+    OFF)
+message(STATUS "CONF_TRANSFORM_ONBOARD=${CONF_TRANSFORM_ONBOARD}")
+
 # 53L9A1 reference package (read-only) providing shared Utilities/Middlewares/BSP components.
 # Vendored in-repo at firmware/vendor/53L9A1; scanner-stream -> firmware -> vendor/53L9A1.
 set(PKG_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/53L9A1)
@@ -137,6 +146,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     USE_NUCLEO_144
     CFG_TUSB_MCU=OPT_MCU_STM32H5
+    CONF_TRANSFORM_ONBOARD=$<BOOL:${CONF_TRANSFORM_ONBOARD}>
 )
 
 # Optimization options -Ofast for real-time performance on ToF data

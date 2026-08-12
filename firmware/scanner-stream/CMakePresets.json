@@ -23,6 +23,13 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
             }
+        },
+        {
+            "name": "DebugOnboardTransform",
+            "inherits": "Debug",
+            "cacheVariables": {
+                "CONF_TRANSFORM_ONBOARD": true
+            }
         }
     ],
     "buildPresets": [
@@ -33,6 +40,10 @@
         {
             "name": "Release",
             "configurePreset": "Release"
+        },
+        {
+            "name": "DebugOnboardTransform",
+            "configurePreset": "DebugOnboardTransform"
         }
     ]
 }

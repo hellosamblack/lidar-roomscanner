@@ -62,6 +62,13 @@ points here; keep this doc short and binding.
 - Build: `cmake --preset Debug && cmake --build build/Debug` from the app dir; flash + monitor via the
   `firmware-loop` skill. Validation is on-target — there is no simulator; every firmware change ends with
   a flash-and-observe step.
+- **Build-time config is selected by CMake, never by hand-editing a `#define`.** `CONF_TRANSFORM_ONBOARD`
+  is a real `option()` (default OFF → the shipped raw-only config); the `DebugOnboardTransform` preset
+  turns it on into its own `build/DebugOnboardTransform` dir. Configure prints the chosen value, so a
+  requested config can no longer silently fall back. **That alternate config currently wedges the rig on
+  Ethernet — see #166 before flashing it.** If you add another such knob, follow the same shape: `option()`
+  + `target_compile_definitions(... FOO=$<BOOL:${FOO}>)` + an `#ifndef` fallback in the source, so a
+  non-CMake compile still builds and a `-D` on the command line is never a no-op.
 - **Claude drives the on-target loop directly — this is an agentic project, not a hand-off.** Build, flash
   (`STM32_Programmer_CLI` over SWD), and monitor (native CDC via `capture.py` on VID/PID `CAFE:4001`;
   ST-Link VCOM for `printf`/probe output) are all Claude's to run. Toolchain + programmer paths and the

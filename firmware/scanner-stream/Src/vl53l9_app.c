@@ -33,10 +33,17 @@
 #define CONF_PRINT_FRAME   (0) /**< ASCII art disabled in streaming builds */
 #define CONF_STREAM_BINARY (1) /**< emit rs_protocol frames over native USB CDC (see rs_send_frame_cdc) */
 #define CONF_STREAM_RAW (1) /**< also stream RAW_3DMD + periodic CALIB (dual-stream validation / PC-transform mode) */
-#define CONF_TRANSFORM_ONBOARD (0) /**< 1 = run vl53l9_transform on-MCU and stream DEPTH (Phase 1 behavior, also the
-                                     * golden-pair regeneration path with CONF_STREAM_RAW=1); 0 = raw-only, transform
-                                     * runs on the PC (Phase 2 -- equivalence gate passed, on-MCU transform removed
-                                     * from the hot path) */
+/* 1 = run vl53l9_transform on-MCU and stream DEPTH (Phase 1 behavior, also the golden-pair
+ * regeneration path with CONF_STREAM_RAW=1); 0 = raw-only, transform runs on the PC (Phase 2 --
+ * equivalence gate passed, on-MCU transform removed from the hot path).
+ *
+ * Selected at build time: CMakeLists.txt always defines this on the command line from the
+ * CONF_TRANSFORM_ONBOARD option (OFF by default -> 0), and the DebugOnboardTransform preset sets
+ * it ON. The #ifndef fallback keeps non-CMake/direct compiles building the production raw-only
+ * config; do not hand-edit the value here, pass -DCONF_TRANSFORM_ONBOARD=ON to cmake instead. */
+#ifndef CONF_TRANSFORM_ONBOARD
+#define CONF_TRANSFORM_ONBOARD (0)
+#endif
 #define CONF_USECASE     (VL53L9_USECASE_AR_PRECISION) /**< select ranging profile to be applied (see vl53l9_utils.h) */
 
 /* Every output path is knob-gated: DEPTH send needs BINARY && TRANSFORM, RAW/CALIB send needs
