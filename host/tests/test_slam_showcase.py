@@ -422,3 +422,25 @@ def test_a_normal_build_is_unaffected(monkeypatch):
     assert p.done and p.phase != "failed"
     assert (p.stats or {}).get("error") is None
     assert p.fraction == 1.0
+
+
+def test_from_capture_requests_quat_interp_when_the_lever_is_on(monkeypatch):
+    """#155: Detailed must ride the exact same loader alignment as the offline
+    CLI — apply_quat_phase=True selects timestamp interpolation in the shared
+    loader rather than a Detailed-private synchronizer."""
+    seen = {}
+    sentinel_frames = _wall_sequence(2)
+
+    def fake_load_frames(path, max_frames=None, with_imu=False, quat_interp=False):
+        seen["with_imu"] = with_imu
+        seen["quat_interp"] = quat_interp
+        return (sentinel_frames, W, H, [(None, None)] * len(sentinel_frames)) \
+            if with_imu else (sentinel_frames, W, H)
+
+    monkeypatch.setattr("roomscan.slam.cli._load_frames", fake_load_frames)
+    PostProcessWorker.from_capture("some/capture.bin", voxel_size=0.02,
+                                   apply_quat_phase=True)
+    assert seen == {"with_imu": True, "quat_interp": True}
+    # and with the lever off, legacy doubles without the kwarg must keep working
+    # (the kwarg is only passed when the lever is on) — pinned by the fact that
+    # test_from_capture_classmethod_loads_via_slam_cli above still passes.

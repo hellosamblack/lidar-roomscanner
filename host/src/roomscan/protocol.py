@@ -9,6 +9,8 @@ from enum import IntEnum
 
 import numpy as np
 
+from .sensor_time import signed_tick_delta
+
 MAGIC = b"RSCN"
 VERSION = 2
 # v2 changed only the COMMAND/ACK payload registry (new commands 8-12, one new 12-byte
@@ -652,10 +654,16 @@ class ImuSync:
         past it. A host that wants the orientation at the frame instant must propagate
         it BACKWARD by this much — the opposite direction to "the quat is stale".
         Returns None when this drain produced no quaternion.
+
+        Wrap-safe (#155): `lsm_ticks` and `quat_mid_ticks` are raw uint32 counter
+        values ~8 ms apart on a clock that wraps every ~26 h, so the delta is taken
+        modulo 2^32 (nearest signed representative), not by plain subtraction —
+        otherwise one frame per wrap reports an offset of ±26 hours.
         """
         if not self.quat_n or not self.quat_mid_ticks:
             return None
-        return (self.quat_mid_ticks - self.frame_ready_ticks(tick_us)) * tick_us
+        mid_after_latch = signed_tick_delta(self.lsm_ticks, self.quat_mid_ticks)
+        return (mid_after_latch + self.latch_delay_us / tick_us) * tick_us
 
 
 def decode_imu_sync(payload: bytes) -> ImuSync:

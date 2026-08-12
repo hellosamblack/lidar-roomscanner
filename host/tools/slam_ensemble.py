@@ -117,6 +117,7 @@ def run_ensemble(capture, *, n: int = DEFAULT_N, device: str | None = None,
                  rot_prior_weight: float | None = None,
                  prior_smooth_alpha: float | None = None,
                  apply_quat_phase: bool | None = None,
+                 quat_interp_mode: str | None = None,
                  zupt_enabled: bool | None = None,
                  zupt_accel_tol_g: float | None = None,
                  zupt_window: int | None = None,
@@ -157,11 +158,23 @@ def run_ensemble(capture, *, n: int = DEFAULT_N, device: str | None = None,
 
     # The quat-phase and ZUPT levers need the raw IMU per frame; the helper
     # decodes it only when a lever consumes it (ZUPT is on by default).
+    # `quat_interp_mode="reflected"` is #155's VALIDATION-ONLY null arm: it
+    # shifts each frame's orientation query to the mirror image of the frame
+    # time on the far side of the paired quat midpoint — a wrong-direction
+    # change of equal magnitude. If it scores as well as the real alignment,
+    # the metric is rewarding smoothing, not phase correction (BUG-067's trap),
+    # and the real arm's result is void. It is not a config field on purpose.
+    if quat_interp_mode == "reflected":
+        # The null arm must differ from the "on" arm ONLY in query direction —
+        # same loader path, same Mapper fallback for uninterpolated frames.
+        cfg.apply_quat_phase = True
     need_imu = bool(cfg.apply_quat_phase or cfg.zupt_enabled)
+    quat_interp = "reflected" if quat_interp_mode == "reflected" else cfg.apply_quat_phase
     frames, width, height, imu_aux = _load_frames_maybe_imu(
-        str(capture), max_frames, need_imu)
+        str(capture), max_frames, need_imu, quat_interp=quat_interp)
     if not frames:
         return {"capture": str(capture), "error": "no depth frames decoded from capture"}
+    interp_stats = getattr(imu_aux, "interp_stats", None)
 
     # BUG-070 harness: a constant world-Z heading graft is a PHYSICALLY NULL
     # relabelling (tilt preserved to machine precision), so a stable estimator's
@@ -227,6 +240,9 @@ def run_ensemble(capture, *, n: int = DEFAULT_N, device: str | None = None,
         "icp_rot_prior_weight": cfg.icp_rot_prior_weight,
         "prior_smooth_alpha": cfg.prior_smooth_alpha,
         "apply_quat_phase": cfg.apply_quat_phase,
+        # #155: what the timestamp alignment DID (mode/eligible/applied), not
+        # just what was requested. None = lever off / loader double without it.
+        "quat_interp": interp_stats,
         "zupt_enabled": cfg.zupt_enabled,
         "zupt_accel_tol_g": cfg.zupt_accel_tol_g, "zupt_window": cfg.zupt_window,
         "graft_yaw_deg": graft_yaw_deg,
@@ -276,6 +292,13 @@ def format_report(r: dict) -> str:
         out.append("  !! at least one run SATURATED its block grid -- raise block_count (BUG-035)")
     if r["runs_died"]:
         out.append("  !! a run DIED: its closure is where the estimate quit, not drift (BUG-036)")
+    qi = r.get("quat_interp")
+    if qi is not None:
+        out.append(f"  quat interpolation ({qi['mode']}): {qi['applied']}/{qi['eligible']} "
+                   f"frames aligned, {qi['timed_samples']} timed samples")
+        if qi["applied"] == 0:
+            out.append("  !! quat lever is ON but ZERO frames were aligned -- no usable "
+                       "stream-13 pairs; this arm measured nothing")
     out.append(f"  median step {s['median_ms']['mean']:.1f} ms")
     out.append("  runs:")
     for x in r["runs"]:
@@ -310,8 +333,16 @@ def main(argv=None) -> int:
                          "[slam] prior_smooth_alpha (0 = off). A BUG-067 lever independent of "
                          "icp_mode.")
     ap.add_argument("--apply-quat-phase", action="store_true", default=None,
-                    help="apply the +7.76 ms quat-phase compensation (BUG-031/067). Needs "
+                    help="align each frame's quat to its own frame-ready instant by "
+                         "timestamp interpolation (#155; formerly the fixed +7.76 ms "
+                         "rollback, which remains the per-frame fallback). Needs "
                          "stream 11+13 in the capture.")
+    ap.add_argument("--quat-interp-mode", choices=["reflected"], default=None,
+                    help="VALIDATION-ONLY (#155): 'reflected' queries the orientation at "
+                         "the wrong-direction mirror of each frame time (implies "
+                         "--apply-quat-phase). If this null arm beats the baseline too, "
+                         "the metric is rewarding smoothing, not phase correction "
+                         "(BUG-067) — treat the real arm's win as void.")
     ap.add_argument("--zupt", action="store_true", default=None, dest="zupt_enabled",
                     help="enable the accelerometer ZUPT (BUG-069). Needs stream 11.")
     ap.add_argument("--zupt-tol", type=float, default=None, dest="zupt_accel_tol_g",
@@ -342,6 +373,7 @@ def main(argv=None) -> int:
                      rot_prior_weight=args.rot_prior_weight,
                      prior_smooth_alpha=args.prior_smooth_alpha,
                      apply_quat_phase=args.apply_quat_phase,
+                     quat_interp_mode=args.quat_interp_mode,
                      zupt_enabled=args.zupt_enabled,
                      zupt_accel_tol_g=args.zupt_accel_tol_g,
                      zupt_window=args.zupt_window,

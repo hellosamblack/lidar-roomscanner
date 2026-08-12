@@ -141,7 +141,11 @@ class PostProcessWorker:
         # (ZUPT is on by default) -- stream 11 is the biggest in the file, so an
         # unconditional decode would tax a build that isn't using it.
         need_imu = bool(kw.get("apply_quat_phase") or kw.get("zupt_enabled"))
-        frames, width, height, imu_aux = _load_frames_maybe_imu(path, need_imu=need_imu)
+        # apply_quat_phase selects #155's timestamp alignment in the loader;
+        # frames whose quat was aligned there carry offset=None in imu_aux, so
+        # Mapper's fixed rollback cannot correct them a second time.
+        frames, width, height, imu_aux = _load_frames_maybe_imu(
+            path, need_imu=need_imu, quat_interp=bool(kw.get("apply_quat_phase")))
         return cls(frames, width, height, mesh_every=mesh_every, imu_aux=imu_aux, **kw)
 
     # ---- reader side (GUI thread) --------------------------------------

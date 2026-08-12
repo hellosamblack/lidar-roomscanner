@@ -1,5 +1,12 @@
+import math
+import struct
+import zlib
+
 import numpy as np
-from roomscan.slam.cli import main
+import pytest
+
+from roomscan.protocol import IMU_RAW_TICK_US
+from roomscan.slam.cli import main, _load_frames
 from roomscan.slam import cli as slamcli
 from roomscan.slam.mapper import Mapper
 
@@ -210,3 +217,188 @@ def test_run_forwards_every_configured_mapper_knob(monkeypatch):
     assert not missing, f"[slam] keys the offline CLI ignores: {missing}"
     # `icp_mode` is the one deliberate override: --compare-modes calls _run per mode.
     assert seen["icp_mode"] == "translation"
+
+
+# --- #155: timestamp interpolation in _load_frames -------------------------------------
+#
+# Synthetic framed captures prove the ASSOCIATION, not just the math (the math is
+# tests/test_sensor_time.py's job): the group's stream 9/13 arrive AFTER its depth
+# payload on the wire, so at depth time the carried-forward quat belongs to the
+# PREVIOUS group — pairing must be by exact (seq, t_us), and the interpolation must
+# land each frame's quat at that frame's OWN frame-ready instant.
+
+_PERIOD_TICKS = 1536          # ~33.3 ms at the nominal 21.7 us tick
+_LEAD_TICKS = 358             # ~7.77 ms quat-midpoint lead (BUG-031's shape)
+_BASE_TICK = 100_000
+_DEG_PER_FRAME = 10.0
+
+
+def _wire_frame(stream_id, payload, seq, t_us, w=0, h=0):
+    header = struct.pack("<4sBBBBIQHHII", b"RSCN", 1, 1, stream_id, 0,
+                         seq, t_us, w, h, len(payload), 0)
+    return header + payload + zlib.crc32(header + payload).to_bytes(4, "little")
+
+
+def _qz(deg):
+    half = math.radians(deg) / 2.0
+    return (math.cos(half), 0.0, 0.0, math.sin(half))
+
+
+def _qz_deg(q):
+    return math.degrees(2.0 * math.atan2(q[3], q[0]))
+
+
+def _angle_at(tick):
+    return (tick - _BASE_TICK) / _PERIOD_TICKS * _DEG_PER_FRAME
+
+
+def _group(k, *, with_quat=True, with_sync=True, quat_deg=None):
+    """One coincident ToF group: DEPTH_ZF32 first, then its stream 9 and 13 —
+    the real firmware wire order (#155's whole association problem)."""
+    seq, t_us = 42 + k, 1_000_000 + 33_333 * k
+    fr = _BASE_TICK + _PERIOD_TICKS * k          # frame-ready instant, LSM ticks
+    depth = np.full((4, 4), 1000.0, dtype="<f4").tobytes()
+    out = _wire_frame(0, depth, seq, t_us, w=4, h=4)  # stream 0 = DEPTH_ZF32
+    if with_quat:
+        deg = _angle_at(fr + _LEAD_TICKS) if quat_deg is None else quat_deg
+        out += _wire_frame(9, struct.pack("<4f", *_qz(deg)), seq, t_us)
+    if with_sync:
+        # latch 217 us after the edge = exactly 10 nominal ticks
+        payload = struct.pack("<IIIIHHBB", fr + 10, 217, 24_109,
+                              fr + _LEAD_TICKS, 44, 15, 1, 0)
+        out += _wire_frame(13, payload, seq, t_us)
+    return out
+
+
+def _capture(tmp_path, blob, name="cap.bin"):
+    p = tmp_path / name
+    p.write_bytes(blob)
+    return str(p)
+
+
+def test_interp_aligns_each_frame_to_its_own_frame_ready_instant(tmp_path):
+    """Rotation is linear in LSM time, so the interpolated quat at frame k's
+    frame-ready instant must read exactly 10k deg — while the legacy carry-forward
+    hands frame k the PREVIOUS group's midpoint (10(k-1)+2.33 deg). A hard-coded
+    7.76 ms would also pass here; the reflected/no-13 tests below break that tie."""
+    path = _capture(tmp_path, b"".join(_group(k) for k in range(4)))
+    frames, w, h, aux = _load_frames(path, with_imu=True, quat_interp=True)
+    assert (w, h) == (4, 4) and len(frames) == 4
+    stats = aux.interp_stats
+    assert stats == {"mode": "on", "frames": 4, "timed_samples": 4,
+                     "eligible": 4, "applied": 3}
+    for k in (1, 2, 3):
+        assert _qz_deg(frames[k][3]) == pytest.approx(_DEG_PER_FRAME * k, abs=1e-6)
+        assert aux[k][1] is None, "interpolated frame must not also get the fixed rollback"
+    # frame 0 has no left bracket: keeps the carried-forward quat (identity here)
+    assert _qz_deg(frames[0][3]) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_interp_off_keeps_legacy_carry_forward(tmp_path):
+    """The default path must stay byte-identical: frame k carries the previous
+    group's midpoint quat, and the legacy fixed-rollback offset stays populated."""
+    path = _capture(tmp_path, b"".join(_group(k) for k in range(4)))
+    frames, _, _, aux = _load_frames(path, with_imu=True)
+    assert getattr(aux, "interp_stats", None) is None
+    for k in (1, 2, 3):
+        expected = _angle_at(_BASE_TICK + _PERIOD_TICKS * (k - 1) + _LEAD_TICKS)
+        assert _qz_deg(frames[k][3]) == pytest.approx(expected, abs=1e-6)
+        # (mid - frame_ready) x tick: the 217 us latch back-out is already inside
+        # frame_ready_ticks, so the offset is exactly the 358-tick lead
+        assert aux[k][1] == pytest.approx(_LEAD_TICKS * IMU_RAW_TICK_US, abs=1e-6)
+
+
+def test_reflected_mode_mirrors_the_query_direction(tmp_path):
+    """The validation-only null arm must shift the SAME magnitude the WRONG way:
+    frame k reads the orientation at mid + (mid - frame_ready), i.e. 10k + 4.66 deg
+    here. If an implementation ignored timestamps and rolled back a constant, 'on'
+    and 'reflected' could not differ like this."""
+    path = _capture(tmp_path, b"".join(_group(k) for k in range(4)))
+    frames, _, _, aux = _load_frames(path, with_imu=True, quat_interp="reflected")
+    stats = aux.interp_stats
+    assert stats["mode"] == "reflected"
+    mirror = 2.0 * _LEAD_TICKS / _PERIOD_TICKS * _DEG_PER_FRAME  # 4.6615 deg
+    # coverage shifts one frame vs 'on': frame 0's mirrored target sits AFTER its
+    # own midpoint (bracketed), frame 3's sits beyond the newest sample (refused)
+    for k in (0, 1, 2):
+        assert _qz_deg(frames[k][3]) == pytest.approx(_DEG_PER_FRAME * k + mirror, abs=1e-6)
+    assert stats["applied"] == 3
+    assert _qz_deg(frames[3][3]) == pytest.approx(
+        _angle_at(_BASE_TICK + _PERIOD_TICKS * 2 + _LEAD_TICKS), abs=1e-6)
+
+
+def test_no_stream13_capture_is_untouched(tmp_path):
+    """Legacy captures (pre-2026-07-30) must decode identically with the lever on:
+    zero eligible frames, zero applied, quats equal to the interp-off load."""
+    blob = b"".join(_group(k, with_sync=False) for k in range(3))
+    path = _capture(tmp_path, blob)
+    on = _load_frames(path, with_imu=True, quat_interp=True)
+    off = _load_frames(path, with_imu=True)
+    assert on[3].interp_stats == {"mode": "on", "frames": 3, "timed_samples": 0,
+                                  "eligible": 0, "applied": 0}
+    for fon, foff in zip(on[0], off[0]):
+        assert fon[3] == foff[3]
+    assert [a[1] for a in on[3]] == [a[1] for a in off[3]] == [None, None, None]
+
+
+def test_offcycle_stream9_without_sync_is_not_a_timed_sample(tmp_path):
+    """Decoupled-mode regression: an off-cycle stream 9 reusing the group's seq
+    (different t_us, no stream 13) must not poison the timed samples — even a
+    180-deg outlier. It may only affect the legacy carry-forward, exactly as
+    before #155."""
+    groups = [_group(k) for k in range(4)]
+    rogue = _wire_frame(9, struct.pack("<4f", *_qz(180.0)), 42 + 1, 999_999_999)
+    blob = b"".join(groups[:2]) + rogue + b"".join(groups[2:])
+    path = _capture(tmp_path, blob)
+    frames, _, _, aux = _load_frames(path, with_imu=True, quat_interp=True)
+    assert aux.interp_stats["applied"] == 3
+    for k in (1, 2, 3):
+        assert _qz_deg(frames[k][3]) == pytest.approx(_DEG_PER_FRAME * k, abs=1e-6)
+
+
+def test_missing_sync_frame_falls_back_per_frame(tmp_path):
+    """One group with no stream 13: that frame keeps the legacy quat AND the legacy
+    fixed-rollback offset (the old mechanism stays its fallback); its neighbours
+    still interpolate — group 3 bridges the missing sample (2 frame periods is
+    within the span guard)."""
+    blob = b"".join(_group(k, with_sync=(k != 2)) for k in range(4))
+    path = _capture(tmp_path, blob)
+    frames, _, _, aux = _load_frames(path, with_imu=True, quat_interp=True)
+    stats = aux.interp_stats
+    assert stats["eligible"] == 3 and stats["applied"] == 2 and stats["timed_samples"] == 3
+    assert _qz_deg(frames[1][3]) == pytest.approx(_DEG_PER_FRAME, abs=1e-6)
+    assert _qz_deg(frames[3][3]) == pytest.approx(_DEG_PER_FRAME * 3, abs=1e-6)
+    # frame 2: not eligible (no own-group 13) -> legacy quat (group 1's midpoint,
+    # because its own group's stream 9 arrives after the depth payload) + legacy offset
+    assert _qz_deg(frames[2][3]) == pytest.approx(
+        _angle_at(_BASE_TICK + _PERIOD_TICKS * 1 + _LEAD_TICKS), abs=1e-6)
+    assert aux[2][1] is not None and aux[2][1] > 0
+
+
+def test_malformed_sync_degrades_that_frame_only(tmp_path):
+    """A truncated stream-13 payload must not abort depth decoding (the standing
+    malformed-aux contract) and must not become a timed sample."""
+    good = b"".join(_group(k) for k in (0, 1))
+    seq, t_us = 42 + 2, 1_000_000 + 33_333 * 2
+    bad_group = _group(2, with_sync=False) + _wire_frame(13, b"\x00" * 10, seq, t_us)
+    blob = good + bad_group + _group(3)
+    frames, _, _, aux = _load_frames(_capture(tmp_path, blob),
+                                     with_imu=True, quat_interp=True)
+    assert len(frames) == 4
+    assert aux.interp_stats["eligible"] == 3
+    assert _qz_deg(frames[3][3]) == pytest.approx(_DEG_PER_FRAME * 3, abs=1e-6)
+
+
+def test_max_frames_still_sees_the_last_frames_trailing_group(tmp_path):
+    """The pre-#155 loader broke out of the parse the moment the Nth depth frame
+    landed — before that frame's own stream 9/13 (which follow it on the wire)
+    were seen, so the Nth frame could never be aligned. The drain must let the
+    final group complete without decoding a 5th frame."""
+    path = _capture(tmp_path, b"".join(_group(k) for k in range(4)))
+    frames, _, _, aux = _load_frames(path, max_frames=2, with_imu=True, quat_interp=True)
+    assert len(frames) == 2
+    assert aux.interp_stats["applied"] == 1
+    assert _qz_deg(frames[1][3]) == pytest.approx(_DEG_PER_FRAME, abs=1e-6)
+    # and the legacy path's early break is preserved verbatim
+    frames_off, _, _, _ = _load_frames(path, max_frames=2, with_imu=True)
+    assert len(frames_off) == 2

@@ -1076,3 +1076,19 @@ def test_synthetic_pan_tracks_without_loss_in_both_modes():
             m.step(d, q, 101325.0)
         assert m.tracking_lost_count == 0
         assert len(m.trajectory) == 60
+
+
+def test_interpolated_frames_skip_the_fixed_rollback_but_keep_zupt():
+    """#155 no-double-correction pin: the offline loader hands Mapper a quat
+    already SLERP-aligned to the frame instant with quat_offset_us=None, so the
+    fixed gyro rollback must not apply a second correction — while the ZUPT,
+    which rides the same imu_aux, must still see the raw batch."""
+    m = Mapper(W, H, voxel_size=0.02, apply_quat_phase=True,
+               zupt_enabled=True, zupt_window=3)
+    for _ in range(8):
+        m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0,
+               imu_raw=_batch(accel_g=[0.0, 0.0, 1.0],
+                              gyro_dps=[0.0, 0.0, 100.0]),
+               quat_offset_us=None)
+    assert m.quat_phase_count == 0
+    assert m.zupt_count > 0

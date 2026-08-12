@@ -97,3 +97,78 @@ def test_compare_rejects_an_arm_that_died():
     r = compare(base, dead)
 
     assert r["accepted"] is False, "a dead run's closure is not a measurement"
+
+
+# --- #155: quat-interpolation wiring ----------------------------------------------------
+
+def _fake_loader_and_run(monkeypatch, seen):
+    """Stub the capture decode and the SLAM pass so run_ensemble()'s WIRING is
+    testable without Open3D on a GPU: what quat_interp mode reached the loader,
+    and what coverage stats reached the report."""
+    import types
+    import tools.slam_ensemble as se
+    from roomscan.slam.cli import _ImuAuxList
+
+    def fake_load(path, max_frames=None, need_imu=False, quat_interp=False):
+        seen["quat_interp"] = quat_interp
+        seen["need_imu"] = need_imu
+        frames = [(np.full((4, 4), 1000.0, np.float32), None, None,
+                   (1.0, 0.0, 0.0, 0.0), 101325.0, i * 0.03) for i in range(3)]
+        aux = _ImuAuxList((None, None) for _ in frames)
+        aux.interp_stats = {"mode": "reflected" if quat_interp == "reflected" else "on",
+                            "frames": 3, "timed_samples": 3, "eligible": 3, "applied": 2}
+        return frames, 4, 4, aux
+
+    def fake_run(frames, width, height, cfg, mode, device=None, imu_aux=None):
+        mapper = types.SimpleNamespace(
+            trajectory=[np.eye(4) for _ in frames],
+            lost_flags=[False] * len(frames),
+            icp_escalations=0, zupt_count=0, quat_phase_count=0,
+            baro_correction_m=0.0,
+            _tsdf=types.SimpleNamespace(block_usage=lambda: (10, 1000)))
+        return mapper, [1.0] * len(frames), [0.0] * len(frames)
+
+    monkeypatch.setattr(se, "_load_frames_maybe_imu", fake_load)
+    monkeypatch.setattr(se, "_run", fake_run)
+    return se
+
+
+def test_run_ensemble_threads_quat_interp_and_reports_coverage(monkeypatch):
+    seen = {}
+    se = _fake_loader_and_run(monkeypatch, seen)
+    r = se.run_ensemble("cap.bin", n=2, apply_quat_phase=True)
+    assert seen["quat_interp"] is True and seen["need_imu"] is True
+    assert r["apply_quat_phase"] is True
+    assert r["quat_interp"]["applied"] == 2 and r["quat_interp"]["mode"] == "on"
+    # the human-readable report says what the lever DID, not just that it was on
+    assert "quat interpolation (on): 2/3" in se.format_report(r)
+
+
+def test_run_ensemble_reflected_null_arm_implies_the_lever(monkeypatch):
+    """The wrong-direction null (#155 validation arm) must run the SAME loader
+    path as the real arm, differing only in query direction — otherwise the
+    A/B/null comparison confounds mechanism with direction."""
+    seen = {}
+    se = _fake_loader_and_run(monkeypatch, seen)
+    r = se.run_ensemble("cap.bin", n=2, quat_interp_mode="reflected")
+    assert seen["quat_interp"] == "reflected"
+    assert r["apply_quat_phase"] is True          # forced on for arm parity
+    assert r["quat_interp"]["mode"] == "reflected"
+
+
+def test_run_ensemble_flags_zero_coverage(monkeypatch):
+    """'Lever on but nothing aligned' must be loud: a run with zero usable
+    stream-13 pairs measured nothing and must not read as a treatment arm."""
+    seen = {}
+    se = _fake_loader_and_run(monkeypatch, seen)
+    orig = se._load_frames_maybe_imu
+
+    def zero_cov(path, max_frames=None, need_imu=False, quat_interp=False):
+        frames, w, h, aux = orig(path, max_frames, need_imu, quat_interp)
+        aux.interp_stats = {"mode": "on", "frames": 3, "timed_samples": 0,
+                            "eligible": 0, "applied": 0}
+        return frames, w, h, aux
+
+    monkeypatch.setattr(se, "_load_frames_maybe_imu", zero_cov)
+    r = se.run_ensemble("cap.bin", n=2, apply_quat_phase=True)
+    assert "ZERO frames were aligned" in se.format_report(r)

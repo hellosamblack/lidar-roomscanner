@@ -302,6 +302,28 @@ def test_decode_imu_sync_bad_length():
         decode_imu_sync(b"\x00" * 12)
 
 
+def test_imu_sync_quat_offset_survives_tick_rollover():
+    """The LSM counter wraps every ~26 h. A frame whose latch lands just before the
+    wrap while the quat midpoint lands just after must still report the ~ms lead —
+    plain subtraction reports ~-26 hours for that one frame (#155)."""
+    lsm = 0xFFFFFFFF - 100                       # 100 ticks before the wrap
+    mid = 250                                     # 250 ticks after it -> +351 ticks
+    s = decode_imu_sync(struct.pack("<IIIIHHBB", lsm, 217, 3000, mid, 40, 15, 1, 0))
+    # 351 ticks plus the 10-tick latch back-out, at the nominal tick
+    assert s.quat_offset_us(IMU_RAW_TICK_US) == pytest.approx((351 + 10) * IMU_RAW_TICK_US)
+    # and the mirror case (midpoint before the wrap, latch after) stays negative
+    s2 = decode_imu_sync(struct.pack("<IIIIHHBB", 250, 0, 3000, 0xFFFFFFFF - 100, 40, 15, 1, 0))
+    assert s2.quat_offset_us(IMU_RAW_TICK_US) == pytest.approx(-351 * IMU_RAW_TICK_US)
+
+
+def test_imu_sync_no_quat_is_not_a_timed_sample():
+    """quat_n == 0 (no SFLP sample this drain) must yield None, not an offset of
+    zero — downstream, None is 'no timed quaternion exists', which the #155
+    interpolation path relies on to skip the group."""
+    s = decode_imu_sync(struct.pack("<IIIIHHBB", 1000, 217, 3000, 0, 40, 0, 1, 0))
+    assert s.quat_offset_us(IMU_RAW_TICK_US) is None
+
+
 def test_golden_imu_sync_fixture_matches_decoder():
     golden = (Path(__file__).parent / "fixtures" / "golden_imu_sync.bin").read_bytes()
     assert zlib.crc32(golden[:-4]) == int.from_bytes(golden[-4:], "little")

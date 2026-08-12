@@ -133,11 +133,17 @@ class SlamConfig:
     # with it), so smoothing it collapsed the tripod instability in BUG-067's
     # phase sweep. See mapper._smooth_prior.
     prior_smooth_alpha: float = 0.0
-    # +7.76 ms quat-phase compensation (BUG-031/067): roll the SFLP prior back to
-    # the depth-frame instant using the gyro, from the measured stream-13 lead.
-    # OFF by default -- it changes the rotation prior and wants its own
-    # before/after on a moving capture. Needs stream 11 (gyro) + 13 (IMU_SYNC) in
-    # the frame; a no-op where either is absent. See mapper.step / frames.apply_quat_phase.
+    # Quat-phase alignment (BUG-031/067, mechanism superseded by #155): give each
+    # depth frame the orientation AT its own frame-ready instant. Since #155 the
+    # recorded/offline loader does this by TIMESTAMP INTERPOLATION — SLERP between
+    # the exact-group stream-9 samples bracketing the frame time on the LSM clock
+    # (`_load_frames(quat_interp=...)`) — because the lead is not a constant
+    # (+7.76 ms on the golden capture, +5.13 ms on DebugCapF). The original fixed
+    # gyro rollback (mapper.step / frames.apply_quat_phase) remains only as the
+    # per-frame fallback where interpolation has no bracket. OFF by default -- it
+    # changes the rotation prior and wants its own before/after on a moving
+    # capture (#126 measured the FIXED version worse and bistable on the tripod).
+    # Needs stream 11 + 13 in the capture; a no-op where either is absent.
     apply_quat_phase: bool = False
     # Accelerometer ZUPT (BUG-069): a MAP-REACHING zero-velocity constraint that
     # fires on |a| ~= 1 g, so it works during a pan (unlike the display-only

@@ -12,14 +12,29 @@ import numpy as np
 from ..decoder import StreamDecoder
 from ..flatfield import FlatField
 from ..pipeline import TransformStage
-from ..protocol import (StreamId, FrameType, decode_imu_quat, decode_env,
-                        decode_imu_raw, decode_imu_cal, decode_imu_sync)
+from ..protocol import (StreamId, FrameType, IMU_RAW_TICK_US, decode_imu_quat,
+                        decode_env, decode_imu_raw, decode_imu_cal, decode_imu_sync)
+from ..sensor_time import TimestampedQuaternionBuffer, signed_tick_delta
 from .config import SlamConfig
 from .mapper import Mapper
 from . import metrics
 
+#: Widest stream-9 gap the #155 interpolation will bridge. Beyond ~4 lost frames
+#: a bracket still exists but interpolating across it is low-pass smoothing of
+#: the prior, which BUG-067 showed scores as "improvement" on a tripod regardless
+#: of correctness — exactly the misreading this mechanism must not reintroduce.
+_INTERP_MAX_SPAN_US = 150_000.0
 
-def _load_frames(path, max_frames=None, with_imu=False):
+
+class _ImuAuxList(list):
+    """imu_aux with an `interp_stats` side-channel (#155): still a plain list of
+    (ImuRawBatch|None, quat_offset_us|None) for every existing consumer, plus a
+    dict reporting what the timestamp interpolation actually did — so "flag on
+    but zero usable stream-13 pairs" is visible instead of silently identical."""
+    interp_stats: dict | None = None
+
+
+def _load_frames(path, max_frames=None, with_imu=False, quat_interp=False):
     """Return (frames, width, height) where frames is a list of
     (depth_mm(h,w), reflectance(h,w)|None, confidence(h,w)|None, quat(4),
     pressure_pa|None, t_s). Depth/reflectance/confidence come from
@@ -33,14 +48,37 @@ def _load_frames(path, max_frames=None, with_imu=False):
     accel ZUPT (BUG-069) and the quat-phase lever (BUG-067); it is OPT-IN and off
     by default so the 6-tuple frame shape and 3-value return that every existing
     caller unpacks are unchanged. `quat_offset_us` is None where no stream-13
-    frame preceded (older captures), so those levers degrade to no-ops there."""
+    frame preceded (older captures), so those levers degrade to no-ops there.
+
+    `quat_interp` (#155, requires `with_imu`) replaces the carried-forward quat
+    with one SLERP-interpolated AT the depth frame's own frame-ready instant,
+    from stream-9 samples timestamped by their exact-group stream 13
+    (`quat_mid_ticks`, LSM clock, wrap-safe). Pairing is by exact
+    (seq, t_us) — never seq alone (decoupled mode freezes seq) and never
+    "latest sync". Where interpolation succeeds that frame's imu_aux offset
+    becomes None so Mapper's fixed gyro rollback cannot correct it a second
+    time; where it fails (no bracket, missing/invalid 13, legacy capture) the
+    frame keeps the legacy carried-forward quat AND the legacy offset, so the
+    old mechanism remains that frame's fallback. `quat_interp="reflected"` is a
+    VALIDATION-ONLY null: it queries at the mirror image of the frame time on
+    the far side of the quat midpoint — a deliberately wrong-direction shift of
+    equal magnitude. If that scores as well as the real thing, a metric is
+    rewarding smoothing, not phase correction (BUG-067's trap). Never ship it.
+    Interpolation coverage is reported on the returned list's `interp_stats`."""
     dec = StreamDecoder()
     stage = TransformStage(outputs=("depth", "reflectance", "confidence"),
                            flatfield=FlatField.load_configured())
     with open(path, "rb") as f:
         data = f.read()
+    interp = bool(quat_interp) and with_imu
+    mode = "reflected" if quat_interp == "reflected" else ("on" if interp else "off")
     frames = []
-    imu_aux = []
+    imu_aux = _ImuAuxList()
+    frame_keys = []                  # per depth frame: its (seq, t_us) group key
+    quats_by_key = {}                # (seq, t_us) -> stream-9 quat of that exact group
+    syncs_by_key = {}                # (seq, t_us) -> valid ImuSync of that exact group
+    sample_order = []                # keys in wire order (13 is last in its group)
+    stop_key = None                  # set once max_frames is reached (interp only)
     last_quat = (1.0, 0.0, 0.0, 0.0)
     last_pa = None
     last_raw = None
@@ -53,6 +91,8 @@ def _load_frames(path, max_frames=None, with_imu=False):
             continue
         if h.stream_id == StreamId.IMU_QUAT:
             last_quat = decode_imu_quat(frame.payload)
+            if interp:
+                quats_by_key.setdefault((h.seq, h.t_us), last_quat)
             continue
         if h.stream_id == StreamId.ENV:
             last_pa = decode_env(frame.payload)[0]
@@ -72,9 +112,23 @@ def _load_frames(path, max_frames=None, with_imu=False):
             continue
         if with_imu and h.stream_id == StreamId.IMU_SYNC:
             try:
-                last_sync = decode_imu_sync(frame.payload)
+                sync = decode_imu_sync(frame.payload)
             except Exception:
-                pass
+                continue
+            last_sync = sync
+            if interp and sync.valid and sync.quat_n and sync.quat_mid_ticks:
+                key = (h.seq, h.t_us)
+                if key not in syncs_by_key:
+                    syncs_by_key[key] = sync
+                    sample_order.append(key)
+            continue
+        if stop_key is not None:
+            # max_frames reached: the sensor handlers above keep draining the
+            # final depth frame's own trailing stream 9/13 (they arrive AFTER
+            # the depth payload in the group); the first transform-bound frame
+            # of a different group means that group is complete.
+            if (h.seq, h.t_us) != stop_key:
+                break
             continue
         out = stage.feed(frame)
         if out is None:
@@ -92,25 +146,87 @@ def _load_frames(path, max_frames=None, with_imu=False):
             confidence.astype(np.float32) if confidence is not None else None,
             last_quat, last_pa, header.t_us / 1e6,
         ))
+        frame_keys.append((header.seq, header.t_us))
         if with_imu:
             tick = last_tick_us if last_tick_us is not None else 21.7
             offset = last_sync.quat_offset_us(tick) if last_sync is not None else None
             imu_aux.append((last_raw, offset))
         if max_frames and len(frames) >= max_frames:
-            break
+            if not interp:
+                break
+            stop_key = (header.seq, header.t_us)
+    if interp:
+        imu_aux.interp_stats = _align_quats_to_frame_time(
+            frames, frame_keys, imu_aux, quats_by_key, syncs_by_key, sample_order,
+            last_tick_us if last_tick_us is not None else IMU_RAW_TICK_US, mode)
     if with_imu:
         return frames, width, height, imu_aux
     return frames, width, height
 
 
-def _load_frames_maybe_imu(path, max_frames=None, need_imu=False):
+def _align_quats_to_frame_time(frames, frame_keys, imu_aux, quats_by_key,
+                               syncs_by_key, sample_order, tick_us, mode):
+    """Post-pass of `_load_frames` (#155): walk the exact-group timed quaternion
+    samples through a `TimestampedQuaternionBuffer` in wire order and, for every
+    depth frame whose own group carried a valid stream 13, query the orientation
+    at that frame's frame-ready instant. Mutates `frames`/`imu_aux` in place;
+    returns the coverage stats dict.
+
+    A post-pass rather than in-loop state because the group's stream 9/13 arrive
+    AFTER its depth payload: at depth time the carried-forward quat belongs to
+    the PREVIOUS group. The frame-ready instant sits ~5-8 ms BEFORE the paired
+    quat midpoint (the lead BUG-031 measured), so frame N's target is bracketed
+    by groups N-1 and N — queries and samples are both monotone, one sweep."""
+    samples = [(syncs_by_key[k].quat_mid_ticks, quats_by_key[k])
+               for k in sample_order if k in quats_by_key]
+    stats = {"mode": mode, "frames": len(frames), "timed_samples": len(samples),
+             "eligible": 0, "applied": 0}
+    buf = TimestampedQuaternionBuffer(
+        capacity=8, max_span_ticks=_INTERP_MAX_SPAN_US / tick_us)
+    si = 0
+    last_added = None
+    for i, key in enumerate(frame_keys):
+        sync = syncs_by_key.get(key)
+        if sync is None:
+            continue
+        stats["eligible"] += 1
+        target = sync.frame_ready_ticks(tick_us)
+        if mode == "reflected":
+            target = target + 2.0 * signed_tick_delta(target, sync.quat_mid_ticks)
+        while si < len(samples) and (last_added is None
+                                     or signed_tick_delta(last_added, target) > 0.0):
+            if buf.add(samples[si][0], samples[si][1]):
+                last_added = samples[si][0]
+            si += 1
+        quat = buf.at(target)
+        if quat is None:
+            continue
+        f = frames[i]
+        frames[i] = (f[0], f[1], f[2], quat, f[4], f[5])
+        if i < len(imu_aux):
+            imu_aux[i] = (imu_aux[i][0], None)
+        stats["applied"] += 1
+    return stats
+
+
+def _load_frames_maybe_imu(path, max_frames=None, need_imu=False, quat_interp=False):
     """`_load_frames`, returning a 4th `imu_aux` value, tolerant of a caller (or
     a test double) that hands back only the legacy 3-tuple. Centralises the
     "load the raw IMU only when a lever needs it" choice for the CLI, the
     ensemble, and Detailed, so those three cannot drift. Returns
-    (frames, width, height, imu_aux|None)."""
-    loaded = _load_frames(path, max_frames, with_imu=True) if need_imu \
-        else _load_frames(path, max_frames)
+    (frames, width, height, imu_aux|None). `quat_interp` selects #155's
+    timestamp alignment (see `_load_frames`); it implies nothing unless
+    `need_imu` is also set by the lever that wants it."""
+    if need_imu:
+        # Pass quat_interp only when the lever is actually on: legacy test
+        # doubles patch `_load_frames` without the #155 kwarg and must keep
+        # working for the (default-off) paths they exercise.
+        kwargs = {"with_imu": True}
+        if quat_interp:
+            kwargs["quat_interp"] = quat_interp
+        loaded = _load_frames(path, max_frames, **kwargs)
+    else:
+        loaded = _load_frames(path, max_frames)
     if len(loaded) == 4:
         return loaded
     frames, width, height = loaded
@@ -217,12 +333,19 @@ def main(argv=None) -> int:
     # by default), so the CLI's ZUPT is not a silent no-op while Live/Detailed use it.
     need_imu = bool(cfg.zupt_enabled or cfg.apply_quat_phase)
     frames, width, height, imu_aux = _load_frames_maybe_imu(
-        args.capture, args.max_frames, need_imu)
+        args.capture, args.max_frames, need_imu, quat_interp=cfg.apply_quat_phase)
     if not frames:
         print("[slam] no depth frames decoded from capture", file=sys.stderr)
         return 1
     print(f"[slam] {len(frames)} frames, {width}x{height}, "
           f"voxel {cfg.voxel_size * 1000:g} mm, capacity {cfg.block_count} blocks")
+    interp_stats = getattr(imu_aux, "interp_stats", None)
+    if interp_stats is not None:
+        # #155: say what the timestamp alignment actually did — a lever that is
+        # on but found zero usable stream-13 pairs must not read as applied.
+        print(f"[slam] quat interpolation ({interp_stats['mode']}): "
+              f"{interp_stats['applied']}/{interp_stats['eligible']} frames aligned, "
+              f"{interp_stats['timed_samples']} timed samples")
 
     modes = ["translation", "6dof"] if args.compare_modes else [args.icp_mode or cfg.icp_mode]
     results = {}
@@ -233,7 +356,7 @@ def main(argv=None) -> int:
               # Reported, not just applied: a run that used a different ICP
               # index device is not comparable with one that did not, and the
               # JSON is what `slam_rerender` and any later A/B reads.
-              "icp_device": cfg.icp_device, "modes": {}}
+              "icp_device": cfg.icp_device, "quat_interp": interp_stats, "modes": {}}
     for mode in modes:
         mapper, timings, ts = _run(frames, width, height, cfg, mode, device=args.device,
                                    imu_aux=imu_aux)

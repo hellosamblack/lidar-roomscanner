@@ -6,7 +6,11 @@ from __future__ import annotations
 
 import numpy as np
 
+from ..sensor_time import slerp
 from ..sensors import quat_mul, quat_to_matrix, T_CV_TO_BODY, T_WORLD_TO_CV
+
+__all__ = ["apply_quat_phase", "slerp", "prior_rotation", "predict_pose",
+           "world_up", "baro_height_m"]
 
 
 def apply_quat_phase(quat, gyro_dps_body, offset_us: float):
@@ -39,26 +43,8 @@ def apply_quat_phase(quat, gyro_dps_body, offset_us: float):
     return quat_mul(tuple(float(c) for c in quat), dq_conj)
 
 
-def slerp(a, b, t: float) -> tuple[float, float, float, float]:
-    """Spherical linear interpolation between unit quaternions [w,x,y,z], from
-    `a` at t=0 to `b` at t=1. Falls back to a normalized lerp when the two are
-    nearly parallel (numerically safer, and the regime the SLAM prior smoother
-    lives in). Hemisphere-corrects so it takes the short arc."""
-    a = np.asarray(a, dtype=np.float64)
-    b = np.asarray(b, dtype=np.float64)
-    dot = float(np.dot(a, b))
-    if dot < 0.0:
-        b = -b
-        dot = -dot
-    if dot > 0.9995:
-        out = a + t * (b - a)
-    else:
-        theta = np.arccos(max(-1.0, min(1.0, dot)))
-        s = np.sin(theta)
-        out = (np.sin((1.0 - t) * theta) / s) * a + (np.sin(t * theta) / s) * b
-    n = np.linalg.norm(out)
-    out = out / n if n > 1e-12 else np.array([1.0, 0.0, 0.0, 0.0])
-    return (float(out[0]), float(out[1]), float(out[2]), float(out[3]))
+# slerp lives in roomscan.sensor_time since #155 (shared with the timestamped
+# quaternion buffer without pulling Open3D); re-exported above for existing callers.
 
 
 def prior_rotation(quat: tuple[float, float, float, float]) -> np.ndarray:
