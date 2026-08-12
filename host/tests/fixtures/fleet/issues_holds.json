@@ -1,0 +1,53 @@
+[
+  {
+    "number": 9060,
+    "title": "Multi-second whole-group frame loss on the multi-room captures",
+    "labels": [
+      {"name": "bug"},
+      {"name": "area/host-transport"},
+      {"name": "priority/now"},
+      {"name": "needs/operator"},
+      {"name": "needs/capture"},
+      {"name": "status/fix-unverified"}
+    ],
+    "body": "Needs a fresh multi-room capture on the rig, run by the owner, to verify the fix -- see host/src/roomscan/sources.py.",
+    "comments": [],
+    "blockedBy": {"nodes": [], "totalCount": 0}
+  },
+  {
+    "number": 9057,
+    "title": "Mag-sweep coverage binning frame drifts across a live sweep",
+    "labels": [
+      {"name": "bug"},
+      {"name": "priority/next"},
+      {"name": "needs/operator"},
+      {"name": "needs/eyes"}
+    ],
+    "body": "Needs the owner to eyeball the plotted coverage map and confirm it visually before this can close.",
+    "comments": [],
+    "blockedBy": {"nodes": [], "totalCount": 0}
+  },
+  {
+    "number": 9158,
+    "title": "RTAB-Map export comparison for coordinate-convention validation",
+    "labels": [
+      {"name": "priority/next"},
+      {"name": "area/host-slam"}
+    ],
+    "body": "**Original title:** validate the SLAM axis convention against an independent RTAB-Map export\n\n### Root cause\n\nThe coordinate convention used by the mapper has never been checked against an independent\nreconstruction, only against itself.\n\n## Implementation plan\n\n1. Load the paired RTAB-Map export for the same capture.\n2. Compare its trajectory against `host/src/roomscan/slam/mapper.py`'s output.\n3. Reconcile the axis convention if they disagree.\n\nFiles in scope:\n- `host/src/roomscan/slam/mapper.py`\n- `host/tests/test_slam_mapper.py`\n\nThis is written directly into the issue body -- there is no comment thread on this issue yet.\n",
+    "comments": [],
+    "blockedBy": {"nodes": [], "totalCount": 0}
+  },
+  {
+    "number": 9099,
+    "title": "Frame-loss guard needs a bounded retry, not a silent drop",
+    "labels": [
+      {"name": "bug"},
+      {"name": "priority/now"},
+      {"name": "area/host-transport"}
+    ],
+    "body": "No operator hold on this one -- see `host/src/roomscan/sources.py` for the loss handling.",
+    "comments": [],
+    "blockedBy": {"nodes": [], "totalCount": 0}
+  }
+]

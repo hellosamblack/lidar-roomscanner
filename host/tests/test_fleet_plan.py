@@ -37,6 +37,15 @@ def commits():
 
 
 @pytest.fixture(scope="module")
+def holds_issues():
+    """Synthetic issues modelling the 2026-08-12 `fleet-20260812-1832` incident (#177):
+    two issues already parked on the owner in `operator_queue()`, one scored for
+    phantom prior work off a plan-shaped body with zero comments, and one ordinary
+    actionable issue as a control."""
+    return json.loads((FIXTURES / "issues_holds.json").read_text())
+
+
+@pytest.fixture(scope="module")
 def footprints(issues, tracked, commits):
     """number -> (seed, confidence, expanded footprint), computed once."""
     coedit = fp.build_coedit_graph(commits)
@@ -359,6 +368,110 @@ def test_no_selected_issue_carries_an_excluding_label(plan):
     for item in plan["batch"]:
         labels = set(item["labels"])
         assert not (labels & {"status/in-progress", "status/blocked", "data-collection"})
+
+
+# --------------------------------------------------------------------------------
+# #177 defect 1: `needs/operator` -- already parked on the owner in operator_queue()
+# --------------------------------------------------------------------------------
+
+def test_needs_operator_names_the_hold_with_subtype():
+    issue = {"number": 1, "title": "t",
+             "labels": [{"name": "needs/operator"}, {"name": "needs/capture"}]}
+    reason = fp.excluded_reason(issue)
+    assert reason is not None
+    assert "needs/operator" in reason
+    assert "capture" in reason
+
+
+def test_needs_operator_names_the_hold_without_a_subtype():
+    """A held issue whose subtype label is missing must still be named, not silently
+    dropped -- `operator_queue()`'s own `problems` list flags exactly this case."""
+    issue = {"number": 1, "title": "t", "labels": [{"name": "needs/operator"}]}
+    reason = fp.excluded_reason(issue)
+    assert reason is not None and "needs/operator" in reason
+
+
+def test_needs_operator_issue_never_enters_the_batch_or_deferred_unnamed(holds_issues, tracked, commits):
+    """The regression test for #177 defect 1. On the real 2026-08-12 run, #60 (score 105,
+    the top pick) and #57 (85) both carried `needs/operator` and were already sitting in
+    `operator_queue()` -- 2 of the 3 selected issues, out of 9 held repo-wide. A held issue
+    must never reach `batch`, and wherever it is reported the reason must name the hold."""
+    got = fp.plan_fleet(holds_issues, tracked, commits, max_agents=3, generated_at="X")
+    held = {i["number"] for i in holds_issues if "needs/operator" in fp.label_names(i)}
+    assert held == {9060, 9057}, "fixture drifted: expected exactly the two held issues"
+
+    batch_numbers = {i["number"] for i in got["batch"]}
+    assert not (held & batch_numbers), "a needs/operator issue reached the batch"
+
+    excluded = {e["number"]: e["reason"] for e in got["excluded"]}
+    deferred = {d["number"]: d["reason"] for d in got["deferred"]}
+    for n in held:
+        reported = excluded.get(n) or deferred.get(n)
+        assert reported is not None, f"#{n} vanished instead of being reported"
+        assert "needs/operator" in reported, (
+            f"#{n} is held but its reason ({reported!r}) does not name the hold")
+
+
+def test_a_held_issues_high_score_does_not_rescue_it(holds_issues, tracked, commits):
+    """#9060 mirrors #60: priority/now + bug scores 105, the highest in the fixture --
+    high enough that a planner blind to `needs/operator` would put it top of the batch."""
+    got = fp.plan_fleet(holds_issues, tracked, commits, max_agents=3, generated_at="X")
+    candidate_scores = {c["number"]: c["score"] for c in
+                        [{"number": i["number"],
+                          "score": fp.score_issue(i, {})[0]} for i in holds_issues]}
+    assert candidate_scores[9060] == max(candidate_scores.values()), (
+        "fixture drifted: #9060 must still be the highest scorer for this test to prove anything")
+    assert 9060 not in {i["number"] for i in got["batch"]}
+
+
+def test_actionable_issue_without_a_hold_is_not_excluded_via_needs_operator(holds_issues, tracked, commits):
+    """Control: an ordinary actionable issue with no `needs/operator` label must not be
+    swept up by the new check."""
+    got = fp.plan_fleet(holds_issues, tracked, commits, max_agents=3, generated_at="X")
+    reasons_for_9099 = [r for e in got["excluded"] + got["deferred"]
+                        if e.get("number") == 9099 for r in [e["reason"]]]
+    for r in reasons_for_9099:
+        assert "needs/operator" not in r
+
+
+# --------------------------------------------------------------------------------
+# #177 defect 2: prior-work credit must come from an actual comment, never the body
+# --------------------------------------------------------------------------------
+
+def test_prior_work_never_credits_a_plan_shaped_body_with_no_comments():
+    """The regression test for #177 defect 2. On the real run, #158 was scored 'prior
+    work x2 (implementation plan comment)' while carrying zero comments -- prior work
+    doubles the score, so this was a phantom signal. `has_prior_work` must only ever
+    read `issue["comments"]`; a plan-shaped body must never be credited as a comment."""
+    issue = {
+        "number": 1, "title": "t", "labels": [],
+        "body": ("### Root cause\n\nsomething is wrong.\n\n## Implementation plan\n\n"
+                 "1. do the thing.\n\nFiles in scope:\n- `a.py`\n\n**Session start** — now"),
+        "comments": [],
+    }
+    assert fp.has_prior_work(issue) == (False, [])
+    score, why = fp.score_issue(issue, {})
+    assert not any("prior work" in w for w in why), why
+
+
+def test_holds_fixture_plan_shaped_issue_gets_no_comment_prior_work_credit(holds_issues):
+    """#9158 mirrors #158: a body with headed sections and a `Files in scope:` list,
+    posted straight into the issue body, with no comment thread at all."""
+    issue = next(i for i in holds_issues if i["number"] == 9158)
+    assert issue["comments"] == [], "fixture drifted: #9158 must have zero comments"
+    assert fp.PLAN_HEADING_RE.search(issue["body"]), (
+        "fixture drifted: #9158's body must still look plan-shaped")
+    assert fp.has_prior_work(issue) == (False, [])
+    _, why = fp.score_issue(issue, {})
+    assert not any("prior work" in w for w in why), why
+
+
+def test_zero_comment_issues_in_the_holds_fixture_never_show_comment_evidence(holds_issues):
+    """Property check across the whole fixture: no issue with an empty `comments` list
+    can ever produce prior-work evidence, regardless of what its body contains."""
+    for issue in holds_issues:
+        if issue.get("comments") == []:
+            assert fp.has_prior_work(issue) == (False, []), issue["number"]
 
 
 def test_selection_is_deterministic(issues, tracked, commits):

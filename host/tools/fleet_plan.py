@@ -106,6 +106,17 @@ AREA_GLOBS_EXCLUDED = {
     "area/environment",  # Operating-environment and procedure work
 }
 
+#: The `operator-request` skill's umbrella label: an issue already parked on the owner
+#: (waiting on a physical capture, a hardware change, or a decision) and sitting in
+#: `operator_queue()`. Scoring it as if it were actionable re-derives a veto that has
+#: already been decided and written down (#177: on 2026-08-12, 2 of a wave's 3 picks were
+#: already held, out of 9 held repo-wide) -- so it is excluded outright, the same as
+#: `status/blocked`, rather than merely deprioritised. `operator_queue()` is the source
+#: of truth for what is held; this module never calls it, it only reads the label gh
+#: already returned with the issue.
+NEEDS_OPERATOR_LABEL = "needs/operator"
+OPERATOR_SUBTYPES = ("capture", "network", "hardware", "eyes", "decision")
+
 PRIORITY_SCORE = {"priority/now": 100.0, "priority/next": 40.0, "priority/later": 10.0}
 UNPRIORITISED_SCORE = 25.0  # between next and later: unlabelled is not the same as parked
 
@@ -398,7 +409,16 @@ def resources_for(issue: dict, footprint: dict[str, str]) -> set[str]:
 
 
 def has_prior_work(issue: dict) -> tuple[bool, list[str]]:
-    """Whether someone has already done real thinking on this issue, and the evidence."""
+    """Whether someone has already done real thinking on this issue, and the evidence.
+
+    Deliberately reads only `issue["comments"]`, never `issue["body"]` (#177: an issue
+    with zero comments must never be credited "implementation plan comment" off a
+    plan-shaped body -- prior work doubles the score, so a phantom match is a phantom
+    2x). Every evidence string below says "comment" because that is the only source
+    this function is allowed to cite; if a future change wants a plan written straight
+    into the body to count too, it must add that as its own tier with its own wording,
+    not fold it into these strings.
+    """
     evidence = []
     for c in issue.get("comments") or []:
         cb = c.get("body") or ""
@@ -498,6 +518,10 @@ def worktree_name(issue: dict) -> str:
 
 def excluded_reason(issue: dict) -> str | None:
     labels = label_names(issue)
+    if NEEDS_OPERATOR_LABEL in labels:
+        subtype = next((s for s in OPERATOR_SUBTYPES if f"needs/{s}" in labels), None)
+        detail = f" ({subtype})" if subtype else ""
+        return f"needs/operator{detail}: already parked on the owner in operator_queue()"
     if "status/in-progress" in labels:
         return "claimed by another session (status/in-progress)"
     if "status/blocked" in labels:
