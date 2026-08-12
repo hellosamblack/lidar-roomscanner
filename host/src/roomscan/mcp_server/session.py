@@ -237,22 +237,30 @@ class CdpSession:
         raise RuntimeError(f"no CDP page target on port {self.port} within {timeout_s}s")
 
     async def start(self, width: int = 1600, height: int = 1000) -> None:
-        if self._ws is not None:
-            return
-        import websockets
+        """Ensure the browser is up, then (re)apply the requested viewport size.
 
-        if self._proc is None or self._proc.poll() is not None:
-            self._profile = tempfile.mkdtemp(prefix="roomscan-mcp-chrome-")
-            self._proc = subprocess.Popen(
-                [self._find_chrome(), *CHROME_FLAGS,
-                 f"--remote-debugging-port={self.port}",
-                 f"--user-data-dir={self._profile}", "about:blank"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        ws_url = await asyncio.to_thread(self._cdp_target)
-        self._ws = await websockets.connect(ws_url, max_size=None)
-        await self.cmd("Page.enable")
-        await self.cmd("Runtime.enable")
-        await self._disable_http_cache()
+        The browser is a singleton kept warm across tool calls (module docstring),
+        so `width`/`height` must be re-applied on every call, not only the first --
+        an early version returned immediately once `self._ws` existed, which made
+        every call after the first one silently keep whatever size the browser
+        launched with (issue #168: `width`/`height` read back unchanged after two
+        different resize requests).
+        """
+        if self._ws is None:
+            import websockets
+
+            if self._proc is None or self._proc.poll() is not None:
+                self._profile = tempfile.mkdtemp(prefix="roomscan-mcp-chrome-")
+                self._proc = subprocess.Popen(
+                    [self._find_chrome(), *CHROME_FLAGS,
+                     f"--remote-debugging-port={self.port}",
+                     f"--user-data-dir={self._profile}", "about:blank"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            ws_url = await asyncio.to_thread(self._cdp_target)
+            self._ws = await websockets.connect(ws_url, max_size=None)
+            await self.cmd("Page.enable")
+            await self.cmd("Runtime.enable")
+            await self._disable_http_cache()
         await self.cmd("Emulation.setDeviceMetricsOverride",
                        {"width": width, "height": height,
                         "deviceScaleFactor": 1, "mobile": False})
@@ -371,23 +379,31 @@ class PlaywrightSession:
         self.url: str | None = None
 
     async def start(self, width: int = 1600, height: int = 1000) -> None:
-        if self._page is not None:
-            return
-        from playwright.async_api import async_playwright
+        """Ensure the page is up, then (re)apply the requested viewport size.
 
-        self._pw = await async_playwright().start()
-        self._browser = await self._pw.chromium.launch(
-            channel="chrome", args=[f for f in CHROME_FLAGS if f != "--headless=new"])
-        self._page = await self._browser.new_page(
-            viewport={"width": width, "height": height})
-        # Same reason as `CdpSession._disable_http_cache` -- this loop looks at
-        # files edited seconds ago, so a cache hit is a silent stale read.
-        try:
-            cdp = await self._page.context.new_cdp_session(self._page)
-            await cdp.send("Network.enable")
-            await cdp.send("Network.setCacheDisabled", {"cacheDisabled": True})
-        except Exception:
-            pass
+        Same fix as `CdpSession.start` (issue #168): the browser/page is a
+        singleton kept warm across tool calls, so an early-return once `self._page`
+        existed made `width`/`height` inert after the first call. `set_viewport_size`
+        is Playwright's documented way to resize an existing page's viewport.
+        """
+        if self._page is None:
+            from playwright.async_api import async_playwright
+
+            self._pw = await async_playwright().start()
+            self._browser = await self._pw.chromium.launch(
+                channel="chrome", args=[f for f in CHROME_FLAGS if f != "--headless=new"])
+            self._page = await self._browser.new_page(
+                viewport={"width": width, "height": height})
+            # Same reason as `CdpSession._disable_http_cache` -- this loop looks at
+            # files edited seconds ago, so a cache hit is a silent stale read.
+            try:
+                cdp = await self._page.context.new_cdp_session(self._page)
+                await cdp.send("Network.enable")
+                await cdp.send("Network.setCacheDisabled", {"cacheDisabled": True})
+            except Exception:
+                pass
+        else:
+            await self._page.set_viewport_size({"width": width, "height": height})
 
     async def stop(self) -> None:
         for closer in (getattr(self._browser, "close", None),

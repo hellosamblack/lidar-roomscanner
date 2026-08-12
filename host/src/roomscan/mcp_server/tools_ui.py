@@ -20,6 +20,11 @@ async def ui_screenshot(url: str = "", settle: float = 0.0, width: int = 1600,
                         height: int = 1000, renavigate: bool = False) -> list:
     """Screenshot the web UI and return the image plus the on-page event-log tail.
 
+    `width`/`height` set the actual browser viewport (`window.innerWidth/Height`),
+    not just the returned image size -- every call resizes it, even without
+    `renavigate`, so back-to-back calls at different sizes each take effect. Use
+    this for the narrow-viewport checks in docs/web-ui-testing.md.
+
     The browser stays open between calls, so by default this shoots the page as it
     already stands -- pass `renavigate=True` (with a `settle`, ~8 s for a cold load)
     to reload first. The event-log tail is the fastest signal for a load failure.

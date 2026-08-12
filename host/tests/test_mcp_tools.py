@@ -348,6 +348,142 @@ def test_cdp_cache_disable_is_non_fatal_on_an_old_target():
     asyncio.run(s._disable_http_cache())  # must not raise
 
 
+# --- ui_screenshot viewport resize (#168) ------------------------------------
+#
+# `ui_screenshot` calls `browser.start(width=..., height=...)` on EVERY call, not
+# just the first (see tools_ui.py). Both browser backends used to return early
+# once already launched, so a second call at a different size left the actual
+# viewport (and `window.innerWidth/Height`) at whatever the browser launched
+# with -- `width`/`height` were silently inert past the first screenshot. These
+# assert the resize command actually reaches the driver on a REPEAT call, which
+# is exactly the call the bug made a no-op; reverting the `session.py` fix turns
+# both red (see PR description for the exact failure).
+
+def test_cdp_session_reapplies_viewport_on_a_repeat_start_call():
+    import asyncio
+
+    from roomscan.mcp_server.session import CdpSession
+
+    sent: list[tuple[str, dict | None]] = []
+    s = CdpSession()
+
+    async def fake_cmd(method, params=None):
+        sent.append((method, params))
+        return {}
+
+    s.cmd = fake_cmd                      # type: ignore[method-assign]
+    s._ws = object()                      # simulate an already-launched browser
+
+    asyncio.run(s.start(width=820, height=700))
+
+    assert ("Emulation.setDeviceMetricsOverride",
+            {"width": 820, "height": 700, "deviceScaleFactor": 1, "mobile": False}) in sent, (
+        "start() on an already-running CdpSession must still push the requested "
+        f"viewport size; commands sent were {sent!r}")
+
+
+def test_cdp_session_resizes_to_each_of_two_different_requests():
+    """The exact reproduction from the issue: two different sizes, back to back."""
+    import asyncio
+
+    from roomscan.mcp_server.session import CdpSession
+
+    sizes: list[tuple[int, int]] = []
+    s = CdpSession()
+
+    async def fake_cmd(method, params=None):
+        if method == "Emulation.setDeviceMetricsOverride":
+            sizes.append((params["width"], params["height"]))
+        return {}
+
+    s.cmd = fake_cmd                      # type: ignore[method-assign]
+    s._ws = object()
+
+    asyncio.run(s.start(width=1100, height=560))
+    asyncio.run(s.start(width=820, height=700))
+
+    assert sizes == [(1100, 560), (820, 700)], (
+        "each start() call must resize to ITS OWN request, not repeat the first")
+
+
+def test_playwright_session_reapplies_viewport_on_a_repeat_start_call():
+    import asyncio
+
+    from roomscan.mcp_server.session import PlaywrightSession
+
+    calls: list[dict] = []
+    s = PlaywrightSession()
+
+    class _FakePage:
+        async def set_viewport_size(self, size):
+            calls.append(size)
+
+    s._page = _FakePage()                 # simulate an already-launched page
+
+    asyncio.run(s.start(width=1100, height=560))
+
+    assert calls == [{"width": 1100, "height": 560}], (
+        "start() on an already-running PlaywrightSession must call "
+        f"set_viewport_size with the requested size; got {calls!r}")
+
+
+def test_web_ui_shot_cli_sends_the_device_metrics_override_before_navigate(tmp_path):
+    """`host/tools/web_ui_shot.py` launches a fresh Chrome per invocation, so it
+    does not have the repeat-call bug above -- but the issue explicitly asks
+    whether `height` reaches the raw-CDP fallback there too. It does: assert the
+    CDP command sequence carries both dimensions and precedes the navigate.
+    """
+    import argparse
+    import asyncio
+    import base64
+    import json as _json
+
+    from tools import web_ui_shot
+
+    class _FakeCdpWs:
+        def __init__(self):
+            self.sent: list[dict] = []
+
+        async def send(self, msg):
+            self.sent.append(_json.loads(msg))
+
+        async def recv(self):
+            last = self.sent[-1]
+            result: dict = {}
+            if last.get("method") == "Page.captureScreenshot":
+                result = {"data": base64.b64encode(b"fake-png-bytes").decode()}
+            return _json.dumps({"id": last["id"], "result": result})
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    fake_ws = _FakeCdpWs()
+
+    def fake_connect(url, max_size=None):
+        return fake_ws  # used as `async with websockets.connect(...)`, not awaited
+
+    orig_connect = web_ui_shot.websockets.connect
+    web_ui_shot.websockets.connect = fake_connect  # type: ignore[assignment]
+    try:
+        args = argparse.Namespace(url="http://localhost:8000/x", out=str(tmp_path / "shot.png"),
+                                  width=1100, height=560, settle=0.0)
+        asyncio.run(web_ui_shot._run("ws://fake", args, []))
+    finally:
+        web_ui_shot.websockets.connect = orig_connect
+
+    methods = [m.get("method") for m in fake_ws.sent]
+    override = next(m for m in fake_ws.sent
+                    if m.get("method") == "Emulation.setDeviceMetricsOverride")
+    assert override["params"] == {"width": 1100, "height": 560,
+                                  "deviceScaleFactor": 1, "mobile": False}
+    assert methods.index("Emulation.setDeviceMetricsOverride") < methods.index("Page.navigate"), (
+        "the viewport must be sized before navigation, or the first paint happens "
+        "at the wrong size")
+
+
 # --- RigSession /ws-mesh (BUG-061 A6) ----------------------------------------
 
 class _FakeMeshWs:
