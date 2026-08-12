@@ -79,6 +79,22 @@ exploration slot for an issue with no discoverable footprint. What it hands to *
 - `suggested_model` — advisory. `orchestrator-only` means firmware or transform work: it needs the
   rig, and its error paths spin forever instead of returning, so a worker cannot recover unattended.
 
+**Read the body of every issue you are about to claim. A high score is not actionability.** The
+planner ranks on labels, prior work and footprint — it cannot see a sentence. On 2026-08-12 two of
+the three top-ranked issues were un-workable for reasons only their prose states: #60 (scored 105,
+`priority/now`, handed the exploration slot twice) names **owner action** as its next step — a
+physical experiment flexing the Ethernet patch cable to discriminate link-bounce from bridge roaming
+scans from a firmware TX-pacer stall — and #84 came back `orchestrator-only`. Treat
+`suggested_model: orchestrator-only` as a **veto, not advice**: it means firmware or transform work
+that needs the rig, whose error paths spin forever instead of returning. Veto by hand, say why, and
+leave the issue unclaimed rather than half-claimed.
+
+Where the planner reports a soft conflict, **assign the contested file exclusively** instead of
+hoping. Name it in both spawn prompts — "X owns `foo.py`; you stop and report rather than edit it" —
+and in the claim comments. Cheap, and it converts a gamble into a rule. Note the footprint model
+does not see **shared test files**: two workers appending to the same `test_*.py` is common and only
+shows up at the second one's rebase.
+
 Model tiers: **Haiku 4.5** for mechanical work (a declared footprint of ≤3 files, doc-shaped or
 test-shaped changes, grep-checkable rules); **Sonnet 5** for ordinary implementation; **you (Opus)**
 for orchestration and the review gate. Do not put a cheap tier on SLAM numerics — a wrong fix there
@@ -210,6 +226,24 @@ other sessions are using, and both destroy the per-commit `Refs #NNN` attributio
 
 Re-verify before each merge: another session can land two commits mid-wave, so what was a
 fast-forward when you planned it may have diverged.
+
+## Step 8.5 — The verifications only you can run
+
+Workers call no MCP tools and drive no browser, so every issue that needs the rig, the GPU or the
+one shared browser arrives with that row in `blocked_on`. Run those yourself after the merge — and
+before you do, check what the tool you are about to verify with is actually running:
+
+- **A fix TO the MCP layer cannot be verified THROUGH the MCP layer.** `roomscan-mcp` is long-lived
+  and pins the modules it booted with, so after landing a `tools_*.py` / `session.py` fix, calling
+  that same tool executes the *pre-fix* code and reads as the fix not working. Restarting
+  `roomscan-web` does not help — different process. **Drive the merged module in a fresh `python`
+  process instead** (that is how #168's viewport fix was confirmed: three requested sizes, three
+  exact `innerWidth`/`innerHeight` matches). If the check also needs the device *through* the stale
+  server, you cannot do it at all — say so on the issue rather than assuming, as #171 did.
+- **Restart `roomscan-web` before any browser check**, or you are testing the code it started with.
+  Confirm the restart took by looking for a field the new code adds, not by the process being up.
+- Prefer a check whose failure is visible: for #101 the proof was the viewport empty and Device FPS
+  `-` *while the event log showed the device still emitting*, then data returning on capture load.
 
 ## Step 9 — Close out once, at the end
 
