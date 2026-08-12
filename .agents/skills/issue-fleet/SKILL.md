@@ -184,6 +184,14 @@ and fix that before merging anything. Then run the `code-review` skill inline on
 findings back to the **same** worker, which still holds the context; spawn a fresh reviewer only for
 diffs over roughly 800 lines, to protect your own context.
 
+Read the diff against **the issue's plan**, not just against itself. The failure mode a clean diff
+cannot show you is a step that was never done: plans here gate steps on a condition (*"if the
+existing test harness makes it cheap"*), and a worker that skips one tends to omit it from the
+report entirely rather than decline it. Check each conditional step yourself — the condition is
+often cheaper to evaluate than the worker judged. Also confirm `git stash list` is empty: `refs/stash`
+is shared across every worktree of the clone, so a worker that stashes to prove a regression and dies
+mid-proof leaves it on the owner's shared checkout.
+
 ## Step 8 — Land serially, largest footprint first
 
 ```bash
@@ -243,3 +251,5 @@ One full round trip, one Haiku worker, on this repo:
 - `main`'s HEAD moved during a wave and you did not stop.
 - A batch where every issue has prior work — the cold tail is starving; check the exploration slot
   actually fired.
+- A worker report that is **silent** about a conditional step of its issue's plan.
+- A non-empty `git stash list` at the review gate.

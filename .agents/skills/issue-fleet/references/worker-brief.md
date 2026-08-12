@@ -64,6 +64,14 @@ If you need a browser check, say so in `blocked_on` and stop; the orchestrator h
 
 End with exactly this structure. The orchestrator parses it; prose around it is fine, omissions are not.
 
+**Give an explicit verdict on every conditional step of the plan you were given.** Issue plans here
+routinely gate a step on a judgement call — *"add X if the existing test harness makes it cheap"*,
+*"do Y if it turns out to be necessary"*. If you skip one, say so and say why, in `blocked_on` or
+beside `tests_run`. Silence is not a decline: the orchestrator cannot tell "I weighed it and it was
+too expensive" from "I never read that step", and only one of those is acceptable. (2026-08-12: a
+worker skipped a step-4 dispatch-level test whose stated condition was already met by a harness 250
+lines above where it was working, and reported nothing about it. One review round-trip.)
+
 ```
 files_changed:  <abs or repo-relative paths, one per line>
 tests_run:      <the exact command, and the pass/fail counts>
