@@ -858,6 +858,35 @@ def test_profile_blurbs_cover_the_preset_slugs():
     assert {"stability", "precision", "high_framerate", "manual"} <= keys
 
 
+def test_oscillate_amplitude_slider_disabled_unless_oscillate_is_the_active_mode():
+    """Issue #107 claim 2: the amplitude slider has zero effect under
+    Continuous (scene.js `updateOscillate`'s wave logic only runs when
+    `orbitMode === 'oscillate'`), so it must be disabled -- not just
+    world-view-gated like Orbit Speed/mode, which both stay meaningful
+    (rate/direction) under Continuous too.
+
+    Reintroducing the defect (`!worldOnly` alone, the pre-fix binding) makes
+    this fail: that expression is satisfied in World with Continuous
+    selected, which is exactly the state the issue reports as "stays
+    interactive when oscillate is off"."""
+    js = _controls()
+    m = re.search(r"const worldOnly = .+?slOrbitAmplitude\.disabled\s*=\s*(.+?);", js, re.DOTALL)
+    assert m is not None, "no disabled binding found for slOrbitAmplitude"
+    block, expr = m.group(0), m.group(1)
+    # Must not be the bare worldOnly expression the pre-#107 code used --
+    # that is satisfied in World with Continuous selected, exactly the state
+    # the issue reports as "stays interactive when oscillate is off".
+    assert expr.strip() != "!worldOnly", (
+        "amplitude slider is still gated on worldOnly alone (issue #107 regression)")
+    # Must reference orbit_mode (the only signal that distinguishes
+    # Continuous from Oscillate), directly or via a variable defined in the
+    # same block, and must still require World -- a locked view has nothing
+    # to swing either.
+    assert "orbit_mode" in block, f"amplitude disabled-binding does not gate on orbit_mode: {expr!r}"
+    assert "worldOnly" in expr or re.search(r"=\s*worldOnly\b", block), (
+        f"amplitude disabled-binding dropped the World-only gate: {expr!r}")
+
+
 def test_profile_blurbs_carry_no_hardcoded_consequence_numbers():
     """Like the button tooltips, the static benefit blurbs must not bake in
     fps/exposure numbers that would stale on a preset retune -- the live config is

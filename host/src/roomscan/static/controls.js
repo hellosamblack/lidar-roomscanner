@@ -589,7 +589,15 @@ export function createControls(hub) {
         if (chkOrbit) chkOrbit.disabled = !worldOnly;
         if (slOrbitSpeed) slOrbitSpeed.disabled = !worldOnly;
         if (segOrbitMode) for (const b of segOrbitMode.querySelectorAll('button')) b.disabled = !worldOnly;
-        if (slOrbitAmplitude) slOrbitAmplitude.disabled = !worldOnly;
+        // The amplitude only has an effect once Oscillate is the selected
+        // mode -- Orbit Speed also sets the oscillate SWING RATE (see
+        // scene.js updateOscillate), so it stays gated on worldOnly alone,
+        // but amplitude does nothing at all under Continuous. Issue #107:
+        // it used to share the worldOnly-only gate above and stayed
+        // interactive (and undimmed) with Continuous selected or Auto-orbit
+        // off, which read as "live" when nothing it controls was running.
+        const oscillateActive = worldOnly && msg.orbit_mode === 'oscillate';
+        if (slOrbitAmplitude) slOrbitAmplitude.disabled = !oscillateActive;
         setActive(segViewColormap, 'colormap', msg.view_colormap);
         if (slPointSize && msg.point_size !== undefined) slPointSize.value = msg.point_size;
         if (chkPointAuto && msg.point_size_auto !== undefined) chkPointAuto.checked = !!msg.point_size_auto;

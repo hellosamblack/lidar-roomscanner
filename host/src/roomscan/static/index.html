@@ -1893,8 +1893,10 @@
                         <div class="field-label field-label--sub">Orbit Speed <span class="hud-val" id="orbit-speed-val">6&deg;/s</span></div>
                         <input type="range" class="slider" id="sl-orbit-speed" min="-60" max="60" step="0.5" value="6" title="Degrees per second; negative reverses direction, 0 parks it">
                         <!-- Oscillate mode (owner ask, 2026-07-31): instead of circling forever,
-                             swing back and forth about the azimuth where oscillation started. Same
-                             worldOnly gate as the two controls above (controls.js). -->
+                             swing back and forth about the azimuth where oscillation started. The
+                             mode buttons share the worldOnly gate above (controls.js); the
+                             amplitude slider below is additionally gated on orbit_mode ===
+                             'oscillate' (issue #107) since it has no effect under Continuous. -->
                         <div class="field-label field-label--sub">Orbit Mode</div>
                         <div class="segmented segmented--sm" id="seg-orbit-mode">
                             <button data-orbitmode="continuous" title="Circle the scene continuously in one direction">Continuous</button>
