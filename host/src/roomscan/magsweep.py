@@ -866,6 +866,12 @@ class MagSweepSession:
         # the client paint a cell solid the INSTANT it fills while the truth
         # channel stays slow. See docs/web-protocol.md, MAGPOSE `filled_cell`.
         self.occupied: set[int] = set()
+        # The calibration frozen for coverage-cell BINNING (see
+        # `binning_calibration`) and which "kind" it was determined to be
+        # ("candidate" | "current" | "provisional") -- BUG-046 / issue #57.
+        # `reset()` is the only thing that clears these.
+        self._coverage_cal: MagCalibration | None = None
+        self._coverage_cal_kind: str | None = None
 
     # -- collection --
     def start(self) -> None:
@@ -894,6 +900,12 @@ class MagSweepSession:
         self.fit_error = None
         self.last_t_us = None
         self.occupied.clear()
+        # Re-arm the coverage-binning freeze -- this is the ONLY thing that
+        # does (see `binning_calibration`): a fresh sweep gets to pick a new
+        # frame, but nothing short of a full reset may move the frame under
+        # samples that are still on the table.
+        self._coverage_cal = None
+        self._coverage_cal_kind = None
 
     def add(self, mag_ut, t_us: int | None = None) -> bool:
         """Record one raw sample. `t_us` de-duplicates: the broadcaster polls
@@ -974,14 +986,57 @@ class MagSweepSession:
         return self.candidate
 
     def binning_calibration(self, current: MagCalibration | None) -> MagCalibration | None:
-        """Which calibration to bin directions with (module docstring): the
-        candidate if one has been fitted, else the saved one, else a
-        provisional hard-iron estimate from the cloud itself."""
+        """Which calibration to bin directions with for the sphere-coverage
+        map (module docstring) -- FROZEN for the life of the sweep, not
+        recomputed on every call (BUG-046 / issue #57).
+
+        The bug: `build_report` used to call this fresh on every tick, and it
+        prefers the candidate the instant one exists. Pressing Fit therefore
+        swapped the binning frame out from under the tally mid-report -- every
+        sample's cell moved (~3.35 deg measured, against ~24 deg cells), a few
+        crossed a boundary, and a cell whose only occupant crossed out read
+        empty a report tick after it had read full. `sync_occupied` then
+        overwrote the incrementally-marked truth with the regressed one, so a
+        completed 92/92 sweep read 91/92 the moment Stop & Fit finished.
+
+        Fix: latch onto the FIRST determinable calibration -- same preference
+        order as before, candidate > current > provisional -- and hand back
+        that exact object on every later call regardless of what `current` is
+        passed or whether a candidate has since been fitted. Only `reset()`
+        clears the latch, so `stop()`/Fit and any resumed collection into the
+        same cloud keep binning in the frame the sweep started in; quality
+        metrics are untouched -- they still read `current`/`session.candidate`
+        directly, never through here.
+
+        With nothing determinable yet (a fresh install: no candidate, no saved
+        calibration, and the provisional hard-iron estimate needs >=4 samples
+        it doesn't have) there is nothing to freeze ON, so binning stays live
+        -- recomputed every call -- until a real value first appears. Freezing
+        on `None` would pin an entire first-ever tumble to raw (unrotated)
+        directions, which the module docstring already rules out as
+        "meaningless": raw directions live in a cone around the hard-iron
+        offset and can never cover the sphere however well you tumble."""
+        if self._coverage_cal is not None:
+            return self._coverage_cal
         if self.candidate is not None:
-            return self.candidate
-        if current is not None:
-            return current
-        return provisional_calibration(self.samples)
+            live, kind = self.candidate, "candidate"
+        elif current is not None:
+            live, kind = current, "current"
+        else:
+            live = provisional_calibration(self.samples)
+            kind = "provisional"
+        if live is not None:
+            self._coverage_cal = live
+            self._coverage_cal_kind = kind
+        return live
+
+    def coverage_binning_kind(self) -> str:
+        """Which calibration KIND coverage cells are (or, before anything is
+        determinable, currently would be) binned with -- "candidate" |
+        "current" | "provisional" | "raw". Mirrors whatever
+        `binning_calibration` has latched onto (or, pre-latch, "raw" -- the
+        last-resort fallback while nothing is determinable yet)."""
+        return self._coverage_cal_kind if self._coverage_cal_kind is not None else "raw"
 
 
 def view_calibration(session: MagSweepSession, current: MagCalibration | None,
@@ -1057,9 +1112,11 @@ def build_report(session: MagSweepSession, current: MagCalibration | None,
         "motion": motion_state(session.recent, bin_cal),
         "has_current": current is not None,
         "has_candidate": session.candidate is not None,
-        "binning": ("candidate" if session.candidate is not None
-                    else "current" if current is not None
-                    else "provisional" if bin_cal is not None else "raw"),
+        # Reflects what `bin_cal` (above) ACTUALLY was frozen to, not a fresh
+        # preference-order guess -- otherwise this label could say "candidate"
+        # after Fit while the map is still, correctly, binned in "current"
+        # (BUG-046 / issue #57).
+        "binning": session.coverage_binning_kind(),
         "fit_error": session.fit_error,
         # Both quality blocks are measured against THIS session's samples, so
         # with none collected there is nothing to say about either calibration

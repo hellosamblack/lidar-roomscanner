@@ -455,17 +455,52 @@ def test_session_reset_clears_everything():
     assert s.elapsed() == 0.0
 
 
-def test_session_binning_calibration_precedence():
+def test_session_binning_calibration_freezes_on_first_determinable_value():
+    """BUG-046 / issue #57: binning is FROZEN, not recomputed every call --
+    the first determinable value (same candidate > current > provisional
+    preference order as before) is latched and held from then on, whatever
+    is passed or fitted afterwards. Only `reset()` re-arms it."""
     s = ms.MagSweepSession()
     saved = _cal()
-    assert s.binning_calibration(None) is None          # nothing at all yet
-    assert s.binning_calibration(saved) is saved
+    assert s.binning_calibration(None) is None          # nothing determinable: stays live
+    assert s.binning_calibration(saved) is saved        # first determinable value: latches
+    assert s.binning_calibration(None) is saved         # still latched, whatever `current` now is
+    other = _cal(offset=(1.0, 2.0, 3.0))
+    assert s.binning_calibration(other) is saved         # a DIFFERENT saved cal doesn't move it
+
     s.start()
     for i, v in enumerate(_raw_from_body(_sphere(400, seed=6))):
         s.add(v, t_us=i)
-    assert s.binning_calibration(None) is not None      # provisional from the cloud
     s.stop()
-    assert s.binning_calibration(saved) is s.candidate  # candidate wins once fitted
+    assert s.candidate is not None
+    assert s.binning_calibration(saved) is saved         # candidate exists now -- still ignored
+    s.reset()
+    assert s.binning_calibration(None) is None           # re-armed: nothing determinable again
+
+
+def test_session_binning_calibration_prefers_candidate_on_first_call():
+    """With a candidate already fitted before `binning_calibration` is ever
+    called, the candidate wins over whatever `current` is passed -- same
+    preference order as before, just evaluated once instead of every tick."""
+    s = ms.MagSweepSession()
+    s.start()
+    for i, v in enumerate(_raw_from_body(_sphere(400, seed=6))):
+        s.add(v, t_us=i)
+    s.stop()
+    assert s.candidate is not None
+    assert s.binning_calibration(_cal()) is s.candidate
+    assert s.coverage_binning_kind() == "candidate"
+
+
+def test_session_binning_calibration_falls_back_to_provisional_then_latches():
+    s = ms.MagSweepSession()
+    s.start()
+    for i, v in enumerate(_raw_from_body(_sphere(400, seed=6))):
+        s.add(v, t_us=i)
+    prov = s.binning_calibration(None)          # no candidate, no saved cal
+    assert prov is not None
+    assert s.coverage_binning_kind() == "provisional"
+    assert s.binning_calibration(_cal()) is prov          # latched -- a saved cal shows up too late
 
 
 # =============================================================================
@@ -574,6 +609,62 @@ def test_build_report_incomplete_tumble_says_so_loudly():
     assert rep["candidate"]["verdict"] == "bad"
     assert rep["gaps"][0]["size"] > ms.SPHERE_CELLS // 2
     assert "Biggest gap" in rep["guidance"]
+
+
+def test_coverage_progress_does_not_regress_across_the_fit_swap():
+    """BUG-046 / issue #57: pressing Fit at "92/92 cells complete" must never
+    un-complete the sweep. Re-bin a FIXED sample cloud under two calibrations
+    that genuinely disagree (`saved`, in force when the sweep starts, and
+    `fitted`, standing in for whatever `stop()` produces) and assert the
+    reported coverage does not go backwards.
+
+    The two calibrations are a deliberately engineered worst case, not a
+    hopeful one: `raw` is built so `calibrated_directions(raw, saved)` lands
+    EXACTLY one sample on every one of the 92 lattice cell centres (verified
+    below), and `fitted` is `saved` rotated 15 deg -- comfortably enough to
+    push a lattice-spaced (~24 deg) sample across a cell boundary. A naive
+    re-bin under `fitted` alone (also asserted below, independent of the
+    session) measurably empties cells. Through a `MagSweepSession`, with the
+    coverage frame frozen at Start, it must not.
+
+    PROVEN by reintroducing the defect: reverting
+    `MagSweepSession.binning_calibration` to recompute fresh on every call
+    (as it did before this fix) makes this test fail with
+    `occ_after == 85 < occ_before == 92`."""
+    lattice = ms.sphere_lattice()
+    raw = lattice @ np.asarray(AXIS_CONVENTION, dtype=np.float64)
+    saved = _cal(offset=(0.0, 0.0, 0.0), matrix=IDENTITY, field=1.0)
+    assert np.array_equal(ms.assign_cells(ms.calibrated_directions(raw, saved)),
+                           np.arange(ms.SPHERE_CELLS))          # one sample, each cell, exactly
+
+    axis = np.array([0.3, 0.4, 0.8660254])
+    axis /= np.linalg.norm(axis)
+    rot = ms.axis_angle_matrix(axis, math.radians(15.0))
+    fitted = _cal(offset=(0.0, 0.0, 0.0), matrix=tuple(map(tuple, rot)), field=1.0)
+
+    # The disagreement is real: binning `raw` fresh under `fitted` alone
+    # empties cells (this is the mechanism the fix guards against).
+    naive_after = ms.coverage_stats(ms.assign_cells(ms.calibrated_directions(raw, fitted)))
+    assert naive_after["occupied"] < ms.SPHERE_CELLS
+
+    s = ms.MagSweepSession()
+    s.start()
+    for i, v in enumerate(raw):
+        s.add(v, t_us=i)
+    before = ms.build_report(s, saved)
+    assert before["binning"] == "current"
+    occ_before = sum(1 for c in before["cell_counts"] if c)
+    assert occ_before == ms.SPHERE_CELLS
+
+    s.stop()                        # fits its own candidate from `raw`; overridden below
+    s.candidate = fitted            # stand in for whatever the real fit produced
+    after = ms.build_report(s, saved)
+    occ_after = sum(1 for c in after["cell_counts"] if c)
+
+    assert occ_after >= occ_before, f"coverage regressed: {occ_after} < {occ_before}"
+    assert occ_after == ms.SPHERE_CELLS
+    assert after["cell_counts"] == before["cell_counts"]      # frozen: literally unchanged
+    assert after["binning"] == "current"                      # never flips to "candidate"
 
 
 # =============================================================================
