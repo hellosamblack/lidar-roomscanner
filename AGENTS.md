@@ -190,12 +190,24 @@ in the repo. The evidence for every one is in `docs/roadmap-history.md`.
   transport (BUG-061: pose JSON head-of-line blocked behind a mesh backlog).
 - **Connection count is a performance variable on this server.** `/ws` work is per-client; stale
   headless/MCP sockets are real load (BUG-060).
-- **Never assume a vendor build flag is off because you did not pass `-D`.** Vendor headers self-define
-  via `#ifndef` — `VL53L9_TRANSFORM_LIGHT` defaults to `1` and silently bypasses TNR and the
-  flying-pixel filter.
+- **Never assume a vendor default, in either direction, and it is not a C-only trap.** Vendor headers
+  self-define via `#ifndef` — `VL53L9_TRANSFORM_LIGHT` defaults to `1` and silently bypasses TNR and
+  the flying-pixel filter, so not passing `-D` selected the LIGHT build. The mirror image cost four
+  days on the web side (#106): `gaussian-splats-3d` gates its **entire** per-scene opacity path behind
+  a constructor option `enableOptionalEffects` that defaults to **`false`**, so the See-Through slider
+  set `scene.opacity` on every move and the uniform was never even declared. An `#ifndef` default
+  (surprise ON) and an opt-in default (surprise OFF) are the same mistake. Read the vendor's own
+  default; never infer it from your call site looking correct.
 - **An invariant-preserving check verifies nothing.** |B| is preserved by all 48 signed axis
   permutations, so a magnetometer check "passed" for three weeks while every heading was 180° out
   (BUG-059). Ask which wrong answers a check can actually see before trusting it.
+- **A check that reads back the value it just wrote is that same failure, cheaply.** `splat.js`
+  exposed a `sceneOpacity` getter commented *"to verify See-Through end-to-end"* that returned the
+  property `applySeeThrough()` had assigned one line earlier — it reported `1` and `0.08` faithfully
+  while the renderer ignored both (#106). A read-back proves the setter ran, nothing more. An
+  end-to-end claim needs an observable on the **far side** of the layer in question; for a rendering
+  path that means **pixels**, framed so a null result cannot be explained away (the first attempt had
+  the camera inside the splat, where alpha saturation could have masked a real change).
 - **A percentage of a path is meaningless when the path is invented.** `icp_mode="translation"` gives
   rotation-prior error no rotational DoF to land in, so it emerges as translation — 18–20 m of
   fabricated path at 0 lost frames and 0.88 fitness (BUG-067). Validate against a null capture before
