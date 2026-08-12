@@ -212,6 +212,9 @@ class CdpSession:
         self._ws = None
         self._id = 0
         self.url: str | None = None
+        # Last explicitly-requested size, re-applied by every call including
+        # argless internal ones (see `start()`).
+        self._size: tuple[int, int] = (1600, 1000)
 
     # -- lifecycle
     def _find_chrome(self) -> str:
@@ -236,16 +239,31 @@ class CdpSession:
             time.sleep(0.25)
         raise RuntimeError(f"no CDP page target on port {self.port} within {timeout_s}s")
 
-    async def start(self, width: int = 1600, height: int = 1000) -> None:
-        """Ensure the browser is up, then (re)apply the requested viewport size.
+    async def start(self, width: int | None = None, height: int | None = None) -> None:
+        """Ensure the browser is up, then (re)apply the current viewport size.
 
         The browser is a singleton kept warm across tool calls (module docstring),
-        so `width`/`height` must be re-applied on every call, not only the first --
-        an early version returned immediately once `self._ws` existed, which made
+        so the viewport must be re-applied on every call, not only the first -- an
+        early version returned immediately once `self._ws` existed, which made
         every call after the first one silently keep whatever size the browser
         launched with (issue #168: `width`/`height` read back unchanged after two
         different resize requests).
+
+        `width`/`height` default to `None`, meaning "keep the last explicitly
+        requested size" (`self._size`), NOT "reset to 1600x1000". This is
+        deliberate: `goto`/`evaluate`/`wait_for`/`screenshot` all call
+        `self.start()` with no arguments just to ensure the browser exists before
+        they act -- with a hardcoded default, that argless call silently reasserted
+        1600x1000 and undid whatever `ui_screenshot(width=..., height=...)` had just
+        set, immediately before capturing the pixels (issue #168, second half: the
+        first fix made `start()` idempotent-safe but gave teeth to those argless
+        internal callers). Any *new* argless `self.start()` added later inherits
+        this "preserve, don't reset" behaviour for free.
         """
+        if width is not None:
+            self._size = (width, self._size[1])
+        if height is not None:
+            self._size = (self._size[0], height)
         if self._ws is None:
             import websockets
 
@@ -262,7 +280,7 @@ class CdpSession:
             await self.cmd("Runtime.enable")
             await self._disable_http_cache()
         await self.cmd("Emulation.setDeviceMetricsOverride",
-                       {"width": width, "height": height,
+                       {"width": self._size[0], "height": self._size[1],
                         "deviceScaleFactor": 1, "mobile": False})
 
     async def _disable_http_cache(self) -> None:
@@ -377,15 +395,32 @@ class PlaywrightSession:
         self._browser = None
         self._page = None
         self.url: str | None = None
+        # Last explicitly-requested size, re-applied by every call including
+        # argless internal ones (see `start()`).
+        self._size: tuple[int, int] = (1600, 1000)
 
-    async def start(self, width: int = 1600, height: int = 1000) -> None:
-        """Ensure the page is up, then (re)apply the requested viewport size.
+    async def start(self, width: int | None = None, height: int | None = None) -> None:
+        """Ensure the page is up, then (re)apply the current viewport size.
 
         Same fix as `CdpSession.start` (issue #168): the browser/page is a
         singleton kept warm across tool calls, so an early-return once `self._page`
         existed made `width`/`height` inert after the first call. `set_viewport_size`
         is Playwright's documented way to resize an existing page's viewport.
+
+        `width`/`height` default to `None`, meaning "keep the last explicitly
+        requested size" (`self._size`), NOT "reset to 1600x1000". This matters
+        because `goto`/`evaluate`/`wait_for`/`screenshot` all call `self.start()`
+        with no arguments just to ensure the page exists before they act -- with a
+        hardcoded default, that argless call silently reasserted 1600x1000 via
+        `set_viewport_size` and undid whatever `ui_screenshot(width=..., height=...)`
+        had just set, immediately before capturing the pixels (issue #168, second
+        half). Any *new* argless `self.start()` added later inherits this
+        "preserve, don't reset" behaviour for free.
         """
+        if width is not None:
+            self._size = (width, self._size[1])
+        if height is not None:
+            self._size = (self._size[0], height)
         if self._page is None:
             from playwright.async_api import async_playwright
 
@@ -393,7 +428,7 @@ class PlaywrightSession:
             self._browser = await self._pw.chromium.launch(
                 channel="chrome", args=[f for f in CHROME_FLAGS if f != "--headless=new"])
             self._page = await self._browser.new_page(
-                viewport={"width": width, "height": height})
+                viewport={"width": self._size[0], "height": self._size[1]})
             # Same reason as `CdpSession._disable_http_cache` -- this loop looks at
             # files edited seconds ago, so a cache hit is a silent stale read.
             try:
@@ -403,7 +438,8 @@ class PlaywrightSession:
             except Exception:
                 pass
         else:
-            await self._page.set_viewport_size({"width": width, "height": height})
+            await self._page.set_viewport_size(
+                {"width": self._size[0], "height": self._size[1]})
 
     async def stop(self) -> None:
         for closer in (getattr(self._browser, "close", None),

@@ -427,6 +427,73 @@ def test_playwright_session_reapplies_viewport_on_a_repeat_start_call():
         f"set_viewport_size with the requested size; got {calls!r}")
 
 
+def test_ui_screenshot_applies_the_requested_viewport_through_the_public_tool(monkeypatch):
+    """Drive the regression through `ui_screenshot`, not `CdpSession.start()`.
+
+    The tests above cover `start()` in isolation and did NOT see the actual bug:
+    `ui_screenshot` calls `browser.start(width=..., height=...)` correctly, but then
+    calls `browser.screenshot()` and `browser.diag_tail()` (-> `evaluate()`), and
+    both of those call `self.start()` with NO arguments just to ensure the browser
+    is up. Before the fix, that argless call carried hardcoded defaults
+    (`width: int = 1600, height: int = 1000`) and silently reasserted them,
+    reverting the size a moment before the pixels were actually captured -- the
+    exact failure named in the issue (`["820x700", "1600x1000"]` from a single
+    `ui_screenshot(width=820, height=700)` call).
+
+    Runs the three sizes docs/web-ui-testing.md prescribes, back to back on one
+    warm session (as real repeat calls are), and asserts the viewport in force AT
+    THE MOMENT `Page.captureScreenshot` fires -- the property the issue is
+    actually about, since a later re-apply (e.g. `diag_tail()`'s `evaluate()`,
+    which runs after the capture) could coincidentally match the request and mask
+    a capture-time miss. Reintroducing the old hardcoded
+    `width: int = 1600, height: int = 1000` defaults on `CdpSession.start` turns
+    this red (verified while writing this test; see commit message for the exact
+    failure text).
+    """
+    import asyncio
+    import base64
+
+    from roomscan.mcp_server import tools_ui
+    from roomscan.mcp_server.session import CdpSession
+
+    applied: list[tuple[int, int]] = []
+    at_capture: list[tuple[int, int]] = []
+    s = CdpSession()
+    s._ws = object()            # already-launched browser (as the tests above simulate)
+    s.url = "http://existing"   # so ui_screenshot takes the no-renavigate branch
+
+    async def fake_cmd(method, params=None):
+        if method == "Emulation.setDeviceMetricsOverride":
+            applied.append((params["width"], params["height"]))
+            return {}
+        if method == "Page.captureScreenshot":
+            # Snapshot the viewport in force AT THIS INSTANT -- not after
+            # `ui_screenshot` returns, when a later argless re-apply (diag_tail)
+            # could coincidentally match and hide a capture-time miss.
+            at_capture.append(applied[-1])
+            return {"data": base64.b64encode(b"fake-png-bytes").decode()}
+        if method == "Runtime.evaluate":
+            return {"result": {"value": "log tail"}}
+        return {}
+
+    s.cmd = fake_cmd             # type: ignore[method-assign]
+    monkeypatch.setattr(tools_ui, "browser", s)
+
+    for width, height in [(1280, 800), (1100, 560), (820, 700)]:
+        asyncio.run(tools_ui.ui_screenshot(width=width, height=height, settle=0))
+        assert at_capture[-1] == (width, height), (
+            f"ui_screenshot(width={width}, height={height}): the viewport at the "
+            f"moment Page.captureScreenshot fired was {at_capture[-1]}, not the "
+            f"requested size -- full capture-time sequence {at_capture!r}, full "
+            f"apply sequence {applied!r}")
+        # Belt and braces: the post-return size (what a caller would read back)
+        # should also match, though the line above is the one that must hold.
+        assert applied[-1] == (width, height), (
+            f"ui_screenshot(width={width}, height={height}) did not survive to "
+            f"return either: last viewport applied was {applied[-1]}, full "
+            f"sequence {applied!r}")
+
+
 def test_web_ui_shot_cli_sends_the_device_metrics_override_before_navigate(tmp_path):
     """`host/tools/web_ui_shot.py` launches a fresh Chrome per invocation, so it
     does not have the repeat-call bug above -- but the issue explicitly asks
