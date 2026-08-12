@@ -183,6 +183,16 @@ and in `Refs` lines of each commit. `session-end` will prompt you to update each
 
 **Data-collection task** — these require the hardware physically present. Read the issue body
 for capture protocol requirements before starting; they are often blocking (`status/blocked`).
+If the capture has not been made yet, the session's deliverable is the **request**, not the
+analysis: run the `operator-request` skill to post a followable runbook and apply
+`needs/operator` + `needs/capture`. Do not start by writing the analysis for data that does not
+exist — and if the issue already carries a runbook, read it before writing a second one.
+
+**A task you can write but cannot verify** — firmware needing the rig, a transport path this host
+cannot exercise, anything whose acceptance is "does it look right". Anchor it as normal, but know
+up front it will end held rather than closed: `operator-request` owns that judgement, and
+`session-end` will route through it. Deciding this at the *start* is cheaper than discovering it
+while writing the closing commit.
 
 **Exploratory / diagnostic session** — if the session is read-only investigation with no
 planned code change, skip this skill. If the investigation reveals something that *does*

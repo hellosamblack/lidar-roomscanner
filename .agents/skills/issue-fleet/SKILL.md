@@ -126,6 +126,14 @@ no, leave it and say so — a run that lands three unverifiable diffs is worse t
 verified fix. Prefer issues whose acceptance is **pytest-shaped**: a named function, a stated
 mechanism, and a test the body already specifies.
 
+That question is the `operator-request` skill's close-or-hold table, applied at planning time
+instead of at closing time — it is the same judgement, and that skill carries the full version plus
+the rationalizations. **A veto is not a dead end: it is an operator request waiting to be written.**
+Rather than leaving a vetoed issue silently unclaimed, run `operator-request` on it — post the
+runbook, apply `needs/operator` + a subtype — so the next wave finds it actionable instead of
+re-deriving the same veto. `operator_queue()` lists what is already waiting, so you can skip
+issues whose request is outstanding.
+
 Where the planner reports a soft conflict, **assign the contested file exclusively** instead of
 hoping. Name it in both spawn prompts — "X owns `foo.py`; you stop and report rather than edit it" —
 and in the claim comments. Cheap, and it converts a gamble into a rule. Note the footprint model

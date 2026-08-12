@@ -41,6 +41,12 @@ points here; keep this doc short and binding.
   `-blocked`, `-partial`) when the close reason alone doesn't carry the nuance. `bug` is for defects,
   `work-item` for forward-looking work (was the `SLAM-`/`SENS-`/`XPORT-`/`FW-`/`OFFLINE-`/`TOOL-`
   register), `data-collection` for owner-collected-capture items (was the `DC-*` queue).
+- **Nothing closes on unverified work (2026-08-12, #173).** Before any close, ask *what would prove
+  this is fixed, and did I actually run it, today, against real data?* If not, the issue stays open
+  with `needs/operator` plus one subtype — `needs/capture`, `-network`, `-hardware`, `-eyes`,
+  `-decision` — paired with `status/fix-unverified` (code landed, verification pending) or
+  `status/blocked`. The `operator-request` skill owns that judgement and writes the owner-facing
+  runbook; `operator_queue()` lists what is outstanding.
 - **Branch discipline (owner workflow, 2026-07-16).** Land work by **committing straight to `main`
   and closing any feature/worktree branch without a PR** (the PR flow is retired — no `gh pr create`,
   no `gh pr merge`). A short-lived branch/worktree for isolation is fine; finish by getting the commit

@@ -403,6 +403,7 @@ is in.
 |---|---|
 | `fleet_plan(max_agents?, priorities?, exclude_areas?, include_unknown?)` | ranks open issues (priority, ×2 for prior work, bonus for gating others) and returns the highest-scoring batch whose file footprints do not collide. Read `notes`: soft conflicts and prose-inferred dependencies are surfaced for your judgement, never applied silently |
 | `fleet_budget(ceiling_pct?, observed_week_pct?, observed_block_pct?, limit_basis?, limit_tokens?, forecast_agents?, forecast_minutes?, source?)` | current 5h block and **rolling** 168h window against a declared ceiling, with a `go`/`reduce`/`stop` verdict on the *projected* load of the **worst** window. **Ask the owner for their percentages and pass them** — without `observed_week_pct` the weekly figure is `None` and the verdict covers the 5h block only. Read `binding_window`, `limit_basis`, `seven_day.pct_basis` and `coverage.includes_subagents` before trusting anything |
+| `operator_queue(detailed?)` | open issues held for an owner action (`needs/operator`), with subtype, age, status labels and the parsed footer of the latest `## 🔧 Operator Request` comment — the artifact expected and the gate that scores it. Read `problems`: it names held issues whose runbook is missing or unparseable, which the issue list cannot show you. Input to the `operator-request` skill's batch mode. `detailed=False` skips the per-issue comment fetch |
 
 Three things `fleet_plan` encodes that a prose rubric kept getting wrong:
 

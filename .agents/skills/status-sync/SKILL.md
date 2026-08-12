@@ -11,6 +11,21 @@ session pays to rediscover (the 2026-07-10 retro burned a full session correctin
 
 **The unit of "done" is: code + the doc deltas it implies, in the same commit.**
 
+## Before you close anything — is it actually verified?
+
+**Run the `operator-request` skill's close-or-hold table before any `gh issue close`, and before
+writing any commit message containing `Closes #NNN`.** One question:
+
+> **What would prove this is fixed — and did I actually run it, today, against real data?**
+
+If the honest answer is no — the claim needs a capture that does not exist, a link this host cannot
+exercise, an observable not stored in the file, or a human's eyes — the issue **stays open** with
+`needs/operator` plus a subtype, paired with `status/fix-unverified` (code landed, verification
+pending) or `status/blocked`. Post the operator runbook; do not close and hope. "The code is
+obviously right" and "tests pass" are not verification of a hardware claim.
+
+Then continue the checklist below — a held issue still needs its doc deltas landed.
+
 ## The checklist (fill every slot; write "n/a — <why>" where truly not applicable)
 
 1. **GitHub Issues — work items.** Does this work advance/close a `work-item`-labeled issue, clear a
@@ -86,10 +101,14 @@ The PR flow is retired. **Land work by committing straight to `main`, no PR.**
 | "The milestone retro will catch it" | The retro is a backstop, not the mechanism — and it costs a session. |
 | "Owner said ship it quickly" | The checklist is minutes; correcting drift is a session. Quick = this list, once. |
 | "I'll commit the docs right after the code" | Same commit, or it won't happen — that's how the drift occurred. |
+| "I'll close it; the owner can verify later" | That's what `operator-request` is for. Nobody reopens a closed issue — it's invisible. |
 
 ## Red flags — stop and run the checklist
 
 - A commit message saying "closes/completes/fixes" an item that still reads open in ROADMAP.md.
+- **You are about to close an issue whose acceptance you did not personally exercise** — the fix is
+  "unverifiable here", the acceptance says "verify on the rig", or the only evidence is that the
+  code reads correctly. Run `operator-request` and hold it instead.
 - Landing code with no doc delta in the same commit when a phase status / measured number changed.
 - A memory description contradicting what you just verified.
 - `gh pr create` / `gh pr merge` in your plan — the PR flow is retired; commit to `main` instead.

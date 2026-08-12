@@ -155,6 +155,17 @@ plain `<verb>: <what>` title (no ID prefix — the label is the type, `#NNN` is 
 Close one: `gh issue close <n> --reason completed` (or `"not planned"` for a by-design/anomaly/
 investigated call — add the matching `status/*` label).
 
+**Nothing closes on unverified work (2026-08-12, #173).** Before any close, ask *what would prove
+this is fixed, and did I actually run it, today, against real data?* If not, the issue stays open
+with `needs/operator` plus one subtype — `needs/capture`, `-network`, `-hardware`, `-eyes`,
+`-decision` — paired with `status/fix-unverified` (code landed, verification pending) or
+`status/blocked`. The `operator-request` skill owns that judgement and writes the owner's runbook as
+an issue comment: plain language, strictly alternating `[Claude]`/`[You]` steps composed from its
+step library, with a machine-readable footer naming the artifact and the gate. `operator_queue()`
+lists what is outstanding, and `host/tests/test_operator_skill.py` pins the routing from
+`status-sync`, `session-end`, `session-start` and `issue-fleet` — a gate nobody consults is worth
+nothing, which is what `status/fix-unverified` had been until then.
+
 **Working several issues at once (2026-08-12, #170).** The `issue-fleet` skill runs a fleet of
 subagent workers across open issues, one git worktree each, under an owner-declared usage ceiling;
 `fleet_plan()` picks a batch whose file footprints do not collide and `fleet_budget()` gates it.

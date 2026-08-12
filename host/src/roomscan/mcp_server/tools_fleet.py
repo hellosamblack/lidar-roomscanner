@@ -86,3 +86,27 @@ def fleet_budget(ceiling_pct: float = 80.0, limit_basis: str = "peak",
                    observed_week_pct=observed_week_pct or None,
                    observed_block_pct=observed_block_pct or None,
                    source=source)
+
+
+@mcp.tool()
+def operator_queue(detailed: bool = True) -> dict:
+    """What is waiting on the owner: open issues held for a physical or human action.
+
+    Answers "what do you need from me?" in one call. Returns every open issue labelled
+    `needs/operator` with its subtype (`capture`, `network`, `hardware`, `eyes`,
+    `decision`), age, status labels, and the parsed footer of its latest
+    `## 🔧 Operator Request` comment -- which names the artifact expected and the gate
+    that will score it.
+
+    Read `problems`. It reports held issues whose runbook comment is missing or has no
+    parseable footer: the label is a promise that the instructions exist, and an issue
+    carrying it with nothing to act on is a dead end the issue list cannot show you.
+
+    This is also the input to batch mode -- group the result by `kind` and by shared
+    setup so the owner powers the rig up once rather than once per issue. See the
+    `operator-request` skill.
+
+    `detailed=False` skips the per-issue comment fetch for a fast label-only listing.
+    """
+    from tools.operator_queue import collect
+    return collect(include_comments=detailed)

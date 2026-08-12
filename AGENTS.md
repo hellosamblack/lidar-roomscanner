@@ -54,6 +54,19 @@ improvement in a trailing commit `status-sync` never sees (#169). A `Stop`-hook 
 subcommands the skills use (`create`, `comment`, `close`, `edit`, `list`, `view`, `reopen`, plus
 `gh label list`) are unblocked in auto-mode (`.claude/settings.local.json`).
 
+**Nothing closes on unverified work (owner, 2026-08-12, issue #173):** before any `gh issue close`
+or `Closes #NNN`, run the `operator-request` skill's close-or-hold table — *what would prove this is
+fixed, and did I actually run it, today, against real data?* If the acceptance needs a capture that
+does not exist, a path this host cannot exercise (USB CDC is dead here), an observable not stored in
+the capture file, or a human's eyes, the issue **stays open** with `needs/operator` + a subtype
+(`capture`/`network`/`hardware`/`eyes`/`decision`), paired with `status/fix-unverified` or
+`status/blocked`. The same skill writes the owner-facing runbook — plain language, strictly
+alternating `[Claude]`/`[You]` steps composed from its step library, posted as an issue comment —
+and processes the result when it comes back. `operator_queue()` answers "what do you need from me?"
+in one call. `status-sync`, `session-end`, `session-start` and `issue-fleet` all route through it;
+`host/tests/test_operator_skill.py` pins that wiring, because a gate nobody consults is worth
+nothing (`status/fix-unverified` sat unused in the tracker for weeks).
+
 **Self-improvement rule (owner, 2026-07-08):** after every milestone (phase completion / major merge),
 run the `milestone-retro` skill BEFORE starting the next phase — convert the push's friction into
 skills (with references/scripts), shared tools under `host/tools/`, and doc fixes. A milestone isn't

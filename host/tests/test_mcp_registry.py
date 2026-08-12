@@ -34,6 +34,7 @@ EXPOSED: dict[str, tuple[str, ...]] = {
     "headless_doctor.py": ("doctor",),
     "heading_check.py": ("capture_heading",),
     "mag_check.py": ("capture_magcheck",),
+    "operator_queue.py": ("operator_queue",),
     "orientation_probe.py": ("orientation_probe",),
     "profile_probe.py": ("capture_profile_probe",),
     "profile_tuning.py": ("profile_tuning",),

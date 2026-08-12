@@ -141,6 +141,12 @@ Because these edits are now in scope for the session's commit, they are also in 
 ## Phase 3: Ship It
 
 **Commit & land (commit-to-`main`, no PR — owner workflow 2026-07-16):**
+0. **Decide whether the issue may close at all.** Run the `operator-request` close-or-hold table
+   (`status-sync` gates on it too). If the acceptance needs a capture, a link, a hardware change or
+   a human's eyes that you did not exercise this session, the commit says **`Refs #NNN`, not
+   `Closes #NNN`** — post the operator runbook, apply `needs/operator` + a subtype, and leave the
+   issue open. Everything below still runs; only the closing keyword and the `gh issue close`
+   change. Say plainly in the summary that the work is landed but unverified.
 1. Run `git status` and `git branch` to see current state
 2. Run the `status-sync` skill checklist — the commit must include the doc
    deltas the work implies (ROADMAP.md status, superseded annotations, memory).
@@ -244,6 +250,12 @@ Provide the owner with a clear forward-looking summary covering three areas:
 - Flag any architectural decisions that unlock or constrain future work
 
 **Recordings & Verifications Needed from Owner:**
+
+**Each item here is an action, not a note.** Run the `operator-request` skill for every one: post
+the runbook as a comment on its issue and apply `needs/operator` + a subtype. A verification listed
+only as prose here is a verification that never happens — that was this section's failure mode, and
+it is why issues closed while their real acceptance sat unrun.
+
 - Capture sessions or hardware tests that depend on physical actions (moving
   devices, changing board settings, rescanning a space, etc.)
 - Validation runs needed to gate the next milestone or confirm a fix works
@@ -252,6 +264,9 @@ Provide the owner with a clear forward-looking summary covering three areas:
 - UI/UX validation steps that require human eyes or a real handheld use case
 - Any data the session assumed but didn't verify (e.g., "assumes the mag cal
   is valid — run `capture_magcheck` on the latest capture")
+
+If several are pending, use `operator-request`'s batch mode — `operator_queue()`, then one combined
+runbook — so the owner powers the rig up once rather than once per issue.
 
 **Risks & Opportunities (to be recorded in docs):**
 - **Risks** — Known edge cases, second-order failure modes, or performance
