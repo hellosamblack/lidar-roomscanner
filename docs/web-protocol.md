@@ -111,7 +111,7 @@ backpressure.
 | 2 | `IR_IMAGE` | `u32 tag · u16 width · u16 height · u8[w*h*3] RGB` | `pack_ir_image` `web.py:212` |
 | 3 | `MESH` | `9×u32 header (tag, mesh_seq, flags, then 6 counts) · per-submesh f32 pos·f32 col·u32 idx · floor f32 pos·u32 line-idx` | `pack_mesh` (web Phase 4) — a SLAM `MeshPacket`; flags bit0=decimated, bit1=walls_split; emitted on the mesh-throttle cadence only. **Delivered exclusively over `/ws-mesh`, not `/ws`, since BUG-061** — see "The mesh channel — /ws-mesh" above for the credit-gated delivery contract |
 | 4 | `SURFACE` | `u32 tag · u16 w · u16 h · u32 n_tris · f32[3·W·H] positions · f32[3·W·H] colors · u8[W·H] valid · u32[3·T] tri_indices · u8[W·H] covered` | `pack_surface_cloud` — grid-ordered positions+colors + triangulated mesh indices; sent instead of POINT_CLOUD when `surface_enabled` is true |
-| 5 | `MAGPOSE` | `u32 tag · u32 seq · f32[4] quat(w,x,y,z) · f32[3] field_dir_body · f32[3] gravity_body · f32 field_ut · f32 dev_pct · f32 dip_deg · i16 live_cell · i16 filled_cell · u16 flags · u16 pad` — **68 bytes**, ~2.0 kB/s at 30 Hz | `pack_magpose` / `build_magpose` (magcal 3D feedback, 2026-07-29) — sent **only to `state.magcal_clients`** on the 30 Hz broadcaster tick. `live_cell`/`filled_cell` are `-1` for none; `dev_pct`/`dip_deg` may be `NaN` (no calibration / no gravity). `flags`: bit0 collecting, bit1 stationary, bit2 mag_anomaly *(reserved, Phase 2)*, bit3 have_quat, bit4 provisional_binning, bit5 sample_rejected. See "Magnetometer sweep" below |
+| 5 | `MAGPOSE` | `u32 tag · u32 seq · f32[4] quat(w,x,y,z) · f32[3] field_dir_body · f32[3] gravity_body · f32 field_ut · f32 dev_pct · f32 dip_deg · i16 live_cell · i16 filled_cell · u16 flags · u16 pad` — **68 bytes**, ~2.0 kB/s at 30 Hz | `pack_magpose` / `build_magpose` (magcal 3D feedback, 2026-07-29) — sent **only to `state.magcal_clients`** on the 30 Hz broadcaster tick. `live_cell`/`filled_cell` are `-1` for none; `dev_pct`/`dip_deg` may be `NaN` (no calibration / no gravity). `flags`: bit0 collecting, bit1 stationary, bit2 mag_anomaly *(reserved, Phase 2)*, bit3 have_quat, bit4 provisional_binning (derived from the session's latched `coverage_binning_kind()`, the same source as the `magcal` JSON `binning` field — never a fresh per-tick precedence lookup, see "Magnetometer sweep"), bit5 sample_rejected. See "Magnetometer sweep" below |
 
 `POINT_CLOUD` (or `SURFACE` in surface mode) goes out every broadcast tick (so late joiners see data within ~36 ms);
 `IR_IMAGE` rides a slower cadence (`web.py:855`, `:869`).
@@ -387,7 +387,17 @@ coverage could never reach 100%. Binned calibrated, a cell means "the device was
 field entered it from this direction", which is both actionable and what the ellipsoid fit must span.
 Precedence for the binning calibration is candidate → saved → `magsweep.provisional_calibration` (a
 bounding-box hard-iron estimate used only for display on a first-ever tumble, never fitted, never saved);
-the message reports which was used in `binning`.
+the message reports which was used in `binning`. That precedence is evaluated **once per sweep, not per
+message**: `MagSweepSession.binning_calibration` latches onto the first determinable value and returns it
+from then on, and only `reset()` re-arms the latch (issue #57 / BUG-046). Coverage is measured on
+*calibrated* directions, so re-evaluating the precedence every tick moved the binning frame out from under
+the tally the instant Fit produced a candidate — every sample's direction shifted ~3.35° against ~24° cells,
+a few crossed a boundary, and a completed 92/92 sweep read 91/92 the moment the user finished it. Freezing
+the frame is what makes the progress number mean one thing for the life of the sweep. Quality metrics are
+deliberately *not* frozen — they still read `current`/`candidate` directly, because they are meant to
+describe the newest fit. Both channels that report the binning kind — this message's `binning` field and
+`MAGPOSE`'s `provisional_binning` flag (bit4) — read the latch via `coverage_binning_kind()`, so they
+cannot disagree; deriving either from a fresh precedence lookup reintroduces the defect in that channel.
 
 *Quality metrics and their thresholds* (all computed server-side; the components are always shipped
 alongside the headline, deliberately — a single opaque score is what let the bad calibration through):
