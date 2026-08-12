@@ -381,6 +381,44 @@ ping 0% loss, streams 7/9/10/11 all at **30.5 Hz, 0 drops, 0 gaps**, `ping` →
 0 CRC failures. `run_tests()` was checked in both directions: 22 passed on a `-k`
 selection, and `ok=False` with the failing test id against a deliberate probe.
 
+**fleet\_\*** — planners for the `issue-fleet` skill, which runs several subagent
+workers across open issues in separate worktrees. Both are **read-only**: neither
+creates a worktree, claims an issue, spawns an agent, or touches git. Those stay in
+the orchestrator's own Bash calls, because everything in this server runs from
+`paths.REPO` — always the *main* checkout, whichever worktree the caller believes it
+is in.
+
+| tool | notes |
+|---|---|
+| `fleet_plan(max_agents?, priorities?, exclude_areas?, include_unknown?)` | ranks open issues (priority, ×2 for prior work, bonus for gating others) and returns the highest-scoring batch whose file footprints do not collide. Read `notes`: soft conflicts and prose-inferred dependencies are surfaced for your judgement, never applied silently |
+| `fleet_budget(ceiling_pct?, limit_basis?, limit_tokens?, forecast_agents?, forecast_minutes?, source?)` | current 5h block and **rolling** 168h window against a declared ceiling, with a `go`/`reduce`/`stop` verdict on the *projected* load. Always read `limit_basis` and `coverage.includes_subagents` before trusting the percentage |
+
+Three things `fleet_plan` encodes that a prose rubric kept getting wrong:
+
+- **The median issue names exactly one file.** Intersecting raw footprints therefore
+  finds almost no conflicts — a check with no power. Seeds are expanded through a
+  co-edit graph from `git log --name-only` (`web.py` and `test_web.py` co-occur in 37
+  commits) before conflict is computed, and `conflicts()` distinguishes a **hard**
+  overlap on stated files from a **soft** one on inferred paths.
+- **The collisions that bite are not files.** One Playwright browser is shared across
+  every `ui_*` call, and port 8000, the rig and the GPU are each a singleton — so
+  `resources` is modelled separately from footprints, with a per-wave cap of one each.
+- **Prior work and extractable paths are the same signal**, so rewarding prior work
+  while deferring unknown footprints would starve the cold tail permanently. One
+  explicit exploration slot per wave goes to the highest-scoring path-less issue, and
+  says so in `notes`.
+
+`fleet_budget` is an estimate and is built to admit it: no quota API is reachable from
+an agent here (the `claude` CLI has no usage subcommand; the real figures live in CLI
+process memory and are never written to disk). It prefers `ccusage` and falls back to
+reading `~/.claude/projects/**` directly. Two facts the fallback reader had to encode,
+both measured: worker spend lives one level deeper than the main transcripts
+(`<session>/subagents/agent-*.jsonl`, invisible to a flat `projects/*/*.jsonl` glob),
+and the store repeats records, so summing without deduplicating on
+`(message.id, requestId)` overcounts by ~80%. With both fixed, a native read
+reproduced `ccusage blocks --json` exactly on entry count and on three of its four
+token fields.
+
 ## Two invariants
 
 **Client, never competitor.** The server must never bind the device UDP/CDC stream --

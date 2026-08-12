@@ -1,0 +1,976 @@
+[
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "## What\n\nAdd an `issue-fleet` skill that turns the main session into an **orchestrator** running a fleet of\nsubagents, each working a different open issue in its own git worktree, plus the two host tools that\nmake the selection and the budgeting real rather than re-derived by prose every run.\n\nThe tracker has 64 open issues and 19 of them already carry a written `## Implementation plan`\ncomment \u2014 prior work sitting idle \u2014 but there is no way to work more than one at a time.\n`.claude/worktrees/` exists and is empty.\n\nOwner requirements: target the highest-impact issues, prioritise issues with prior work already\ndone, choose the batch so parallel workers are unlikely to touch the same files, delegate to cheaper\nmodels aggressively without compromising code quality, and respect a not-to-exceed usage ceiling on\nthe 5-hour and weekly limits.\n\nDeliverables:\n\n- `.agents/skills/issue-fleet/SKILL.md` + `references/worker-brief.md`\n- `host/tools/fleet_plan.py` \u2014 issue scoring, file-footprint extraction and expansion, conflict-free\n  batch selection\n- `host/tools/fleet_budget.py` \u2014 rolling 5h/168h usage estimate against an owner-declared ceiling\n- `host/src/roomscan/mcp_server/tools_fleet.py` exposing both as MCP tools\n- `.claude/agents/fleet-worker.md` (sonnet) and `fleet-worker-mech.md` (haiku)\n\nThree measured findings drive the design:\n\n1. **Subagent token spend is persisted at `~/.claude/projects/<proj>/<session-uuid>/subagents/agent-*.jsonl`**\n   \u2014 nested one level below the main transcripts. A flat `projects/*/*.jsonl` glob misses 100% of it.\n   Today that is only 2.8% of output tokens because subagents are barely used here; a fleet inverts\n   that ratio, so the budget tool must prove its glob covers the nested path and report `coverage`.\n2. **The median extractable file footprint per issue is one file** (51/64 issues have at least one\n   tracked path). Intersecting raw footprints declares nearly every pair conflict-free, so footprints\n   must be expanded via a co-edit graph built from `git log --name-only` before conflict is computed.\n3. **The collisions that actually bite are not files** \u2014 the single shared Playwright browser in the\n   MCP server, port 8000, the rig/SWD probe, and the GPU. Those need an explicit per-wave resource\n   cap orthogonal to file footprints.\n\nAlso amends the standing rule \"subagents don't commit; the controlling session commits\" (stated in\nboth `docs/engineering-practices.md` and `status-sync`) with a fleet carve-out: workers commit\n`Refs #NNN` on their own branch inside their own worktree, and the orchestrator reviews, rebases,\nfast-forwards to `main`, and writes the single closing commit.\n\n## Acceptance\n\n- [ ] `fleet_plan()` returns a conflict-free batch against the live tracker, ranked with prior-work\n      weighting, with per-issue footprint, confidence tier, resources and suggested model tier\n- [ ] Two `area/host-web` issues that both reach `index.html` only after co-edit expansion are never\n      co-scheduled (the regression test for the whole selection design)\n- [ ] `fleet_budget()` reports a non-empty `limit_basis` on every return path, computes a rolling\n      168h window locally, and returns `verdict: \"unknown\"` rather than a number on any failure\n- [ ] `fleet_budget()`'s transcript reader is proven to match the nested `*/subagents/*.jsonl` path\n- [ ] Both scripts are registered as MCP tools and listed in `EXPOSED` in\n      `host/tests/test_mcp_registry.py` and in `docs/mcp-server.md`\n- [ ] The subagent-commit carve-out lands in `docs/engineering-practices.md` and `status-sync`\n- [ ] A live dry run completes one full round trip on a real low-risk issue: claim \u2192 worktree \u2192\n      spawn \u2192 review \u2192 rebase \u2192 `merge --ff-only` \u2192 worktree removal \u2192 close\n- [ ] Tests green\n",
+  "comments": [
+   {
+    "body": "**Session start** \u2014 2026-08-12T02:56Z\n\nTask: Build the `issue-fleet` skill plus `fleet_plan` / `fleet_budget` host tools and their MCP\nwrappers, so a session can orchestrate a fleet of subagent workers across open issues in isolated\nworktrees under an owner-declared usage ceiling.\n\nFiles in scope: `.agents/skills/issue-fleet/SKILL.md`,\n`.agents/skills/issue-fleet/references/worker-brief.md`, `host/tools/fleet_plan.py`,\n`host/tools/fleet_budget.py`, `host/src/roomscan/mcp_server/tools_fleet.py`,\n`host/src/roomscan/mcp_server/server.py`, `host/tests/test_fleet_plan.py`,\n`host/tests/test_fleet_budget.py`, `host/tests/test_fleet_skill.py`,\n`host/tests/test_mcp_registry.py`, `host/tests/fixtures/fleet/`,\n`.claude/agents/fleet-worker.md`, `.claude/agents/fleet-worker-mech.md`,\n`docs/mcp-server.md`, `docs/engineering-practices.md`,\n`.agents/skills/status-sync/SKILL.md`, `AGENTS.md`\n\nRelated open issues checked: none in this area overlap. `area/host-tools` has #168\n(ui_screenshot viewport), #136 (Rerun sidecar) and #74 (GIL-starvation metric) open \u2014 none touch\nthe MCP registration surface or `host/tools/` scripts this session adds. No issue anywhere in the\ntracker mentions fleet/orchestration/subagents/worktrees. `status/in-progress` was empty at session\nstart, so nothing is claimed by another session.\n\nNote: this session amends the standing \"subagents don't commit\" rule in\n`docs/engineering-practices.md` and `.agents/skills/status-sync/SKILL.md` with a fleet carve-out.\nAny concurrent session reading that rule should read this issue too.\n",
+    "createdAt": "2026-08-12T02:56:54Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-12T02:56:33Z",
+  "labels": [
+   {
+    "name": "work-item"
+   },
+   {
+    "name": "area/host-tools"
+   },
+   {
+    "name": "priority/now"
+   },
+   {
+    "name": "status/in-progress"
+   }
+  ],
+  "number": 170,
+  "title": "Add an issue-fleet skill: orchestrate subagent workers across issues in worktrees",
+  "updatedAt": "2026-08-12T02:56:54Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Legacy ID:** WEB-8\n\nReorganize Sensors\n  and Streams cards to reduce vertical footprint: (a) **Sensors** uses a 2\u00d72 grid layout\n  showing roll/tilt/heading/fusion corrections in one row instead of flat rows; (b) each\n  metric visualized as a horizontal progress bar (like bandwidth gauge) with **jitter**\n  and **worst-case** statistics displayed inline; (c) add a **Reset Stats** button to\n  zero the worst-case counters. Reduces scroll burden on the dock band while improving\n  signal visibility. Related: **BUG-033** (Sensors card outgrew the dock; this is the\n  deliberate reorg answer).\n\n---\n_Migrated from `ROADMAP.md#work-item-register`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "## Implementation plan\n\n### Metric semantics\n\n* Treat **worst-case** as the highest observed p95 jitter since the last reset\u2014not the largest pose angle, since normal scanner movement would make that meaningless.\n* Stream bars show `host_hz / device_hz`, matching the existing desktop HUD.\n* Sensor bars show:\n\n  * Roll: signed range \u00b1180\u00b0\n  * Tilt: signed range \u00b190\u00b0\n  * Heading: 0\u2013360\u00b0\n  * Fusion correction: signed range \u00b1180\u00b0\n* Keep peak statistics server-owned so all connected tabs share the same reset baseline.\n\n### Implementation\n\n1. **Expose fusion correction**\n\n   * Add a read-only correction accessor to `YawFusion` and `SensorState` in `host/src/roomscan/sensors.py`.\n   * Add `fusion_correction_deg` to the additive `sensor` WebSocket payload in `host/src/roomscan/web.py`.\n   * Extend `OrientationJitter` with a `fusion` signal so correction jitter uses the same full-precision, server-side calculation as roll, tilt, and heading.\n\n2. **Track resettable worst-case jitter**\n\n   * Extend `OrientationJitter` to retain each signal\u2019s maximum p95 value since reset.\n   * Extend `RateMeter`/`StreamRate` in `host/src/roomscan/metrics.py` with peak stream jitter.\n   * Add reset methods that clear only peak values; rolling live statistics continue uninterrupted.\n   * Add a `reset_stats` WebSocket command that resets both registries and logs the action. Cleared peaks should render as `\u2014` until a fresh measurement arrives rather than fabricating a measured zero.\n\n3. **Rebuild the Sensors card**\n\n   * Replace the flat Roll/Tilt/Heading/Fusion rows in `host/src/roomscan/static/index.html` with a compact 2\u00d72 `.sensor-metric-grid`.\n   * Each tile contains the editable label, current value, horizontal bar, current p95 jitter, and worst p95 jitter.\n   * Preserve the orientation gizmo, compass, warnings, fusion status/remedy, environment section, existing controls, and full diagnostic values.\n   * Keep Yaw and overall-orientation jitter in Diagnostics; add the fusion signal and worst column there for complete inspection.\n\n4. **Upgrade Stream rows**\n\n   * Update `host/src/roomscan/static/hud.js` so every sensor stream renders a delivery-ratio bar plus inline host rate, current jitter, and worst jitter.\n   * Use the existing good-high thresholds: green at \u226590%, amber at 70\u201390%, and red below 70%.\n   * Render an empty track when `device_hz` is unavailable.\n   * Keep the existing bandwidth, Drops, and Gaps displays unchanged.\n\n5. **Add Reset Stats**\n\n   * Add one `Reset Stats` button to the Stream card with the required plain-language `title`.\n   * Send `reset_stats`; let subsequent server messages drive both cards so reconnects and multiple tabs remain consistent.\n   * Do not reuse `Reset Heading`: fusion-filter reset and telemetry-baseline reset remain separate actions.\n\n6. **Document the additive JSON changes**\n\n   * Update `docs/web-protocol.md` with `fusion_correction_deg`, per-signal `worst_p95_deg`, per-stream `worst_jitter_ms`, and `reset_stats`.\n   * No firmware or binary protocol version change is required.\n\n### Tests and verification\n\n* `host/tests/test_sensors.py`: correction accessor and fusion-reset behavior.\n* `host/tests/test_web.py`: sensor serialization, fusion jitter, peak retention/reset, and `reset_stats` dispatch.\n* `host/tests/test_metrics.py`: stream peak tracking, monotonic maximum behavior, and reset.\n* `host/tests/test_static_ui.py`: required IDs, tooltips, 2\u00d72 structure, and progress-bar markup.\n* Run the full host pytest suite.\n* Use the repository\u2019s headless browser workflow with replay data to verify:\n\n  * the open Sensors card fits the dock without wrapping or auto-collapse;\n  * bars and statistics update from real messages;\n  * peaks persist after the rolling window changes;\n  * Reset Stats clears both cards and new peaks accumulate afterward;\n  * desktop and narrow viewport screenshots remain usable.\n\n### Acceptance criteria\n\n* Sensors presents Roll, Tilt, Heading, and Fusion Correction in a readable 2\u00d72 grid.\n* Every sensor tile and stream row has a working progress bar, live jitter, and resettable worst-case jitter.\n* Reset Stats affects every connected client through server-owned state.\n* Existing sensor controls, warnings, diagnostics, stream loss counters, and SLAM inputs are unchanged.\n* The Sensors card\u2019s measured open height is reduced from the current baseline and remains inside the dock band at the documented 1000 px test viewport.\n",
+    "createdAt": "2026-08-12T02:55:44Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:22:36Z",
+  "labels": [
+   {
+    "name": "work-item"
+   },
+   {
+    "name": "area/host-web"
+   },
+   {
+    "name": "priority/later"
+   }
+  ],
+  "number": 125,
+  "title": "Compact side-rail layout with progress-bar metrics.",
+  "updatedAt": "2026-08-12T02:55:44Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Legacy ID:** WEB-6\n\nMove playback controls\n  (seek bar, play/pause, speed) from the sidebar to a new floating panel docked at\n  the bottom of the 3D viewport, styled like a video player. Complements the planned\n  Record-on-top-bar (WEB-1) and Discard-completed (WEB-2) features.\n\n---\n_Migrated from `ROADMAP.md#work-item-register`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "## Implementation plan\n\nMove the replay transport controls out of the Secondary sidebar and into a dedicated floating, video-player-style panel at the bottom of the 3D viewport.\n\n### 1. Extract playback markup from the sidebar\n\nIn `host/src/roomscan/static/index.html`:\n\n- Remove the current `#transport-card` control-group from the Secondary sidebar.\n- Add a dedicated `#playback-panel` outside both sidebars, over the 3D viewport.\n- Preserve the existing control IDs so the transport protocol and event wiring do not need to change:\n  - `btn-golive`\n  - `btn-playpause`\n  - `btn-transport-restart`\n  - `seg-speed`\n  - `chk-loop`\n  - `seek`\n  - `pos-status`\n- Reorganize them horizontally like a media player:\n  - restart + play/pause on the left\n  - seek bar and current/duration/frame status in the center\n  - speed + loop + Go Live on the right\n- Keep the panel hidden unless replay is active.\n\n### 2. Add dedicated floating-panel styling\n\nAlso in `index.html`'s existing component styles:\n\n- Add `.playback-panel` styles rather than inheriting `.sidebar .control-group`.\n- Position it `fixed` and centered horizontally near the bottom of the usable 3D viewport.\n- Anchor its bottom position from `--dock-bottom` so expanding/collapsing the Event Log cannot cover it.\n- Give it the same glass/card visual language as the rest of the UI, but use a compact horizontal layout appropriate for transport controls.\n- Add a sensible max width and responsive wrapping/compaction for narrow windows.\n- Keep the seek bar as the dominant flexible element.\n- Make all controls pointer-interactive without interfering with OrbitControls outside the panel.\n\nThe panel should remain visually distinct from the full-width Event Log underneath it.\n\n### 3. Decouple Playback from sidebar/card-collapse behavior\n\n`layout.js` currently treats `data-card-id=\"transport\"` as a normal persistent/collapsible card.\n\nSince the new playback panel is transient replay chrome rather than a sidebar card:\n\n- Remove `transport` from sidebar/card-collapse-specific icon/title/default-state bookkeeping where it is no longer applicable.\n- Do not give the new panel `data-card-id=\"transport\"`.\n- Ensure it is not affected by sidebar visibility, sidebar resizing, squircle/card restoration, or persisted `roomscan.card.transport.collapsed` state.\n- Keep using the existing `--dock-bottom` measurement produced by `layout.js` to avoid the Event Log.\n\nThis also means hiding the Secondary sidebar must no longer hide playback controls.\n\n### 4. Update `capture.js` without changing transport semantics\n\nIn `host/src/roomscan/static/capture.js`:\n\n- Replace the `transportCard` DOM reference with the new `playbackPanel`.\n- Continue driving visibility exclusively from:\n  `session.playback.is_replay`\n- Preserve the existing one-way server-state flow for:\n  - pause/resume\n  - restart\n  - playback speed\n  - loop\n  - seek\n  - Go Live\n- Preserve the current seek behavior where `input` previews locally while dragging and `change` commits the seek.\n- Preserve `pos-status` formatting and server-driven active states.\n\nNo backend/WebSocket protocol changes should be necessary.\n\n### 5. Update layout/default-state tests\n\nThere are tests which currently treat `transport` as a normal collapsible card/default layout entry.\n\nUpdate those expectations so Playback is no longer part of the sidebar-card state model.\n\nAdd/static-check coverage that:\n\n- the playback panel exists outside `#secondary-bar`\n- the old `#transport-card` sidebar card is gone\n- all existing transport control IDs still exist exactly once\n\n### 6. Headless UI regression\n\nUsing the existing replay/headless-Chrome workflow from `docs/web-ui-testing.md`:\n\n1. Start against a replay capture.\n2. Assert `#playback-panel` is visible.\n3. Assert its bounding box is:\n   - horizontally inside the viewport\n   - above the Event Log\n   - outside the Secondary sidebar DOM\n4. Exercise the real controls:\n   - pause and resume\n   - restart\n   - 0.5\u00d7 / 1\u00d7 / 2\u00d7 / Max\n   - loop\n   - seek\n5. Confirm `#pos-status` advances/updates as expected.\n6. Toggle the Secondary sidebar off and confirm the playback panel remains visible and usable.\n7. Expand the Event Log and confirm the panel moves/stays above it rather than overlapping it.\n8. Take screenshots at desktop and narrow viewport widths to verify the player remains usable without covering important sidebar controls.\n\n### Acceptance criteria\n\n- Playback controls are no longer present in the Secondary sidebar.\n- A replay displays one floating playback panel at the bottom of the 3D viewport.\n- The panel contains seek, play/pause, restart, speed, loop, position/status, and Go Live controls.\n- Existing playback behavior and WebSocket messages are unchanged.\n- The panel only appears during replay.\n- Sidebar hide/resize/collapse state does not affect the panel.\n- The Event Log cannot overlap the panel.\n- Existing transport controls remain fully operable in headless UI testing.\n- No duplicate transport element IDs are introduced.\n\n### Expected files\n\n- `host/src/roomscan/static/index.html`\n- `host/src/roomscan/static/capture.js`\n- `host/src/roomscan/static/layout.js`\n- relevant assertions in `host/tests/test_web.py`\n- `docs/web-ui-testing.md` only if selector/documentation references need updating\n\nNo firmware or backend transport changes should be required.",
+    "createdAt": "2026-08-12T00:55:46Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:22:31Z",
+  "labels": [
+   {
+    "name": "work-item"
+   },
+   {
+    "name": "area/host-web"
+   },
+   {
+    "name": "priority/later"
+   }
+  ],
+  "number": 123,
+  "title": "Floating playback panel at 3D view bottom.",
+  "updatedAt": "2026-08-12T00:55:46Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Legacy ID:** WEB-1\n\nMove the Record section to the top-right\n  controls instead of giving it a separate sidebar section.\n\n---\n_Migrated from `ROADMAP.md#work-item-register`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "## Implementation plan\n\nThe existing Record control is already cleanly separated from the recording backend, so this should be a UI relocation rather than a recording/protocol change.\n\n### 1. Move Record into the top bar\n\n**File:** `host/src/roomscan/static/index.html`\n\n- Remove the standalone `#capture-card` sidebar card.\n- Move the existing `#btn-record` and `#record-status` elements into a compact top-bar wrapper, e.g. `#topbar-record`.\n- Place the wrapper with the top-right controls, but keep it visually distinct from `.topbar-admin` since Record is a primary instrument action rather than a maintenance action.\n- Preserve the existing element IDs so the recording behavior does not need to be rewired.\n- Add compact top-bar styling for:\n  - idle `Record`\n  - active `Stop`\n  - elapsed time / capture size\n  - disabled state when no live source exists\n- Preserve the existing red active-recording treatment.\n\n### 2. Retarget the existing state-driven visibility logic\n\n**File:** `host/src/roomscan/static/capture.js`\n\nThe actual recording behavior can remain unchanged:\n\n```js\nhub.send({ type: 'record', on: !active });\n````\n\nand `session.recording` should remain the source of truth for active state, elapsed time, bytes, and post-recording rename behavior.\n\nChange only the DOM container being controlled:\n\n* Replace the `captureCard` reference with the new top-bar Record wrapper.\n* Continue hiding the Record controls when `state.source !== 'live'`.\n* Continue deriving button state entirely from the server `session` echo.\n* Preserve:\n\n  * `session.has_live` disabling\n  * `recording.active` \u2192 Record/Stop rendering\n  * elapsed time and byte count\n  * the post-recording naming modal\n  * manual-vs-auto recording semantics used by Live SLAM\n\nNo WebSocket protocol or `SessionController` changes should be necessary.\n\n### 3. Remove the obsolete sidebar-card metadata\n\n**File:** `host/src/roomscan/static/layout.js`\n\nOnce `data-card-id=\"capture\"` is removed from the page:\n\n* Remove the `capture` entry from `CARD_ICONS`.\n* Remove the `capture` entry from `CARD_TITLES`.\n* Confirm the squircle/collapse rail no longer creates or expects a Record card.\n* No migration is needed for an old `roomscan.card.capture.collapsed` localStorage entry; it can simply become inert.\n\n### 4. Add a structural regression test\n\n**File:** `host/tests/test_static_ui.py`\n\nAdd a cheap markup test that asserts:\n\n* `#btn-record` exists exactly once.\n* `#btn-record` is inside the top-bar markup.\n* the old `id=\"capture-card\"` / `data-card-id=\"capture\"` sidebar card is gone.\n\nThe existing static-UI tests should continue checking duplicate IDs, tooltips, and consistency between real card IDs and `layout.js` squircle metadata.\n\n### Validation\n\nRun:\n\n```bash\npytest host/tests/test_static_ui.py\npytest host/tests/test_web.py\n```\n\nThen smoke-test the UI:\n\n1. Live mode shows Record in the top-right controls.\n2. Clicking Record starts a recording and changes the control to Stop.\n3. Elapsed time / file size update while recording.\n4. Stopping opens the existing naming modal.\n5. Switching to View hides the Record control.\n6. Returning to Live restores it.\n7. Live SLAM auto-record still updates the same top-bar control correctly.\n8. The old Record sidebar card/squircle is no longer present.\n\n### Acceptance criteria\n\n* Record no longer consumes a standalone sidebar section.\n* Record/Stop and current recording status are available from the top-right controls in Live mode.\n* View mode does not expose the live Record action.\n* Recording, auto-recording, and post-recording rename behavior are unchanged.\n* No backend or wire-protocol changes are introduced.\n",
+    "createdAt": "2026-08-12T00:15:40Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:22:18Z",
+  "labels": [
+   {
+    "name": "work-item"
+   },
+   {
+    "name": "area/host-web"
+   },
+   {
+    "name": "priority/later"
+   }
+  ],
+  "number": 118,
+  "title": "Simplify the Record controls.",
+  "updatedAt": "2026-08-12T00:16:08Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "# BUG-096 \u2014 Oscillate orbit mode non-functional and slider always enabled\n\n**Date filed:** 2026-08-08  \n**Status:** open  \n**Area:** host/web UI (View panel, camera controls)  \n\n## Summary\n\nThe \"Oscillate\" orbit mode toggle in the View panel does nothing \u2014 enabling oscillation produces no visible camera motion. Additionally, the oscillation amplitude slider remains enabled regardless of whether oscillate mode is active; it should be disabled when oscillate mode is off.\n\n## Observation\n\n- The Oscillate toggle control exists and responds to clicks\n- No camera oscillation occurs when toggled on\n- The oscillation amplitude slider is always interactive, even when oscillate mode is disabled\n- The slider should be visually and functionally disabled (grayed out, non-interactive) when oscillate mode is off\n\n## Expected behavior\n\n1. When Oscillate is toggled **on**: the camera should autonomously oscillate (triangle wave \u00b1N degrees) about the current azimuth\n2. When Oscillate is toggled **off**: the camera should hold a fixed azimuth without oscillation\n3. The oscillation amplitude slider should only be enabled/interactive when Oscillate mode is active\n\n## Root cause\n\nUnknown. Suspected areas:\n- The oscillate-mode state is not being passed to the camera controller / SLAM orbit logic\n- The orbit oscillation is not being applied in the scene's animation loop\n- The slider's disabled state is not being bound to the oscillate toggle's state in the UI\n\n## Resolution\n\nTBD \u2014 requires inspection of the orbit camera logic in `slam.js`, the View panel's oscillate control binding, and the connection between the UI state and the animation loop.\n\n---\n_Migrated from `bugs/BUG-096.md`. Original index status: `open`, area: `host/web`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "## Implementation plan\n\nThe existing oscillation math is already present in `scene.js`; this looks primarily like a UI/state-wiring bug.\n\n### Current behavior / likely root cause\n\n- `host/src/roomscan/static/scene.js`\n  - Already implements `updateOscillate()` as a triangle wave.\n  - `isOscillating()` requires all three conditions:\n    - `orbit_enabled`\n    - `orbit_mode === \"oscillate\"`\n    - `view_mode === \"world\"`\n  - The render loop already calls `updateOscillate()` immediately before `controls.update(dt)`.\n\n- `host/src/roomscan/static/controls.js`\n  - Clicking **Oscillate** currently sends only:\n    `orbit_mode: \"oscillate\"`\n  - Auto-orbit defaults to disabled, so selecting Oscillate by itself can leave `orbit_enabled === false`, making `isOscillating()` false and producing no camera motion.\n  - The amplitude slider is currently disabled only when leaving World mode; it remains enabled in Continuous mode and while orbit is stopped.\n\n- `host/src/roomscan/web.py`\n  - Already accepts and persists `orbit`, `orbit_mode`, and `orbit_amplitude` together, so no protocol redesign should be necessary.\n\n### Changes\n\n1. **Make selecting Oscillate actually start oscillation**\n   - Update the `seg-orbit-mode` handler in `controls.js`.\n   - When the user selects `oscillate`, send `orbit_mode: \"oscillate\"` and `orbit: true` in the same `set_view` message.\n   - Keep the existing Auto-orbit checkbox as the master start/stop control so the user can pause the motion without losing the selected mode/amplitude.\n\n2. **Keep mode changes atomic**\n   - Rely on the existing server state echo rather than locally mutating checkbox/button state.\n   - This keeps multiple browser tabs synchronized and preserves the current one-way state-flow convention.\n\n3. **Disable the amplitude control unless it is meaningful**\n   - In the `state` handler in `controls.js`, enable `#sl-orbit-amplitude` only when:\n     - `view_mode === \"world\"`\n     - `orbit_mode === \"oscillate\"`\n     - `orbit_enabled === true`\n   - Otherwise set the native `disabled` state so it is both visually greyed out and non-interactive.\n\n4. **Verify the existing scene transition behavior**\n   - Confirm that entering Oscillate causes the existing `oscActive` rising-edge path to capture the current azimuth as the center point.\n   - Confirm switching Continuous \u2192 Oscillate while already orbiting starts the wave from the current camera azimuth rather than jumping back to a previous position.\n   - Confirm stopping and restarting oscillation re-centers around the azimuth where it was restarted.\n   - Only change `scene.js` if this verification exposes an edge-state bug; the triangle-wave implementation itself should not need to be replaced.\n\n5. **Add regression coverage**\n   - `host/tests/test_web.py`\n     - Add a combined `set_view` test covering `orbit=true`, `orbit_mode=\"oscillate\"`, and amplitude in one request.\n     - Assert the resulting `UiState`, persisted config, and `_state_message()` all agree.\n   - `host/tests/test_static_ui.py`\n     - Add a regression around the Oscillate control wiring so future changes cannot return to a mode-selection-only path that leaves orbit disabled.\n     - Pin the amplitude-slider gating to oscillate/active World mode.\n   - Keep the existing orbit-mode validation/range tests unchanged.\n\n### Manual verification\n\n1. Enter **World** view with Auto-orbit off.\n2. Click **Oscillate**.\n   - Camera should begin moving immediately.\n3. Set amplitude to a small obvious value such as 10\u00b0.\n   - Camera should reverse near \u00b110\u00b0 around the azimuth where oscillation started.\n4. Change amplitude while running.\n   - The new limits should take effect without a camera jump.\n5. Turn Auto-orbit off.\n   - Camera should stop and the amplitude slider should disable.\n6. Turn Auto-orbit back on while Oscillate remains selected.\n   - Oscillation should restart centered on the current azimuth.\n7. Select **Continuous**.\n   - Continuous orbit should work and the amplitude slider should disable.\n8. Switch to FPV/Mirror.\n   - Orbit controls should remain disabled and the locked camera must not move.\n\n### Acceptance criteria\n\n- Selecting **Oscillate** in World view produces visible camera motion without requiring an additional hidden/unclear step.\n- Oscillation reverses at approximately `\u00b1orbit_amplitude_deg` around its start azimuth.\n- Turning Auto-orbit off immediately parks the camera.\n- The amplitude slider is disabled whenever oscillation is not actively applicable.\n- Continuous orbit behavior is unchanged.\n- FPV/Mirror remain locked.\n- Orbit mode, enabled state, speed, and amplitude continue to survive state echoes and persisted configuration.",
+    "createdAt": "2026-08-12T00:10:00Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:21:50Z",
+  "labels": [
+   {
+    "name": "bug"
+   },
+   {
+    "name": "area/host-web"
+   },
+   {
+    "name": "priority/next"
+   }
+  ],
+  "number": 107,
+  "title": "Oscillate orbit mode does nothing; oscillation slider should be disabled when oscillate is off",
+  "updatedAt": "2026-08-12T00:10:00Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Legacy ID:** WEB-4\n\nWhen switching to View, minimize every\n  panel except the Captures pane so replay can be selected and controlled without\n  unrelated live controls. This complements **BUG-090**.\n\n---\n_Migrated from `ROADMAP.md#work-item-register`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "## Implementation plan\n\nI\u2019d implement this as a one-time UI focus action when the server-confirmed source transitions into `view`, reusing the existing card-collapse machinery rather than adding separate visibility rules.\n\n### 1. Centralize programmatic card collapse in `layout.js`\n\nRefactor the existing collapse behavior in `host/src/roomscan/static/layout.js` into a helper that can be used both by:\n\n- header/squircle clicks\n- mode-driven UI changes\n\nThe helper should:\n\n- add/remove `.collapsed`\n- update `roomscan.card.<id>.collapsed` consistently\n- refresh the squircle rail\n- schedule/re-run layout\n\nExpose a small public hook such as:\n\n```js\nwindow.__setCardCollapsed(cardId, collapsed)\n````\n\nThis avoids `browser.js` directly manipulating classes/localStorage and getting out of sync with `layout.js`.\n\n### 2. Apply the View focus policy on the source transition\n\nIn `host/src/roomscan/static/browser.js`, extend the existing `hub.on('state', ...)` handler.\n\nDetect the actual transition:\n\n```text\nprevious source != \"view\"\nnew source      == \"view\"\n```\n\nOn that transition:\n\n1. Enumerate cards using `[data-card-id]` rather than maintaining a brittle hard-coded list.\n2. Collapse every card except `data-card-id=\"browser\"`.\n3. Explicitly expand `browser`.\n4. Let the existing `browserCard.hidden` logic make the Captures card visible.\n5. Trigger the normal relayout path.\n\nOnly do this on the transition into View \u2014 **not on every `state` message**. Otherwise a user who deliberately expands Sensors/View/etc. while browsing a capture would have it immediately collapsed again by the next server echo.\n\nThis naturally covers the current Stream, Sensors, IR Monitor, Device, View, Record, Playback, SLAM, Resources, Event Log, etc. cards and future cards that adopt `data-card-id`.\n\n### 3. Reconcile the existing map-display auto-collapse\n\n`browser.js` currently has `collapseForMapDisplay()`, which collapses the Captures card when View is showing `slam` or `detailed`.\n\nMake sure that behavior does not immediately undo WEB-4 on the same Live \u2192 View state transition.\n\nChange it so map auto-collapse only fires for a display transition **while already in View**, e.g.:\n\n```text\nprevious source == \"view\"\ncurrent source  == \"view\"\ndisplay entered slam/detailed\n```\n\nResult:\n\n* Clicking **View** always lands with Captures expanded.\n* Afterward, switching the View display to SLAM/Detailed can retain the existing \u201cget the browser out of the map\u201d behavior.\n* No source transition can produce an expand-then-collapse flicker.\n\n### 4. Keep server state authoritative\n\nDo not perform this immediately from the `#seg-source` click handler in `slam.js`.\n\nThat handler currently only sends:\n\n```js\n{ type: 'set_source', source: 'view' }\n```\n\nKeep that one-way state model intact. The card focus change should happen only after the server broadcasts `state.source === \"view\"`, matching the rest of the UI and keeping multiple tabs consistent with accepted server state.\n\n### 5. Regression coverage\n\nAdd a headless-browser regression using the existing Chrome/Playwright workflow documented in `docs/web-ui-testing.md`.\n\nCover at least:\n\n1. Start in Live with several cards expanded.\n2. Click View and wait for the server `state` echo.\n3. Assert:\n\n   * `#browser-card` is visible.\n   * `#browser-card` is **not** `.collapsed`.\n   * every other `[data-card-id]` card is `.collapsed`.\n   * squircle indicators match the card state.\n4. Expand another card manually while still in View.\n5. Allow another `state`/`session` update through and assert it stays expanded, proving the policy is transition-only.\n6. Enter View while the selected display is SLAM/Detailed and verify Captures is still initially expanded.\n7. Then change display while already in View and verify the existing map-display collapse behavior still works.\n\n### Expected files\n\n* `host/src/roomscan/static/layout.js`\n\n  * reusable programmatic collapse helper\n  * keep persistence/squircle/layout behavior centralized\n* `host/src/roomscan/static/browser.js`\n\n  * detect Live/Splat \u2192 View transition\n  * apply View focus policy\n  * tighten `collapseForMapDisplay()` transition condition\n* headless web-UI regression alongside the existing browser verification tooling/tests\n\n### Acceptance criteria\n\n* Switching to **View** always presents an expanded **Captures** card.\n* Every other card is minimized on that transition.\n* The behavior is driven by the confirmed server state, not optimistic click state.\n* Subsequent state messages do not continually force cards closed.\n* Users can manually reopen cards after entering View.\n* Existing SLAM/Detailed map-space behavior continues to work after the initial View landing.\n* Squircle rail, persisted collapse state, and dock layout remain synchronized with the visible card state.\n",
+    "createdAt": "2026-08-12T00:53:10Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:22:26Z",
+  "labels": [
+   {
+    "name": "work-item"
+   },
+   {
+    "name": "area/host-web"
+   },
+   {
+    "name": "priority/later"
+   }
+  ],
+  "number": 121,
+  "title": "Make View mode capture-focused.",
+  "updatedAt": "2026-08-12T00:53:10Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Legacy ID:** WEB-5\n\nAdd keyboard controls for 3D navigation:\n  **W/A/S/D** for forward/left/backward/right, **Spacebar** for vertical ascent,\n  **Ctrl/C** for vertical descent. Decouple camera from auto-follow when any key is\n  pressed; restore auto-follow on release of all navigation keys.\n\n---\n_Migrated from `ROADMAP.md#work-item-register`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "## Implementation plan\n\nImplement WEB-5 as client-side camera behavior, keeping the existing server-side view/follow state unchanged.\n\n### 1. Add keyboard navigation to `scene.js`\n\nUpdate `host/src/roomscan/static/scene.js` to track a set of currently pressed navigation keys:\n\n- `W` / `S` \u2014 forward / backward\n- `A` / `D` \u2014 left / right\n- `Space` \u2014 ascend\n- `Ctrl` or `C` \u2014 descend\n\nUse `KeyboardEvent.code` (`KeyW`, `Space`, `ControlLeft`, etc.) so handling is independent of keyboard layout.\n\nKeep keyboard navigation **World-view only**. FPV and Mirror are intentionally scanner-locked today and should retain that behavior.\n\n### 2. Move the camera continuously in the render loop\n\nApply movement from `animate()` using its existing wall-clock `dt` rather than browser key-repeat events.\n\nFor each frame:\n\n1. Derive camera forward with `camera.getWorldDirection()`.\n2. Project forward onto the horizontal XZ plane so W/S do not change altitude.\n3. Derive the horizontal right vector from forward and the existing `CAM_UP`.\n4. Add the requested WASD + vertical directions and normalize diagonal movement.\n5. Multiply by a single `NAV_SPEED_M_S` constant and `dt`.\n6. Translate **both** `camera.position` and `controls.target` by the same delta.\n\nMoving camera and target together preserves the user's existing OrbitControls zoom distance and viewing angle.\n\n### 3. Temporarily suspend auto-follow without changing persisted state\n\nDo not send `slam_opt` and do not toggle the Follow checkbox when navigation begins.\n\nInstead, make the pressed-key set a temporary local override:\n\n- While any navigation key is held, `trackTarget()` should ignore World-mode SLAM follow updates.\n- When the final navigation key is released, remove the override.\n- The next SLAM pose update can immediately call `trackTarget()` again if the existing server-owned `slam_follow` state is enabled.\n- If Follow was already disabled, releasing the keys must not enable it.\n\nThis preserves the current one-way server-state architecture and avoids broadcasting a transient keyboard gesture to every connected tab.\n\n### 4. Handle focus/lost-key edge cases\n\nPrevent navigation from getting stuck when a key-up event is missed:\n\n- Clear the pressed-key set on `window.blur`.\n- Clear it when the document becomes hidden.\n- Ignore navigation shortcuts when the active target is an input, select, textarea, or content-editable control.\n- Prevent the browser's default Space/Ctrl behavior only when that key is actually being consumed for 3D navigation.\n\n### 5. Keep auto-follow integration localized\n\nNo protocol or `web.py` change should be necessary.\n\n`slam.js` already routes World-mode following through `sceneApi.trackTarget(...)`, so the temporary navigation override can live entirely inside `scene.js`. FPV/Mirror continue using `setSlamPose()` / `setFollowTarget()` unchanged.\n\n### 6. Tests\n\nAdd coverage in `host/tests/test_static_ui.py` for the important structural invariants:\n\n- all requested navigation key codes are registered;\n- World tracking is suppressed while navigation is active;\n- navigation translates camera and OrbitControls target together;\n- blur/visibility cleanup clears held navigation state.\n\nThen run the existing host test suite.\n\nAlso validate in the browser/headless UI:\n\n1. World view: W/A/S/D moves relative to the current view.\n2. Space and Ctrl/C move vertically.\n3. Diagonal movement is not faster than single-axis movement.\n4. Holding a key while SLAM Follow is enabled stops the camera being pulled back toward the scanner.\n5. Releasing the final key resumes Follow automatically.\n6. Follow remains off if it was off before navigation.\n7. FPV/Mirror remain scanner-locked.\n8. Typing/interacting with normal UI controls does not move the camera.\n9. Losing browser focus while holding a key does not leave movement or follow suppression stuck.\n\n### Acceptance criteria\n\n- WASD + Space + Ctrl/C provide smooth, frame-rate-independent free-camera translation in World view.\n- Camera framing/orbit angle is preserved while translating.\n- Auto-follow is suspended only for the duration of active keyboard navigation and resumes after the last key is released.\n- The server-side Follow setting is never changed as a side effect of navigation.\n- FPV/Mirror behavior and mouse OrbitControls remain unchanged.",
+    "createdAt": "2026-08-12T00:12:40Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:22:28Z",
+  "labels": [
+   {
+    "name": "work-item"
+   },
+   {
+    "name": "area/host-web"
+   },
+   {
+    "name": "priority/later"
+   }
+  ],
+  "number": 122,
+  "title": "WASD free-camera navigation.",
+  "updatedAt": "2026-08-12T00:12:40Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "## BUG-089 \u2014 Captures pane does not grow with the primary sidebar\n\n**Date filed:** 2026-08-07  \n**Area:** host/web UI  \n**Status:** open\n\nThe Captures pane keeps a fixed or independently constrained width while the primary\nsidebar grows, leaving unused space and causing avoidable wrapping. It should track\nthe sidebar's available width subject to a sensible minimum. Trace the layout\nconstraints, including resize and narrow-window behavior.\n\n---\n_Migrated from `bugs/BUG-089.md`. Original index status: `open`, area: `host/web UI`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "## Implementation plan \u2014 #100: Captures pane does not grow horizontally with the primary sidebar\n\nI\u2019d take this one.\n\n### Current behavior / likely cause\n\nThe primary sidebar is explicitly resizable in `host/src/roomscan/static/layout.js` via `setSidebarWidth()` / `setupSidebarResizing()`, with widths persisted in `roomscan.bar.primary.width`.\n\nThe Captures card already has `width: 100%` in `host/src/roomscan/static/index.html`, so the remaining bug is likely in the surrounding flex/grid constraints rather than another hard-coded Captures width. The fix should make the **entire Captures layout consume the current sidebar width** while preserving the sidebar's existing min/max behavior.\n\n### Implementation\n\n1. **Trace the effective width chain**\n   - Inspect the computed sizing of:\n     - `#primary-bar`\n     - `#browser-card`\n     - `#browser-card > .control-group__body`\n     - `.browser-grid`\n     - `.cap-tile`\n   - Check for `width`, `max-width`, `flex-basis`, intrinsic/min-content sizing, or inline styles that prevent descendants from following `#primary-bar`.\n   - Confirm `browser.js` does not stamp a fixed width while rendering or changing grid/list modes.\n\n2. **Make the Captures card truly sidebar-sized**\n   - In `host/src/roomscan/static/index.html`, keep the browser card/body on a fluid sizing chain:\n     - `width: 100%`\n     - `min-width: 0` where needed on flex children\n     - avoid fixed/max widths tied to the old sidebar size\n   - Ensure padding/borders remain included through `box-sizing: border-box`.\n   - The card should occupy all usable horizontal space at every sidebar width rather than merely allowing its outer element to grow while its contents remain constrained.\n\n3. **Make the capture grid respond to available width**\n   - Revisit `.browser-grid`'s fixed `repeat(3, 1fr)` layout.\n   - Prefer an available-width-driven definition such as `repeat(auto-fit/auto-fill, minmax(...))`, with a sensible tile minimum.\n   - Desired behavior:\n     - wider sidebar \u2192 additional/larger usable tile space instead of dead space;\n     - normal sidebar \u2192 current approximately three-column presentation;\n     - narrow sidebar \u2192 fewer columns rather than squeezed/sliver tiles.\n   - Keep `.browser-grid.is-list` at one full-width column.\n\n4. **Handle sidebar resizing continuously**\n   - In `host/src/roomscan/static/layout.js`, verify the existing drag handler does not need to manually size the browser card; CSS should ideally derive it directly from the sidebar.\n   - Keep `setSidebarWidth()` as the single owner of sidebar width.\n   - Verify `schedule()` / relayout does not restore stale card dimensions during a drag.\n   - On browser-window resize, re-clamp any persisted sidebar width against the new `maxW = min(500px, 45vw)` so a previously wide sidebar cannot leave the layout in an invalid narrow-window state.\n\n5. **Preserve existing behavior**\n   - Do not change capture loading, filtering, sorting, thumbnail loading, selection, or list/grid state.\n   - Preserve sidebar width persistence.\n   - Preserve collapse/expand behavior and the browser card's existing vertical flex/scroll behavior.\n   - Verify the Captures card still cooperates with the dock collision/layout rules rather than introducing horizontal overflow.\n\n### Regression coverage\n\nAdd a headless browser regression that measures DOM geometry rather than relying only on screenshots:\n\n1. Enter **View** so `#browser-card` is visible.\n2. Set the primary sidebar to several representative widths, e.g. `220`, `320`, `420`, and `500px`.\n3. For each width assert:\n   - `browserCard.getBoundingClientRect().width` tracks the sidebar's inner width;\n   - the browser body/grid does not exceed the card;\n   - there is no horizontal scrollbar/overflow;\n   - capture tiles remain usable and do not collapse into narrow slivers.\n4. Exercise both grid and list views.\n5. Resize the viewport down through the existing narrow-window cases called out in `docs/web-ui-testing.md` (`1280x800`, `1100x560`, `820x700`) and verify the sidebar is clamped without overlap or off-screen content.\n6. Reload once and confirm a persisted sidebar width restores with the Captures pane still filling it.\n\n### Manual verification\n\nUsing the existing `ui_*`/Playwright workflow from `docs/web-ui-testing.md`:\n\n- open View with a populated capture library;\n- drag the primary sidebar from minimum to maximum width;\n- confirm the Captures pane grows continuously with it;\n- switch Grid \u2194 List while wide and narrow;\n- collapse/reopen Captures;\n- reload to exercise persisted width;\n- inspect the narrow viewport sizes for overflow and dock collisions.\n\n### Acceptance criteria\n\n- Captures uses essentially all available horizontal space inside the primary sidebar.\n- Resizing the primary sidebar immediately resizes the Captures pane.\n- Wider widths no longer leave unused horizontal space.\n- Narrow widths reflow cleanly instead of producing excessive wrapping or unusably narrow tiles.\n- No horizontal overflow at supported viewport widths.\n- Grid/List, collapse state, sidebar persistence, and capture interactions continue working unchanged.",
+    "createdAt": "2026-08-12T00:05:00Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:21:31Z",
+  "labels": [
+   {
+    "name": "bug"
+   },
+   {
+    "name": "area/host-web"
+   },
+   {
+    "name": "priority/later"
+   }
+  ],
+  "number": 100,
+  "title": "Captures pane does not grow horizontally with the primary sidebar",
+  "updatedAt": "2026-08-12T00:05:00Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "## BUG-093 \u2014 Sidepane hierarchy gives grandchildren the same weight as children\n\n**Date filed:** 2026-08-07  \n**Area:** host/web UI  \n**Status:** open\n\nGrandchildren in a sidepane hierarchy have the same visual weight as direct children;\nfor example, `CAMERA & POSE` and `VIEW MODE` do not read as distinct levels. Direct\nchildren should be stronger through typography, indentation, spacing, or grouping.\nReview the semantic nesting and shared styles and add a two-level hierarchy regression.\n\n---\n_Migrated from `bugs/BUG-093.md`. Original index status: `open`, area: `host/web UI`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "## Implementation plan\n\nI\u2019d tackle this as a small hierarchy/styling cleanup in the shared sidebar components, with a regression covering at least two nesting levels.\n\n### Likely cause\n\nThe current sidebar styles make parent subgroups and nested field labels too similar:\n\n- `.control-subgroup > summary` uses roughly the same font size, uppercase treatment, weight, and muted color as `.field-label`.\n- Nested labels such as `View Mode` use the base `.field-label` class even though they are grandchildren under a subgroup such as `Camera & Pose`.\n- The result is that `CAMERA & POSE` and `VIEW MODE` read as peers instead of parent/child levels.\n\n### Plan\n\n1. **Add a hierarchy regression first**\n   - Render/open the `View` control group.\n   - Assert `Camera & Pose` is represented as the subgroup heading.\n   - Assert `View Mode` is nested inside that subgroup.\n   - Verify the two levels use distinct hierarchy classes/styles rather than equivalent typography.\n   - Include at least one second nested control area so this tests the shared pattern, not one hard-coded label.\n\n2. **Define an explicit three-level sidebar hierarchy**\n   - Level 1: top-level `.control-group__header`\n   - Level 2: `.control-subgroup > summary` / `.debug-section > summary`\n   - Level 3: nested `.field-label`\n   - Make each level visually distinct through a combination of font size, weight, spacing, indentation, and/or opacity.\n\n3. **Introduce a deliberate nested-label style**\n   - Use or extend `.field-label--sub` for labels inside `.control-subgroup__body`.\n   - Give nested labels slightly less weight and/or a small left indent.\n   - Avoid relying only on color differences, since the hierarchy should remain clear at a glance.\n\n4. **Apply the nested style consistently**\n   - Audit subgroup contents in the secondary sidebar.\n   - Update labels such as:\n     - `View Mode`\n     - `Ranging Mode`\n     - `FPS`\n     - `Exposure`\n     - `Power Mode`\n     - other labels nested under `<details class=\"control-subgroup\">`\n   - Keep direct children of top-level control groups on the stronger base `.field-label`.\n\n5. **Keep the shared styles semantic**\n   - Avoid one-off inline styles or selectors tied to specific text.\n   - Prefer reusable hierarchy classes in `index.html` so future subgroups inherit the same visual structure.\n   - Do not change control behavior, disclosure state, or JavaScript bindings.\n\n6. **Regression-check surrounding UI**\n   - Verify collapsed and expanded subgroup states.\n   - Check both narrow and wide sidebar widths.\n   - Confirm labels do not introduce awkward wrapping or excessive indentation.\n   - Check Device, View, and Debug sections for consistent hierarchy.\n\n### Expected files\n\n- `host/src/roomscan/static/index.html`\n- Browser/UI regression coverage using the repo\u2019s existing headless Chrome / Playwright workflow\n\n### Acceptance gate\n\nA user should be able to distinguish these levels immediately:\n\n1. Top-level card, e.g. `VIEW`\n2. Subgroup, e.g. `CAMERA & POSE`\n3. Nested field, e.g. `VIEW MODE`\n\nGrandchildren must no longer have the same visual weight as their parent subgroup headings, and the distinction should remain clear at supported narrow and wide sidebar widths.",
+    "createdAt": "2026-08-11T23:39:56Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:21:41Z",
+  "labels": [
+   {
+    "name": "bug"
+   },
+   {
+    "name": "area/host-web"
+   },
+   {
+    "name": "priority/later"
+   }
+  ],
+  "number": 104,
+  "title": "Sidepane grandchildren have the same visual weight as their parents' direct children",
+  "updatedAt": "2026-08-11T23:39:56Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "## BUG-090 \u2014 View mode can show live data instead of the loaded capture\n\n**Date filed:** 2026-08-07  \n**Area:** host/web  \n**Status:** open\n\nIn View mode, Point cloud, SLAM, Stream, Sensors, or IR monitor can show the current\nlive stream rather than the loaded capture. View mode must be capture-scoped: every\nlisted display and sensor panel shows only the loaded capture, despite asynchronous\nlive packets arriving in the background. Add an end-to-end regression covering each\ndisplay.\n\n---\n_Migrated from `bugs/BUG-090.md`. Original index status: `open`, area: `host/web`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "## Implementation plan \u2014 #101: View mode can display live data instead of the loaded capture\n\nIssue: https://github.com/hellosamblack/lidar-roomscanner/issues/101  \nVerified: open, `priority/now`, and **0 comments**.\n\n### Diagnosis\n\nThe intended invariant is \u201cView means a selected immutable capture.\u201d Currently:\n\n- `set_source(view)` leaves the live reader running while no capture is selected.\n- Point cloud, IR, sensors, metrics, and SLAM consume shared state without a source-generation boundary.\n- Cached frames and delayed reader callbacks can survive a live \u2192 capture transition.\n- `/ws-mesh` is separate from `/ws`, so an already queued live mesh can arrive after the main socket announces View mode.\n\n### Implementation\n\n1. **Introduce a source generation**\n   - Add a monotonically increasing generation to `SessionController`.\n   - Increment it for every live/replay/capture switch.\n   - Pass the captured generation into `_run_reader`.\n   - Guard metrics, `SensorState.feed`, SLAM submission, and render-slot writes so callbacks from an obsolete reader are discarded.\n   - Include the generation with render-slot entries so `_broadcaster` can reject stale frames.\n\n2. **Reset source-owned state at the switch boundary**\n   - Add complete source-reset methods to `SensorState` and `MetricsRegistry`; clear quaternion, environment, histories, rate meters, and render counters.\n   - Reset the broadcaster\u2019s `last_item`, packed point-cloud cache, orientation/jitter/elevation smoothers, and IR state when the generation changes.\n   - Preserve genuinely host-wide state such as resource utilization and user preferences.\n\n3. **Enforce View readiness in `web.py`**\n   - Define one predicate requiring:\n     - `ui.source == \"view\"`;\n     - `controller.mode == \"replay\"`;\n     - `selected_capture` matches `controller.replay_path`.\n   - While View has no selected capture, show the browser but emit no point-cloud, IR, sensor, stream, or SLAM data.\n   - Refuse SLAM/Detailed/Preview activation until the predicate is satisfied.\n   - Gate every source-owned broadcaster branch on the active generation and readiness predicate.\n\n4. **Add a client reset barrier**\n   - Add `stream_generation` and `stream_ready` to the authoritative `state` message.\n   - In `ws.js`, emit a local `stream_reset` before delivering state for a new generation.\n   - Handle it in:\n     - `scene.js`: clear point/surface draw ranges;\n     - `slam.js`: clear mesh, trajectory, scanner pose, and detailed progress;\n     - `ir.js`: clear the canvas and orientation state;\n     - `sensors.js`: clear readings, gizmos, histories, and warning timers;\n     - `hud.js`: clear source-specific Stream rates, drops, and gaps.\n   - Keep the capture browser visible while `stream_ready` is false.\n\n5. **Order the separate mesh channel**\n   - Send a JSON `mesh_reset` barrier on `/ws-mesh` after any previously queued mesh for the old generation.\n   - Teach `ws.js` to accept this text control frame on the mesh socket.\n   - Do not cache or transmit meshes whose generation is no longer active.\n   - Document the additive control message in `docs/web-protocol.md`; the binary mesh layout remains unchanged.\n\n### Regression coverage\n\nAdd `host/tests/test_web_view_scope_e2e.py` using:\n\n- a fake live source continuously producing recognizable depth, IR, IMU, and environment values;\n- a capture fixture containing deliberately different values;\n- delayed old-generation callbacks injected after the capture loads;\n- the real server, WebSockets, and headless Chrome.\n\nVerify independently that:\n\n- **Point cloud:** geometry contains only capture depths.\n- **SLAM:** pose, trajectory, and mesh derive only from capture frames.\n- **Stream:** stream rows/rates identify only capture streams.\n- **Sensors:** heading, orientation, pressure, and temperature match the capture.\n- **IR monitor:** rendered pixel checksum matches the capture.\n- Entering View without selecting a capture clears all five surfaces.\n- Switching capture A \u2192 B never shows live data or stale A data after B\u2019s reset barrier.\n- Returning to Live restores normal live updates.\n\nAlso add focused unit tests for generation invalidation, state resets, View readiness, and mesh-reset ordering. Prove the end-to-end test by temporarily removing the generation guard and confirming that delayed live packets make it fail.\n\n### Verification\n\n- Run the focused View-scope tests.\n- Run the complete host pytest suite.\n- Exercise Live \u2192 View browser \u2192 capture A \u2192 capture B \u2192 Live in headless Chrome.\n- Capture screenshots for Point cloud, SLAM, Stream, Sensors, and IR.\n- Confirm no stale-generation messages appear in browser/server diagnostics.",
+    "createdAt": "2026-08-12T01:24:49Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:21:34Z",
+  "labels": [
+   {
+    "name": "bug"
+   },
+   {
+    "name": "area/host-web"
+   },
+   {
+    "name": "priority/now"
+   }
+  ],
+  "number": 101,
+  "title": "View mode can display current live data instead of only the loaded capture",
+  "updatedAt": "2026-08-12T01:24:49Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "## BUG-071 \u2014 `resolve_command()` never wired up `\"standby\"`, so `rig_command`/generic `cmd` can't send it\n\n**Status:** open, not fixed (found incidentally, out of scope for the pass that found it) \u00b7\n**Area:** host/web \u00b7 **Found by:** trying to exercise `SET_STANDBY` via `rig_command(name=\"standby\",\n...)` while verifying the 2026-08-03 auto-idle work, 2026-08-03.\n\n`resolve_command()` (`web.py`, backs the generic inbound `{\"type\": \"cmd\", \"name\": ...}` message) maps\n`ping`/`calib`/`reinit`/`usecase`/`period`/`exposure` to their `CommandCode`s and returns `None` \u2014\n\"unknown/invalid cmd request\" \u2014 for anything else. `\"standby\"` was never added, even though the wire\nprotocol fully supports it (`CommandCode.SET_STANDBY`, `RS_CMD_SET_STANDBY`) and the CLI tool\n(`roomscan-ctl standby <0|1|2>`, `host/src/roomscan/control.py`) already parses it correctly\n(`test_control_cli_parses_standby`). The web app's own `SET_STANDBY` traffic goes entirely through\nthe dedicated `set_idle` message \u2192 `_dispatch_standby()`, which never routes through\n`resolve_command()`, so this gap was invisible until something tried to send `standby` as a generic\n`cmd` \u2014 which is exactly what the `rig_command` MCP tool's own docstring claims is supported\n(`\"name is one of ping, calib, reinit, usecase, period, exposure, standby\"`).\n\n**Not fixed**: found while validating an unrelated feature (auto-idle activity accounting), and\n`rig_set`/`set_idle`/the auto-idle machinery are all unaffected \u2014 this only blocks a *manual* generic\n`cmd` standby request over `/ws`, e.g. via `rig_command`. Fix is a one-line addition to\n`resolve_command()` (`if name == \"standby\": return CommandCode.SET_STANDBY, int(param), f\"standby\n{int(param)}\"`), but wasn't made without a clearer picture of why the app deliberately built a\nseparate `set_idle` path instead of just using generic `cmd` here in the first place \u2014 worth checking\nthat history before adding the case, in case there was a reason (e.g. wanting persisted\nenabled/level state that a bare `cmd` round-trip doesn't carry).\n\n---\n_Migrated from `bugs/BUG-071.md`. Original index status: `open`, area: `host/web`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "## Implementation plan\n\nI\u2019d fix this as a small host/web command-routing change and deliberately leave the existing `set_idle` / auto-idle machinery separate.\n\n### 1. Add `standby` to the generic command resolver\n\nIn `host/src/roomscan/web.py`, extend `resolve_command()` with the missing mapping:\n\n- `\"standby\"` \u2192 `CommandCode.SET_STANDBY`\n- convert the supplied parameter to `int`, consistent with `period` / `exposure`\n- preserve the numeric level in the command label, e.g. `standby 0`, `standby 1`, `standby 2`\n\nConceptually:\n\n    if name == \"standby\":\n        level = int(param)\n        return CommandCode.SET_STANDBY, level, f\"standby {level}\"\n\nThis lets the existing generic `{\"type\":\"cmd\",\"name\":\"standby\",\"param\":...}` path use the same `CommandDispatcher` and ACK/log handling as every other generic command.\n\n### 2. Keep generic `standby` separate from `set_idle`\n\nDo **not** route this through the existing `set_idle` handler.\n\nThey serve different purposes:\n\n- `cmd/standby` is a one-shot device command, equivalent to `roomscan-ctl standby <0|1|2>` and useful to `rig_command`.\n- `set_idle` configures the web server's automatic idle policy (`idle_enabled` / `idle_level`), persists those preferences, manages debounce/activity state, and issues standby commands later through `_dispatch_standby()`.\n\nA manual generic standby request therefore should not silently change or persist the user's auto-idle settings.\n\nAlso avoid trying to update `state.sensor_idled` optimistically from the generic command path: the dispatcher is asynchronous and the command can fail. The existing auto-idle bookkeeping should continue to describe commands issued by the auto-idle subsystem itself rather than pretending a manual command was acknowledged before the ACK arrives.\n\n### 3. Add resolver regression coverage\n\nExtend the existing `resolve_command` tests in `host/tests/test_web.py`.\n\nAdd a parameterized test covering all three protocol values:\n\n- `standby 0` \u2192 `(CommandCode.SET_STANDBY, 0, \"standby 0\")`\n- `standby 1` \u2192 `(CommandCode.SET_STANDBY, 1, \"standby 1\")`\n- `standby 2` \u2192 `(CommandCode.SET_STANDBY, 2, \"standby 2\")`\n\nKeep the existing unknown-command test to ensure unsupported names still return `None`.\n\n### 4. Add one dispatch-level regression if the existing test harness makes it cheap\n\nExercise the generic inbound command path with:\n\n    {\"type\": \"cmd\", \"name\": \"standby\", \"param\": 1}\n\nand assert that the dispatcher receives:\n\n    CommandCode.SET_STANDBY, 1, \"standby 1\"\n\nThis pins the actual BUG-071 failure mode rather than only testing the pure helper.\n\nThe test should not require hardware; mock/fake the dispatcher exactly as the existing web command tests do.\n\n### 5. Protect the separate auto-idle behavior\n\nRun the existing sensor-idle tests, especially those covering:\n\n- persisted `idle_enabled` / `idle_level`\n- `_dispatch_standby()`\n- viewer leave/join auto-idle behavior\n- wake behavior\n\nNo changes should be required in `set_idle`, `_dispatch_standby()`, or the browser idle UI.\n\n### Verification\n\nRun at minimum:\n\n    pytest host/tests/test_web.py host/tests/test_sensor_idle.py\n\nThen run the full host test suite.\n\nFor an end-to-end smoke test against a live rig, send:\n\n    rig_command(name=\"standby\", param=1)\n    rig_command(name=\"standby\", param=0)\n\nand verify both commands receive normal `SET_STANDBY` ACKs instead of `unknown/invalid cmd request`.\n\n### Expected files changed\n\n- `host/src/roomscan/web.py`\n- `host/tests/test_web.py`\n\nNo firmware or protocol changes should be necessary; `SET_STANDBY` already exists on the wire and is already supported by the CLI and the dedicated auto-idle path.",
+    "createdAt": "2026-08-11T23:42:52Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:20:37Z",
+  "labels": [
+   {
+    "name": "bug"
+   },
+   {
+    "name": "area/host-web"
+   },
+   {
+    "name": "priority/now"
+   }
+  ],
+  "number": 82,
+  "title": "resolve_command() never wired up \"standby\", so rig_command/generic cmd can't send it",
+  "updatedAt": "2026-08-11T23:42:52Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Legacy ID:** SLAM-9\n\n**What RTAB-Map does.** No node enters the map unless the device has moved. On mobile it sets\n`RGBD/LinearUpdate = 0.05` m and `RGBD/AngularUpdate = 0.05` rad\n(`app/android/jni/RTABMapApp.cpp:159-160`; library defaults are 0.1/0.1,\n`corelib/include/rtabmap/core/Parameters.h:402-403`). A phone on a tripod adds **zero** nodes,\nso a stationary sensor cannot contribute geometry or pose error to the map at all.\n\n**What we do.** `Mapper.step` integrates every frame unconditionally at ~30 fps. There is no\ndisplacement gate anywhere between the reader and `TsdfMap.integrate`.\n\n**Why it matters here.** This is the zero-velocity constraint #101/BUG-069 says the reconstruction\nlacks, expressed as a map-update gate rather than a detector \u2014 and unlike `StationarityGate`\n(display-only, and requires <=0.3 deg/frame so it cannot fire during a pan) a displacement gate is\nin the reconstruction path and is trivially correct. It also directly attacks BUG-067: on\n`captures/imuTranslationError.bin` (tripod, true translation ~ the head's lever arm) the pipeline\nreports 18-20 m of path at mean fitness 0.88. Frames that contribute no new viewpoint can only\ncontribute ICP noise.\n\nSecondary benefit: fewer integrations per metre means slower TSDF block growth, which is upstream\nof #111 (SLAM-2, mesh-extraction ceiling) and BUG-035.\n\n**To explore.**\n- Gate on the *pose delta since last integrated frame*, not on IMU rate \u2014 the source of the pose is\n  the thing we are deciding to trust.\n- Pick thresholds by matched ensembles over >=3 captures (tripod + both room circuits), per the\n  `slam-ensemble` protocol; a single run cannot distinguish this from chaos.\n- Decide what a gated frame still does: it should still update display/orientation and probably\n  still feed ICP for pose continuity, just not `integrate()`. Those are separable and the\n  answer may differ.\n- Watch for the opposite failure: gating too aggressively starves frame-to-model tracking of\n  recent geometry.\n\nRelated: #110 (SLAM-1), #112 (SLAM-3), BUG-067, BUG-069.\n\n---\n*Source: 2026-08-11 study of `introlab/rtabmap` @ `2e193ee1` (local checkout `~/git/personal/rtabmap`), prompted by the owner's Pixel 10 Pro XL RTAB-Map/ARCore capture. Background note: `docs/rtabmap-study.md`.*",
+  "comments": [
+   {
+    "body": "## Implementation plan\n\nI\u2019d implement this as a **TSDF integration gate only**: tracking/ICP continues on every usable frame, but the map is updated only after the pose has moved far enough from the last frame that was actually integrated.\n\n### 1. Add configurable keyframe thresholds\n\nIn `host/src/roomscan/slam/config.py` and `Mapper.__init__`, add:\n\n- `keyframe_linear_m`\n- `keyframe_angular_deg`\n\nSemantics:\n\n- `0` disables that criterion.\n- Both `0` preserves today's behavior exactly: every successfully tracked frame integrates.\n- The first successfully tracked frame always integrates.\n- With the gate enabled, integrate when **either** the translation or rotation from the last integrated pose exceeds its enabled threshold.\n\nStart the validation sweep around RTAB-Map's mobile values:\n\n- linear: `0.02 / 0.05 / 0.10 m`\n- angular: `~1.7 / 2.9 / 5.7\u00b0` (`0.03 / 0.05 / 0.10 rad`)\n\nKeep the shipped default disabled until the matched-capture results select a threshold.\n\n### 2. Separate tracking state from map-keyframe state\n\n`Mapper.step()` currently couples two operations:\n\n1. `TsdfMap.integrate(...)`\n2. advancing `_t_prev`\n\nThat coupling must be broken.\n\nAdd `_last_integrated_pose`, containing the full 4\u00d74 pose of the last TSDF keyframe.\n\nFor every successfully tracked frame:\n\n1. Run prediction, raycast and ICP exactly as today.\n2. Apply barometer/ZUPT exactly as today.\n3. Compare the resulting pose against `_last_integrated_pose`.\n4. Integrate only when the keyframe gate passes.\n5. **Always update `_t_prev` after successful tracking**, even when integration was skipped.\n6. Update `_last_integrated_pose` only after a real `TsdfMap.integrate()`.\n\nThis is important: using `_t_prev` as the keyframe reference would make skipped frames stop advancing the tracking prior, turning a map-update optimization into a tracking behavior change.\n\nNo change should be required inside `TsdfMap`; the decision belongs in `Mapper`, where the pose history exists.\n\n### 3. Make integration status explicit\n\nAdd a backward-compatible field to `FrameStep`:\n\n`map_integrated: bool`\n\nSet it:\n\n- `True` when `TsdfMap.integrate()` actually ran.\n- `False` on tracking-lost frames.\n- `False` on successfully tracked frames suppressed by the keyframe gate.\n\nKeep `integrate_ms = 0.0` on skipped frames.\n\nAlso maintain simple mapper counters for integrated vs. keyframe-skipped frames so capture sweeps can report the actual reduction rather than inferring it indirectly.\n\n### 4. Fix worker mesh throttling\n\n`host/src/roomscan/slam/worker.py` currently assumes:\n\n`not step.tracking_lost == frame changed the TSDF`\n\nThat stops being true after this change.\n\nChange `_frames_integrated` and mesh extraction scheduling to advance only when:\n\n`step.map_integrated`\n\nA gated frame should still immediately publish its fresh pose/trajectory/HUD data, but it should not trigger an expensive mesh extraction when the underlying map did not change.\n\n### 5. Carry the flag through the remote backend\n\nUpdate:\n\n- `host/src/roomscan/slam/wire.py`\n- `host/src/roomscan/slam/service.py`\n- `host/src/roomscan/slam/remote.py`\n\nAdd optional `map_integrated` to the POSE message.\n\nFor compatibility with an older service, `RemoteSlamWorker` should interpret a missing field as:\n\n`map_integrated = not tracking_lost`\n\nbecause that is exactly the pre-keyframe behavior.\n\nThe mapper config itself already flows to the remote worker through the serialized mapper kwargs, so the new thresholds should use that existing path rather than adding another protocol mechanism.\n\n### 6. Handle Detailed reconstruction explicitly\n\n`DetailedSlamPreset.mapper_kwargs()` already builds on `SlamConfig.mapper_kwargs()`, so the knobs can propagate automatically.\n\nBecause these thresholds change reconstructed geometry, make the resolved Detailed thresholds part of the reconstruction preset/fingerprint if Detailed is going to use the gate. Do not let changing a keyframe threshold silently reuse a sidecar produced with a different integration policy.\n\n### 7. Add regression tests\n\nIn `host/tests/test_slam_mapper.py`:\n\n- First valid frame always integrates.\n- Gate disabled -> every non-lost frame still integrates.\n- A successfully tracked sub-threshold frame has `map_integrated == False`.\n- `_t_prev` still advances when integration is skipped.\n- `_last_integrated_pose` does not advance when integration is skipped.\n- Several individually-small movements eventually exceed the displacement from the **last integrated pose** and create a new keyframe.\n- Angular displacement can independently trigger integration.\n- Tracking-lost frames neither integrate nor advance the integrated-pose reference.\n- `SyntheticPan` remains tracked with the gate enabled.\n\nIn `host/tests/test_slam_worker.py`:\n\n- A tracked-but-gated frame does not advance the mesh-extraction cadence.\n- A subsequent integrated keyframe does.\n- Pose publication still occurs on skipped frames.\n\nIn `host/tests/test_slam_wire.py` / service tests:\n\n- `map_integrated` round-trips through a POSE message.\n- Missing `map_integrated` retains old-service compatibility.\n- Remote `FrameStep.map_integrated` matches the service result.\n\nKeep the existing `test_mapper_kwargs_defaults_match_mapper_signature` and Detailed kwargs coverage tests passing so Live, CLI and Detailed cannot silently diverge.\n\n### 8. Validate thresholds with matched capture ensembles\n\nRun baseline + threshold candidates over at least:\n\n1. `captures/imuTranslationError.bin` \u2014 tripod/null-translation case this issue is intended to attack.\n2. `captures/coffeeRoomCircuitMnt.bin`\n3. `captures/coffeeRoomCircuitNoMnt.bin`\n\nUse identical perturbation seeds for every candidate.\n\nRecord:\n\n- max excursion / stationary drift\n- final closure error\n- path length\n- tracking-lost frames and longest lost streak\n- fitness / RMSE\n- integrated-frame count and percentage\n- TSDF `blocks_used`\n- total runtime / integration time\n\nThe gate is a win only if it materially reduces the tripod fabrication and integration/block growth **without increasing tracking loss or degrading room-circuit closure**. In particular, reject thresholds that save integrations by starving frame-to-model tracking of sufficiently recent geometry.\n\nOnce a threshold wins across the matched ensembles, make that the default for Live and Detailed; otherwise leave the feature available but disabled and record the negative result.\n\n### Expected files\n\n- `host/src/roomscan/slam/mapper.py`\n- `host/src/roomscan/slam/config.py`\n- `host/src/roomscan/slam/worker.py`\n- `host/src/roomscan/slam/wire.py`\n- `host/src/roomscan/slam/service.py`\n- `host/src/roomscan/slam/remote.py`\n- `host/tests/test_slam_mapper.py`\n- `host/tests/test_slam_worker.py`\n- `host/tests/test_slam_wire.py`\n- relevant remote/service/Detailed tests",
+    "createdAt": "2026-08-12T01:08:44Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T13:17:11Z",
+  "labels": [
+   {
+    "name": "work-item"
+   },
+   {
+    "name": "area/host-slam"
+   },
+   {
+    "name": "priority/later"
+   }
+  ],
+  "number": 149,
+  "title": "Keyframe-gate map updates by minimum displacement",
+  "updatedAt": "2026-08-12T01:08:44Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Legacy ID:** SLAM-2\n\n*(was sub-phase 6.I; proposed)*. Chunked\n  extract-and-stitch or a non-Open3D mesher, to get past **BUG-053** (marching cubes crashes above\n  ~260k blocks) so Detailed can run finer than 10 mm voxels on room-sized captures. Detail: \"Sub-phase 6.I\".\n\n---\n_Migrated from `ROADMAP.md#work-item-register`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "## Implementation plan\n\n### Design\n\nKeep Open3D\u2019s existing marching-cubes implementation, but run it against spatially partitioned temporary VoxelBlockGrids:\n\n1. Read active block coordinates from the source TSDF.\n2. Partition them into fixed spatial chunks with a one-block halo.\n3. Copy only each chunk\u2019s TSDF, weight, and color attributes into a temporary CPU grid.\n4. Extract each chunk below the 250k-block crash ceiling.\n5. Keep triangles owned by that chunk, concatenate the results, weld boundary vertices, remove duplicate/degenerate triangles, and recompute normals.\n\nThis preserves current Open3D geometry and color semantics without adding another meshing dependency.\n\n### Code changes\n\n- [ ] Add `host/src/roomscan/slam/chunked_mesher.py`.\n\n  - Snapshot active block keys once.\n  - Transfer voxel attributes to CPU one chunk at a time.\n  - Guarantee every temporary grid remains safely below `_MAX_SAFE_EXTRACT_BLOCKS`.\n  - Support negative block coordinates and sparse rooms.\n  - Return the existing host-resident `o3d.t.geometry.TriangleMesh` type.\n\n- [ ] Update `host/src/roomscan/slam/tsdf.py`.\n\n  - Split extraction-limit failures from integration/rehash capacity failures.\n  - Add an extraction strategy to `TsdfMap.mesh()`:\n    - `open3d`: existing guarded behavior.\n    - `auto`: existing extractor below the ceiling, chunked extraction above it.\n  - Leave `point_cloud()` unchanged unless a demonstrated caller also needs chunking.\n  - Preserve the current default so live SLAM cannot unexpectedly start a long CPU extraction.\n\n- [ ] Update `host/src/roomscan/slam/mapper.py`.\n\n  - Forward the selected mesh strategy to `TsdfMap`.\n\n- [ ] Update `host/src/roomscan/slam/showcase.py`.\n\n  - Continue using fast Open3D extraction for intermediate Detailed previews.\n  - Once the map exceeds the ceiling, stop attempting intermediate extraction, retain the last good preview, and continue integrating frames.\n  - Use `auto` for the final mesh so the build completes through the chunked path.\n  - Keep integration/rehash failures terminal and preserve the \u201cnever commit a partial sidecar\u201d behavior.\n\n- [ ] Update `host/src/roomscan/slam/cli.py`.\n\n  - Use automatic chunked extraction for the CLI\u2019s final mesh output as well.\n\n- [ ] Re-enable the 5 mm Detailed preset only after the full-room validation gate passes.\n\n  - Measure the complete 5 mm active-block count first.\n  - Preallocate sufficient GPU capacity to avoid Open3D\u2019s destructive rehash path when it fits safely.\n  - Otherwise expose a Detailed-only CPU-device setting; chunked extraction fixes meshing capacity, but it must not conceal a separate TSDF integration-capacity failure.\n\n### Tests\n\n- [ ] Partitioning tests covering negative coordinates, empty chunks, halos, and the per-chunk block ceiling.\n- [ ] Small-map parity test comparing standard and chunked extraction bounds, colors, and surface distance.\n- [ ] Plane/corner fixtures crossing chunk boundaries, asserting no cracks, duplicate triangles, or degenerate faces.\n- [ ] Lower the ceiling in a unit test so a small synthetic map exercises the chunked fallback without allocating 250k blocks.\n- [ ] Verify `PostProcessWorker` continues processing after intermediate extraction reaches the ceiling and performs one final chunked extraction.\n- [ ] Verify live `SlamWorker` retains its current last-good-mesh freeze behavior.\n- [ ] Verify a failed final extraction still produces no PLY/TUM/manifest commit.\n\n### Full-room acceptance gate\n\nRun `DebugCapB1.bin` at 5 mm and require:\n\n- all 4,808 frames are processed;\n- active blocks exceed the old 250k ceiling;\n- no segfault, CUDA illegal access, or unsafe rehash;\n- a non-empty, reloadable PLY and current manifest are written;\n- chunk peak memory remains bounded independently of total map size;\n- seams are absent under boundary-edge and nearest-surface checks;\n- a prefix below 250k blocks agrees with normal Open3D extraction within a small fraction of one voxel.\n\nThe 10 mm default should remain in place until this gate passes; then changing it back to 5 mm will intentionally invalidate older Detailed sidecars through the existing preset fingerprint.",
+    "createdAt": "2026-08-12T01:48:54Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:22:00Z",
+  "labels": [
+   {
+    "name": "work-item"
+   },
+   {
+    "name": "area/host-slam"
+   },
+   {
+    "name": "priority/later"
+   }
+  ],
+  "number": 111,
+  "title": "Lift the mesh-extraction ceiling",
+  "updatedAt": "2026-08-12T01:48:54Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Legacy ID:** SLAM-3\n\n*(open, architectural)*. The ICP retry (BUG-036) survives a bad *frame*,\n  not a bad *second*; there is no recovery from a real tracking-kill (see fixture DC-C). *(2026-08-06:\n  also the ceiling on BUG-067 \u2014 the accel ZUPT fixed the tripod's net drift/instability but a pure\n  pan still over-reports total *path* 13.1 \u2192 11.5 m because the coherence veto won't hold through\n  partly-coherent fabricated drift; only relocalization or a full zero-velocity re-anchor removes the\n  rest. See bugs/BUG-067.md.)*\n\n---\n_Migrated from `ROADMAP.md#work-item-register`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "## Implementation plan\n\nI\u2019d implement this as **bounded local relocalization after sustained tracking loss**, rather than a full global/loop-closure system.\n\n### Current failure mode\n\n`Mapper.step()` currently does the right thing for an isolated bad frame:\n\n1. Predict pose from the current SFLP rotation + the last good translation.\n2. Raycast the TSDF from that pose.\n3. Run ICP.\n4. If the normal correspondence radius fails, `register_escalating()` retries once at `icp_retry_dist`.\n5. If that also fails, mark the frame lost, skip integration, and leave `_t_prev` unchanged.\n\nThe problem is step 5 after a multi-frame outage. Translation remains frozen at the last good position while the scanner may continue moving, so every subsequent raycast starts farther from reality. There is currently no mechanism that can search its way back onto the existing map.\n\n### Proposed approach\n\n#### 1. Add an explicit relocalization state machine\n\nIn `host/src/roomscan/slam/mapper.py`, track:\n\n- consecutive post-bootstrap lost frames\n- whether relocalization is active\n- the current search cursor / candidate set\n- an optional provisional recovered pose\n- attempt / success / failure counters\n\nKeep the existing `register_escalating()` path unchanged for ordinary tracking. Relocalization only activates after a sustained lost streak (initially ~3\u20135 frames; tune from the DC-C fixture).\n\n#### 2. Add a bounded translation search\n\nCreate something like:\n\n`host/src/roomscan/slam/relocalization.py`\n\nThe SFLP quaternion already gives us a strong current orientation prior, so the first implementation should search **translation**, not arbitrary 6-DoF poses.\n\nGenerate translation candidates around the last known-good `_t_prev`:\n\n- search primarily in world X/Z (Y is the vertical axis in the current Open3D CV-world convention)\n- keep only a small vertical band around the last position / barometric estimate\n- expand outward in rings\n- coarse search first, then refine around a promising candidate\n- cap the number of candidates evaluated per frame so recovery cannot stall the SLAM worker\n\nStarting values to validate, not hard requirements:\n\n- max horizontal radius: ~1.5\u20132.0 m\n- coarse spacing: ~0.25\u20130.5 m\n- vertical band: ~\u00b10.25 m\n- candidate budget: ~4\u20138 evaluations per SLAM iteration\n\n#### 3. Evaluate candidates with the existing TSDF, without extracting the whole map\n\nFor each candidate translation:\n\n1. Combine the candidate translation with the **current IMU/SFLP rotation**.\n2. Raycast the existing TSDF at that candidate pose using the current depth frame as `depth_hint`.\n3. Reject candidates whose raycast produces too few model points.\n4. Run the existing ICP implementation against that raycast, with a relocalization-specific correspondence radius.\n5. Rank passing candidates using fitness/RMSE.\n\nDo **not** build relocalization around `TsdfMap.point_cloud()` or full mesh extraction. The repository already has a known Open3D extraction ceiling; candidate raycasts keep this bounded to the current frustum and avoid coupling SLAM-3 to that separate problem.\n\nUse a stricter acceptance gate than ordinary tracking. Initial values can be around fitness >= 0.6 / RMSE <= 0.03 m, then tune from real captures.\n\nAlso reject ambiguous results where two spatially different candidates score essentially the same rather than guessing in a repetitive room.\n\n#### 4. Require confirmation before modifying the map\n\nA coarse relocalization hit should **not immediately integrate into the TSDF**.\n\nInstead:\n\n1. Store the winning pose as provisional.\n2. Use it as the prediction for the next valid frame.\n3. Require normal, tight ICP to succeed from that pose.\n4. Only after confirmation:\n   - commit the recovered translation to `_t_prev`\n   - resume TSDF integration\n   - reset the lost streak/search state\n   - increment the relocalization-success counter\n\nIf confirmation fails, throw away the provisional pose and continue searching.\n\nThis is important because a false relocalization is much worse than remaining visibly tracking-lost: one incorrect integration can permanently corrupt the TSDF.\n\n#### 5. Keep normal tracking behavior untouched\n\nWhen tracking is healthy:\n\n- no candidate search\n- no extra raycasts\n- no changes to the current ICP path\n- no changes to TSDF integration\n- no added hot-path cost besides a lost-streak counter\n\nThe existing one-frame `icp_retry_dist` recovery remains the first line of defense.\n\n### Configuration\n\nAdd a minimal set of knobs to `host/src/roomscan/slam/config.py` and mirror them through all Mapper construction paths:\n\n- `relocalize_enabled`\n- `relocalize_after_frames`\n- `relocalize_radius_m`\n- `relocalize_candidates_per_frame`\n\nKeep finer search/scoring constants private initially. We should tune those from the real fixture before turning them into permanent configuration surface.\n\nMake sure the new Mapper kwargs flow through:\n\n- live `SlamRunner`\n- CLI / Detailed SLAM\n- `slam/service.py` remote worker path\n\n### Observability\n\nExpose at least:\n\n- relocalization attempts\n- relocalization successes\n- relocalization failures/exhaustions\n- whether the current pose is provisional/relocalizing\n\nIf these are included in the remote SLAM status, update `slam/wire.py`, `slam/remote.py`, `slam/service.py`, and their protocol tests together so local and remote backends report the same state.\n\n### Tests\n\nAdd focused unit tests for the search machinery:\n\n- candidate generation expands outward deterministically\n- X/Z search uses the correct world axes\n- candidate count is bounded per iteration\n- search resets cleanly after success/failure\n- no duplicate candidates\n\nExtend `host/tests/test_slam_mapper.py` with:\n\n- a normal tracked sequence never invokes relocalization\n- a post-bootstrap lost streak triggers relocalization\n- failed candidates leave `_t_prev` and the TSDF untouched\n- a provisional candidate is **not** integrated immediately\n- a successful next-frame confirmation commits the pose and resumes integration\n- failed confirmation returns to search\n- invalid/too-sparse depth frames do not produce false recovery\n- exhausting the search leaves tracking lost rather than accepting a bad pose\n- the relocalization path never calls full `TsdfMap.point_cloud()` extraction\n\nAdd/update config and local/remote plumbing tests where the new settings/telemetry pass through.\n\n### Validation / acceptance criteria\n\nReplay the **DC-C tracking-kill fixture referenced by this issue**.\n\nBaseline should reproduce the sustained lost tail. With relocalization enabled:\n\n- tracking reacquires after the outage\n- `tracking_stats(...).died` becomes false\n- trailing/longest lost runs are bounded to the outage + search time\n- TSDF integration resumes after confirmed recovery\n- the recovered trajectory does not contain a large discontinuity inconsistent with the physical capture\n\nRegression-test clean captures as well:\n\n- captures with no sustained tracking failure should perform **zero relocalization attempts**\n- their trajectory/map output should remain unchanged apart from any newly reported counters\n- normal SLAM latency should remain unchanged\n- the BUG-067 stationary/pan cases should not accidentally trigger relocalization when tracking itself is still valid\n\nFinally, test an intentionally unrecoverable displacement outside the configured search radius. The correct behavior there is to remain `tracking_lost`, not to snap to a superficially similar part of the room.\n\n### Suggested implementation order\n\n1. Add relocalization search/candidate primitives + unit tests.\n2. Add lost-streak/provisional-pose state to `Mapper`.\n3. Integrate bounded candidate raycasts + ICP scoring.\n4. Add next-frame confirmation and integration guard.\n5. Add configuration/plumbing.\n6. Add observability.\n7. Replay DC-C and tune the search radius, spacing, acceptance gate, and ambiguity threshold from measured results.\n8. Run the clean-capture regression set before enabling it by default.",
+    "createdAt": "2026-08-12T00:02:53Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:22:03Z",
+  "labels": [
+   {
+    "name": "work-item"
+   },
+   {
+    "name": "area/host-slam"
+   },
+   {
+    "name": "priority/later"
+   }
+  ],
+  "number": 112,
+  "title": "Relocalization",
+  "updatedAt": "2026-08-12T00:02:53Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Original title:** officeFullScanAug6.bin forks near frame ~979: the ceiling drops below the previously established height, and Detailed SLAM reconstructs a separate set of rooms\n\n## BUG-084 \u2014 SLAM forks into a second, vertically displaced set of rooms near frame 979\n\n**Date filed:** 2026-08-06  \n**Area:** host/slam  \n**Status:** open (reproducible from the supplied capture; root cause unknown)\n\n## Symptom\n\n`captures/officeFullScanAug6.bin` contains a catastrophic SLAM discontinuity at\napproximately frame **979**. The mapper places the ceiling substantially lower than the\nceiling it had already detected earlier in the scan. The resulting map is not merely\nslightly warped: the Detailed SLAM reconstruction shows a separate, internally coherent\nset of rooms rather than the same room layout continued from the earlier trajectory.\n\nThe ceiling-height jump and the second-room-set result indicate a map fork, relocalization\nfailure, or similarly terminal pose discontinuity. They should be investigated together;\nthe Detailed result independently exposes the failure even if the live preview makes the\ntransition difficult to see.\n\n## Reproduction\n\n1. Load `captures/officeFullScanAug6.bin`.\n2. Run SLAM through the capture, including frames around 979.\n3. Compare the ceiling height before and after the discontinuity.\n4. Run the same capture through Detailed SLAM and compare its room layout with the map\n   established before frame 979.\n\n## Expected behavior\n\nThe ceiling should remain at the previously established physical height, and the scan\nshould continue in the same world/map. If tracking confidence is insufficient to maintain\nthat estimate, SLAM should reject or clearly flag the transition rather than silently\ncreating a second set of rooms at a different elevation.\n\n## Impact\n\nThe capture's reconstruction is unusable across the discontinuity. A visually plausible\nbut vertically displaced map can contaminate room dimensions and any downstream mesh or\nmeasurement, while the separate Detailed room set makes the failure look like valid new\ngeometry rather than an explicit tracking loss.\n\n## Investigation notes\n\n- The first reported onset is around frame 979; determine the exact last-good and first-bad\n  frames during analysis.\n- Compare raw and fused orientation priors, ICP fitness/correspondences, tracking-lost\n  gates, barometer authority, and pose increments across the boundary.\n- Check whether the live and Detailed paths diverge at the same frame or whether one path\n  is masking an earlier pose error.\n- Do not infer a physical second room set from the Detailed mesh until the pose trajectory\n  has been checked for a discontinuity.\n\n## Related issues\n\n- BUG-067: SLAM can fabricate large motion while reporting healthy tracking.\n- BUG-068: ill-conditioned translation solves were accepted by an ineffective guard.\n- BUG-070: SLAM behavior depends on the world-frame heading prior.\n\n---\n_Migrated from `bugs/BUG-084.md`. Original index status: `open`, area: `host/slam`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "**Triage 2026-08-11 \u2014 first diagnostic to run:** the symptom (internally coherent second room set, *vertically* displaced, at healthy fitness) is exactly the BUG-083 signature \u2014 #94 found that isolated ENV frames carrying `pressure = 0.0 Pa` fabricated **8.6 m of vertical** at high fitness before the firmware fix. `officeFullScanAug6.bin` was recorded 2026-08-06, around when #94 was found/fixed, so the capture may well contain the poisoned ENV frames even though the firmware is now fixed.\n\nConcrete steps:\n1. Scan the capture's ENV frames around frame ~979 for zero/absurd pressure samples.\n2. Re-run Detailed with the barometer disabled (`baro_authority = 0`) and diff the trajectory \u2014 if the fork disappears, this is #94's data poisoning a pre-fix capture, and the fix is a host-side validity guard on decode (reject 0.0 Pa), not a SLAM change.\n3. Only if that comes back clean, proceed to the ICP/prior bisection in the issue body.\n",
+    "createdAt": "2026-08-11T17:04:11Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:21:17Z",
+  "labels": [
+   {
+    "name": "bug"
+   },
+   {
+    "name": "area/host-slam"
+   },
+   {
+    "name": "priority/now"
+   }
+  ],
+  "number": 95,
+  "title": "officeFullScanAug6.bin forks near frame ~979\u2026",
+  "updatedAt": "2026-08-11T17:04:11Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Original title:** Reported drift is not invariant to a physically null relabelling of compass heading: a constant graft_yaw offset swings a stationary capture's reported displacement from 0.81 \u00b1 0.53 m (0\u00b0) to 2.89 \u00b1 0.14 m (90\u00b0), repeatably. This is why Live SLAM (mag-grafted prior) reads ~4\u00d7 worse than Detailed (raw SFLP prior) on the same bytes. Still open 2026-08-06: the accel ZUPT (BUG-069) tightens each heading's run-to-run variance (now deterministic, no longer bistable \u2014 0.104 at 0\u00b0, 2.44 \u00b1 0.36 at 90\u00b0) but does NOT remove the across-heading dependence; not root-caused. Clue: the fabrication appears anchored in the world/CV frame (its coherence rotates with the graft), so suspect the prior yaw's interaction with the NN search / raycast viewpoint\n\n## BUG-070 \u2014 reported drift changes by 2 m under a physically null change of compass heading\n\n**Status:** anomaly (reproducible, measured, not root-caused) \u00b7 **Area:** host/slam \u00b7 **Found by:**\nisolating why Live SLAM and Detailed disagree on BUG-067's capture, 2026-08-02.\n\nLive SLAM feeds `sensor.fused_quat()` (SFLP with a magnetometer heading graft, +56.8\u00b0 on this\ncapture); Detailed feeds the raw SFLP quat via `_load_frames`. Live reads ~4\u00d7 worse. The obvious\nexplanation \u2014 that the mag correction *wanders*, which it does, \u00b12\u20133\u00b0 over the run \u2014 **is wrong**:\na **frozen constant** graft is just as bad (1.81 \u00b1 0.77 m vs the live 1.69 \u00b1 0.52 m).\n\n`graft_yaw` is a pure heading change; verified numerically that boresight tilt and the CV-world\nup-component are preserved to machine precision under grafts of 45/90/180\u00b0, and the\n`T_WORLD_TO_CV @ R @ T_CV_TO_BODY` sandwich carries it correctly. So a constant graft relabels\ncompass directions and changes no physics. Yet, sweeping it (n=4 each, max excursion):\n\n```\n  0\u00b0 0.81 \u00b1 0.53    15\u00b0 1.28 \u00b1 0.89    30\u00b0 0.81 \u00b1 0.32    45\u00b0 1.42 \u00b1 0.61\n 57\u00b0 1.59 \u00b1 0.70    60\u00b0 1.37 \u00b1 0.62    75\u00b0 2.21 \u00b1 0.62    90\u00b0 2.89 \u00b1 0.14   180\u00b0 2.84 \u00b1 0.17\n```\n\n**What it is not.** Not the voxel lattice: a 90\u00b0 rotation about world up maps the cubic lattice onto\nitself, so 0/90/180 would agree, and they do not. Not the barometer: `baro_authority=0` gives 2.77\nat 90\u00b0 vs 3.02 with it on. Not a tracking failure: 0 lost frames, mean fitness 0.882\u20130.885 at both\n0\u00b0 and 90\u00b0.\n\n**What it looks like.** The 0\u00b0 and 90\u00b0 runs track *identically* (distance-from-origin within 0.1 m)\nuntil t \u2248 88 s, then 90\u00b0 slips 0.83 \u2192 2.98 m across the BUG-068 window while 0\u00b0 does not. So heading\nis not a systematic cause \u2014 it biases which side of a **bistable** marginal event the run lands on.\nThat a null relabelling can decide a 2 m outcome is the honest measure of how unstable this\ntranslation estimate is (BUG-067), and it means **any single-run comparison across captures with\ndifferent headings is confounded** \u2014 a sharper version of the \"score ensembles, not single runs\"\nrule from BUG-037.\n\n**BUG-068 did NOT fix it** \u2014 the prediction first written here was wrong, and is corrected rather\nthan deleted. Re-running the sweep with the shipped conditioning cap (n=4, max excursion):\n\n```\n   heading      cap 0 (pre-fix)     cap 20 (shipped)\n       0\u00b0      0.814 +/- 0.529      0.469 +/- 0.079\n      45\u00b0      1.421 +/- 0.605      1.454 +/- 0.706\n      57\u00b0      1.591 +/- 0.699      0.926 +/- 0.417\n      90\u00b0      2.887 +/- 0.141      2.107 +/- 0.540\n     180\u00b0      2.844 +/- 0.170      2.409 +/- 0.605\n```\n\nThe cap stabilises the 0\u00b0 case (spread 0.529 \u2192 0.079) and does nothing for the heading dependence\nitself: 45\u00b0 is unchanged and 90\u00b0 is still 4.5\u00d7 the 0\u00b0 result. So this is a **second, independent**\ndefect, not a downstream symptom of BUG-068. Still not root-caused; recorded so a future session\ndoes not have to rediscover it, and so nobody assumes the conditioning fix covered it.\n\n**The accel ZUPT (BUG-069) did NOT fix it either (2026-08-06).** The graft sweep re-run with the\nshipped default config (ZUPT on), n=8 max excursion:\n\n```\n   0\u00b0  0.104 +/- 0.016      45\u00b0  0.924 +/- 0.755\n  90\u00b0  2.443 +/- 0.363     180\u00b0  2.546 +/- 0.130\n```\n\nZUPT collapses the run-to-run spread *within* a heading (0\u00b0 sd 0.079 \u2192 0.016; note 90\u00b0 and 180\u00b0 are\nnow TIGHT too \u2014 0.363, 0.130 \u2014 the estimate is deterministic per heading, not bistable) but the\nacross-heading swing is intact: 90\u00b0/180\u00b0 still sit at ~2.5 m, ~24\u00d7 the 0\u00b0 result. So this is now\nbetter described as a **systematic heading dependence**, not a bistable coin-flip \u2014 a null world-Z\nrelabel of the prior deterministically moves the fabricated trajectory by metres. That the ZUPT's\ncoherence veto holds at 0\u00b0 but not at 90\u00b0 suggests the fabricated pan drift's *direction* (hence its\ncoherence) rotates with the graft, which is itself the clue: the fabrication is anchored to something\nin the world/CV frame, not the body. Prime remaining suspects to test next: the interaction of the\nworld-frame prior yaw with the NN correspondence search / raycast viewpoint, and whether the\nper-frame fabricated increment is coherent-in-world (a graft rotates it toward or away from the\nveto's coherence axis). **Still open, still not root-caused**; confounds any single-run comparison\nacross captures (or Live-vs-Detailed on one capture) with different headings.\n\n---\n\n---\n_Migrated from `bugs/BUG-070.md`. Original index status: `anomaly`, area: `host/slam`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [],
+  "createdAt": "2026-08-11T02:20:35Z",
+  "labels": [
+   {
+    "name": "bug"
+   },
+   {
+    "name": "area/host-slam"
+   },
+   {
+    "name": "status/anomaly"
+   },
+   {
+    "name": "priority/next"
+   }
+  ],
+  "number": 81,
+  "title": "Reported drift is not invariant to a physically null relabelling of compass heading\u2026",
+  "updatedAt": "2026-08-11T17:01:19Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Legacy ID:** SLAM-1\n\n*(was sub-phase 6.D; owner target)*.\n  ICP\u2192IMU yaw feedback, then a go/no-go on pose-graph loop closure vs the ~3% frame-to-model baseline.\n  **Blocked:** the multi-room gate (DC-B) fails on transport loss (**BUG-049**) \u2014 fix that and\n  re-record before scoring loop closure. Detail: `docs/roadmap-history.md` \u2192 \"Sub-phase 6.D\".\n\n---\n_Migrated from `ROADMAP.md#work-item-register`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "**Triage 2026-08-11 \u2014 this is the hub of the SLAM critical path.** Dependency order:\n\n1. **#60** (multi-second whole-group frame loss, legacy BUG-049) \u2014 must be fixed first; it already cost DC-B take 2 a 21 s tracking collapse and invalidates any multi-room capture recorded before the fix.\n2. **#138** (multi-room closed loop \u00d72) \u2014 re-record after #60 lands; this is the gate data.\n3. **#110** (this issue) \u2014 the go/no-go itself, scored with the paired-ensemble gate (`slam/validation.py`) against the ~3% frame-to-model baseline. Remember the standing rule: score ensembles, never single runs.\n\nDownstream, contingent on the verdict here:\n- **If go (pose graph earns its keep):** #150 (per-node cloud store) is the architectural core, with #151 (gravity constraint + optimize-from-end), #154 (BoW place recognition), #115 (GTSAM backend) as its components, and #156/#157 as the rendering consequences.\n- **Regardless of verdict:** #112 (relocalization) and #149 (keyframe gating) stand on their own \u2014 #149 also directly mitigates the stationary-fabrication class (#78/BUG-067 lineage).\n\nAlso note #102 (seek non-determinism) and #81 (heading-relabel drift anomaly) both degrade the *measurement* this decision relies on; #102 is labeled priority/now for that reason.\n",
+    "createdAt": "2026-08-11T17:04:09Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:21:58Z",
+  "labels": [
+   {
+    "name": "work-item"
+   },
+   {
+    "name": "area/host-slam"
+   },
+   {
+    "name": "status/blocked"
+   },
+   {
+    "name": "priority/next"
+   }
+  ],
+  "number": 110,
+  "title": "Drift correction / loop-closure evaluation",
+  "updatedAt": "2026-08-11T17:04:09Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Original title:** Multi-second whole-group frame loss on the multi-room captures \u2014 2.29% / 4.28% / 9.35% of RAW frames lost while byte-clean and 0 CRC, in outages up to 215 frames (7.1 s). Cost DC-B take 2 a 628-frame (21.2 s) tracking collapse. Recurring 63-frame quantum in all three takes; not RF range (the bridge rides on the scanner, never roamed, signal > 80%)\n\n## BUG-049 \u2014 Multi-second whole-group frame loss on the multi-room captures\n\n**Status:** open \u00b7 **Area:** host/transport \u00b7 **Found:** 2026-07-31, scoring DC-B\n\nThe three DC-B takes are **byte-perfect** \u2014 0 CRC failures, 0 bytes skipped, `clean: true` \u2014 while\nmissing large numbers of frames the device demonstrably sent:\n\n| take | duration | RAW loss | whole-group | fragment-only | worst outage |\n|---|---|---|---|---|---|\n| `DebugCapB1` | 163 s | **2.29%** (113/4933) | 72 | 46 | 63 frames = 2.1 s @ 37.3 s |\n| `DebugCapB2` | 165 s | **4.28%** (214/5004) | 139 | 86 | 73 = 2.4 s @ 5.8 s; 63 @ 136.3 s |\n| `DebugCapB3` | 181 s | **9.35%** (512/5474) | 456 | 69 | **215 = 7.1 s @ 66.2 s**; 153 = 5.1 s @ 162.6 s |\n| *`coffeeRoomCircuitNoMnt`* | 66 s | 0.15% | **0** | 4 | 1 frame |\n\n**The device emitted them.** Sequence numbers advance continuously at a steady **30.29 fps** (seq span\n\u00f7 elapsed `t_us`) straight across the gaps, so these were lost between board and file. There are **zero\nEVENT frames** in any take \u2014 the firmware never noticed.\n\n**Two distinct mechanisms**, separated by `capture_analyze`'s new continuity census:\n1. **Whole-group outages** \u2014 the seq is absent from streams 9/10/11/13 *and* 7, i.e. the 20-byte\n   IMU_QUAT datagram vanished alongside the ~15 KB RAW one. Not bandwidth, not fragmentation.\n   CALIB spacing degrades to 64/128/256 where it should be uniformly 64.\n2. **RAW-only fragment loss** \u2014 46/86/69 frames where only the ~11-fragment RAW datagram was lost.\n   This is the BUG-041/BUG-042 neighbourhood and is present at low rate on *every* capture.\n\n**Cost to SLAM, measured.** `DebugCapB2`'s 628-frame (21.2 s) tracking collapse begins at **t = 8.26 s**;\nits transport outage ran **5.81 \u2192 8.19 s**. Tracking died within ~70 ms of the hole ending and stayed\ndead 21.2 s. This is the open \"no relocalization\" hole, quantified: SLAM is frame-to-model, so after a\n2.4 s gap the pose prior is stale and ICP cannot re-register. **A bad 2.4 seconds cost 21 seconds.**\nTiming matters more than length \u2014 `DebugCapB1`'s comparable 63-frame outage at t = 37.3 s cost it\n**zero** lost frames, because by then there was a mature model to re-register against.\n\n**What it is NOT.** Not RF range: the Wi-Fi bridge is permanently mounted on the scanner with a patch\ncable, so its link endpoints never separate; the owner confirms it never roamed and signal stayed\nabove 80% (owner, 2026-07-31). Not block-grid saturation: re-running B2 at `block_count=500000`\ngives byte-identical results with `blocks_used` unchanged at 154469, so 160000 was never limiting\n(knob confirmed applied via the report's `block_count` field).\n\n**What discriminates the remaining candidates.** The loss correlates with **walking**, not duration \u2014\n`DebugCapE` is 147 s, nearly as long as B1, recorded the same session, and has 3 whole-group losses.\nA **63-frame (2.08 s) outage recurs in all three takes**, which is a quantum, not the continuous\ndistribution RF fading produces. Leading candidates: (a) Ethernet patch-cable link bounce \u2014 the one\nhop that physically flexes, and link-down plus auto-negotiation is ~1\u20133 s, matching the quantum;\n(b) background roaming scans on the bridge, which take the radio off-channel to *evaluate* candidates\nwithout ever losing signal or roaming; (c) a stall in the firmware's slot-FIFO TX pacer (BUG-041),\nwhich would block all streams together.\n\n**Next step (owner action).** Record ~3 minutes stationary, flexing the patch cable at the connectors\npartway through. If the outages follow the cable it is (a); if a still, untouched 3-minute capture\nstill shows them it is (b) or (c). Do it with the Drops/Gaps HUD visible \u2014 BUG-040 fixed those rows,\nand BUG-042's counters separate reorder from loss, but none of that is stored in the capture file, so\nit has to be read live.\n\n**Instrument gap this exposed.** `capture_analyze` called all three takes `clean: true`, because it\nonly ever checked CRC and resync. It now reports a `continuity` block; `clean` and\n`continuity.complete` are deliberately separate properties.\n\n---\n_Migrated from `bugs/BUG-049.md`. Original index status: `open`, area: `host/transport`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [],
+  "createdAt": "2026-08-11T02:19:25Z",
+  "labels": [
+   {
+    "name": "bug"
+   },
+   {
+    "name": "area/host-transport"
+   },
+   {
+    "name": "priority/now"
+   }
+  ],
+  "number": 60,
+  "title": "Multi-second whole-group frame loss on the multi-room captures\u2026",
+  "updatedAt": "2026-08-11T17:00:47Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "## Symptom\n\n`ui_screenshot(width=\u2026, height=\u2026)` does not resize the browser viewport. Passing\n`width=1100, height=560` and then `width=820, height=700` returned images that were\nunchanged from the default framing, and `ui_eval(\"window.innerWidth\")` /\n`window.innerHeight` still reported **1600 x 1000** after both calls.\n\n## Why it matters\n\n`docs/web-ui-testing.md` prescribes verifying UI work at three narrow sizes \u2014\n`1280x800`, `1100x560`, `820x700` \u2014 for exactly the constrained-layout bugs where\nnarrowness is the failure condition. With these parameters inert, a session that\nfollows the documented procedure gets a **pass that means nothing**: same viewport,\nsame result, three times over, reported as three sizes covered. That is the\n\"invariant-preserving check verifies nothing\" failure mode from AGENTS.md, but in the\ntooling rather than in the code under test.\n\nFound while verifying #103 (a clipped-out-of-the-card action drawer), where narrow\nviewports were one of the acceptance conditions. Worked around there by starving the\ncard's height via the other dock cards instead \u2014 a real in-app squeeze, but not the\nsame thing as a narrow window, so #103's narrow-viewport row is genuinely unverified.\n\n## Expected\n\nEither the parameters set the Playwright viewport (`page.set_viewport_size`) before\nshooting, or \u2014 if they are only meant to size the returned image \u2014 the docstring says\nso and a separate `viewport`/`ui_viewport` control exists, since resizing is what the\ntesting doc actually asks for.\n\n## Reproduction\n\n```\nui_screenshot(width=1100, height=560)\nui_eval(\"(() => ({w: window.innerWidth, h: window.innerHeight}))()\")\n# -> {\"w\": 1600, \"h\": 1000}\n```\n\n## Notes\n\n- `docs/web-ui-testing.md` now warns about this inline (landed with #103) \u2014 that note\n  should be reduced to a pointer here once fixed.\n- Worth checking the same question for `height` on the raw-CDP fallback path and for\n  `host/tools/web_ui_shot.py`, which takes the same two arguments.\n",
+  "comments": [
+   {
+    "body": "Doc warning landed on branch `fix/issue-103-capture-action-pane` (commit 1754f92, `docs/web-ui-testing.md`) so a session following the documented narrow-viewport procedure is not misled while this is open. Reduce it to a pointer here once fixed.",
+    "createdAt": "2026-08-12T00:48:12Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-12T00:47:28Z",
+  "labels": [
+   {
+    "name": "bug"
+   },
+   {
+    "name": "area/host-tools"
+   },
+   {
+    "name": "priority/next"
+   }
+  ],
+  "number": 168,
+  "title": "ui_screenshot width/height do not resize the viewport, so narrow-viewport UI checks silently pass",
+  "updatedAt": "2026-08-12T00:48:12Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Original title:** The GIL-starvation metric under-reports precisely when starvation is total \u2014 summed tick lateness over wall time falls toward zero as blocking approaches 100%, because the watchdog thread stops being scheduled at all (1 tick landed of ~2186 due read as \"10.3% starved\"). slam_icp_bench.py fixed with tick_share; slam_stall_profile.py still to do\n\n## BUG-063 \u2014 the GIL-starvation metric under-reports precisely when starvation is total\n\n**Status:** open (measured, one instrument fixed, one not) \u00b7 **Area:** host/tools\n(`slam_stall_profile.py`; `slam_icp_bench.py` already corrected) \u00b7 **Found by:** the item 4 matched\nCUDA ICP study, 2026-08-02, when a variant that visibly froze the process reported a *better*\nstarvation figure than stages that ran fine.\n\n**The defect.** Both watchdog-based instruments compute starvation as **summed tick lateness over\nwall time**. That construction is self-defeating: if the measured code holds the GIL continuously,\nthe watchdog thread barely gets scheduled, so there are almost no lateness samples to sum, and the\nmetric falls toward zero exactly as blocking approaches total.\n\n**Measured.** Over a 10.93 s `gpu_translation` stage the watchdog landed **1 tick where ~2186 were\ndue**, and that single tick was 2998.9 ms late. The stage reported **\"10.3% starvation\"** \u2014 better\nthan stages that were genuinely healthy. Its true behaviour: whole-process freezes of 598.7 /\n1626.8 / 2998.9 / 3981.6 ms, while **no single `register()` call exceeded 9 ms**.\n\n**The fix, where applied.** `slam_icp_bench.py` reports **`tick_share` = ticks landed / ticks due**,\nwhich degrades in the right direction:\n\n| Variant | `tick_share` | ticks / due | worst stall | (legacy) starved % |\n|---|---|---|---|---|\n| `translation` (shipped) | 0.953 | 1470 / 1542 | 2.0 ms | 4.7% |\n| `6dof` | 0.989 | 1334 / 1349 | 0.2 ms | 1.1% |\n| `gpu_translation` | **0.058** | 127 / 2209 | **3981.6 ms** | 66.7% |\n| `translation_cpu_nns` | 0.951 | 1553 / 1632 | 4.2 ms | 4.9% |\n\n**Still to do.** `host/tools/slam_stall_profile.py` computes starvation the same way and has the\nsame blind spot. **Its published numbers are not in doubt** \u2014 BUG-060's 11.9% vs 94.3% comparison\nhad ample ticks in both regimes, so the sum was well-sampled \u2014 but it should gain `tick_share`\nbefore it is next used to clear a change, because the one situation it cannot currently see is the\none it exists to catch.\n\n**Why this matters beyond the metric.** A low starvation reading is used as evidence that a change\nis safe for `roomscan-web`, whose asyncio loop, reader thread and broadcaster all need the GIL. An\ninstrument that reads *healthy* under total blocking would have waved through exactly the\nBUG-060/BUG-061 failure mode. Generalises the repo's standing lesson one level down: a native call's\nwall time is not its blocking cost \u2014 and here even the starvation *percentage* was not its blocking\ncost. Pair any \"it didn't starve\" claim with the number of samples the claim rests on.\n\n---\n\n---\n_Migrated from `bugs/BUG-063.md`. Original index status: `open`, area: `host/tools`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "```markdown\n## Implementation plan\n\nI\u2019d take this one. The defect is already root-caused, and `host/tools/slam_icp_bench.py` contains the corrected watchdog metric we can mirror.\n\n### Scope\n\nPrimary file:\n- `host/tools/slam_stall_profile.py`\n\nReference implementation:\n- `host/tools/slam_icp_bench.py` (`_Watchdog.report()`)\n\nTests:\n- Add focused coverage under `host/tests/`, likely `test_slam_stall_profile.py`.\n\n### Plan\n\n1. **Add expected-tick accounting to `GilWatchdog.report()`**\n   - Preserve the existing `ticks`, `starved_s`, `starved_pct_of_wall`, and `worst_stall_ms` fields for compatibility.\n   - Compute the amount of wall time attributable to each watchdog stage.\n   - For each stage calculate:\n     - `expected_ticks = stage_wall_s / period_s`\n     - `tick_share = ticks / expected_ticks`\n   - Match the semantics and rounding already used by `slam_icp_bench.py`.\n\n2. **Track per-stage wall time correctly**\n   - Reuse the existing `timings` collected for `step`, `mesh`, `prep`, and `pack`.\n   - Build `wall_by_stage` from the summed timing samples.\n   - Account for `idle` as the remaining session wall time so its tick coverage is meaningful rather than comparing idle ticks against the full run.\n   - Pass both stage timing information and total wall time into the watchdog report rather than deriving sample coverage from lateness alone.\n\n3. **Add an overall tick-coverage headline**\n   - Compute total watchdog ticks versus `wall_s / _WATCHDOG_PERIOD_S`.\n   - Add an overall `tick_share` (plus observed/expected tick counts) next to the existing top-level starvation fields.\n   - Keep `starved_pct_of_wall` as a legacy/supporting metric; `tick_share` becomes the metric used to decide whether the starvation measurement itself was adequately sampled.\n\n4. **Update human-readable output**\n   - Extend the GIL-starvation table to show something like `ticks 1470/1542, share 0.953`.\n   - Include overall tick share in the TOTAL line.\n   - Update the explanatory text/docstring so it explicitly states:\n     - high `tick_share` \u2248 watchdog was regularly scheduled;\n     - low `tick_share` \u2248 other Python threads were prevented from running;\n     - a low legacy starvation percentage is not trustworthy when tick share is low.\n\n5. **Add deterministic regression tests**\n   - Test the report math without depending on thread scheduling by injecting known watchdog samples/stage wall times.\n   - Cover a healthy case (e.g. ~95/100 expected ticks \u2192 `tick_share ~= 0.95`).\n   - Reproduce the BUG-063 failure shape: 1 tick during ~10.93 s at a 5 ms period should report ~1/2186 ticks and a near-zero `tick_share`, even though the legacy summed-lateness percentage can appear modest.\n   - Verify zero-duration stages return a sensible `None`/empty tick-share value rather than dividing by zero.\n   - Verify the existing starvation fields remain present so downstream JSON consumers do not break.\n\n6. **Validate against the existing corrected instrument**\n   - Run the new tests.\n   - Run `slam_stall_profile.py <capture> --json` and confirm its tick accounting has the same semantics as `slam_icp_bench.py`.\n   - Do one real at-scale profile (>=1500 frames as the tool recommends) and confirm:\n     - ordinary stages show tick shares near 1 when Python threads continue to run;\n     - a known GIL-heavy path such as the decimation A/B shows degraded tick share;\n     - existing timing/starvation output remains otherwise unchanged.\n\n### Acceptance criteria\n\n- `slam_stall_profile.py` reports observed ticks, expected ticks, and `tick_share`.\n- Complete/near-complete GIL starvation can no longer appear healthy merely because the watchdog stopped getting scheduled.\n- Existing starvation/timing JSON fields remain backward-compatible.\n- Console output makes sampling coverage visible alongside the legacy starvation percentage.\n- Regression coverage includes the specific \u201c1 tick out of ~2186\u201d failure mode from BUG-063.\n```",
+    "createdAt": "2026-08-11T23:46:52Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:20:12Z",
+  "labels": [
+   {
+    "name": "bug"
+   },
+   {
+    "name": "area/host-tools"
+   },
+   {
+    "name": "priority/next"
+   }
+  ],
+  "number": 74,
+  "title": "The GIL-starvation metric under-reports precisely when starvation is total\u2026",
+  "updatedAt": "2026-08-11T23:46:52Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Legacy ID:** TOOL-1\n\n*(was sub-phase 6.J; proposed)*. A bounded,\n  disabled-by-default developer diagnostic; raw `RSCN` `.bin` stays authoritative. Detail:\n  `docs/roadmap-history.md` \u2192 \"Sub-phase 6.J\".\n\n---\n_Migrated from `ROADMAP.md#work-item-register`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [],
+  "createdAt": "2026-08-11T02:23:03Z",
+  "labels": [
+   {
+    "name": "work-item"
+   },
+   {
+    "name": "area/host-tools"
+   },
+   {
+    "name": "priority/later"
+   }
+  ],
+  "number": 136,
+  "title": "Rerun multimodal observability sidecar",
+  "updatedAt": "2026-08-11T17:02:26Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "## What\n\nWith the build-time knob made real (#89), the `CONF_TRANSFORM_ONBOARD=1` configuration **compiles and boots but does not work on current hardware**. It has bit-rotted since Phase 2, when the transform moved host-side and the raw-only loop became the only exercised path.\n\n## Observed (2026-08-11, on-rig, Ethernet/UDP 172.17.2.58:5000)\n\nFlashed `build/DebugOnboardTransform/scanner_stream.bin` (207,747 B), captured 15 s:\n\n- **No `RAW_3DMD` frames at all. No `DEPTH_ZF32` frames at all. No `CALIB`.**\n- Only `IMU_QUAT` / `ENV` / `IMU_RAW` / `IMU_SYNC` arrived, and at **91.7% loss** (`device_fps` 30.04, `received_fps` 2.5, 18 gap events, max gap 39).\n- 0 CRC failures, 0 bytes skipped \u2014 what arrived was byte-clean; it simply never sent the ToF frames.\n- A follow-up 30 s capture decoded **nothing within 15 s** \u2014 the board had gone fully silent, i.e. it degrades then wedges.\n\nThe immediately-preceding and immediately-following captures on `build/Debug` (raw-only, same session, same rig, same transport) were healthy: 29.96\u201329.98 fps, 0 CRC failures, \u22641.1% loss, CALIB/IMU_CAL cadence 64 with 0 missed. So this is the configuration, not the rig or the link.\n\n## Why this is not a transport-selection bug\n\nThe obvious theory \u2014 that the legacy loop is CDC-only and predates Ethernet \u2014 is wrong. Its ToF sends go through `rs_send_frame_cdc` (`Src/vl53l9_app.c`:2708/2716/2722), which resolves `rs_active_data_route()` to `RS_ROUTE_BOTH` and calls `ETH_SendFrame_Gather` whenever `ETH_IsUp()`. The same function carried the IMU frames that *did* arrive in the same capture. So Ethernet was up and claimed; only the large frames (~15 KB RAW, ~9 KB DEPTH) never made it.\n\nLeading hypothesis, unverified: the `#if CONF_TRANSFORM_ONBOARD` loop lacks the TX-queue/pacing machinery the raw-only loop gained in Phase 5, so the big gather-sends exhaust lwIP pbufs/descriptors and take the small frames down with them. `transform_process_stream` on the M33 also runs inline in that loop. Not yet distinguished from a `handle_error()` spin.\n\n## Side effect worth knowing\n\nRunning this build **warm-wedged the I3C bus**: after restoring the raw-only build, ToF returned to 30.0 fps / 0 CRC but streams 9/10/11 stayed absent across two SWD reset+reflash cycles. Per `docs/engineering-practices.md` \u2192 Firmware, that needs an owner USB power-cycle; MCU reset does not clear it.\n\n## Acceptance\n\n- [ ] Root-cause why RAW/DEPTH never reach the wire in this config (pbuf exhaustion vs `handle_error()` spin vs loop stall) \u2014 `g_last_seq` / `uwTick` over SWD will separate them\n- [ ] Either fix the onboard-transform loop to use the Phase-5 send path, or explicitly retire the config and delete the knob\n- [ ] If kept: an on-target capture showing DEPTH_ZF32 flowing with 0 CRC failures\n\nFound while doing #89. The knob itself works correctly \u2014 it faithfully selects a config that is broken.",
+  "comments": [
+   {
+    "body": "## Implementation plan\n\n### What the current code tells us\n\nThe initial suspicion that the onboard path bypasses the Phase-5 Ethernet queue does not appear to be correct:\n\n* `rs_send_frame_cdc()` delegates Ethernet sends to `ETH_SendFrame_Gather()`.\n* `ETH_SendFrame_Gather()` already copies frames into the paced 8-slot FIFO, retries stack/descriptor stalls, and exposes queue telemetry.\n* Both RAW and DEPTH in the onboard loop therefore already enter the same low-level Ethernet sender as production RAW frames.\n\nThe more important difference is one level higher: `CONF_TRANSFORM_ONBOARD` still selects an entirely separate legacy acquisition loop.\n\nThat loop still:\n\n* uses `VL53L9_SYNC_MANUAL` + `vl53l9_trigger_frame()`;\n* runs `transform_process_stream()` inline before emitting RAW/DEPTH;\n* has different boot/recovery behavior from the production raw-only loop;\n* does not use the production autonomous-ranging safe-point flow;\n* does not seed `g_active_profile` / the runtime TX-window configuration through the same boot path;\n* can still fall into the onboard build's terminal `handle_error()` behavior instead of the raw-only bounded recovery path.\n\nSo I would diagnose the exact stop point first, then remove that duplicated loop rather than trying to invent another Ethernet sender.\n\n### 1. Instrument the onboard loop enough to distinguish the failure\n\n**File:** `firmware/scanner-stream/Src/vl53l9_app.c`\n\nAdd a small `#if CONF_TRANSFORM_ONBOARD` diagnostic state block with volatile values visible over SWD:\n\n* current phase:\n\n  * waiting for FRAME_READY\n  * DMA started\n  * transforming\n  * sending CALIB\n  * sending RAW\n  * sending DEPTH\n  * waiting for DMA completion\n  * parsing\n  * error\n* last parsed sensor frame counter;\n* completed-transform count;\n* last transform return code;\n* transform elapsed time;\n* last VL53L9 status captured before `handle_error()`;\n* snapshots/deltas of:\n\n  * `ETH_TxPendingFragments()`\n  * `ETH_TxQueueHighWater()`\n  * `ETH_TxEnqueueDrops()`\n  * `ETH_TxStackStalls()`\n\nAlso update `g_last_seq` after a successful parse in the onboard loop. Today that variable is effectively production-loop-only, which makes the suggested SWD `g_last_seq` check less useful for this configuration.\n\nKeep this instrumentation compile-time-local to the onboard build; it should not change the production hot path.\n\n### 2. Reproduce once and classify the wedge before changing behavior\n\nFlash `DebugOnboardTransform`, start an Ethernet capture, and inspect the diagnostic state over SWD after the stream fails.\n\nThis should reduce the problem to one of three concrete cases:\n\n1. **Transform/loop stall**\n\n   * `uwTick` continues but the phase remains `TRANSFORMING`, or the transform duration is pathological.\n   * Investigate `transform_process_stream()` and its input/output buffer state.\n\n2. **Sensor fault / `handle_error()`**\n\n   * phase reaches `ERROR`, frame counter stops, and PC lands in the terminal error path.\n   * Use the captured `vl53l9_status_t` to identify which trigger/read/ack operation caused it.\n\n3. **Ethernet backlog**\n\n   * frame counter and transforms continue advancing, but pending fragments/high-water/stall counters climb.\n   * Only in this case modify the pacer or its call cadence. Do not replace `ETH_SendFrame_Gather()`; it already implements the Phase-5 queue.\n\nThis instrumentation should stay until we can explain the current \u201csmall frames first, then silence\u201d behavior rather than guessing from symptoms.\n\n### 3. Preferred fix: eliminate the legacy acquisition-loop fork\n\nAssuming the transform itself is healthy, move `CONF_TRANSFORM_ONBOARD` onto the **same autonomous Phase-5 acquisition state machine used by the production build**.\n\nRefactor the current raw-only loop so the compile-time option changes only what happens to a completed RAW frame:\n\n```text\nacquire frame N\n\u2192 parse metadata / establish seq\n\u2192 optional transform_process_stream(frame N)\n\u2192 common CALIB cadence\n\u2192 common RAW send\n\u2192 optional DEPTH send\n\u2192 common IMU/env service\n\u2192 common safe-point/recovery behavior\n```\n\nConcretely:\n\n* use `rs_boot_bringup()` / `VL53L9_SYNC_AUTONOMOUS` for both configurations;\n* seed `g_active_profile` and `rs_update_eth_tx_window()` in both configurations;\n* use the same bounded sensor recovery path in both configurations;\n* keep the existing `rs_send_frame_cdc()` \u2192 `ETH_SendFrame_Gather()` transport path;\n* conditionally allocate/configure the transform and depth buffer under `CONF_TRANSFORM_ONBOARD`;\n* after each completed RAW frame, point the transform input at that frame, run the transform, and enqueue DEPTH with the **same sensor sequence number** as RAW;\n* retain one common CALIB countdown instead of the onboard loop's separate function-local cadence;\n* remove the manual-trigger/double-buffer legacy loop once the unified path passes hardware validation.\n\nIf transform latency proves too large to run serially at 30 Hz, preserve the existing double-buffer overlap as a second optimization step, but keep it inside the common autonomous acquisition loop rather than restoring two independent state machines.\n\n### 4. Make failures recoverable instead of silently wedging\n\nThe unified path should inherit the production recovery contract:\n\n* report/capture the VL53L9 status;\n* perform bounded reset/re-init attempts;\n* clear stale GPIO/DMA events;\n* retransmit CALIB after recovery;\n* restart the outer acquisition iteration from known-good state.\n\nA recoverable sensor error should therefore produce an observable gap/event, not a board that silently stops servicing Ethernet.\n\n### 5. Verification\n\nBuild both configurations:\n\n```bash\ncmake --preset Debug\ncmake --build --preset Debug\n\ncmake --preset DebugOnboardTransform\ncmake --build --preset DebugOnboardTransform\n```\n\nThen, after an owner USB power-cycle to clear the known I3C warm-wedge condition, run the hardware gate on `DebugOnboardTransform`:\n\n1. **3 \u00d7 15 s Ethernet captures**\n\n   * RAW_3DMD present\n   * DEPTH_ZF32 present\n   * CALIB present\n   * RAW and DEPTH sequence numbers remain paired\n   * 0 CRC failures\n   * `fw_tx_enqueue_drops == 0`\n   * `fw_tx_stack_stalls == 0` or demonstrably transient/non-growing\n   * queue does not accumulate across frames\n\n2. **30\u201360 s soak**\n\n   * proves the original delayed \u201cgoes fully silent\u201d failure is gone;\n   * `device_fps` and received ToF cadence remain stable.\n\n3. **Regression flash of normal `Debug`**\n\n   * RAW-only Ethernet behavior remains at the existing healthy baseline;\n   * no change to CRC/loss/CALIB/IMU behavior.\n\n### Files expected to change\n\nPrimary:\n\n* `firmware/scanner-stream/Src/vl53l9_app.c`\n\nPotentially, only if diagnosis proves additional telemetry is needed:\n\n* `firmware/scanner-stream/Src/ethernet_transport.c`\n* `firmware/scanner-stream/Inc/ethernet_transport.h`\n\nI would avoid changing the Ethernet queue until the SWD instrumentation proves it is actually the failing component.\n\n### Done when\n\n* the failure mechanism is identified with concrete SWD/telemetry evidence;\n* the duplicate legacy onboard acquisition state machine is removed or there is a documented reason it must remain;\n* `CONF_TRANSFORM_ONBOARD=1` streams paired RAW + DEPTH over Ethernet without CRC errors or eventual silence;\n* the normal raw-only build remains unchanged on its existing hardware gate.\n",
+    "createdAt": "2026-08-12T01:03:10Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-12T00:20:32Z",
+  "labels": [
+   {
+    "name": "bug"
+   },
+   {
+    "name": "area/firmware-scanner-stream"
+   },
+   {
+    "name": "priority/later"
+   }
+  ],
+  "number": 166,
+  "title": "CONF_TRANSFORM_ONBOARD=1 build wedges the rig: no RAW/DEPTH on Ethernet, then goes silent",
+  "updatedAt": "2026-08-12T01:03:10Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "## BUG-073 \u2014 rapid reconfiguration near the rate ceiling can drop the ACK entirely (no ACK, no BUSY)\n\n**Status:** open \u00b7 **Area:** firmware/scanner-stream \u00b7 **Found by:** the 2026-08-03 frame-rate-ceiling\ninvestigation, sweeping 90\u219292\u219295\u219297\u219299\u2192100 Hz manual params back-to-back with ~1 s settle.\n\nThree consecutive `SET_MANUAL_PARAMS` requests (92/95/97 Hz) got neither an ACK nor a BUSY; the next\n(99 Hz) ACKed after 4.7 s with bimodal interval stats. A controlled retest of the same values from a\nsettled baseline (2 s settle) succeeded every time, so the trigger is reconfig-before-settle, not the\nvalues. Points at `rs_apply_pending_config`'s documented `handle_error(); return true;` no-ACK path\nfiring when a reconfig lands before the previous one has settled. A host retry recovers, but the\ncontract says every accepted command produces exactly one ACK/BUSY. Recheck after the ceiling\namendment (the shipped preset moves out of the 90\u2013100 Hz band, but manual requests can still go there).\n\n---\n_Migrated from `bugs/BUG-073.md`. Original index status: `open`, area: `firmware/scanner-stream`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "### Implementation plan for [#84](https://github.com/hellosamblack/lidar-roomscanner/issues/84)\n\n#### Diagnosis\n\n`rs_apply_pending_config()` currently documents that some recovery paths intentionally abandon an accepted command without an ACK. In the ranging-reconfiguration path, two relevant branches still call `handle_error(); return true;` without replying:\n\n- Restoring `g_active_profile` fails after a candidate write failure.\n- `vl53l9_start()` fails after applying or restoring a profile.\n\nRapid reconfiguration likely reaches one of these paths. Regardless of the precise sensor failure, an accepted command must receive one terminal ACK before recovery begins.\n\n#### Implementation\n\n1. In `firmware/scanner-stream/Src/vl53l9_app.c`, add a small helper for terminal reconfiguration failures:\n   - `SET_MANUAL_PARAMS` \u2192 16-byte `RangingConfigAck` with `SENSOR_ERROR` and the pre-command known-good readback.\n   - Legacy configuration commands \u2192 normal ACK with `SENSOR_ERROR` and packed sensor status.\n   - Always route the ACK through the command\u2019s originating transport.\n\n2. Capture `g_ranging_last_readback` before touching the sensor. Use this snapshot when recovery will restore the old profile; never report the uncommitted candidate as applied.\n\n3. Refactor every ranging-apply failure branch to follow one order:\n   1. Send exactly one terminal error ACK.\n   2. Attempt the existing restore/reinitialization path.\n   3. Resume the acquisition loop without sending another ACK.\n\n   This includes the two currently silent branches and should consolidate the existing duplicated error-ACK code so future recovery paths inherit the same rule.\n\n4. Update the function contract above `rs_apply_pending_config()` and `docs/protocol.md`:\n   - Every syntactically valid command receives one terminal `OK`, error, or `BUSY` ACK.\n   - `BUSY` remains for commands rejected before acceptance because the pending slot is occupied.\n   - Recovery after an accepted command reports `SENSOR_ERROR`.\n   - This is a semantic correction only; the wire format and protocol version do not change.\n\n5. Extend `host/tests/test_control.py` to explicitly verify that a `SENSOR_ERROR` response to `SET_MANUAL_PARAMS` is parsed as the 16-byte ranging-config ACK and preserves the previous known-good configuration.\n\n#### Verification\n\n- Build the production raw-stream firmware with `cmake --preset Debug && cmake --build build/Debug`.\n- Temporarily force each formerly silent branch, one at a time, and verify one `SENSOR_ERROR` ACK is emitted before recovery. Confirm the injection actually landed, then remove it and rebuild.\n- Flash the rig and repeat the original `90\u219292\u219295\u219297\u219299\u2192100 Hz` sweep with approximately one-second spacing for at least ten cycles.\n- Record tokens and assert:\n  - Exactly one ACK per accepted command.\n  - No `CommandClient` timeout.\n  - Failed applies retain the previous configuration, confirmed by `GET_RANGING_CONFIG`.\n  - Streaming resumes after recovery with no CRC failures or persistent sequence gaps.\n- Restore the documented default profile after the stress run and run the focused host tests plus the full host suite.\n\nHost-side automatic retries should remain unchanged as resilience, but must no longer be required to compensate for firmware silence.",
+    "createdAt": "2026-08-12T01:35:55Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:20:43Z",
+  "labels": [
+   {
+    "name": "bug"
+   },
+   {
+    "name": "area/firmware-scanner-stream"
+   },
+   {
+    "name": "priority/next"
+   }
+  ],
+  "number": 84,
+  "title": "rapid reconfiguration near the rate ceiling can drop the ACK entirely (no ACK, no BUSY)",
+  "updatedAt": "2026-08-12T01:35:56Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Legacy ID:** OFFLINE-1\n\n*(was Phase 7)*. Blocked on **DC-I**\n  (rigid phone/webcam mount + hand-eye extrinsic \u2014 undesigned). Detail: `docs/roadmap-history.md` \u2192 \"Phase 7\".\n\n---\n_Migrated from `ROADMAP.md#work-item-register`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "**Triage 2026-08-11 \u2014 likely superseded, kept open pending data.** The owner decision of 2026-08-11 (#158) routes Phase 7 captures through RTAB-Map on the Pixel 10 Pro XL, and #159 proposes RTAB-Map's optimized poses to replace/seed COLMAP SfM outright \u2014 which removes this issue's core premise (COLMAP pose priors) *and* its blocker (#146's rigid mount + hand-eye extrinsic, needed only for the ToF-seeded variant).\n\nRecommendation: don't start this. Wait for #161 (paired RTAB-Map + roomscanner capture) to score the RTAB-Map pose path; if #159 pans out, close this as not-planned/superseded. The depth-*regularization* half of the idea survives in #134/#158 regardless.\n",
+    "createdAt": "2026-08-11T17:04:15Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:22:53Z",
+  "labels": [
+   {
+    "name": "work-item"
+   },
+   {
+    "name": "area/host-offline"
+   },
+   {
+    "name": "status/blocked"
+   },
+   {
+    "name": "priority/later"
+   }
+  ],
+  "number": 132,
+  "title": "COLMAP pose priors + depth-regularized 3DGS",
+  "updatedAt": "2026-08-11T17:04:15Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Legacy ID:** DC-H\n\n**Capture:** **USB CDC connect transient** \u2014 5 \u00d7 15 s\n\n**Unblocks:** **BUG-005**: fix implemented 2026-07-30, **the code path has never executed**. `CAFE:4001` does not enumerate on the headless host (USB_USER is powered from the battery bridge) and `/dev/ttyACM*` return `root:root` mode 0 after every replug\n\n**Protocol:** Needs the board's USB_USER cable into a machine that can open the port (udev rule or run as root). Fresh connect, `host/tools/capture.py --seconds 15`, five times\n\n**Acceptance gate:** `capture_analyze` reports **0** CRC failures in the connect region (today: exactly 1) and the first frame after connect is CALIB\n\n**Status (original):** \u2b1c open\n\n---\n_Migrated from `ROADMAP.md#data-collection-queue`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [],
+  "createdAt": "2026-08-11T02:23:27Z",
+  "labels": [
+   {
+    "name": "data-collection"
+   },
+   {
+    "name": "status/blocked"
+   },
+   {
+    "name": "priority/later"
+   }
+  ],
+  "number": 145,
+  "title": "USB CDC connect transient",
+  "updatedAt": "2026-08-11T17:02:29Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Capture:** **Braced fixed-heading tilt sweep** \u2014 ~2 min\n\n**Unblocks:** `docs/superpowers/plans/2026-07-29-orientation-resume.md` \u00a74.6: BUG-030's closure proved the calibration's **magnitude**, not its **direction**. An ellipsoid fit is ambiguous up to a rotation (DT0103) \u2014 every sample on a perfect sphere while the field vector is systematically rotated. Bounded at ~2.5\u00b0 by the near-spherical soft iron; measured at nothing\n\n**Protocol:** Hand-held, off the tripod. Pick **one fixed compass bearing** and keep pointing at it. Sweep tilt level \u2192 45\u00b0 \u2192 vertical, **holding each ~15 s**. Two cycles\n\n**Acceptance gate:** `mag_check` tilt table flat (expected) **and** `absolute_heading` agreeing across every hold. Disagreement \u21d2 implement DT0103's accelerometer-assisted fit\n\n**Status (original):** \u26a0\ufe0f **collected to spec, gate FAILS on the tilt-ramp clause** (`DebugCapE.bin`, 2026-07-31) \u2014 7 holds of 15\u201318 s at tilt 3.9/46.1/90.3/50.3/4.1/47.8/90.9\u00b0, exactly two cycles. Ramp **1.72\u00d7** (GOOD < 1.10). \u26a0\ufe0f The heading clause is **partly artifact** \u2014 see BUG-048; re-score it after the singularity fix before sizing DT0103. ~~**The singularity fix landed 2026-07-31 (BUG-051, `yaw_twist_deg`) \u2014 DC-E's heading clause is now re-scorable and that re-score is the next step here.**~~ **Do NOT re-score with that build (BUG-058, 2026-08-01): `yaw_twist_deg` made `absolute_heading` track ROLL at slope \u22120.978, and DC-E is a tilt sweep held at one bearing \u2014 exactly the geometry that heading was wrong for. The re-score is still the next step here, but it needs the BUG-058 build (`boresight_bearing_deg` \u2212 `magnetic_north_bearing_deg`), and note that build returns `None` for the vertical holds, where no bearing exists.** Note the artifact was larger than BUG-048 estimated: an 18.4\u00b0 systematic bias at the operating pose, not only noise near lock\n\n---\n_Migrated from `ROADMAP.md#data-collection-queue`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [],
+  "createdAt": "2026-08-11T02:23:20Z",
+  "labels": [
+   {
+    "name": "data-collection"
+   },
+   {
+    "name": "status/partial"
+   },
+   {
+    "name": "priority/next"
+   }
+  ],
+  "number": 142,
+  "title": "Braced fixed-heading tilt sweep",
+  "updatedAt": "2026-08-11T17:01:06Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Capture:** **Multi-room closed loop \u00d72** \u2014 2\u20133 rooms or a corridor circuit, 3\u20135 min each, two takes of the *same* route\n\n**Unblocks:** Phase 6.D items 3\u20134, the loop-closure go/no-go. The baseline is single-room only (~3% over 24 m) and the paired 95%-CI gate has only the two coffee-room circuits to score. Loop closure is supposed to earn its keep on **multi-room** trajectories \u2014 nothing in `captures/` tests that\n\n**Protocol:** Start parked on a marked pose, walk the route, return to the **same** marked pose. Revisit at least one area mid-route (that is what a pose-proximity edge needs). Two takes so the gate is paired\n\n**Acceptance gate:** 0 lost frames, stream 9, byte-clean. ~135 MB per 5 min\n\n**Status (original):** \u274c **collected \u00d73, gate FAILS on \"0 lost frames\"** (`DebugCapB1/B2/B3`, 2026-07-31) \u2014 2.29/4.28/9.35% transport loss, **BUG-049**. B1 usable as a provisional baseline (**2.71 \u00b1 0.58 m over 75.3 m = 3.6%**); B3 is 9.6% on the *same route*. **Re-record after BUG-049** \u2014 see [roadmap-history: DC-B](docs/roadmap-history.md)\n\n---\n_Migrated from `ROADMAP.md#data-collection-queue`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [],
+  "createdAt": "2026-08-11T02:23:09Z",
+  "labels": [
+   {
+    "name": "data-collection"
+   },
+   {
+    "name": "status/blocked"
+   },
+   {
+    "name": "priority/next"
+   }
+  ],
+  "number": 138,
+  "title": "Multi-room closed loop \u00d72",
+  "updatedAt": "2026-08-11T17:00:56Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Legacy ID:** SENS-4\n\nFirmware work, gated on a host consumer existing.\n\n---\n_Migrated from `ROADMAP.md#work-item-register`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [
+   {
+    "body": "## Implementation plan \u2014 #129: Stream SHT40 humidity\n\nSelected because [#129](https://github.com/hellosamblack/lidar-roomscanner/issues/129) is open and has zero comments.\n\n### Proposed wire contract\n\nAdd additive stream ID `14`, `HUMIDITY`:\n\n- Payload: one little-endian `float32` containing relative humidity in `%RH`.\n- `width = height = 0`.\n- Independent low-rate cadence, initially 1 Hz.\n- No protocol-version bump; older hosts already skip unknown stream IDs.\n- Keep stream 10 `ENV` byte-for-byte compatible rather than expanding its 20-byte payload.\n\n### Implementation sequence\n\n1. **Build the host consumer first**\n   - Add `StreamId.HUMIDITY`, `HUMIDITY_SIZE`, `decode_humidity()`, and finite `0\u2013100 %RH` validation in `host/src/roomscan/protocol.py`.\n   - Extend `SensorState` in `host/src/roomscan/sensors.py` with latest humidity plus bounded history/sparkline history.\n   - Add `humidity_pct` and `humidity_hist` to `build_sensor_message()` in `host/src/roomscan/web.py`; humidity-only input must count as sensor data.\n   - Add a Humidity row and sparkline to the Sensors card in `static/index.html` and `static/sensors.js`.\n   - Add stream-14 labeling/order to `metrics.py`.\n   - Preserve recording and replay automatically through the existing generic frame path.\n\n2. **Update the protocol artifacts together**\n   - Register stream 14 in `docs/protocol.md`, `rs_protocol.h`, and `protocol.py`.\n   - Add `golden_humidity.bin`, independently packed by `host/tests/make_fixtures.py`.\n   - Cross-check the golden frame\u2019s stream ID, payload, CRC32, and decoded `%RH`.\n   - Document the additive change in the protocol version history and `docs/web-protocol.md`.\n\n3. **Prove the hardware transaction path before writing the production driver**\n   - Confirm the SHT40 at 7-bit address `0x44` on the IKS4A1 auxiliary bus.\n   - Do not assume the unused sensor-hub slot 3 is sufficient: the current hub performs register-style reads, while SHT40 requires command `0xFD`, STOP, approximately 10 ms conversion time, then a six-byte read.\n   - Create a minimal on-target probe proving that exact transaction without disturbing the existing LPS22DF/LIS2MDL/STTS22H slots.\n   - If the LSM sensor hub cannot express the transaction, document the required alternate bus route\u2014most likely a second MCU I\u00b2C peripheral and explicit physical wiring\u2014and mark the issue blocked until that route is approved.\n\n4. **Implement non-blocking firmware acquisition**\n   - Put SHT40 CRC8/conversion logic in a small `rs_sht40.c/.h` module; CRC polynomial `0x31`, initial value `0xFF`.\n   - Use a state machine: trigger measurement \u2192 wait on a timestamp deadline \u2192 read six bytes \u2192 validate both CRC fields \u2192 convert and clamp `%RH`.\n   - Never use `HAL_Delay(10)` in the acquisition path.\n   - Service SHT40 only in an off-cycle/safe-point path that yields immediately when ToF `FRAME_READY` becomes pending.\n   - Emit stream 14 only after a valid fresh measurement; never resend stale data after a NACK or CRC failure.\n   - Continue the 1 Hz service while ToF is in standby, using the existing frozen-sequence/live-clock convention.\n\n5. **Verification**\n   - Unit tests: payload length, known conversion, CRC rejection, NaN/out-of-range rejection, history bounds, JSON schema, and no-data behavior.\n   - Compatibility test: existing v1/v2 captures without stream 14 replay unchanged.\n   - Run the complete host test suite and both firmware build presets.\n   - On hardware, record at least 60 seconds and require:\n     - plausible `0\u2013100 %RH` values and a visible response to a controlled humidity stimulus;\n     - zero SHT40 CRC/NACK failures;\n     - zero protocol CRC failures and sequence gaps;\n     - no regression in streams 7/9/10/11 cadence, ToF doubled intervals, or TX-queue drops.\n   - Visually verify the Sensors card using the real stream and replayed golden capture.\n\n6. **Ship-time synchronization**\n   - Update `docs/iks4a1-stacking.md`, `ROADMAP.md`, and the stale \u201cSHT40 humidity unstreamed\u201d notes in `AGENTS.md`.\n   - Land with the protocol artifacts in lockstep and close with `Closes #129`.\n\n### Main risk\n\nThe blocker is bus transaction capability, not decoding or UI work. The implementation must prove command \u2192 delayed read on the actual stacked hardware before treating slot 3 as a viable solution.",
+    "createdAt": "2026-08-12T02:10:49Z",
+    "author": {
+     "login": "hellosamblack"
+    }
+   }
+  ],
+  "createdAt": "2026-08-11T02:22:46Z",
+  "labels": [
+   {
+    "name": "work-item"
+   },
+   {
+    "name": "area/host-sensors"
+   },
+   {
+    "name": "priority/later"
+   }
+  ],
+  "number": 129,
+  "title": "Stream SHT40 humidity.",
+  "updatedAt": "2026-08-12T02:10:49Z"
+ },
+ {
+  "blockedBy": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "blocking": {
+   "nodes": [],
+   "totalCount": 0
+  },
+  "body": "**Legacy ID:** SENS-2\n\nBuilt, gated off; blocked on orientation\n  ground truth (**DC-F**).\n\n---\n_Migrated from `ROADMAP.md#work-item-register`. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md_",
+  "comments": [],
+  "createdAt": "2026-08-11T02:22:41Z",
+  "labels": [
+   {
+    "name": "work-item"
+   },
+   {
+    "name": "area/host-sensors"
+   },
+   {
+    "name": "status/blocked"
+   },
+   {
+    "name": "priority/next"
+   }
+  ],
+  "number": 127,
+  "title": "Enable the imufusion complementary filter.",
+  "updatedAt": "2026-08-11T17:01:11Z"
+ }
+]

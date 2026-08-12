@@ -29,6 +29,8 @@ EXPOSED: dict[str, tuple[str, ...]] = {
     "analyze_capture.py": ("capture_analyze",),
     "capture_motion.py": ("capture_motion",),
     "meta_check.py": ("capture_meta",),
+    "fleet_budget.py": ("fleet_budget",),
+    "fleet_plan.py": ("fleet_plan",),
     "headless_doctor.py": ("doctor",),
     "heading_check.py": ("capture_heading",),
     "mag_check.py": ("capture_magcheck",),

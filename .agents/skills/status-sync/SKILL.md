@@ -65,7 +65,11 @@ The PR flow is retired. **Land work by committing straight to `main`, no PR.**
 - Landing = commit on `main` + branch closed. Pushing to `origin` is a separate step; only push
   when the owner asks (they may want to review the local commit first).
 - Subagents don't commit; the controlling session commits (subagent cwd defaults to the main
-  checkout — the mis-commit that caused the 2026-07-10 main/PR divergence). This still holds.
+  checkout — the mis-commit that caused the 2026-07-10 main/PR divergence). This still holds,
+  with one carve-out: under the `issue-fleet` skill a worker commits `Refs #NNN` on its own branch
+  **inside its own worktree**, which is precisely the isolation the 2026-07-10 failure lacked. The
+  orchestrator still does the review, the rebase, the `merge --ff-only`, the doc deltas and the
+  closing commit — so everything below about merging a subagent's commit applies unchanged.
 - **When you MERGE a subagent's feature commit, run this checklist yourself against it.** Subagents
   are briefed on the feature, not on the planning docs, so their commit will land the code with no
   ROADMAP/CLAUDE.md delta and you inherit the drift. On 2026-07-29 a 3D calibration view merged and

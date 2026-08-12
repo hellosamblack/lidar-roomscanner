@@ -45,7 +45,13 @@ points here; keep this doc short and binding.
   and closing any feature/worktree branch without a PR** (the PR flow is retired — no `gh pr create`,
   no `gh pr merge`). A short-lived branch/worktree for isolation is fine; finish by getting the commit
   onto `main` and deleting the branch. Pushing to `origin` is a separate, owner-triggered step.
-  Subagents don't commit; the controlling session does.
+  Subagents don't commit; the controlling session does. **Fleet carve-out (owner, 2026-08-12,
+  issue #170):** under the `issue-fleet` skill a worker *may* commit `Refs #NNN` on its own branch
+  **inside its own worktree**, because the isolation is what the original rule was protecting
+  against — the 2026-07-10 mis-commit was a subagent running `git commit` at the *main* checkout.
+  The orchestrator still owns every boundary beyond that branch: it reviews, rebases in the
+  worktree, `merge --ff-only`s onto `main`, and writes the single `Closes` commit. A worker still
+  never touches `main`, shared docs, or `gh`.
 - **Path lengths.** Repo-relative paths stay ≤150 characters (longer breaks `git worktree add` and
   fresh clones on default Windows git).
 
