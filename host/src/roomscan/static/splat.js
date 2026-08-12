@@ -63,6 +63,17 @@ export function createSplat(hub, sceneApi) {
             gpuAcceleratedSort: false,
             sharedMemoryForWorkers: false,
             sceneRevealMode: GaussianSplats3D.SceneRevealMode.Instant,
+            // LOAD-BEARING for See-Through (issue #106). This flag defaults to
+            // FALSE throughout the vendor, and it gates the ENTIRE per-scene
+            // opacity path, not just the uniform upload:
+            //   :6820 `uniform float sceneOpacity[]` is only DECLARED if set
+            //   :6928 the shader only READS it if set
+            //   :9940 `uniforms.sceneOpacity.value[i] = clamp(scene.opacity)`
+            //         only runs if set
+            // Without it, `applySeeThrough`'s `scene.opacity = ...` writes a
+            // plain JS property that never reaches the GPU -- the slider moved
+            // the value 1 -> 0.08 and the render was pixel-identical.
+            enableOptionalEffects: true,
         });
         viewer.visible = false;
         sceneApi.scene.add(viewer);
@@ -392,7 +403,23 @@ export function createSplat(hub, sceneApi) {
     return {
         get loadedSlug() { return loadedSlug; },
         // diagnostics only (see scene.js's `controls` comment): read the live splat
-        // scene opacity to verify See-Through end-to-end.
+        // scene opacity.
+        //
+        // This does NOT verify See-Through end-to-end, though it used to claim it
+        // did (issue #106). It reads back the same JS property `applySeeThrough`
+        // just wrote, so it returns 0.08 identically whether or not any shader
+        // consumes it -- which is exactly how the slider stayed broken while
+        // looking verified. It has no power past this layer. To check See-Through
+        // for real, compare PIXELS at two slider settings; assert on this only to
+        // confirm the setter ran.
         get sceneOpacity() { try { return viewer && viewer.getSplatScene(0).opacity; } catch (e) { return null; } },
+        // Whether the vendor actually compiled the per-scene opacity path (issue
+        // #106). False means `sceneOpacity` above is inert no matter what it reads.
+        get seeThroughLive() {
+            try {
+                const m = viewer && viewer.splatMesh && viewer.splatMesh.material;
+                return !!(m && m.uniforms && m.uniforms.sceneOpacity);
+            } catch (e) { return null; }
+        },
     };
 }
