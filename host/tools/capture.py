@@ -53,6 +53,13 @@ HEADER_SIZE = 32
 _HEADER = struct.Struct("<4sBBBBIQHHII")  # magic, ver, type, stream, flags, seq, t_us, w, h, plen, reserved
 assert _HEADER.size == HEADER_SIZE
 MAX_PAYLOAD = 1 << 20
+# Mirrors roomscan.protocol.SUPPORTED_VERSIONS (not imported -- this tool is
+# deliberately pure stdlib, same as analyze_capture.py). Keep this list in step
+# with a protocol version bump: hardcoding `ver != 1` here meant every v2 frame
+# was rejected and a byte-perfect capture reported as "entirely garbage" with
+# exit 1 -- the same bug analyze_capture.py fixed on 2026-08-04, missed here
+# until 2026-08-11. host/tests/test_capture_tool_versions.py pins it.
+SUPPORTED_VERSIONS = (1, 2)
 
 FRAME_TYPES = {1: "DATA", 2: "EVENT", 3: "COMMAND", 4: "ACK"}
 STREAMS = {0: "DEPTH_ZF32", 1: "DEPTH_ZAPC", 2: "AMBIENT", 3: "AMPLITUDE", 4: "CONFIDENCE",
@@ -242,7 +249,7 @@ def decode_file(path: Path):
             break
         magic, ver, ftype, stream, flags, seq, t_us, w, h, plen, _res = _HEADER.unpack(
             data[pos:pos + HEADER_SIZE])
-        if ver != 1 or plen > MAX_PAYLOAD:
+        if ver not in SUPPORTED_VERSIONS or plen > MAX_PAYLOAD:
             note_skip(1)
             pos += 1
             continue
