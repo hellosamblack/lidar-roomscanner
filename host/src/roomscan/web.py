@@ -5436,7 +5436,15 @@ def build_magpose(session: MagSweepSession, current, sensor_state, seq: int,
         flags |= MAGPOSE_COLLECTING
     if have_quat:
         flags |= MAGPOSE_HAVE_QUAT
-    if bin_cal is None or (session.candidate is None and current is None):
+    # Derived from the LATCHED binning kind (`coverage_binning_kind`), not a
+    # fresh preference-order guess -- a fresh guess is exactly the BUG-046 /
+    # issue #57 defect class in this channel: it would flip to "not
+    # provisional" the instant Fit produces a candidate, even though `bin_cal`
+    # (above, from the same latch) is still, correctly, binning on the
+    # provisional estimate. `kind in ("provisional", "raw")` already implies
+    # `bin_cal is None` iff "raw" (the latch only ever stores a non-None
+    # value), so no separate `bin_cal is None` check is needed.
+    if session.coverage_binning_kind() in ("provisional", "raw"):
         flags |= MAGPOSE_PROVISIONAL
     if session.last_rejected:
         flags |= MAGPOSE_REJECTED

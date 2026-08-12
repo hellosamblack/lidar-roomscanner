@@ -1257,6 +1257,45 @@ def test_magpose_marks_a_provisional_binning():
     assert math.isnan(got["dev_pct"])       # no calibration -> no colour claim
 
 
+def test_json_binning_and_magpose_provisional_flag_agree_across_fit():
+    """BUG-046 / issue #57 follow-up: the 5 Hz JSON `binning` label
+    (`build_report`) and the 30 Hz MAGPOSE `MAGPOSE_PROVISIONAL` bit
+    (`build_magpose`) must never contradict each other -- both have to derive
+    from the SAME latch (`session.coverage_binning_kind()`), not two
+    independent fresh guesses. Reproduces the primary first-ever-calibration
+    flow (no saved calibration) across the Fit swap: before this fix, the bit
+    re-guessed off `session.candidate`/`current` on every call, so it flipped
+    to "not provisional" the instant Fit produced a candidate while the JSON
+    label -- and the actual binning frame, frozen -- correctly stayed
+    "provisional"."""
+    from roomscan.sensors import SensorState
+
+    session = ms.MagSweepSession()
+    session.start()
+    for i, v in enumerate(_raw_from_body(_sphere(300, seed=6))):
+        session.add(v, t_us=i)
+
+    def _check(current):
+        report = ms.build_report(session, current)
+        pose = _decode_magpose(web.build_magpose(session, current, SensorState(), 1))
+        json_provisional = report["binning"] in ("provisional", "raw")
+        pose_provisional = bool(pose["flags"] & web.MAGPOSE_PROVISIONAL)
+        assert json_provisional == pose_provisional, (
+            f"channels disagree: JSON binning={report['binning']!r} "
+            f"(provisional={json_provisional}) vs MAGPOSE bit4 "
+            f"(provisional={pose_provisional})")
+        return report["binning"]
+
+    before = _check(None)                 # no saved calibration: binning on provisional
+    assert before == "provisional"
+
+    session.stop()                        # fits a real candidate from the same cloud
+    assert session.candidate is not None
+
+    after = _check(None)                  # frame is still frozen on the provisional estimate
+    assert after == before == "provisional"
+
+
 def test_magpose_flags_a_stationary_board(monkeypatch):
     """A board on the desk must SAY so. The recorded trap: 255 stationary
     samples scored `std_pct 0.22%` against a x2.04-biased calibration, i.e. a
