@@ -139,6 +139,102 @@ export function createSplat(hub, sceneApi) {
         }
     }
 
+    // --- splat extent trimming (issue #176) ---------------------------------
+    // #108's frameRoomBBox fits the camera to the RAW bounding box of the
+    // content. For a photometric splat build that box is dominated by a
+    // handful of low-density outlier gaussians -- the spiky streaks radiating
+    // out of a COLMAP/gsplat reconstruction -- so the camera backs off ~1.7x
+    // too far and the room fills roughly a third of the frame area it could.
+    //
+    // Measured on every build under `results/splats/` (`host/tools/` doesn't
+    // have a script for this -- see host/tests/test_splat_extent_trim.py for
+    // the harness): trimming the outer 1% of splat CENTERS per axis recovers
+    // 42-53% of the inflated radius on every one of our own photometric
+    // builds (sam-office 144k, sam-office-2 30k, sam-office-2-depth 116k,
+    // sam-office-2-dense 323k) and 92.8% on the imported `scaniverse-splat`
+    // (2.46M gaussians -- a much spikier photogrammetry artifact set). 5%
+    // trims a bit further but risks eating a genuine corner on a sparse build
+    // for only a few more points of recovery; 1% is the number here.
+    //
+    // A same-build opacity threshold (the manifest's own `min_opacity` /
+    // `cull_opacity` preset knobs) was tried first because it targets the
+    // actual cause rather than a blind percentile -- but the post-train cull
+    // in `host/src/roomscan/splat/train.py` already drops every gaussian
+    // below `cull_opacity` before the PLY is even written, and among what's
+    // left, opacity barely correlates with distance from the centroid
+    // (measured |corr| < 0.13 on every build here): dropping 40%+ of the
+    // REMAINING gaussians by raising the opacity floor moved the radius under
+    // 1%. The outliers are not reliably faint, so a spatial trim is the one
+    // that actually works.
+    //
+    // Walking every centre is too slow to gate a load on the 2.46M-gaussian
+    // import -- stride-sample instead, at a fixed sample COUNT rather than a
+    // fixed stride, so cost stays bounded no matter how big the build is.
+    // 20000 matches the sample size the numbers above were measured with
+    // (144356 / 7 ~ 20623), and comparing stride 1 against stride 100 on the
+    // 2.46M-point import (24557 samples) moved the trimmed radius by ~1.4% --
+    // small enough that the bounded sample is a fair stand-in for the full
+    // population at a cost of low tens of milliseconds, not the ~0.5s a full
+    // walk cost in the equivalent offline measurement.
+    const SPLAT_TRIM_PERCENT = 1;             // trim the outer 1% of centers per axis
+    const SPLAT_TRIM_MIN_SAMPLES = 20;        // too few samples to trim meaningfully -- skip it
+    const SPLAT_TRIM_TARGET_SAMPLES = 20000;  // bounds the walk cost regardless of splat count
+
+    function percentile(sortedAxis, p) {
+        const n = sortedAxis.length;
+        if (n === 0) return NaN;
+        if (n === 1) return sortedAxis[0];
+        const idx = (p / 100) * (n - 1);
+        const lo = Math.floor(idx), hi = Math.ceil(idx);
+        if (lo === hi) return sortedAxis[lo];
+        const frac = idx - lo;
+        return sortedAxis[lo] * (1 - frac) + sortedAxis[hi] * frac;
+    }
+
+    // centers: flat [x0,y0,z0, x1,y1,z1, ...] (plain Array or typed array).
+    // Pure -- no THREE/WebGL runtime -- so it is unit-testable directly
+    // (host/tests/test_splat_extent_trim.py), the same pattern scene.js's
+    // `frameRoomBBox` uses (#108). Returns null when there are too few
+    // samples to trim meaningfully, matching frameRoomBBox's own null
+    // contract for "nothing to frame".
+    function trimmedCentersBBox(centers, trimPercent = SPLAT_TRIM_PERCENT) {
+        if (!centers || centers.length < 3 * SPLAT_TRIM_MIN_SAMPLES) return null;
+        const n = Math.floor(centers.length / 3);
+        const xs = new Array(n), ys = new Array(n), zs = new Array(n);
+        for (let i = 0; i < n; i++) {
+            xs[i] = centers[i * 3]; ys[i] = centers[i * 3 + 1]; zs[i] = centers[i * 3 + 2];
+        }
+        xs.sort((a, b) => a - b);
+        ys.sort((a, b) => a - b);
+        zs.sort((a, b) => a - b);
+        const lo = trimPercent, hi = 100 - trimPercent;
+        return {
+            minX: percentile(xs, lo), maxX: percentile(xs, hi),
+            minY: percentile(ys, lo), maxY: percentile(ys, hi),
+            minZ: percentile(zs, lo), maxZ: percentile(zs, hi),
+        };
+    }
+
+    // Stride-sample a loaded SplatMesh's own centers, transformed into scene
+    // space (`true` = apply the scene transform -- same as the raw-box call
+    // this replaces). `mesh` only needs `getSplatCount()` /
+    // `getSplatCenter(i, out, true)`, duck-typed so this is unit-testable
+    // with a plain fake and no THREE mock: the vendor's own
+    // `SplatBuffer.getSplatCenter` just assigns `outCenter.x/.y/.z`, no
+    // Vector3 methods used.
+    function sampleSplatCenters(mesh, targetSamples = SPLAT_TRIM_TARGET_SAMPLES) {
+        const count = mesh && typeof mesh.getSplatCount === 'function' ? mesh.getSplatCount() : 0;
+        if (!count) return null;
+        const stride = Math.max(1, Math.floor(count / targetSamples));
+        const out = [];
+        const tmp = { x: 0, y: 0, z: 0 };
+        for (let i = 0; i < count; i += stride) {
+            mesh.getSplatCenter(i, tmp, true);
+            out.push(tmp.x, tmp.y, tmp.z);
+        }
+        return out;
+    }
+
     // Point the World-mode camera at the splat once, when it first appears
     // (issue #108): human eye level (~6 ft / 1.83 m off the floor), centred
     // on the room's own centroid, backed off by however much THAT room's
@@ -147,21 +243,29 @@ export function createSplat(hub, sceneApi) {
     // against -- wrong scale/position for an imported splat or a differently
     // cropped build, and not eye level at all (2.5 m is closer to a ladder).
     //
-    // `SplatMesh.computeBoundingBox(true, 0)` walks the loaded scene's own
-    // splat centers with its manifest transform already applied -- DropInViewer
-    // itself carries no transform (see `ensureViewer`'s bare `scene.add(viewer)`),
-    // so the box comes back directly in camera/controls space.
+    // The bounding box fed to the camera is the TRIMMED extent (issue #176,
+    // see the block above), not the raw box -- the raw box over-backs-off
+    // ~1.7x on a photometric build because of low-density outlier gaussians.
+    // `computeBoundingBox(true, 0)` remains the fallback for when sampling
+    // fails (vendor internals changed, or too few splats to trim).
     function frameCamera() {
         if (framedSlug === loadedSlug) return;
         framedSlug = loadedSlug;
         const mesh = viewer && viewer.splatMesh;
-        const box = mesh && typeof mesh.computeBoundingBox === 'function'
-            ? mesh.computeBoundingBox(true, 0) : null;
-        const framed = box && sceneApi.frameCameraToBBox({
-            minX: box.min.x, maxX: box.max.x,
-            minY: box.min.y, maxY: box.max.y,
-            minZ: box.min.z, maxZ: box.max.z,
-        });
+        let box = null;
+        try {
+            const samples = mesh ? sampleSplatCenters(mesh) : null;
+            box = samples ? trimmedCentersBBox(samples) : null;
+        } catch (e) { /* vendor internals changed -- fall back below */ }
+        if (!box && mesh && typeof mesh.computeBoundingBox === 'function') {
+            const raw = mesh.computeBoundingBox(true, 0);
+            box = raw && {
+                minX: raw.min.x, maxX: raw.max.x,
+                minY: raw.min.y, maxY: raw.max.y,
+                minZ: raw.min.z, maxZ: raw.max.z,
+            };
+        }
+        const framed = box && sceneApi.frameCameraToBBox(box);
         if (!framed) {
             // Degenerate box (no splats yet / a single point) or the World
             // view isn't active -- fall back to the old fixed shot so the
