@@ -328,8 +328,8 @@ class _Watchdog:
         freely. So report how many of the expected ticks actually landed --
         `tick_share` near 1.0 means other Python threads (the asyncio loop, the
         reader) got to run; near 0 means they did not, whatever the percentage
-        says. `host/tools/slam_stall_profile.py` shares this blind spot and
-        should gain the same field."""
+        says. `host/tools/slam_stall_profile.py::GilWatchdog.report()` carries
+        the same `ticks`/`expected_ticks`/`tick_share` fields (issue #74)."""
         out = {}
         for stage, samples in self.late.items():
             if stage == "idle":
