@@ -190,17 +190,25 @@ not just the data — a take with the right length and the wrong motion fails.
 > must be **started first**, and the window **closed again before stopping**. Getting this backwards
 > means the operator either cannot start the take or cannot end it. The instrument keeps streaming
 > and recording the whole time the window is open.
+>
+> **Arming trap (added #174).** Opening that window does not begin collecting — `magcal.js:542`
+> only calls `setOpen(true)`; the sweep starts on `#magcal-start` (`:547`). Step 3 below is not
+> optional padding: without it the ball never fills, the operator has no gap guidance to steer by,
+> and **Stop & Fit** never enables. The first version of the #144 runbook omitted it.
 
 ```
 1. [You] Hold the scanner **in your hands, well away from the tripod, any metal furniture, and
    your laptop.** Metal nearby bends the reading and gets baked in permanently.
 2. [You] In the **left-hand panel**, find the **Calibrate Mag** button and click it. A window opens
-   showing a ball that fills in as you cover angles.
-3. [You] Slowly turn the scanner through **every orientation you can** — like slowly rolling a ball
+   showing a ball.
+3. [You] In that window, click **Start**. Only now does the ball begin filling in as you cover
+   angles — opening the window on its own collects nothing, and the **Stop & Fit** button stays
+   greyed out until you have pressed **Start**.
+4. [You] Slowly turn the scanner through **every orientation you can** — like slowly rolling a ball
    in your hands. Upside down, on each side, nose up, nose down.
-4. [You] Keep going for <N> seconds. **Aim at the gaps the ball shows you** rather than repeating
+5. [You] Keep going for <N> seconds. **Aim at the gaps the ball shows you** rather than repeating
    a motion you have already done — slow and varied beats fast and repetitive.
-5. [You] Close the window with the **×** in its corner (or press **Esc**). You must close it before
+6. [You] Close the window with the **×** in its corner (or press **Esc**). You must close it before
    you can stop the recording.
 ```
 

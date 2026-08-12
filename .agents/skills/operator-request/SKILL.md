@@ -42,6 +42,7 @@ rediscovery; leaving one open costs a label.
 | "The owner can verify later" | That is exactly what this skill is for. Post the request; don't close and hope. |
 | "It's a small fix" | #16 is a small fix. It has been `status/fix-unverified` since 2026-07-30. |
 | "Re-opening is cheap" | Nobody re-opens. A closed issue is invisible. |
+| "I said in the closing comment that it isn't verified" | **The most common one, and the hardest to see.** An accurate note is not a hold. The #174 audit reopened #57, #168 and #171 — every one closed with a candid paragraph naming the exact unrun check, #171's even spelling out the command. Prose does not appear in `operator_queue()`, does not carry a label, and does not stop `Closes #NNN`. If you are writing that paragraph, you have already made the judgement: change the keyword and the labels, not just the wording. |
 
 ### What "hold" looks like
 
@@ -110,6 +111,18 @@ substitutes them before `gh` sees them.
    `position: fixed; inset: 0`, so while any modal is open the sidebars are unreachable and the
    step order has to change. Writing this from memory produced a runbook telling the owner to
    watch a coverage ball that only exists inside a modal covering the button they needed next.
+
+   **Then grep the handler, not just the element.** Existing is not the same as working: opening a
+   panel is rarely what arms it. `#magcal-modal`'s open button only calls `setOpen(true)`
+   (`magcal.js:542`); sampling starts on `#magcal-start` (`:547`), and until it is pressed the
+   coverage ball stays empty and **Stop & Fit** is `disabled`. The #144 runbook shipped without that
+   click and would have wasted the owner's trip — caught by the #174 audit, not by writing it.
+
+   ```bash
+   grep -n "btnStart\|addEventListener" host/src/roomscan/static/magcal.js
+   ```
+
+   For every control the runbook names, ask: *does this render, or does this do the thing?*
 
 8. **Re-read it once as the operator.** Every `[You]` step must be one action. No acronyms. If a
    step says "and then", split it. If you cannot picture doing it, neither can they.
@@ -180,6 +193,8 @@ gh issue edit NNN --repo hellosamblack/lidar-roomscanner \
 - A runbook step contains a tool name, an acronym, or the word "just".
 - You named a button, card or readout **from memory** without grepping `index.html` for it — or you
   named two controls without checking whether one covers the other.
+- You told the operator to **open** something without checking what **starts** it.
+- You are writing "this was not verified on hardware" into a comment that also says `Closes #NNN`.
 - You wrote "good coverage", "a reasonable amount", or "until it looks right" instead of a number.
 - You are scoring a capture without having checked `continuity.complete` and `capture_motion`.
 - An issue carries `needs/operator` but has no `## 🔧 Operator Request` comment — the label is a

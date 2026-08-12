@@ -65,7 +65,12 @@ alternating `[Claude]`/`[You]` steps composed from its step library, posted as a
 and processes the result when it comes back. `operator_queue()` answers "what do you need from me?"
 in one call. `status-sync`, `session-end`, `session-start` and `issue-fleet` all route through it;
 `host/tests/test_operator_skill.py` pins that wiring, because a gate nobody consults is worth
-nothing (`status/fix-unverified` sat unused in the tracker for weeks).
+nothing (`status/fix-unverified` sat unused in the tracker for weeks). **A candid "not verified on
+hardware" paragraph inside a closing comment is not a hold** — the retroactive audit (#174) reopened
+#57, #168 and #171, each closed with an accurate note naming the exact unrun check, one of them
+spelling out the command for a later session to run. Prose carries no label, does not reach
+`operator_queue()`, and does not stop `Closes #NNN`; if you are writing that paragraph you have
+already made the judgement, so change the keyword and the labels too.
 
 **Self-improvement rule (owner, 2026-07-08):** after every milestone (phase completion / major merge),
 run the `milestone-retro` skill BEFORE starting the next phase — convert the push's friction into
