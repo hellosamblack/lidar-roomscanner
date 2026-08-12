@@ -154,6 +154,98 @@ def test_render_floorplan_returns_none_without_orientation(tmp_path):
     assert thumbs.render_floorplan(s["frames"], s["width"], s["height"], size=64) is None
 
 
+def _rot_toward(direction: tuple[float, float, float]) -> np.ndarray:
+    """Orthonormal 3x3 whose 3rd column is `direction` (unit-normalised) --
+    the other two columns are an arbitrary right-handed completion. Enough
+    for a synthetic near-zero-FOV frame, where only where the boresight ray
+    lands matters."""
+    d = np.asarray(direction, dtype=np.float64)
+    d = d / np.linalg.norm(d)
+    helper = np.array([1.0, 0.0, 0.0]) if abs(d[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    col0 = np.cross(helper, d)
+    col0 /= np.linalg.norm(col0)
+    col1 = np.cross(d, col0)
+    return np.stack([col0, col1, d], axis=1)
+
+
+def test_floorplan_height_band_excludes_grazing_vertical_contamination(monkeypatch):
+    """#109: the reported symptom ("vertical point cloud instead of a
+    horizontal floorplan") comes from tilted frames' rays -- ceiling/floor,
+    grazing-angle -- landing far from the room's real footprint AND far from
+    the shared origin's own height, flooding the top-down histogram.
+    `_floorplan_ground_points`'s height band should keep the level "wall"
+    content and drop that contamination.
+
+    24 level frames sweep a 2 m-radius circle (Y == 0 exactly -- a small
+    room's walls). 4 contaminant frames are pitched 60 deg off level at an
+    8 m range: real ToF grazing-angle clutter looks exactly like this, a long
+    return from a ray nearly parallel to the surface it hits. Their
+    horizontal reach (8 * cos(60 deg) = 4 m) is well outside the room's real
+    2 m footprint, and their height (8 * sin(60 deg) = 6.9 m) is well outside
+    any plausible band.
+
+    `display_rotation` is monkeypatched to an exact lookup -- this test is
+    about the height-band arithmetic, not the SFLP quaternion convention
+    (that's `test_sensors.py` / `docs/coordinate-frames.md`).
+    """
+    w = h = 8
+    rots: dict[int, np.ndarray] = {}
+    frames = []
+    depth_core = np.full((h, w), 2000.0, dtype=np.float32)     # 2 m "wall"
+    for i in range(24):
+        theta = 2.0 * np.pi * i / 24
+        rots[i] = _rot_toward((np.sin(theta), 0.0, np.cos(theta)))
+        frames.append((depth_core, i))
+
+    depth_far = np.full((h, w), 8000.0, dtype=np.float32)      # 8 m grazing return
+    pitch = np.deg2rad(60.0)
+    for j in range(4):
+        idx = 100 + j
+        az = 2.0 * np.pi * j / 4
+        d = (np.sin(az) * np.cos(pitch), np.sin(pitch), np.cos(az) * np.cos(pitch))
+        rots[idx] = _rot_toward(d)
+        frames.append((depth_far, idx))
+
+    monkeypatch.setattr(thumbs, "display_rotation", lambda q: rots[q])
+
+    # With the fix (height-band filtering on): the contaminant frames are
+    # excluded, so the footprint stays near the 2 m room radius.
+    x, z = thumbs._floorplan_ground_points(frames, w, h, fov_h=2.0, fov_v=2.0,
+                                           height_band_m=0.4)
+    radius = np.hypot(x, z)
+    assert radius.max() < 2.5, f"grazing contamination leaked through: max radius {radius.max():.2f} m"
+
+    # Reintroducing the pre-fix defect (no height filter at all) must let the
+    # contamination back in -- proving the assertion above exercises the
+    # band, not some other clamp.
+    x_nf, z_nf = thumbs._floorplan_ground_points(frames, w, h, fov_h=2.0, fov_v=2.0,
+                                                 height_band_m=None)
+    radius_nf = np.hypot(x_nf, z_nf)
+    assert radius_nf.max() > 3.5, (
+        f"expected the unfiltered defect to inflate the footprint, got max radius {radius_nf.max():.2f} m")
+
+
+def test_render_floorplan_applies_the_height_band_by_default(monkeypatch, tmp_path):
+    """`render_floorplan`'s default argument must actually reach
+    `_floorplan_ground_points` as a real (non-None, non-infinite) band --
+    the helper-level test above would not catch a caller that forgot to wire
+    the parameter through."""
+    cap = tmp_path / "a.bin"
+    _capture(cap, 40)
+    s = thumbs.sample_capture_frames(cap, 20)
+    seen = {}
+    real = thumbs._floorplan_ground_points
+
+    def spy(frames, width, height, fov_h, fov_v, height_band_m):
+        seen["height_band_m"] = height_band_m
+        return real(frames, width, height, fov_h, fov_v, height_band_m)
+
+    monkeypatch.setattr(thumbs, "_floorplan_ground_points", spy)
+    thumbs.render_floorplan(s["frames"], s["width"], s["height"], size=64)
+    assert seen["height_band_m"] == thumbs.DEFAULT_HEIGHT_BAND_M
+    assert seen["height_band_m"] is not None
+
+
 def test_render_depth_fallback_upscales_one_frame(tmp_path):
     cap = tmp_path / "a.bin"
     _capture(cap, 30, with_quat=False)

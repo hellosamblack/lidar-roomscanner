@@ -50,6 +50,7 @@ from .sensors import display_rotation
 DEFAULT_SAMPLES = 40
 DEFAULT_SIZE = 256
 THUMBS_DIR = "thumbs"
+DEFAULT_HEIGHT_BAND_M = 0.4
 
 _DEPTH_STREAMS = (StreamId.RAW_3DMD, StreamId.DEPTH_ZF32)
 
@@ -182,22 +183,31 @@ def sample_capture_frames(path, n: int = DEFAULT_SAMPLES) -> dict:
 
 # --- rendering ---------------------------------------------------------------
 
-def render_floorplan(frames, width: int, height: int, *, size: int = DEFAULT_SIZE,
-                     fov_h: float = 55.0, fov_v: float = 42.0) -> np.ndarray | None:
-    """Orientation-only rotational sweep as an RGB uint8 (size, size, 3) image.
+def _floorplan_ground_points(frames, width: int, height: int, fov_h: float, fov_v: float,
+                             height_band_m: float | None) -> tuple[np.ndarray, np.ndarray] | None:
+    """Deproject + gravity-align every frame, then keep only the points near
+    the shared deprojection origin's OWN height -- a horizontal slice through
+    the room, the way an architectural floor plan is a cut at a fixed height.
 
-    Every frame is deprojected about the SAME origin (there is no translation
-    estimate here -- that costs a full SLAM run) and rotated into the
-    gravity-aligned world by `display_rotation(quat)`. World (X, Z) -- the
-    ground plane, since the Open3D CV world is Y-down -- is 2-D histogrammed and
-    log1p-normalised, because a stationary dwell otherwise saturates one cell
-    and blacks out the rest of the sweep.
+    Without this band, ceiling/floor returns and grazing-angle rays from
+    tilted frames (large apparent range because the ray is nearly parallel to
+    the surface it hits) land far from the room's real footprint in (X, Z)
+    *and* far from the origin in Y, and dominate the histogram -- the tile
+    reads as a diffuse "upright point cloud" rather than a floor plan (#109).
+    A ray straight out of a level frame instead lands near Y=0 by
+    construction (`display_rotation` gravity-aligns Y to vertical), so
+    filtering on Y isolates exactly the wall-height content a floor plan
+    wants.
 
-    Returns None when no frame carried an orientation (the caller falls back to
-    `render_depth_fallback`).
+    `height_band_m=None` disables the filter (keeps every point) -- used to
+    reproduce the pre-fix behaviour in tests.
+
+    Returns `(x, z)` metre arrays (ground plane; Open3D CV world is Y-down so
+    the ground plane is X-Z), or `None` when no frame carried an orientation.
     """
     deproj = Deprojector(width, height, fov_h, fov_v)
     xs: list[np.ndarray] = []
+    ys: list[np.ndarray] = []
     zs: list[np.ndarray] = []
     for depth, quat in frames:
         rot = display_rotation(quat)
@@ -208,11 +218,49 @@ def render_floorplan(frames, width: int, height: int, *, size: int = DEFAULT_SIZ
             continue
         world = pts @ rot.T
         xs.append(world[:, 0])
+        ys.append(world[:, 1])
         zs.append(world[:, 2])
     if not xs:
         return None
     x = np.concatenate(xs)
+    y = np.concatenate(ys)
     z = np.concatenate(zs)
+    if x.size == 0:
+        return None
+
+    if height_band_m is not None:
+        band = np.abs(y) < height_band_m
+        # A capture that is mostly steep tilt (little level content) could
+        # empty the band -- fall back to the unfiltered points rather than
+        # rendering nothing.
+        min_keep = max(30, int(0.01 * x.size))
+        if int(band.sum()) >= min_keep:
+            x, z = x[band], z[band]
+    return x, z
+
+
+def render_floorplan(frames, width: int, height: int, *, size: int = DEFAULT_SIZE,
+                     fov_h: float = 55.0, fov_v: float = 42.0,
+                     height_band_m: float | None = DEFAULT_HEIGHT_BAND_M) -> np.ndarray | None:
+    """Orientation-only rotational sweep as an RGB uint8 (size, size, 3) image.
+
+    Every frame is deprojected about the SAME origin (there is no translation
+    estimate here -- that costs a full SLAM run) and rotated into the
+    gravity-aligned world by `display_rotation(quat)`. World (X, Z) -- the
+    ground plane, since the Open3D CV world is Y-down -- is 2-D histogrammed and
+    log1p-normalised, because a stationary dwell otherwise saturates one cell
+    and blacks out the rest of the sweep. Points are first restricted to a
+    horizontal band near the origin's own height (`_floorplan_ground_points`,
+    `height_band_m`) so ceiling/floor and grazing-angle clutter from tilted
+    frames doesn't flood the histogram (#109).
+
+    Returns None when no frame carried an orientation (the caller falls back to
+    `render_depth_fallback`).
+    """
+    ground = _floorplan_ground_points(frames, width, height, fov_h, fov_v, height_band_m)
+    if ground is None:
+        return None
+    x, z = ground
     if x.size == 0:
         return None
 
