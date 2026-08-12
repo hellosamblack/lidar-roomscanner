@@ -102,6 +102,24 @@ exploration slot for an issue with no discoverable footprint. What it hands to *
 - `suggested_model` — advisory. `orchestrator-only` means firmware or transform work: it needs the
   rig, and its error paths spin forever instead of returning, so a worker cannot recover unattended.
 
+**Cross-check the batch against `operator_queue()` before anything else — the planner does not.**
+`fleet_plan` has no idea an issue is already parked on the owner, so a `needs/operator` issue ranks
+exactly as if it were actionable. On 2026-08-12 that put **two of its three picks** (#60 at 105, the
+top score, and #57 at 85) into a wave when both were already in the operator queue, out of nine held
+issues repo-wide. One `operator_queue(detailed=False)` call at Step 2 removes the whole class. Treat
+an outstanding `needs/operator` as a **veto** — somebody is already waiting on the owner for it.
+
+**Distrust `prior_work` credit; open the thread.** The planner doubles an issue's score for prior
+work, and on the same run credited #158 with *"prior work x2 (implementation plan comment)"* when
+**the issue had no comments at all** — a phantom signal promoting it into the wave. Confirm the
+comments exist before letting that multiplier decide anything. (Both defects are filed as #177.)
+
+**Check the data the issue needs actually exists on this box.** #158 also wanted RTAB-Map exports:
+the rtabmap checkout's `data/samples.zip` is bag-of-words vocabulary imagery, not an export, and the
+paired capture (#161) is `status/blocked`. Its coordinate-convention half — which its own body flags
+as the BUG-051/058 failure mode — had nothing to validate against. `ls` the directory before
+claiming.
+
 **Read the body of every issue you are about to claim. A high score is not actionability.** The
 planner ranks on labels, prior work and footprint — it cannot see a sentence. On 2026-08-12 two of
 the three top-ranked issues were un-workable for reasons only their prose states: #60 (scored 105,
