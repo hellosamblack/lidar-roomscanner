@@ -211,6 +211,17 @@ a near-static capture showed zero stalls on code that freezes 1261 ms on a real
 room sweep. It runs in a subprocess and never binds the device, so it is safe
 beside a live server (both just get slower). Found BUG-060.
 
+Judge that starvation by **`tick_share`**, not by `starved_pct_of_wall` (#74).
+Each `gil_starvation[<stage>]` entry, and the report's top level, now carry
+`ticks` / `expected_ticks` / `tick_share` (= ticks landed ÷ `stage_wall_s /
+period`) beside the legacy fields, matching `slam_icp_bench`'s watchdog. The
+legacy percentage is self-defeating at the extreme: a stage that holds the GIL
+almost completely leaves the watchdog almost no chance to tick, so there is
+almost nothing to sum, and it can read *lower* than a stage that ran freely — 1
+tick landed of ~2186 due. A low `starved_pct_of_wall` is only evidence of health
+when `tick_share` is near 1; when `tick_share` is low it means the instrument
+barely sampled.
+
 `slam_icp_bench` answers "would moving this on (or off) the GPU help?" with
 measurements instead of intuition. `what="api"` is the one to run **first** before
 writing any device-resident code: it probes each Open3D 0.19 tensor op against a
@@ -440,6 +451,7 @@ during verification, every one of them returning a confident wrong answer:
 | `rig_record(on=True)` | `ok` in replay, where `start_record()` is a no-op | check `active`, explain why |
 | `rig_record(on=True)` | **`ok=False` while 734 clean frames were recorded** | poll `session` for `active == on` |
 | `rig_command` | `ok` for `status="timeout"` — device never answered | only `status == "ok"` is success |
+| `rig_command` | **`ok` carrying the *previous* command's late ACK** (#171, open) | check `ack.label` matches what you sent |
 
 The last two were found on real hardware, against a board that had stopped
 responding. `_await_state` / `_await_session` exist for exactly this: a broadcast
