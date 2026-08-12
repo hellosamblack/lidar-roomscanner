@@ -16,15 +16,19 @@
 //
 // Public surface:
 //   makeXrayMaterial(THREE, material) -> the see-through twin of a material
+//   frameRoomBBox(bbox, fovDeg, opts) -> pure eye/target/distance for a room
+//                         bbox, no THREE runtime needed (issue #108)
 //   createScene(hub) -> { resetCamera, THREE, scene, camera,
 //                         setPointsVisible(bool), setFollow(bool),
 //                         setFollowTarget(eye, center, up), trackTarget(pos),
 //                         setSlamPose(pose), setViewportMirror(bool),
-//                         setRenderActive(bool) }
+//                         setRenderActive(bool), frameCameraToBBox(bbox, opts) }
 // trackTarget(pos) is World+Follow's "track, keep my framing": pans the orbit
 // toward `pos` (a [x,y,z]) by translating camera+target by the same delta,
 // preserving the user's zoom/angle. setFollowTarget's eye/center/up snap is
-// for FPV/Mirror only (a fixed scanner-relative shot).
+// for FPV/Mirror only (a fixed scanner-relative shot). frameCameraToBBox
+// (issue #108) is the one-shot "park at eye level over this room" framer
+// splat.js and slam.js's Detailed path use for static reconstructions.
 // slam.js (web Phase 4) uses the returned handle to add its mesh/trajectory
 // group to the same scene and to drive the follow camera (which must coordinate
 // with OrbitControls — only one may own the camera per frame).
@@ -104,6 +108,65 @@ const DEFAULT_VIEW_CAM = {
     fpv:    { distance_m: 0.30, height_m: 0.20, rotation_deg: 0 },   // just over the sensor's shoulder
     mirror: { distance_m: 0.30, height_m: 0.20, rotation_deg: 0 },
 };
+
+// --- room auto-framing (issue #108) ---------------------------------------
+// The `DEFAULT_VIEW_CAM.world` shot above is an offset from the SENSOR'S OWN
+// origin -- correct for a live/replay point cloud (which starts at the
+// sensor), meaningless for a splat or a Detailed reconstruction, whose
+// geometry has its own scale and position that the fixed 4.2 m/2.6 m offset
+// knows nothing about. Those two static-content modes instead frame
+// themselves from their OWN bounding box: eye at human eye level (not an
+// arbitrary "elevated" height), aimed at the room's own centroid (not the
+// world origin), backed off by however much THAT room's size needs (not a
+// fixed 4.2 m that overshoots a small room and undershoots a large one).
+//
+// `frameRoomBBox` is pure (plain numbers in, plain numbers out) so it is
+// unit-testable without a THREE/WebGL runtime -- see
+// host/tests/test_room_framing.py, which runs it for real under Node
+// (docs/engineering-practices.md: prove the regression by reintroducing the
+// defect). `frameCameraToBBox` below is the thin apply-to-camera wrapper
+// splat.js and slam.js's Detailed path call with their own geometry's bbox.
+export const ROOM_EYE_HEIGHT_M = 1.83;      // ~6 ft, human eye level (issue #108)
+const ROOM_FIT_MARGIN = 1.15;               // headroom so far corners aren't clipped
+const ROOM_MIN_DISTANCE_M = 0.5;            // never crush the eye into the centroid
+
+// bbox: {minX,maxX,minY,maxY,minZ,maxZ} in the Y-DOWN world frame (gravity
+// runs along +Y, so the floor is the LARGER Y and "up" is -Y -- same
+// convention as CAM_UP/`camera.up` above). fovDeg: the camera's *vertical*
+// field of view. Returns null for a degenerate (empty/non-finite) box.
+export function frameRoomBBox(bbox, fovDeg, opts = {}) {
+    const { minX, maxX, minY, maxY, minZ, maxZ } = bbox || {};
+    const vals = [minX, maxX, minY, maxY, minZ, maxZ];
+    if (!vals.every(Number.isFinite)) return null;
+    const dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
+    if (dx <= 0 && dy <= 0 && dz <= 0) return null;     // no extent at all -- one point
+
+    const centerX = (minX + maxX) / 2;
+    const centerZ = (minZ + maxZ) / 2;
+    const floorY = maxY;                                // Y-DOWN: floor is the larger Y
+
+    const eyeHeight = Number.isFinite(opts.eyeHeightM) ? opts.eyeHeightM : ROOM_EYE_HEIGHT_M;
+    // Never place the eye outside the room's OWN vertical extent -- a very
+    // low ceiling, or a near-planar (e.g. single-wall) capture.
+    const eyeY = Math.min(floorY - 0.05, Math.max(minY + 0.05, floorY - eyeHeight));
+
+    // Bounding radius = half the box's 3D diagonal. Framing to the RADIUS
+    // (not just the horizontal extent) guarantees the whole room is visible
+    // from the fixed viewing direction picked below, however that direction
+    // happens to sit relative to the room's own long axis.
+    const radius = 0.5 * Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const halfFovRad = (Number.isFinite(fovDeg) ? fovDeg : 60) * Math.PI / 360;
+    const margin = Number.isFinite(opts.marginFactor) ? opts.marginFactor : ROOM_FIT_MARGIN;
+    const minDist = Number.isFinite(opts.minDistanceM) ? opts.minDistanceM : ROOM_MIN_DISTANCE_M;
+    const distance = Math.max(minDist, (radius * margin) / Math.sin(halfFovRad));
+
+    return {
+        eye: [centerX, eyeY, centerZ - distance],
+        target: [centerX, eyeY, centerZ],
+        distance_m: distance,
+        eye_height_m: floorY - eyeY,
+    };
+}
 
 export function createScene(hub) {
     D('module loaded; THREE r' + THREE.REVISION);
@@ -401,6 +464,28 @@ export function createScene(hub) {
         camera.updateProjectionMatrix();
     }
     applyPose('world');                     // initial pose + seeds savedPos/savedTarget
+
+    // Room auto-frame (issue #108): apply a `frameRoomBBox` result straight
+    // to the camera. Callers (splat.js, slam.js's Detailed path) own
+    // computing the bbox from their own geometry -- this only ever runs in
+    // World, matching the fact that FPV/Mirror are locked, scanner-relative
+    // views with nothing to auto-frame. Same "becomes the new return-to pose"
+    // contract as `applyPose('world')` above, so Reset Camera returns to the
+    // room shot rather than snapping back to the sensor-relative default.
+    function frameCameraToBBox(bbox, opts) {
+        if (viewMode !== 'world') return false;
+        const pose = frameRoomBBox(bbox, camera.fov, opts);
+        if (!pose) return false;
+        camera.position.set(pose.eye[0], pose.eye[1], pose.eye[2]);
+        camera.up.set(0, -1, 0);
+        controls.target.set(pose.target[0], pose.target[1], pose.target[2]);
+        camera.lookAt(controls.target);
+        savedPos.copy(camera.position);
+        savedTarget.copy(controls.target);
+        controls.update();
+        camera.updateProjectionMatrix();
+        return true;
+    }
 
     function applyViewMode(m) {
         if (!(m in DEFAULT_VIEW_CAM)) return;
@@ -769,5 +854,5 @@ export function createScene(hub) {
 
     return { resetCamera, THREE, scene, camera, controls, setPointsVisible, setFollow,
              setFollowTarget, trackTarget, setSlamPose, setViewportMirror, setRenderActive,
-             setPreviewTexture, setPreviewVisible };
+             setPreviewTexture, setPreviewVisible, frameCameraToBBox };
 }

@@ -181,6 +181,13 @@ export function createSlam(hub, sceneApi) {
     // time and ETA as the tab that started the build.
     let detailedBuild = null;
     let detailedResources = null;
+    // Room auto-frame (issue #108): parks the World-mode camera at eye level
+    // over the reconstructed mesh's OWN bounding box once per Detailed entry
+    // -- see `maybeFrameDetailed` below, and scene.js's `frameCameraToBBox`
+    // (the same primitive splat.js uses for the Splat source). Reset whenever
+    // Detailed is left, so re-entering (or a fresh build replacing the mesh)
+    // gets framed again rather than inheriting wherever the camera was left.
+    let detailedFramed = false;
 
     // Headless-verification surface (BUG-061). Initialized eagerly so a probe
     // reading it before the first packet sees the documented shape, not
@@ -243,6 +250,39 @@ export function createSlam(hub, sceneApi) {
         return attr;
     }
 
+    // Room auto-frame (issue #108): once per Detailed entry, once real mesh
+    // geometry exists, park the camera at eye level over the reconstruction's
+    // OWN bounding box -- same primitive splat.js uses (`sceneApi.frameCameraToBBox`),
+    // so both static-content modes share one "eye level, centred on the room,
+    // distance tuned to its size" rule rather than the world view's
+    // sensor-origin-relative establishing shot (meaningless once the mesh has
+    // grown well away from where the scan started).
+    //
+    // `computeBoundingBox()` on each submesh's geometry honours the LIVE
+    // `count` set by `setLiveCount` (see that function's own comment on why
+    // the naive `Math.ceil` padding once corrupted this exact computation --
+    // BUG-033/BUG-061), so a still-growing mesh never folds its padded-but-
+    // unwritten tail into the box. An empty submesh's box is THREE's own
+    // `Box3.makeEmpty()` (min=+Infinity/max=-Infinity) -- `isEmpty()` filters
+    // it out of the union rather than corrupting the merged box.
+    function maybeFrameDetailed() {
+        if (detailedFramed || state.display !== 'detailed') return;
+        const box = new THREE.Box3();
+        for (const mesh of [nonWallMesh, wallMesh]) {
+            const g = mesh.geometry;
+            if (!g.attributes.position || !g.attributes.position.count) continue;
+            g.computeBoundingBox();
+            if (g.boundingBox && !g.boundingBox.isEmpty()) box.union(g.boundingBox);
+        }
+        if (box.isEmpty()) return;   // nothing real to frame yet -- try again next mesh
+        const framed = sceneApi.frameCameraToBBox({
+            minX: box.min.x, maxX: box.max.x,
+            minY: box.min.y, maxY: box.max.y,
+            minZ: box.min.z, maxZ: box.max.z,
+        });
+        if (framed) detailedFramed = true;
+    }
+
     // --- MESH binary ingest ----------------------------------------------
     // Layout (docs/web-protocol.md): 9×u32 header then, per submesh, f32 pos,
     // f32 col, u32 idx; floor is f32 pos + u32 line-idx. Counts up front.
@@ -267,6 +307,7 @@ export function createSlam(hub, sceneApi) {
         lastMeshes = { nwPos, nwCol, nwIdx, wPos, wCol, wIdx };
         renderMeshes();
         applyLines(floorLines, fPos, fIdx);
+        maybeFrameDetailed();
         if (state.display === 'detailed' && detailedBuild && !detailedBuild.done) {
             detailedBuild.meshShown = true;
             renderDetailedBuildStatus();
@@ -539,6 +580,11 @@ export function createSlam(hub, sceneApi) {
             view_colormap: msg.view_colormap || 'turbo',
             view_mode: msg.view_mode || 'world',
         };
+        // Leaving Detailed: reset the auto-frame latch (issue #108) so the
+        // NEXT entry (this session or a later one, possibly onto a rebuilt
+        // mesh) gets freshly framed rather than silently doing nothing
+        // because a stale `detailedFramed` from a previous visit is still set.
+        if (state.display !== 'detailed') detailedFramed = false;
         applyColormap(state.view_colormap);
         if (msg.see_through !== undefined) {
             seeThrough = Math.min(1, Math.max(0, Number(msg.see_through) || 0));
@@ -585,6 +631,7 @@ export function createSlam(hub, sceneApi) {
         trajLine.geometry.setDrawRange(0, 0);
         scannerHasPose = false;
         detailedBuild = null;
+        detailedFramed = false;    // the mesh about to arrive is a fresh generation
         procRatePrev = null;
         procRateEma = null;
         updateScannerVisibility();

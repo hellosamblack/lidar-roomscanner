@@ -128,17 +128,38 @@ export function createSplat(hub, sceneApi) {
         }
     }
 
-    // Point the World-mode camera at the splat once, when it first appears.
+    // Point the World-mode camera at the splat once, when it first appears
+    // (issue #108): human eye level (~6 ft / 1.83 m off the floor), centred
+    // on the room's own centroid, backed off by however much THAT room's
+    // size needs. The old fixed `(0, -2.5, 7)` pull-back assumed every build
+    // shared the ~3-unit-radius normalisation of the one preset it was tuned
+    // against -- wrong scale/position for an imported splat or a differently
+    // cropped build, and not eye level at all (2.5 m is closer to a ladder).
+    //
+    // `SplatMesh.computeBoundingBox(true, 0)` walks the loaded scene's own
+    // splat centers with its manifest transform already applied -- DropInViewer
+    // itself carries no transform (see `ensureViewer`'s bare `scene.add(viewer)`),
+    // so the box comes back directly in camera/controls space.
     function frameCamera() {
         if (framedSlug === loadedSlug) return;
         framedSlug = loadedSlug;
-        const cam = sceneApi.camera, controls = sceneApi.controls;
-        // The build normalises the model to ~3-unit radius centred on origin;
-        // y is down (camera.up = (0,-1,0)), so a slightly-above-eye vantage sits
-        // at negative y. A short pull-back frames the whole room.
-        controls.target.set(0, 0, 0);
-        cam.position.set(0, -2.5, 7);
-        controls.update();
+        const mesh = viewer && viewer.splatMesh;
+        const box = mesh && typeof mesh.computeBoundingBox === 'function'
+            ? mesh.computeBoundingBox(true, 0) : null;
+        const framed = box && sceneApi.frameCameraToBBox({
+            minX: box.min.x, maxX: box.max.x,
+            minY: box.min.y, maxY: box.max.y,
+            minZ: box.min.z, maxZ: box.max.z,
+        });
+        if (!framed) {
+            // Degenerate box (no splats yet / a single point) or the World
+            // view isn't active -- fall back to the old fixed shot so the
+            // viewer is never left staring at nothing.
+            const cam = sceneApi.camera, controls = sceneApi.controls;
+            controls.target.set(0, 0, 0);
+            cam.position.set(0, -2.5, 7);
+            controls.update();
+        }
     }
 
     function apply() {
