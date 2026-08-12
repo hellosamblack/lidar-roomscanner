@@ -1,5 +1,6 @@
 import math
 import struct
+from collections import deque
 
 import numpy as np
 import pytest
@@ -451,6 +452,102 @@ def test_sensor_state_clear_imu_raw():
     ss.clear_imu_raw()
     assert ss.latest_imu_raw() is None
     assert ss.imu_raw_history() == []
+
+
+def _env_frame(pressure, temp, t_us, mag=(30.0, 0.0, 40.0)):
+    payload = struct.pack("<5f", pressure, mag[0], mag[1], mag[2], temp)
+    return Frame(FrameHeader(FrameType.DATA, StreamId.ENV, 0, 1, t_us, 0, 0, len(payload)),
+                 payload)
+
+
+def _quat_frame(quat, t_us):
+    payload = struct.pack("<4f", *quat)
+    return Frame(FrameHeader(FrameType.DATA, StreamId.IMU_QUAT, 0, 1, t_us, 0, 0, len(payload)),
+                 payload)
+
+
+# Instance attributes that are configuration, not data derived from the frames
+# read so far. Everything else in `SensorState.__dict__` must be back at its
+# construction value after `reset_source()` -- see the test below.
+_SENSOR_STATE_CONFIG_FIELDS = {
+    "_lock",                 # identity, never reset
+    "_fusion", "_imu_fusion",  # filter OBJECTS persist; their state is checked separately
+    "_spark_interval_us",    # constructor arg
+}
+
+
+def test_sensor_state_reset_source_clears_every_timeline_derived_field():
+    """BUG-091 / issue #102: a seek must leave no sample from before it.
+
+    `clear_imu_raw` only drops stream 11. The latest SFLP quat, the latest ENV
+    sample (pressure -> SLAM's baro Z), the mag used by YawFusion, the
+    pressure/temp histories and the stream-12 tick trim all survived a rewind,
+    so the first depth frames after it were submitted to SLAM carrying the
+    timeline the operator had just left.
+
+    Written as a diff against a never-fed `SensorState` rather than a list of
+    hand-picked asserts: a new stateful field added to `__init__` is then
+    covered automatically instead of silently escaping the reset. A genuinely
+    non-timeline field has to be added to `_SENSOR_STATE_CONFIG_FIELDS`
+    deliberately, which is the point."""
+    from roomscan.magcal import MagCalibration
+    from roomscan.sensors import YawFusion
+
+    def _fresh():
+        return SensorState(fusion=YawFusion(calibration=MagCalibration(**_CAL_2026_08_01)),
+                           env_spark_interval_s=0.0)
+
+    pristine, ss = _fresh(), _fresh()
+
+    # Drive every stream the state machine tracks, across enough time for the
+    # spark deques to fill and the fusion filter to leave "init".
+    batch = _imu_raw_batch(gravity_rows=[[1.0, 0.0, 0.0]])
+    for i, (quat, mag) in enumerate(_NORTH_FACING_SAMPLES[:4]):
+        t = 1_000_000 + i * 40_000
+        ss.feed(_env_frame(101325.0 + i, 20.0 + i, t, mag=mag))
+        ss.feed(_quat_frame(quat, t))
+    ss.feed(Frame(FrameHeader(FrameType.DATA, StreamId.IMU_CAL, 0, 1, 1_200_000, 0, 0, 4),
+                  struct.pack("<bBH", 12, 1, 0)))
+    ss._imu_raw = batch
+    ss._imu_raw_hist.append((1_200_000, batch))
+
+    # Sanity: the fixture actually moved the state it claims to reset. Without
+    # this the test could pass against a no-op `reset_source`.
+    assert ss.latest_quat() is not None
+    assert ss.latest_env() is not None
+    assert ss.latest_imu_raw() is not None
+    assert len(ss.pressure_history()) > 0 and len(ss.temp_history()) > 0
+    assert len(ss.pressure_spark_history()) > 0
+    assert ss.imu_tick_us != pristine.imu_tick_us
+    assert ss.fusion_status() != "init"
+
+    ss.reset_source()
+
+    def _norm(v):
+        return list(v) if isinstance(v, deque) else v
+
+    checked = 0
+    for name, want in pristine.__dict__.items():
+        if name in _SENSOR_STATE_CONFIG_FIELDS:
+            continue
+        checked += 1
+        assert _norm(ss.__dict__[name]) == _norm(want), f"{name} survived reset_source()"
+    assert checked >= 10, f"only {checked} fields compared -- the guard has gone hollow"
+
+    # The filter objects are reused, so compare their state, not their identity.
+    assert ss.fusion_status() == "init"
+    assert ss._fusion._have_delta is False
+    assert ss.fused_quat() is None
+
+
+def test_sensor_state_reset_source_is_safe_without_fusion_filters():
+    """The default `SensorState()` has neither filter attached; the reset must
+    still work (the seek path does not know which one it got)."""
+    ss = SensorState()
+    ss.feed(_quat_frame((1.0, 0.0, 0.0, 0.0), 1000))
+    ss.reset_source()
+    assert ss.latest_quat() is None
+    assert ss.fusion_status() == "off"
 
 
 def test_gravity_body_from_imu_raw_none_when_no_samples():

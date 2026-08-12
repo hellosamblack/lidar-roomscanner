@@ -3644,7 +3644,7 @@ class SessionController:
                  client, recorder, pacer, sensor_state, metrics,
                  captures_dir=CAPTURES_DIR, results_dir=RESULTS_DIR,
                  initial_replay_path=None, initial_speed_fps=_SPEED_BASE_FPS,
-                 on_frame=None):
+                 on_frame=None, on_discontinuity=None):
         self._live_underlying = live_source
         self._live_proxy = _NoCloseSource(live_source) if live_source is not None else None
         self.live_label = live_label
@@ -3664,6 +3664,11 @@ class SessionController:
         # at stream rate (the SLAM mapper) is not paced by the broadcaster.
         # Survives every source swap because `_run` reads it on each respawn.
         self.on_frame = on_frame
+        # Called by `_begin_new_timeline` on every operation that starts a NEW
+        # replay timeline, in the window where no reader is running. Wired to
+        # `make_slam_discontinuity` in `create_app`; None in tests that do not
+        # care about SLAM. See `_begin_new_timeline` for why the window matters.
+        self.on_discontinuity = on_discontinuity
         # Where reconstruction sidecars live, so rename/delete can carry them
         # with the capture. Keyword-defaulted: every existing caller is unchanged.
         self.results_dir = str(results_dir)
@@ -3737,6 +3742,16 @@ class SessionController:
             if self.mode == "replay" and self.loop:
                 self._seek_prefix = b""
                 self._seek_offset = 0
+                # EOF -> frame 0 is as much a jump as a manual seek: without
+                # this, the second pass integrates frame 0 on top of the first
+                # pass's final pose and the map grows a duplicate room every
+                # lap. Safe on THIS thread: `_begin_new_timeline` takes no lock
+                # of its own, so it cannot deadlock against a concurrent swap
+                # that is joining us. It does block while the SLAM worker tears
+                # down -- but only ever on a replay wrap, where the source is a
+                # file and there is no socket to overflow (unlike the reader
+                # stall BUG-060 was about).
+                self._begin_new_timeline()
                 self.bus.publish("replay looping")
                 continue
             if self.mode == "replay":
@@ -3751,6 +3766,38 @@ class SessionController:
             t.join(timeout=2.0)
         self._thread = None
 
+    # ---- timeline discontinuity (BUG-091 / issue #102) ----
+
+    def _begin_new_timeline(self) -> None:
+        """Declare that the frames about to be read are NOT a continuation of the
+        ones just read, and drop every piece of state carried over from them.
+
+        Load capture, Go Live, seek, restart and replay loop-wraparound all do
+        this; pause / resume / speed / loop-toggle deliberately do not -- they
+        leave the read position alone, so the current map is still valid.
+
+        Callers must invoke this **after `_stop_reader()` and before
+        `_spawn()`**. That window is the whole point: with no reader running,
+        nothing can feed the old map between the reset and the new reader's
+        first frame. Reset *after* the spawn and the new reader races the reset,
+        integrating post-seek frames into the pre-seek map -- which is the
+        non-determinism this fixes.
+
+        Takes no lock of its own, so it is also safe to call from the reader
+        thread at loop wraparound (where `_lock` may be held by a concurrent
+        swap that is joining this very thread)."""
+        # Order matters only in that the sensor reset is what SLAM would read;
+        # both must land before any new frame arrives, and none can here.
+        self.sensor_state.reset_source()
+        cb = self.on_discontinuity
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                # A SLAM teardown failure must not strand the session with no
+                # reader running -- the caller still has to `_spawn()`.
+                log.exception("on_discontinuity hook failed")
+
     # ---- swaps (run under _lock, off the event loop) ----
 
     def switch_to_replay(self, path) -> None:
@@ -3759,11 +3806,11 @@ class SessionController:
             if self.recorder.active:
                 self.recorder.stop()                      # never record a replay
             self._auto_recording = False
-            # Drop any stream-11 batch from whatever source was active before
-            # (owner ask, 2026-07-28 "World" orientation mode) -- a capture
-            # with no stream 11 must fall back to the quat-derived gravity
-            # vector, not silently inherit the old source's real one.
-            self.sensor_state.clear_imu_raw()
+            # Drops the stale stream-11 gravity batch (owner ask, 2026-07-28
+            # "World" orientation mode: a capture with no stream 11 must fall
+            # back to the quat-derived vector, not inherit the old source's
+            # real one) along with the rest of the old timeline's sensor state.
+            self._begin_new_timeline()
             self.stats.new_stream()   # per-source seq numbering; see Stats.new_stream
             self.mode = "replay"
             self.replay_path = str(path)
@@ -3787,7 +3834,7 @@ class SessionController:
                     ser.reset_input_buffer()
             except Exception:
                 pass
-            self.sensor_state.clear_imu_raw()              # see switch_to_replay's comment
+            self._begin_new_timeline()                     # see switch_to_replay's comment
             self.stats.new_stream()   # per-source seq numbering; see Stats.new_stream
             self.mode = "live"
             self.replay_path = None
@@ -3800,10 +3847,15 @@ class SessionController:
             self.bus.publish("switched to live device")
 
     def seek(self, frac: float) -> None:
+        """Jump to a fraction of the capture. A seek is a timeline discontinuity
+        (BUG-091): the frames on the far side of it are not a continuation of
+        the ones already integrated, so the ephemeral map and the sensor state
+        both restart here."""
         with self._lock:
             if self.mode != "replay" or not self.index or self.index["n_frames"] == 0:
                 return
             self._stop_reader()
+            self._begin_new_timeline()
             n = self.index["n_frames"]
             i = max(0, min(n - 1, int(round(frac * (n - 1)))))
             off = self.index["offsets"][i]
@@ -3825,10 +3877,13 @@ class SessionController:
             self._spawn()
 
     def restart(self) -> None:
+        """Rewind to frame 0 -- a seek to 0.0 by another name, and the same
+        discontinuity."""
         with self._lock:
             if self.mode != "replay":
                 return
             self._stop_reader()
+            self._begin_new_timeline()
             self._seek_prefix = b""
             self._seek_offset = 0
             self.pacer.paused.clear()
@@ -4955,8 +5010,7 @@ async def _handle_delete_captures(state, ctrl, msg: dict) -> dict:
 
     if switch_away:
         await _stop_slam_auto_record(state, ctrl)
-        await asyncio.to_thread(ctrl.switch_to_live)
-        await _reset_slam(state)
+        await asyncio.to_thread(ctrl.switch_to_live)   # resets SLAM internally
         ui.source, ui.selected_capture = "live", None
         if ui.display in ("preview", "detailed"):
             ui.display = "point_cloud"
@@ -4990,20 +5044,40 @@ async def _handle_delete_captures(state, ctrl, msg: dict) -> dict:
     return result
 
 
-async def _reset_slam(state) -> None:
-    """Drop the SLAM map (off the event loop) after a source-swap, so a new
-    capture / Go Live rebuilds a fresh map. No-op if SLAM was never armed.
+def reset_slam_state(state) -> None:
+    """Drop the SLAM map + the cached `/ws-mesh` mesh. Blocking; safe to call
+    from any thread (`SlamRunner.reset` takes its own lock).
 
-    Also drops the cached `/ws-mesh` mesh (BUG-061) -- a stale big map must
-    not keep being resent once the map itself is gone. Existing flows keep
-    their `last_sent_obj` identity untouched: the fresh map's first mesh is a
-    brand new bytes object, so it reads as "new" automatically -- no seq
-    bookkeeping needed here."""
+    The one implementation behind two front ends: `_reset_slam` awaits it off
+    the event loop for the async handlers, and `make_slam_discontinuity` hands
+    it to `SessionController` so a reader swap can reset the map *between*
+    stopping the old reader and spawning the new one.
+
+    Dropping the cached mesh matters for BUG-061 -- a stale big map must not
+    keep being resent once the map itself is gone. Existing flows keep their
+    `last_sent_obj` identity untouched: the fresh map's first mesh is a brand
+    new bytes object, so it reads as "new" automatically -- no seq bookkeeping
+    needed here."""
     slam = getattr(state, "slam_runner", None)
     if slam is not None:
-        await asyncio.to_thread(slam.reset)
+        slam.reset()
     state.latest_mesh = None
     state.latest_mesh_seq = 0
+
+
+def make_slam_discontinuity(state):
+    """`SessionController.on_discontinuity` hook: reset ephemeral SLAM for a new
+    replay timeline. Reads `state` lazily, so it can be built before the rest of
+    `app.state` exists (same contract as `make_slam_feed`)."""
+    def _discontinuity() -> None:
+        reset_slam_state(state)
+    return _discontinuity
+
+
+async def _reset_slam(state) -> None:
+    """Drop the SLAM map (off the event loop) after a source-swap, so a new
+    capture / Go Live rebuilds a fresh map. No-op if SLAM was never armed."""
+    await asyncio.to_thread(reset_slam_state, state)
 
 
 # --- magnetometer sweep / calibration modal (owner ask, 2026-07-29) ---------
@@ -5776,8 +5850,10 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         # Leaving live ends Live SLAM's auto-take (before switch_to_replay
         # closes the recorder itself, which would strand the file unnamed).
         await _stop_slam_auto_record(state, ctrl)
+        # `switch_to_replay` resets SLAM itself, inside its no-reader window
+        # (`_begin_new_timeline`). Resetting again out here would run AFTER the
+        # new reader is already spawned and could drop its first frames.
         await asyncio.to_thread(ctrl.switch_to_replay, path)
-        await _reset_slam(state)          # fresh map for the new source
         ui.source, ui.selected_capture = "view", path.name
         if ui.display in ("preview", "detailed"):
             ui.display = "point_cloud"
@@ -5797,8 +5873,7 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         # `stop_record` -- so the file would be orphaned with no `last_name`
         # and no rename modal.
         await _stop_slam_auto_record(state, ctrl)
-        await asyncio.to_thread(ctrl.switch_to_live)
-        await _reset_slam(state)
+        await asyncio.to_thread(ctrl.switch_to_live)   # resets SLAM internally
         ui.source, ui.selected_capture = "live", None
         if ui.display == "detailed":
             ui.display = "point_cloud"
@@ -5845,6 +5920,11 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         await _broadcast_source_videos(state)
 
     elif mtype == "transport" and ctrl is not None:
+        # Split by whether the action moves the read position (BUG-091):
+        # `restart`/`seek` begin a new replay timeline and reset ephemeral SLAM
+        # + sensor state inside the controller's no-reader window;
+        # pause/resume/speed/loop do not touch the position, so they keep the
+        # current map. Documented in docs/web-protocol.md.
         action = msg.get("action")
         value = msg.get("value", 0)
         if action == "pause":
@@ -6017,6 +6097,11 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             await _broadcast_source_videos(state)  # populate the capture viewer
             await _broadcast_state(state)
             return
+        # Both swapping branches reset SLAM inside the controller's no-reader
+        # window, so there is no `_reset_slam` after this block -- see
+        # `_begin_new_timeline`. The one path that reaches here without swapping
+        # is an unresolvable `selected_capture`, and that leaves the reader
+        # untouched, so leaving its map alone is the consistent answer.
         if source == "live":
             await asyncio.to_thread(ctrl.switch_to_live)
             ui.source, ui.selected_capture = "live", None
@@ -6038,7 +6123,6 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             state.bus.publish("View -> pick a capture from the browser")
             await _broadcast_state(state)
             return
-        await _reset_slam(state)
         ui.display, ui.mode = "point_cloud", "realtime"
         await _broadcast_session(state)
         await _broadcast_state(state)
@@ -6484,7 +6568,10 @@ def main(argv=None) -> int:
         # Feeds the SLAM mapper at stream rate, off the broadcaster (BUG-060).
         # Reads `app.state` lazily, so it is safe to build before the rest of
         # app.state exists -- the reader thread only starts at controller.start().
-        on_frame=make_slam_feed(app.state))
+        on_frame=make_slam_feed(app.state),
+        # Fresh ephemeral map on every timeline discontinuity (BUG-091), run in
+        # the no-reader window inside the swap so nothing can feed the old map.
+        on_discontinuity=make_slam_discontinuity(app.state))
 
     # SLAM mode (web Phase 4): armed lazily on the first `set_mode slam`; builds
     # no Open3D/GPU state until then, so real-time launches are unaffected.

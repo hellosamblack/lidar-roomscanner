@@ -82,7 +82,7 @@ in-process call meanwhile.
 | `rig_view(source?, display?, regenerate?)` | authoritative Live/View and Point cloud/Preview/SLAM/Detailed control |
 | `rig_profile(profile?, ranging_mode?, fps?, exposure_ms?, power_mode?, force?)` | read or set the ranging profile; `ok=true` only once the **device** reads back the requested config (see below) |
 | `rig_imu_env_rate(rate_hz?, coupled?, require_full_env?)` | read or set the IMU/env poll rate (streams 9/10/11) — a second, independent command from `rig_profile` |
-| `rig_playback(action, value?)` | `go_live` / `load_capture` / transport |
+| `rig_playback(action, value?)` | `go_live` / `load_capture` / transport. **`go_live`, `load_capture`, `seek` and `restart` discard the ephemeral SLAM map** — they begin a new replay timeline, so the worker/TSDF/trajectory/cached mesh and all sensor state reset (BUG-091, `docs/web-protocol.md` → "Timeline discontinuities"). Seeking mid-scan throws the scan away and restarts from the seek point; `pause`/`resume`/`speed`/`loop` keep the map |
 | `rig_save()` | export the **Live** SLAM map (`.ply` + `.tum`). Live SLAM only — a live scan is unrepeatable, so its one-shot export stays; for a recorded capture the persistent artifact is the sidecar from `rig_view(display="detailed", regenerate=True)` |
 | `rig_ws_probe(seconds?, url?)` | splits "nothing rendered" into server-computing / transport-delivering / payload-well-formed. Acks every mesh (`/ws-mesh` is credit-gated, so a silent client sees one mesh then a 1-per-5-s trickle) and re-parses one MESH with `slam.js`'s exact layout — `slack_bytes != 0` means packer and reader have drifted. Keep `seconds` small: connection count is a performance variable here (BUG-060/061) |
 

@@ -125,6 +125,48 @@ class SensorState:
             self._imu_raw = None
             self._imu_raw_hist.clear()
 
+    def reset_source(self) -> None:
+        """Drop EVERY sample derived from the current source AND the current
+        position within it (BUG-091 / issue #102).
+
+        `clear_imu_raw` only protects the stream-11 gravity path. That is enough
+        for a source swap's *tilt* readout, but not for replay determinism: the
+        latest SFLP quaternion, the latest ENV sample (pressure -> SLAM's baro Z,
+        mag -> YawFusion), the pressure/temp histories, the stream-12 tick trim
+        and the fusion filters' internal state all survive a seek too. The first
+        depth frames after a rewind would then be submitted to SLAM carrying
+        orientation and pressure from the timeline the operator just left, so the
+        same capture at the same seek position produced a different map depending
+        on where playback had been before.
+
+        Every operation that begins a new replay timeline -- load capture, Go
+        Live, seek, restart, loop wraparound -- calls this. Pause / resume /
+        speed / loop-toggle do NOT: they do not move the read position, so their
+        state is still the state of the frames that produced it.
+
+        The post-reset window is deliberately empty rather than seeded: with no
+        quat, `SlamRunner.submit` drops frames (it already does this at every
+        live start-up), so SLAM simply waits for replay to supply orientation
+        again instead of borrowing the old timeline's."""
+        with self._lock:
+            self._imu_raw = None
+            self._imu_raw_hist.clear()
+            self._imu_tick_us = IMU_RAW_TICK_US
+            self._quat = None
+            self._env = None
+            self._raw_mag = None
+            self._pressure.clear()
+            self._temp.clear()
+            self._pressure_spark.clear()
+            self._temp_spark.clear()
+            self._last_spark_t = None
+            # Inlined rather than calling `reset_fusion()`: `self._lock` is not
+            # reentrant and this whole reset must be one atomic step.
+            if self._fusion is not None:
+                self._fusion.reset()
+            if self._imu_fusion is not None:
+                self._imu_fusion.reset()
+
     def latest_imu_raw(self) -> ImuRawBatch | None:
         """Newest stream-11 raw-FIFO batch, or None if the device isn't sending them."""
         with self._lock:

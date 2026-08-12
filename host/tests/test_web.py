@@ -2280,6 +2280,239 @@ def test_controller_seek_sets_offset_and_resumes(tmp_path):
         ctrl.close()
 
 
+# --- BUG-091 / issue #102: a seek is a timeline discontinuity ----------------
+#
+# Rewinding or fast-forwarding used to keep feeding the EXISTING map, and used
+# to leave `SensorState` holding the orientation/pressure of the timeline the
+# operator had just left. The same capture at the same seek position therefore
+# reconstructed differently depending on where playback had been before.
+
+
+def _make_timeline_capture(path: Path, n_frames: int, w: int = 8, h: int = 6) -> None:
+    """`[DEPTH_i, IMU_QUAT_i, ENV_i] * n` -- one depth frame per position, each
+    FOLLOWED by the sensor samples belonging to it.
+
+    The ordering is what makes the bug observable. `build_capture_index` only
+    indexes depth frames, so seeking to depth frame `j` lands *before* quat `j`:
+    on a correct timeline reset the first post-seek depth frame has no
+    orientation at all (SLAM drops it, exactly as it does at every live
+    start-up) and the second one carries quat `j`. Without the reset the first
+    one silently carries whatever quat the pre-seek timeline left behind."""
+    out = bytearray()
+    for i in range(n_frames):
+        depth = np.full((h, w), 1000.0 + i, dtype=np.float32)
+        payload = depth.astype("<f4").tobytes()
+        out += pack_frame(FrameHeader(FrameType.DATA, StreamId.DEPTH_ZF32, 0, i + 1,
+                                      i * 35000, w, h, len(payload)), payload)
+        # A distinct, valid unit quaternion per position: rotate about Z by i°.
+        ang = math.radians(i)
+        q = struct.pack("<4f", math.cos(ang / 2), 0.0, 0.0, math.sin(ang / 2))
+        out += pack_frame(FrameHeader(FrameType.DATA, StreamId.IMU_QUAT, 0, i + 1,
+                                      i * 35000 + 1, 0, 0, len(q)), q)
+        env = struct.pack("<5f", 101325.0 + i, 30.0, 0.0, 40.0, 20.0)
+        out += pack_frame(FrameHeader(FrameType.DATA, StreamId.ENV, 0, i + 1,
+                                      i * 35000 + 2, 0, 0, len(env)), env)
+    path.write_bytes(bytes(out))
+
+
+class _TimelineProbe:
+    """Records the exact tuple `make_slam_feed` submits to SLAM, and splits the
+    recording into playback runs.
+
+    A run boundary is derived from the DATA: `_make_timeline_capture` gives
+    frame `i` a depth mean of exactly `1000 + i`, so consecutive frames of one
+    playback pass step by exactly 1.0 and any other step is the reader having
+    jumped -- forwards (fast-forward) or backwards (rewind, loop wrap).
+    Deliberately not keyed off the discontinuity hook: the hook is the thing
+    under test, so a probe that segmented by it would compare nothing at all
+    when the fix is removed, instead of comparing two runs and finding them
+    different."""
+
+    def __init__(self, ctrl):
+        self.resets = 0
+        self.readers_alive_at_reset = []
+        self.rows = []                       # (depth_mean, quat, pressure)
+        self._lock = threading.Lock()
+        self._ctrl = ctrl
+        ctrl.on_frame = self._on_frame
+        ctrl.on_discontinuity = self._on_discontinuity
+
+    def _on_discontinuity(self):
+        with self._lock:
+            self.resets += 1
+            # The reset must land in the window where no reader is running --
+            # otherwise the new reader can integrate into the old map before
+            # the reset arrives, which is the bug.
+            t = self._ctrl._thread
+            self.readers_alive_at_reset.append(t is not None and t.is_alive())
+
+    def _on_frame(self, header, outputs):
+        sensor = self._ctrl.sensor_state
+        env = sensor.latest_env()
+        with self._lock:
+            self.rows.append((float(outputs["depth"].mean()), sensor.fused_quat(),
+                              env.pressure_pa if env is not None else None))
+
+    def runs(self):
+        with self._lock:
+            rows = list(self.rows)
+        out, prev = [], None
+        for row in rows:
+            if prev is None or row[0] != prev + 1.0:
+                out.append([])
+            out[-1].append(row)
+            prev = row[0]
+        return out
+
+    def run(self, i):
+        runs = self.runs()
+        return runs[i] if i < len(runs) else []
+
+
+def _wait_until(pred, timeout=6.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_repeat_seek_to_the_same_position_replays_identically(tmp_path):
+    """The headline regression for BUG-091.
+
+    Seek to the same fraction of the same capture twice, from two DIFFERENT
+    playback positions, and the frames + sensor inputs SLAM receives must be
+    identical. Before the fix the first post-seek frame carried the previous
+    timeline's quaternion and pressure, so the second seek -- reached from
+    further into the capture -- fed the mapper a different prior than the
+    first, and the map diverged from the same nominal starting point."""
+    cap = tmp_path / "timeline.bin"
+    _make_timeline_capture(cap, n_frames=40)
+    # Paced, not Max: the two seeks have to be taken from DIFFERENT playback
+    # positions or the state carried into them is the same by accident and the
+    # test proves nothing. `pause()` freezes the reader where it is.
+    ctrl, _slot = _make_controller(tmp_path, replay_path=str(cap), speed_fps=60.0)
+    probe = _TimelineProbe(ctrl)
+    ctrl.start()
+    try:
+        # Seek 1 is taken from near the TOP of the capture.
+        assert _wait_until(lambda: len(probe.run(0)) >= 3), "no playback from the top"
+        ctrl.pause()
+        near_top = len(probe.run(0))
+        ctrl.seek(0.5)
+        assert _wait_until(lambda: len(probe.run(1)) >= 6), "no playback after seek 1"
+        first = probe.run(1)[:6]
+
+        # Seek 2 is taken from WELL PAST the seek target, so the pre-seek quat
+        # and pressure differ from seek 1's.
+        assert _wait_until(lambda: len(probe.run(1)) >= 15), "run 1 stalled"
+        ctrl.pause()
+        far_in = len(probe.run(1))
+        ctrl.seek(0.5)
+        assert _wait_until(lambda: len(probe.run(2)) >= 6), "no playback after seek 2"
+        second = probe.run(2)[:6]
+    finally:
+        ctrl.close()
+
+    assert far_in > near_top + 5, (
+        f"both seeks were taken from the same place ({near_top} vs {far_in}); "
+        "the fixture cannot see stale state")
+    assert first == second, f"repeat seek diverged:\n  first={first}\n  second={second}"
+    # And the reset really is what makes them match: the first frame of a fresh
+    # timeline has no orientation yet, rather than the previous one's.
+    assert first[0][1] is None, f"first post-seek frame inherited a quat: {first[0]}"
+    assert first[0][2] is None, f"first post-seek frame inherited a pressure: {first[0]}"
+    assert first[1][1] is not None, "replay never re-supplied orientation after the seek"
+
+
+def test_seek_resets_while_no_reader_is_running(tmp_path):
+    """Ordering, not just occurrence. `_reset_slam` awaited after the swap --
+    the shape this replaces -- runs once the new reader thread is already
+    spawned, so it can drop the new timeline's first frames into the old map or
+    tear down a map the new source has begun. `_begin_new_timeline` runs in the
+    window between `_stop_reader()` and `_spawn()`, where that is impossible."""
+    cap = tmp_path / "timeline.bin"
+    _make_timeline_capture(cap, n_frames=20)
+    ctrl, _slot = _make_controller(tmp_path, replay_path=str(cap), speed_fps=0.0)
+    probe = _TimelineProbe(ctrl)
+    ctrl.start()
+    try:
+        ctrl.seek(0.25)
+        ctrl.restart()
+        ctrl.seek(0.75)
+    finally:
+        ctrl.close()
+    assert probe.resets == 3, f"expected one reset per timeline op, got {probe.resets}"
+    assert probe.readers_alive_at_reset == [False, False, False], probe.readers_alive_at_reset
+
+
+def test_restart_resets_the_ephemeral_map(tmp_path):
+    """Rewind-to-zero is a seek by another name and gets the same treatment."""
+    cap = tmp_path / "timeline.bin"
+    _make_timeline_capture(cap, n_frames=12)
+    ctrl, _slot = _make_controller(tmp_path, replay_path=str(cap), speed_fps=0.0)
+    runner = _CountingSlamRunner()
+    ctrl.on_discontinuity = runner.reset
+    ctrl.sensor_state.feed(_quat_frame_for_test((1.0, 0.0, 0.0, 0.0)))
+    assert ctrl.sensor_state.latest_quat() is not None
+    ctrl.restart()
+    try:
+        assert runner.resets == 1
+        assert ctrl.sensor_state.latest_quat() is None
+    finally:
+        ctrl.close()
+
+
+def test_transport_actions_that_do_not_move_the_position_keep_the_map(tmp_path):
+    """The other half of the contract. Pause/resume/speed/loop-toggle leave the
+    read position alone, so the current map is still the map of the frames that
+    produced it -- resetting there would throw away a scan on a speed change."""
+    cap = tmp_path / "timeline.bin"
+    _make_timeline_capture(cap, n_frames=12)
+    ctrl, _slot = _make_controller(tmp_path, replay_path=str(cap), speed_fps=0.0)
+    runner = _CountingSlamRunner()
+    ctrl.on_discontinuity = runner.reset
+    ctrl.sensor_state.feed(_quat_frame_for_test((1.0, 0.0, 0.0, 0.0)))
+    try:
+        ctrl.pause()
+        ctrl.resume()
+        ctrl.set_speed(15.0)
+        ctrl.set_speed(0.0)
+        ctrl.set_loop(True)
+        ctrl.set_loop(False)
+        assert runner.resets == 0
+        assert ctrl.sensor_state.latest_quat() is not None
+    finally:
+        ctrl.close()
+
+
+def test_replay_loop_wraparound_starts_a_fresh_map(tmp_path):
+    """EOF -> frame 0 is as much a jump as a manual seek. Without a reset the
+    second lap integrates frame 0 on top of the first lap's final pose and the
+    map grows a duplicate room every time round."""
+    cap = tmp_path / "timeline.bin"
+    _make_timeline_capture(cap, n_frames=6)
+    ctrl, _slot = _make_controller(tmp_path, replay_path=str(cap), speed_fps=0.0)
+    probe = _TimelineProbe(ctrl)
+    ctrl.loop = True
+    ctrl.start()
+    try:
+        assert _wait_until(lambda: len(probe.run(1)) >= 4 and len(probe.run(2)) >= 4), \
+            f"laps did not both play (runs={[len(r) for r in probe.runs()]})"
+        lap2, lap3 = probe.run(1)[:4], probe.run(2)[:4]
+    finally:
+        ctrl.close()
+    assert lap2 == lap3, f"laps diverged:\n  lap2={lap2}\n  lap3={lap3}"
+    assert lap2[0][1] is None, "a fresh lap must not inherit the previous lap's orientation"
+
+
+def _quat_frame_for_test(quat):
+    payload = struct.pack("<4f", *quat)
+    return Frame(FrameHeader(FrameType.DATA, StreamId.IMU_QUAT, 0, 1, 123, 0, 0,
+                             len(payload)), payload)
+
+
 # --- Web Phase 4: SLAM mode ---------------------------------------------------
 # The protocol/plumbing is exercised with fake worker/meshprep (no Open3D/GPU);
 # save uses a real tiny Open3D mesh so the write path is genuinely covered.
@@ -3277,9 +3510,23 @@ class _FakeCtrl:
         self.captures_dir = captures_dir
         self.switched_to = None
         self.paused = False
+        # Mirrors the real controller (BUG-091): every timeline-changing
+        # operation fires this in its own no-reader window, so the inbound
+        # handlers must NOT reset SLAM again themselves.
+        self.on_discontinuity = None
+
+    def _discontinuity(self):
+        if self.on_discontinuity is not None:
+            self.on_discontinuity()
 
     def switch_to_live(self):
+        self._discontinuity()
         self.mode, self.replay_path, self.switched_to = "live", None, "live"
+
+    def switch_to_replay(self, path):
+        self._discontinuity()
+        self.mode, self.replay_path = "replay", str(path)
+        self.switched_to = str(path)
 
     def pause(self):
         self.paused = True
@@ -4171,31 +4418,64 @@ class _CountingSlamRunner:
 
 
 def test_go_live_resets_the_slam_worker_exactly_once():
+    """A source swap must reset the SLAM worker exactly once -- not zero times
+    (a stale map bleeding into the new source) and not twice.
+
+    Since BUG-091 the reset is owned by the controller's discontinuity hook
+    rather than the handler, so the fake is wired the way `create_app` wires
+    the real one. Counting still catches the two failure modes: a handler that
+    reset again out here would score 2, and dropping the hook scores 0."""
     ui = web.UiState(source="view", display="slam", selected_capture="take.bin")
     ctrl = _RecCtrl(mode="replay", has_live=True)
     state, _ = _autorec_state(ui, ctrl)
     state.slam_runner = _CountingSlamRunner()
+    ctrl.on_discontinuity = web.make_slam_discontinuity(state)
     _run_inbound(state, {"type": "go_live"})
     assert state.slam_runner.resets == 1
 
 
-def test_reset_slam_called_exactly_once_per_swap_handler():
-    """Same invariant as the behavioral test above, but covering the other
-    two swap paths too (`load_capture`, and delete-causes-switch-away)
-    without paying for a full `_FakeCtrl`/`SessionController` capable of
-    `switch_to_replay` for each: a live run through all three would prove no
-    more than counting the one `_reset_slam(state)` call each handler
-    already contains. Mirrors `test_broadcaster_no_longer_feeds_slam`'s
-    source-level style."""
+def test_load_capture_resets_the_slam_worker_exactly_once(tmp_path):
+    """The other swap direction. Previously covered only by counting source
+    text; now that the reset moved into the controller, the handler-side
+    invariant is "does not reset a second time", which counting cannot see."""
+    (tmp_path / "take.bin").write_bytes(b"x")
+    ui = web.UiState(source="live", display="slam")
+    ctrl = _RecCtrl(mode="live", has_live=True, captures_dir=str(tmp_path))
+    state, _ = _autorec_state(ui, ctrl)
+    state.slam_runner = _CountingSlamRunner()
+    ctrl.on_discontinuity = web.make_slam_discontinuity(state)
+    _run_inbound(state, {"type": "load_capture", "name": "take.bin"})
+    assert ctrl.switched_to is not None, "handler did not swap the reader"
+    assert state.slam_runner.resets == 1
+
+
+def test_swap_handlers_do_not_reset_slam_after_the_swap():
+    """BUG-091 ordering guard, and the reason the count above is 1 not 2.
+
+    `_reset_slam` awaited *after* `to_thread(ctrl.switch_to_*)` runs once the
+    new reader thread is already spawned, so it can tear down a map the new
+    source has begun building -- the same reset-races-the-reader shape as the
+    seek bug itself. The reset belongs in `_begin_new_timeline`, inside the
+    controller's no-reader window. Source-level, mirroring
+    `test_broadcaster_no_longer_feeds_slam`'s style: a behavioural test would
+    have to win a race to observe the violation."""
     src = pathlib.Path(web.__file__).read_text()
     switch_away = src[src.index("if switch_away:"):src.index("def _unlink_all")]
     load_capture = src[src.index('elif mtype == "load_capture" and ctrl is not None:'):
                        src.index('elif mtype == "go_live" and ctrl is not None:')]
     go_live = src[src.index('elif mtype == "go_live" and ctrl is not None:'):
-                 src.index('elif mtype == "transport" and ctrl is not None:')]
+                 src.index('elif mtype == "load_splat":')]
+    set_source = src[src.index('elif mtype == "set_source" and ctrl is not None:'):
+                     src.index('elif mtype == "set_display":')]
+    # Anchor on the swap CALL, not the string "switch_to_" -- these blocks talk
+    # about the swap in comments, and `set_source`'s Splat branch legitimately
+    # resets SLAM (no reader to swap) before ever reaching a swap.
+    anchor = "asyncio.to_thread(ctrl.switch_to_"
     for name, block in [("switch_away", switch_away), ("load_capture", load_capture),
-                        ("go_live", go_live)]:
-        assert block.count("_reset_slam(state)") == 1, (name, block)
+                        ("go_live", go_live), ("set_source", set_source)]:
+        assert anchor in block, (name, "guard is anchored on the wrong block")
+        after = block[block.index(anchor):]
+        assert "_reset_slam(state)" not in after, (name, after)
 
 
 def test_a_manual_recording_is_never_stopped_by_a_display_switch():

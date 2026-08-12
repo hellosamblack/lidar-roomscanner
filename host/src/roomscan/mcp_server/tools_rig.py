@@ -787,6 +787,14 @@ async def rig_playback(action: str, value: str | float | None = None,
     `action="load_capture"` takes the capture name in `value`; `action="go_live"`
     takes none. Anything else is a transport action (pause, resume, speed, loop,
     restart, seek), where `value` is that action's argument.
+
+    **`go_live`, `load_capture`, `seek` and `restart` DISCARD the ephemeral SLAM
+    map** (BUG-091): they begin a new replay timeline, so the server resets the
+    SLAM worker, TSDF, trajectory, cached mesh and all sensor state. Seeking
+    mid-scan to "look at" a different part of a capture therefore throws the
+    scan away and starts over from the seek point. `pause`, `resume`, `speed`
+    and `loop` keep the current map. Reaching EOF with `loop` on wraps to frame
+    0 and likewise starts a fresh map each lap.
     """
     if action == "go_live":
         msg = {"type": "go_live"}
