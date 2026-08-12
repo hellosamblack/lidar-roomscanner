@@ -189,26 +189,87 @@ async def rig_down() -> dict:
     return {"ok": not _http_ok(), "terminated": pids, "killed": survivors}
 
 
+# Per-command minimum wait, keyed by `resolve_command()`'s command NAME (not its
+# label -- "standby 1"/"standby 0" share one entry). Only `standby` needs one
+# today: SET_STANDBY powers the ToF laser down/up and did not ACK within the
+# 5s default on-rig, but did within 20s (#171) -- the 5s default made a working
+# command look broken. Explicit `timeout=` still overrides this either way.
+_DEFAULT_COMMAND_TIMEOUT_S = 5.0
+_COMMAND_TIMEOUT_S = {"standby": 20.0}
+
+
 @mcp.tool()
-async def rig_command(name: str, param: int | None = None, timeout: float = 5.0) -> dict:
-    """Send a device COMMAND and return its ACK.
+async def rig_command(name: str, param: int | None = None,
+                      timeout: float | None = None) -> dict:
+    """Send a device COMMAND and return its ACK, matched to the command sent.
 
     `name` is one of ping, calib, reinit, usecase, period, exposure, standby.
     usecase/period/exposure/standby take `param`. Returns "not available in replay"
     if the rig is playing a capture rather than talking to the board.
+
+    `timeout` defaults to 5s, except `standby` (20s) -- SET_STANDBY powers the
+    ToF laser down/up and legitimately takes longer to ACK than a plain command
+    (#171: it did not ACK within 5s but did within 20s). Pass an explicit value
+    to override either default.
+
+    The ACK is matched by `resolve_command()`'s label (e.g. "standby 1", "ping")
+    to the command THIS call sent -- never merely the next `cmd` broadcast the
+    bus produces. Without that check, a differently-named command's late ACK
+    (still in flight from an earlier, already-timed-out call) can arrive while
+    this call is waiting and get reported as THIS call's result: #171 saw a
+    timed-out `standby` call followed by a `ping` call that came back
+    `ok: true` carrying the standby ACK. A `cmd` broadcast seen with a
+    non-matching label while waiting is therefore never treated as this call's
+    answer; it is reported under `unmatched_acks` instead of being silently
+    dropped (a real result vanishing would just be a different flavour of the
+    same bug) -- this session keeps no per-caller queue, so it cannot be
+    re-delivered to its rightful caller, only surfaced.
+
+    Label matching alone cannot disambiguate two in-flight commands that share
+    a label (e.g. two `ping`s close together) -- the wire has no per-request id.
+    That is a real remaining gap; the fix here targets the reported cross-command
+    misattribution, not that same-label case.
     """
+    from roomscan.web import resolve_command
+
     msg = {"type": "cmd", "name": name}
     if param is not None:
         msg["param"] = param
-    ack = await rig.request(msg, expect="cmd", timeout=timeout)
+    resolved = resolve_command(name, param if param is not None else 0)
+    label = resolved[2] if resolved is not None else name
+    wait_s = timeout if timeout is not None else _COMMAND_TIMEOUT_S.get(
+        name, _DEFAULT_COMMAND_TIMEOUT_S)
+
+    await rig.send(msg)
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + wait_s
+    unmatched: list[dict] = []
+    ack: dict | None = None
+    while loop.time() < deadline:
+        candidate = await rig.wait_for("cmd", timeout=max(0.0, deadline - loop.time()))
+        if candidate is None:
+            break
+        if candidate.get("label") == label:
+            ack = candidate
+            break
+        unmatched.append(candidate)
+
     if ack is None:
-        return {"ok": False, "error": f"no ACK within {timeout}s", "sent": msg}
+        out = {"ok": False, "error": f"no ACK within {wait_s}s", "sent": msg}
+        if unmatched:
+            out["unmatched_acks"] = unmatched
+            out["error"] += (f" (saw {len(unmatched)} ACK(s) for a different command "
+                             "while waiting -- a late reply to an earlier call, not "
+                             "this one)")
+        return out
     # An ACK arriving is not the same as the device accepting it. web.py's
     # _cmd_status emits ok | error | busy | timeout -- only "ok" is success, and
     # "timeout" in particular means the device never answered at all.
     status = ack.get("status")
     out = {"ok": status == "ok", "status": status,
            "detail": ack.get("detail"), "sent": msg, "ack": ack}
+    if unmatched:
+        out["unmatched_acks"] = unmatched
     if status == "timeout":
         out["error"] = ("device did not ACK — it is unresponsive or not streaming; "
                         "check rig_status() and consider fw_flash() to reset it")

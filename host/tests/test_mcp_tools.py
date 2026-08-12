@@ -913,6 +913,97 @@ def test_rig_status_reports_the_ranging_state(monkeypatch):
     assert r["ranging"]["applied"]["fps"] == 46
 
 
+# --- rig_command ACK correlation (#171) ---------------------------------------
+#
+# `rig_command()` used to accept the NEXT `cmd` broadcast of any label as proof,
+# so a differently-named command's late ACK -- still in flight from an earlier,
+# already-timed-out call -- could satisfy a later call's wait and be reported as
+# its result. These pin the correlation, reusing `_FakeRig`'s `wait_for` script
+# mechanism (each script entry is popped one per `wait_for("cmd", ...)` call).
+
+def _cmd_ack(label, status="ok", detail="OK applied=1"):
+    return {"type": "cmd", "label": label, "status": status, "detail": detail}
+
+
+def test_rig_command_does_not_accept_another_commands_late_ack(monkeypatch):
+    """Reproduces #171's exact reported sequence: a `standby` call gets no ACK
+    at all and times out, then a `ping` call must not be satisfied by the
+    standby ACK that finally lands on the bus while the ping call is waiting."""
+    import asyncio
+
+    from roomscan.mcp_server import tools_rig
+
+    fake = _FakeRig([])   # call 1: nothing on the bus before it gives up
+    monkeypatch.setattr(tools_rig, "rig", fake)
+
+    r1 = asyncio.run(tools_rig.rig_command(name="standby", param=1, timeout=0.05))
+    assert r1["ok"] is False
+    assert "no ACK within 0.05s" in r1["error"]
+    assert r1.get("unmatched_acks") is None
+
+    # The device's real (late) standby ACK now lands, ready for whichever
+    # wait_for("cmd") call comes next -- exactly the mechanism #171 exploited.
+    fake.script.append(_cmd_ack("standby 1"))
+
+    r2 = asyncio.run(tools_rig.rig_command(name="ping", timeout=0.05))
+
+    assert r2["ok"] is False, r2
+    assert r2.get("ack") is None
+    assert r2["sent"] == {"type": "cmd", "name": "ping"}
+    assert r2["unmatched_acks"] == [_cmd_ack("standby 1")], (
+        "the ping call's wait was satisfied by the standby ACK -- #171's bug")
+
+
+def test_rig_command_skips_a_mismatched_ack_and_returns_the_real_one(monkeypatch):
+    """A non-matching ACK observed while waiting is reported, not silently
+    dropped, and does not stop the wait from finding the real ACK after it."""
+    import asyncio
+
+    from roomscan.mcp_server import tools_rig
+
+    fake = _FakeRig([_cmd_ack("standby 1"), _cmd_ack("ping")])
+    monkeypatch.setattr(tools_rig, "rig", fake)
+
+    r = asyncio.run(tools_rig.rig_command(name="ping", timeout=1.0))
+
+    assert r["ok"] is True
+    assert r["status"] == "ok"
+    assert r["ack"] == _cmd_ack("ping")
+    assert r["unmatched_acks"] == [_cmd_ack("standby 1")]
+
+
+def test_rig_command_standbys_default_timeout_is_longer_than_pings(monkeypatch):
+    """#171's second half: the 5s default was too short for SET_STANDBY (no ACK
+    within 5s but a clean ACK within 20s, on-rig). `standby` gets a longer
+    per-command default; other commands keep 5s."""
+    import asyncio
+
+    from roomscan.mcp_server import tools_rig
+
+    fake = _FakeRig([])
+    monkeypatch.setattr(tools_rig, "rig", fake)
+
+    r_ping = asyncio.run(tools_rig.rig_command(name="ping"))
+    r_standby = asyncio.run(tools_rig.rig_command(name="standby", param=1))
+
+    assert tools_rig._COMMAND_TIMEOUT_S["standby"] > tools_rig._DEFAULT_COMMAND_TIMEOUT_S
+    assert f"no ACK within {tools_rig._DEFAULT_COMMAND_TIMEOUT_S}s" in r_ping["error"]
+    assert f"no ACK within {tools_rig._COMMAND_TIMEOUT_S['standby']}s" in r_standby["error"]
+
+
+def test_rig_command_explicit_timeout_overrides_the_per_command_default(monkeypatch):
+    import asyncio
+
+    from roomscan.mcp_server import tools_rig
+
+    fake = _FakeRig([])
+    monkeypatch.setattr(tools_rig, "rig", fake)
+
+    r = asyncio.run(tools_rig.rig_command(name="standby", param=1, timeout=3.0))
+
+    assert "no ACK within 3.0s" in r["error"]
+
+
 # --- profile_estimate (the offline half) -------------------------------------
 
 def test_profile_estimate_matches_the_profiles_model_for_a_preset():
