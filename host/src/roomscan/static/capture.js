@@ -63,6 +63,10 @@ export function createCapture(hub) {
     let renameTarget = null;  // the name the modal is currently offering to rename FROM
     let renamePending = null; // the sanitized name we just asked the server to rename TO, until echoed back
     let fromBrowser = false;  // the modal was opened by browser.js against an arbitrary capture
+    // #103: a browser rename is fire-and-forget (the `captures` echo carries no
+    // per-request result), so the caller gets told the name we asked for and can
+    // follow its own selection across the rename instead of losing track of it.
+    let onRenamed = null;
 
     // ---- formatting helpers ----
     const fmtBytes = (n) => {
@@ -113,6 +117,7 @@ export function createCapture(hub) {
         // echo, which carries no per-request result. Keeping them apart is why
         // the wire's `from` field is optional rather than always sent.
         fromBrowser = !!(opts && opts.fromBrowser);
+        onRenamed = (opts && typeof opts.onRenamed === 'function') ? opts.onRenamed : null;
         const title = document.getElementById('record-name-title');
         if (title) title.textContent = fromBrowser ? 'Rename Capture' : 'Name Recording';
         if (recNameInput) {
@@ -130,6 +135,7 @@ export function createCapture(hub) {
         renameTarget = null;
         renamePending = null;
         fromBrowser = false;
+        onRenamed = null;
     }
 
     function submitRename() {
@@ -141,6 +147,10 @@ export function createCapture(hub) {
             // Explicit source: absent `from` means "the last recording", which
             // is emphatically not what the browser is asking for.
             hub.send({ type: 'rename_capture', from: renameTarget, name: typed });
+            // Tell the opener the name we ASKED for, before closeRenameModal()
+            // clears the handle. It is a request, not a confirmation — the caller
+            // must still check the name against the next `captures` echo.
+            onRenamed?.(sanitized);
             closeRenameModal();
             return;
         }

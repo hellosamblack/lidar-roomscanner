@@ -925,6 +925,20 @@
             display: flex; flex-direction: column; flex: 1 1 auto; min-height: 260px;
         }
         #browser-card:not(.collapsed) > .control-group__body { flex: 1 1 auto; min-height: 0; }
+        /* Selected-capture actions (#103). `flex: 0 0 auto` is load-bearing: this
+           is fixed chrome that must keep its natural height and never be squeezed
+           or clipped, so #cap-grid below it is the only member that flexes. The
+           dashed rule now sits BELOW the drawer because it moved above the grid. */
+        #browser-selected-detail {
+            flex: 0 0 auto;
+            border-bottom: 1px dashed rgba(255, 255, 255, 0.12);
+            padding-bottom: 8px; margin-bottom: 6px;
+        }
+        #browser-selected-detail #preview-name {
+            font-weight: 700; color: var(--text-main); margin-bottom: 4px;
+        }
+        #browser-selected-detail #preview-facts { margin-bottom: 8px; }
+        #browser-selected-detail #btn-preview-load { width: 100%; margin-bottom: 6px; }
         .browser-filter {
             width: 100%; box-sizing: border-box; margin-bottom: 2px;
             padding: 5px 8px; border: 1px solid var(--panel-border); border-radius: 6px;
@@ -1707,19 +1721,28 @@
                     <button id="btn-browser-refresh" title="Re-scan the captures directory on the server">&#8635; Refresh</button>
                     <button id="btn-browser-delete" disabled title="Delete the ticked captures. This is the only destructive action in the app and always asks first">&#128465; Delete</button>
                 </div>
-                <div class="browser-grid" id="cap-grid"></div>
-                <div class="cap-status" id="browser-status"></div>
-
-                <!-- Integrated Capture Details Drawer -->
-                <div id="browser-selected-detail" class="control-subgroup hidden" style="border-top: 1px dashed rgba(255,255,255,0.12); padding-top: 8px; margin-top: 6px;">
-                    <div class="cap-status" id="preview-name" style="font-weight: 700; color: var(--text-main); margin-bottom: 4px;">&mdash;</div>
-                    <dl class="preview-facts" id="preview-facts" style="margin-bottom: 8px;"></dl>
-                    <button class="primary" id="btn-preview-load" title="Load this capture into the 3D view and start playback" style="width: 100%; margin-bottom: 6px;">&#9654; Load into view</button>
+                <!-- Selected-capture actions (#103). Deliberately BEFORE
+                     #cap-grid, in the card's FIXED chrome: it used to sit after
+                     the grid, and because the grid is the flex-growing member
+                     that also scrolls itself, the drawer was pushed past the
+                     card's `overflow: hidden` clip -- measured at bottom 1018
+                     against a card clipped at 946, so Load and Build were
+                     literally unclickable. The only scrollable ancestor was the
+                     card body, and a wheel over the grid scrolls the GRID, so
+                     there was no gesture that brought them back. Above the grid
+                     the actions are structurally visible instead of depending on
+                     flex/overflow arithmetic working out. -->
+                <div id="browser-selected-detail" class="control-subgroup hidden">
+                    <div class="cap-status" id="preview-name">&mdash;</div>
+                    <dl class="preview-facts" id="preview-facts"></dl>
+                    <button class="primary" id="btn-preview-load" title="Load this capture into the 3D view and start playback">&#9654; Load into view</button>
                     <div class="btn-row">
                         <button id="btn-preview-rename" title="Rename this capture; its reconstruction and thumbnail follow it">&#9998; Rename</button>
                         <button id="btn-preview-build" title="Build (or rebuild) the offline Detailed reconstruction for this capture">&#9881; Build</button>
                     </div>
                 </div>
+                <div class="browser-grid" id="cap-grid"></div>
+                <div class="cap-status" id="browser-status"></div>
             </div>
         </div>
 

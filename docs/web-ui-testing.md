@@ -115,8 +115,12 @@ View-page capture browser `#browser-card` with `#cap-grid .cap-tile[data-name]`,
 its per-tile `input[data-check]`, `#seg-browser-sort button[data-sort=…]`,
 `#seg-browser-view button[data-view=…]`, `chk-browser-thumbs`,
 `btn-browser-refresh`, `btn-browser-delete` and the confirm modal
-`#delete-modal` / `chk-delete-sidecars` / `btn-delete-confirm`, the preview card
-`#preview-card` with `btn-preview-load`/`btn-preview-rename`/`btn-preview-build`,
+`#delete-modal` / `chk-delete-sidecars` / `btn-delete-confirm`, the
+selected-capture action drawer `#browser-selected-detail` with
+`btn-preview-load`/`btn-preview-rename`/`btn-preview-build` (**not**
+`#preview-card`, the standalone card it replaced; and since #103 it sits *before*
+`#cap-grid` in the card's fixed chrome — after the self-scrolling grid it was
+clipped out of the card and those three buttons were unclickable),
 and the
 Web-Phase-4 SLAM controls `#seg-mode button[data-mode=realtime|slam]`,
 `chk-slam-traj`, `chk-slam-follow`, `#seg-walls button[data-walls=split|solid]`,

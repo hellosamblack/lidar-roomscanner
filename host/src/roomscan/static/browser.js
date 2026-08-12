@@ -78,6 +78,16 @@ export function createBrowser(hub, capture, scene) {
     let playing = null;                // session.playback.capture_name
     let selected = new Set();          // ticked names — CLIENT-LOCAL
     let previewed = null;              // previewed name — CLIENT-LOCAL
+    // #103: whether `previewed` is the user's OWN pick rather than a default the
+    // client adopted for them. The drawer's buttons act on `previewed`, so a
+    // vanished explicit pick must clear the drawer, never silently retarget it at
+    // some other capture — pressing Build on the wrong file is worse than an
+    // empty drawer. Auto-adopted defaults stay free to be replaced.
+    let previewExplicit = false;
+    // The name a browser-initiated rename asked for, until a `captures` echo
+    // either shows it (rename went through -> follow the selection to it) or
+    // shows the old name still there (server refused -> keep the old selection).
+    let pendingRenameTo = null;
     // Name filter is a transient per-tab search, not server state (like the
     // ticked set): it narrows what is rendered off the already-broadcast array
     // and never triggers a directory rescan.
@@ -156,7 +166,14 @@ export function createBrowser(hub, capture, scene) {
         const tip = `${c.name}\n${fmtTime(c.duration_s)} · ${c.frames || 0} frames · ` +
             `${fmtBytes(c.bytes)}` + (c.has_stream_9 ? '' : '\nNo orientation stream — point cloud only') +
             (prefs.thumbs ? '\n\n' + THUMB_NOTE : '');
-        return `<div class="${cls.join(' ')}" data-name="${escapeHtml(c.name)}" title="${escapeHtml(tip)}">` +
+        // `aria-selected` mirrors `is-selected` so the selected tile is not
+        // communicated by border colour alone. The tile keeps its implicit role:
+        // it contains a checkbox, and `role="option"` may not contain
+        // interactive content, so promoting it to a listbox option would trade a
+        // styling-only gap for invalid ARIA.
+        return `<div class="${cls.join(' ')}" data-name="${escapeHtml(c.name)}"` +
+            ` aria-selected="${c.name === previewed ? 'true' : 'false'}"` +
+            ` title="${escapeHtml(tip)}">` +
             `<input class="cap-tile__check" type="checkbox" data-check="${escapeHtml(c.name)}"` +
             `${selected.has(c.name) ? ' checked' : ''} title="Select for delete">` +
             badge + img +
@@ -286,6 +303,41 @@ export function createBrowser(hub, capture, scene) {
         }
     }
 
+    // #103: selecting a capture must SURFACE its actions, not merely un-hide a
+    // node that may be collapsed or scrolled out of the card. Called only from
+    // the explicit tile click — never from a `state`/`captures` echo, so it can
+    // never fight `collapseForMapDisplay()`, which is what auto-collapses this
+    // card when the user switches to a map display.
+    function surfaceSelectedDetail() {
+        if (!previewCard || previewCard.classList.contains('hidden')) return;
+        // An action pane inside a collapsed card is not reachable at all.
+        if (browserCard?.classList.contains('collapsed')) {
+            browserCard.classList.remove('collapsed');
+            try { localStorage.setItem('roomscan.card.browser.collapsed', '0'); } catch (err) {}
+            window.__relayout?.();
+        }
+        // `block: 'nearest'` scrolls the minimum needed. The drawer is a SIBLING
+        // of #cap-grid, not a descendant, so this cannot disturb the capture
+        // grid's own scroll position.
+        previewCard.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        // When the card is squeezed to its 260px floor (every other dock card
+        // open, or a short viewport) the drawer is TALLER than the body's
+        // scrollport, so aligning its top pushes the buttons back out of sight.
+        // The issue is about reaching Load/Build, so the actions win over the
+        // facts table. The Rename/Build row is the drawer's lowest element, so
+        // it is the one that gets cut off, and bringing it into view carries the
+        // Load button just above it along with it. Only scroll again if it is
+        // actually still cut off, so the roomy case keeps the whole drawer.
+        const actions = previewCard.querySelector('.btn-row');
+        const scroller = previewCard.parentElement;
+        if (!actions || !scroller) return;
+        const a = actions.getBoundingClientRect();
+        const s = scroller.getBoundingClientRect();
+        if (a.bottom > s.bottom + 0.5 || a.top < s.top - 0.5) {
+            actions.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        }
+    }
+
     function setActive(seg, attr, value) {
         if (!seg) return;
         for (const b of seg.querySelectorAll('button')) {
@@ -309,8 +361,10 @@ export function createBrowser(hub, capture, scene) {
         const tile = e.target.closest('.cap-tile[data-name]');
         if (!tile) return;
         previewed = tile.dataset.name;
+        previewExplicit = true;
         deleteNote = null;
         render();
+        surfaceSelectedDetail();
     });
 
     segSort?.addEventListener('click', (e) => {
@@ -340,7 +394,11 @@ export function createBrowser(hub, capture, scene) {
         // Reuse capture.js's dialog rather than growing a second one; `fromBrowser`
         // is what makes it send the explicit `from` field.
         if (previewed && capture && capture.openRename) {
-            capture.openRename(previewed, { fromBrowser: true });
+            capture.openRename(previewed, {
+                fromBrowser: true,
+                // Follow the selection to the new name once the library echoes it.
+                onRenamed: (newName) => { pendingRenameTo = newName; },
+            });
         }
     });
     btnBuild?.addEventListener('click', openBuildModal);
@@ -435,8 +493,21 @@ export function createBrowser(hub, capture, scene) {
         // that no longer exists (or was just deleted) is gone with it.
         const live = new Set(captures.map((c) => c.name));
         selected = new Set([...selected].filter((n) => live.has(n)));
+        // A rename REPLACES the name in the library, so the drawer follows the
+        // same file to its new name instead of treating it as having vanished.
+        if (pendingRenameTo) {
+            if (live.has(pendingRenameTo)) {
+                if (previewed && !live.has(previewed)) previewed = pendingRenameTo;
+                pendingRenameTo = null;
+            } else if (previewed && live.has(previewed)) {
+                pendingRenameTo = null;      // refused; the old name is still there
+            }
+        }
         if (previewed && !live.has(previewed)) previewed = null;
-        if (!previewed && playing && live.has(playing)) previewed = playing;
+        // Adopt the playing capture only as an INITIAL default. Once the user has
+        // picked a capture, a delete that removes it clears the drawer rather than
+        // pointing Load/Build at whatever happens to be playing.
+        if (!previewed && !previewExplicit && playing && live.has(playing)) previewed = playing;
         render();
     });
 
@@ -444,7 +515,7 @@ export function createBrowser(hub, capture, scene) {
         const next = msg?.playback?.is_replay ? msg.playback.capture_name : null;
         if (next === playing) return;
         playing = next;
-        if (!previewed && playing) previewed = playing;
+        if (!previewed && !previewExplicit && playing) previewed = playing;
         render();
         if (buildPending && playing === buildPending.name) startBuild(buildPending);
     });
@@ -459,7 +530,14 @@ export function createBrowser(hub, capture, scene) {
         if (msg.browser_sort) prefs.sort = msg.browser_sort;
         if (msg.browser_view) prefs.view = msg.browser_view;
         if (typeof msg.browser_thumbs === 'boolean') prefs.thumbs = msg.browser_thumbs;
-        if (msg.selected_capture) previewed = msg.selected_capture;
+        // `selected_capture` is the server's LOADED capture (web.py sets it in
+        // `load_capture` and from `--replay` at startup), NOT the tile the user
+        // highlighted. `state` re-broadcasts on every settings change, so echoing
+        // it into `previewed` unconditionally clobbered this module's documented
+        // CLIENT-LOCAL selection: the drawer snapped back to the loaded capture
+        // ~3 ms after any rename, and Load/Build then addressed the wrong file.
+        // Seed from it only while the user has no pick of their own.
+        if (msg.selected_capture && !previewExplicit) previewed = msg.selected_capture;
         browserCard?.classList.toggle('hidden', source !== 'view');
         render();
     });
