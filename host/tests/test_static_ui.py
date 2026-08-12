@@ -24,6 +24,22 @@ def _index() -> str:
     return INDEX.read_text(encoding="utf-8")
 
 
+def _style_css() -> str:
+    """Just the `<style>...</style>` block, not the whole page.
+
+    #165: a rule-block regex (`[^{}]+\\{[^{}]*\\}`) run against the FULL
+    `index.html` -- inline `<script>` JS and all -- hits pathological
+    backtracking against that shape of input (deeply nested object/template
+    braces) and never returns; the same regex against just the CSS finishes
+    in low single-digit milliseconds. Scoping to the `<style>` block is also
+    the actually-correct behaviour: a test about CSS selectors should not be
+    matching JS object literals that happen to contain the same braces.
+    """
+    m = re.search(r"<style>(.*?)</style>", _index(), re.DOTALL)
+    assert m is not None, "no <style> block found in index.html"
+    return m.group(1)
+
+
 def _js_object_keys(js: str, var_name: str) -> set:
     """Quoted top-level keys of `var <var_name> = { 'k': ..., ... };` in layout.js.
 
@@ -112,7 +128,7 @@ def test_readonly_text_sinks_opt_back_into_selection(selector):
     quaternion or a stack trace on screen and have no way to get it into a bug
     report. These four are read-only text with nothing draggable in them.
     """
-    css = _index()
+    css = _style_css()
     assert "user-select: none" in css, "the body rule this test is about is gone"
     rule = re.search(
         r"([^{}]*\buser-select:\s*text\b[^{}]*)|"
