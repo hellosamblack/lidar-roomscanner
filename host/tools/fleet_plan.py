@@ -88,12 +88,22 @@ AREA_GLOBS = {
     "area/host-offline": ("host/src/roomscan/splat/",),
     "area/host-tools": ("host/tools/", "host/src/roomscan/mcp_server/"),
     "area/host-viewer": ("host/src/roomscan/viewer.py",),
+    "area/host-panel": ("host/src/roomscan/panel.py",),
     "area/firmware": ("firmware/scanner-stream/",),
     "area/firmware-build": ("firmware/scanner-stream/CMakeLists.txt",),
     "area/firmware-scanner-stream": ("firmware/scanner-stream/",),
     "area/firmware-eth": ("firmware/scanner-stream/",),
     "area/firmware-host": ("firmware/scanner-stream/", "host/src/roomscan/protocol.py"),
     "area/transform-lib": ("host/transform/",),
+}
+
+#: Area labels that legitimately have no code footprint. Enforced by a test that ensures
+#: every area/* label in the tracker is either in AREA_GLOBS or AREA_GLOBS_EXCLUDED.
+#: An issue with no stated paths and an excluded area gets an empty footprint, which
+#: conflicts with nothing and permits co-scheduling with any other issue. Such an issue
+#: is bounded only by the exploration slot (one unknown-footprint issue per wave).
+AREA_GLOBS_EXCLUDED = {
+    "area/environment",  # Operating-environment and procedure work
 }
 
 PRIORITY_SCORE = {"priority/now": 100.0, "priority/next": 40.0, "priority/later": 10.0}

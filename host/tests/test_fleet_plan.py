@@ -408,6 +408,29 @@ def test_area_globs_all_match_something_real(tracked):
     assert not dead, f"AREA_GLOBS entries matching no tracked file: {dead}"
 
 
+def test_every_area_label_in_fixture_is_handled(issues):
+    """Every `area/*` label on any issue in the fixture must either have an AREA_GLOBS
+    entry or be explicitly excluded in AREA_GLOBS_EXCLUDED.
+
+    This prevents a new area label from silently producing an empty footprint
+    and co-scheduling everything.
+    """
+    # Collect all area labels in the fixture
+    all_areas = set()
+    for issue in issues:
+        for label in issue.get("labels") or []:
+            name = label.get("name", "")
+            if name.startswith("area/"):
+                all_areas.add(name)
+
+    # Check each area is either in AREA_GLOBS or AREA_GLOBS_EXCLUDED
+    unhandled = all_areas - set(fp.AREA_GLOBS.keys()) - fp.AREA_GLOBS_EXCLUDED
+    assert not unhandled, (
+        f"area/* labels in fixture are not handled: {sorted(unhandled)}. "
+        f"Add them to AREA_GLOBS (with globs that match real files) or "
+        f"AREA_GLOBS_EXCLUDED (if they have no code footprint).")
+
+
 def test_hot_and_shared_constants_name_real_files(tracked):
     assert not [p for p in fp.HOT_FILES if p not in tracked]
     assert not [p for p in fp.SHARED_DOC_FILES
