@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Stop-hook backstop for the session-end skill.
+# Stop-hook backstop for the session-end skill — the DEGRADED path.
 #
-# When the turn is about to end and HEAD carries the session's closing commit
-# (message contains `Closes #NNN`, per the session-start convention) but
-# session-end has not yet run for that HEAD, block the stop and remind Claude to
-# run it. The reminder is fed back into the same turn, so session-end runs
-# without a new user message.
+# Normally session-end runs *before* the closing commit and lands it itself, so
+# the session's memory and self-improvements ride with `Closes #NNN` (issue
+# #169). This hook exists for when that didn't happen: the turn is about to end,
+# HEAD carries the closing commit (message contains `Closes #NNN`, per the
+# session-start convention), and session-end has not run for that HEAD. Block the
+# stop and remind Claude. The reminder is fed back into the same turn, so
+# session-end runs without a new user message — its Phase 3 then lands the
+# improvements as a follow-up `Refs #NNN` commit instead of bundling them.
 #
 # Idempotent + loop-safe via two guards:
 #   - `stop_hook_active`: once we've blocked and Claude has continued, the next
@@ -48,7 +51,7 @@ if [ -f "$marker" ] && [ "$(cat "$marker" 2>/dev/null)" = "$head_sha" ]; then
 fi
 
 num=$(printf '%s' "$msg" | grep -Eoi 'closes[[:space:]]+#[0-9]+' | grep -Eo '[0-9]+' | head -1)
-reason="HEAD closes a governing issue (Closes #${num:-?}) but session-end has not run for this commit. Run the session-end skill now — ship checks, memory, self-improvement, handoff — which records \$(git rev-parse --git-dir)/session-end-done as its final step."
+reason="HEAD closes a governing issue (Closes #${num:-?}) but session-end has not run for this commit. session-end should have run BEFORE this commit so its memory + self-improvement edits rode with it (issue #169) — you are now on the degraded path. Run the session-end skill now: Phase 1 memory (auto memory AND a comment on #${num:-NNN}), Phase 2 improvements, then Phase 3 lands those as a follow-up 'Refs #${num:-NNN}' commit, Phase 4 handoff. It records \$(git rev-parse --git-dir)/session-end-done as its final step."
 
 # Emit a Stop-hook block decision; Claude Code feeds `reason` back into the turn.
 python3 -c '

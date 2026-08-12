@@ -90,11 +90,19 @@ The PR flow is retired. **Land work by committing straight to `main`, no PR.**
 - A memory description contradicting what you just verified.
 - `gh pr create` / `gh pr merge` in your plan — the PR flow is retired; commit to `main` instead.
 
-## After the final commit — hand off to `session-end`
+## Before the final commit — hand off to `session-end`
 
-If the commit you just landed **closes the session's governing issue** — its message contains
-`Closes #NNN` — that is the session's final commit. **Continue directly into the `session-end`
-skill in this same turn**; do not stop and wait to be told to wrap up. Mid-session landings that
-only `Refs #NNN` do not trigger this — run this checklist and keep working. (A `Stop`-hook backstop,
-`.claude/hooks/session-end-guard.sh`, will block the turn and remind you if you forget — but don't
-rely on it.)
+If the commit you are **about to write** closes the session's governing issue — its message would
+contain `Closes #NNN` — stop before staging and **run the `session-end` skill in this same turn**
+instead. It writes the session's memory and self-improvements first, then comes back through this
+checklist (its Phase 3) and lands the closing commit with those edits included. Committing first
+and wrapping up after strands every improvement in a trailing commit this checklist never sees
+(issue #169).
+
+Mid-session landings that only `Refs #NNN` do not trigger this — run this checklist and keep working.
+
+**No recursion:** when `session-end`'s Phase 3 calls this checklist, you are already inside the
+handoff — do not bounce back into `session-end`. Land the commit and continue its Phase 4.
+(A `Stop`-hook backstop, `.claude/hooks/session-end-guard.sh`, catches the case where the closing
+commit lands without `session-end` having run at all — but don't rely on it; its path is the
+degraded one.)

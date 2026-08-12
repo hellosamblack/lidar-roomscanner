@@ -71,19 +71,26 @@ Pick the best match:
   scope in your session-start comment so the issue's history stays honest.
 - **No match** — create one (now unblocked in auto-mode):
 
+Write the body to a file first, then pass `--body-file`. **Never inline `--body "…"`**: an issue body
+almost always contains backticked identifiers, and backticks inside a double-quoted shell argument are
+command-substituted before `gh` ever sees them — you get a `syntax error near unexpected token` at
+best, a silently mangled body at worst (same trap as
+`backticks-in-quoted-commit-message`). `gh issue comment` takes `--body-file` too; use it there as well.
+
 ```bash
+# 1. Write /tmp/issue.md with the Write tool (not a heredoc — same quoting hazard):
+#      ## What
+#      <one paragraph — what this does and why>
+#
+#      ## Acceptance
+#      - [ ] <first verifiable outcome>
+#      - [ ] Tests green
+# 2. Then:
 gh issue create \
   --repo hellosamblack/lidar-roomscanner \
   --title "<verb>: <what>" \
   --label "work-item" --label "area/<area>" --label "priority/<now|next|later>" \
-  --body "## What
-
-<one paragraph — what this does and why>
-
-## Acceptance
-
-- [ ] <first verifiable outcome>
-- [ ] Tests green"
+  --body-file /tmp/issue.md
 ```
 
 Record the number — this is `#NNN` for the rest of the session.
@@ -161,9 +168,13 @@ Use `Refs #NNN` in every commit that advances the issue without closing it. Use
 
 ## At session end
 
-The `session-end` skill handles the close side: outcome comment on the issue and `gh issue close`
-if the work is done (via the `status-sync` checklist it runs). You do not close the issue in this
-skill. `session-end` fires automatically in the same turn once you land the `Closes #NNN` commit.
+The `session-end` skill handles the close side: memory (logged both to auto memory and as a comment
+on this issue), self-improvements, then the outcome comment and `gh issue close` if the work is done
+(via the `status-sync` checklist it runs). You do not close the issue in this skill.
+
+`session-end` runs **before** the `Closes #NNN` commit, not after — it authors the session's memory
+and skill/MCP improvements first, then lands them together with the closing commit it writes itself
+(issue #169). So when the work is done and verified, run `session-end` rather than committing.
 
 ## Special cases
 
