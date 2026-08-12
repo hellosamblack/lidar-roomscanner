@@ -114,6 +114,18 @@ export function createIr(hub) {
         if (!window.__gotIr) { window.__gotIr = true; D('first IR frame: ' + width + 'x' + height); }
     });
 
+    // Client reset barrier (issue #101 step 4): a generation/readiness change
+    // means the pixels currently painted belong to a source the server has
+    // already moved past. Blank the canvas and forget the last-known image
+    // dims + gravity roll so the NEXT `ir_image` re-lays-out from scratch
+    // rather than reusing stale orientation state.
+    hub.on('stream_reset', () => {
+        if (imgW && imgH) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        imgW = 0; imgH = 0;
+        rollDeg = 0;
+        window.__gotIr = false;
+    });
+
     // Server state drives the toggles (not local clicks) so a second tab syncs.
     hub.on('state', (msg) => {
         if (segColormap) {

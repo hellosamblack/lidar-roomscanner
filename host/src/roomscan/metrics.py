@@ -105,7 +105,17 @@ class RateMeter:
     def jitter_ms(self, now: float) -> float | None:
         with self._lock:
             self._trim(now)
-            s = self._samples
+            # A COPY, not the live deque: every other reader here (`host_hz`,
+            # `device_hz`, `bytes_per_s`) does its whole `len`/index walk
+            # INSIDE the lock, but this one walks `s` in a loop AFTER
+            # releasing it. Against a real background reader thread calling
+            # `record()` (which also calls `_trim`, popping the left end)
+            # concurrently, `len(s)` read here can already be stale by the
+            # time the loop below indexes into it, hitting a deque IndexError --
+            # reproduced by a real reader thread + a concurrent `snapshot()`
+            # poller (issue #101 test infrastructure, discovered incidentally
+            # while adding a real-background-reader end-to-end test).
+            s = list(self._samples)
         if len(s) < 2:
             return None
         j_sum = 0.0
@@ -207,6 +217,23 @@ class MetricsRegistry:
         self._render_ticks: deque[float] = deque()
         self._transform_ticks: deque[float] = deque()
         self._browser_ticks: deque[float] = deque()
+
+    def reset_source(self) -> None:
+        """Drop every per-stream rate meter and every render/transform/browser
+        tick history -- everything here is derived from the frames of the
+        source just left (issue #101 step 2: a Live<->View swap must not let
+        the OLD source's rates/jitter bleed into the new one's HUD rows).
+
+        `sampler` (host process/system CPU, RAM, GPU) is deliberately left
+        alone: it measures THIS PROCESS, not the active source, so it must
+        keep running across a source switch -- the same "preserve genuinely
+        host-wide state" rule `SensorState.reset_source` follows for its own
+        fields."""
+        with self._lock:
+            self._meters.clear()
+            self._render_ticks.clear()
+            self._transform_ticks.clear()
+            self._browser_ticks.clear()
 
     def record(self, header: FrameHeader, nbytes: int, now: float) -> None:
         """Record one decoded DATA frame. Non-DATA frames are ignored (their

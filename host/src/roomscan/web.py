@@ -707,6 +707,15 @@ class OrientationSmoother:
                                 self._alpha(quat_angle_deg(self._held, quat)))
         return self._held
 
+    def reset(self) -> None:
+        """Drop the held/raw quat + coherence history so a source switch
+        (issue #101) can't ease the FIRST frame of a new source in from the
+        old one's orientation -- the same "adopt outright" first-sample path
+        `update()` already takes when `_held` is None."""
+        self._held = None
+        self._prev_raw = None
+        self._hist.clear()
+
 
 #: Metres -> feet. The elevation readout is in feet (owner ask, 2026-07-31).
 FT_PER_M = 3.280839895013123
@@ -1028,6 +1037,16 @@ class OrientationJitter:
         out = _jitter_stats([d for _, d in self._samples])
         out["window_s"] = self.window_s
         return out
+
+    def reset(self) -> None:
+        """Purge the whole window + every running "previous value" (issue
+        #101): a source switch must not let the last frame of the OLD source
+        be diffed against the first frame of the NEW one, which would report
+        a huge, meaningless one-off jitter spike."""
+        self._samples.clear()
+        self._prev_quat = None
+        self._prev_roll = self._prev_pitch = self._prev_yaw = None
+        self._prev_heading = None
 
 
 def select_colors(outputs: dict, deproj: Deprojector, color_mode: str,
@@ -2153,6 +2172,30 @@ async def _set_imu_env_rate(state, rate_hz: int) -> None:
     await _broadcast_ranging(state)
 
 
+def _view_ready(ui: "UiState", controller=None) -> bool:
+    """The ONE predicate for "View is showing a genuinely loaded, matching
+    capture" (issue #101 step 3): `ui.source == "view"`, the controller is
+    actually replaying (not live, not mid-swap with `replay_path` not yet
+    updated), and the file it is replaying is exactly the one the UI believes
+    is selected.
+
+    False for every OTHER case, including source != "view" -- this predicate
+    says nothing about Live/Splat readiness; a call site that must also admit
+    those combines it with its own `ui.source != "view"` check. It is False
+    while View is just the capture BROWSER (nothing picked yet, the
+    `set_source` empty-selection branch) and equally False in the brief
+    window between `load_capture` swapping the reader and `replay_path`
+    landing on the new file -- both cases where a live/stale frame must not
+    reach the client (the defect this issue fixes)."""
+    if ui.source != "view":
+        return False
+    if not ui.selected_capture or controller is None:
+        return False
+    if controller.mode != "replay" or not controller.replay_path:
+        return False
+    return os.path.basename(controller.replay_path) == ui.selected_capture
+
+
 def _state_message(ui: UiState, controller=None, detailed=None,
                    calibration_available: bool = False) -> dict:
     """Authoritative presentation state.
@@ -2187,6 +2230,16 @@ def _state_message(ui: UiState, controller=None, detailed=None,
             "selected_capture": ui.selected_capture,
             "selected_splat": ui.selected_splat, "detailed": detail,
             "slam_available": slam_available,
+            # issue #101: the client's reset barrier. `stream_generation` bumps
+            # on every live/replay/capture swap (`SessionController.generation`);
+            # `ws.js` fires a local `stream_reset` when it changes so every
+            # display module clears its OLD-source state before the new
+            # `state`/data lands. `stream_ready` is `_view_ready` widened to
+            # "Live/Splat are always ready, View only once its predicate holds"
+            # -- while it's False the client keeps the capture browser visible
+            # and shows nothing else.
+            "stream_generation": getattr(controller, "generation", 0),
+            "stream_ready": ui.source != "view" or _view_ready(ui, controller),
             "slam_trajectory": ui.slam_trajectory,
             "slam_walls": ui.slam_walls, "slam_follow": ui.slam_follow,
             "idle_enabled": ui.idle_enabled, "idle_level": ui.idle_level,
@@ -3635,6 +3688,83 @@ def make_slam_feed(state):
     return _feed
 
 
+class _GenerationSlot:
+    """Adapts the shared render slot (a `queue.Queue(maxsize=1)`) so every
+    entry the reader thread puts is tagged with the generation active when it
+    was produced (issue #101 step 1). `_broadcaster` reads the tag back and
+    discards anything from a generation the controller has already
+    superseded, so a frame the OLD reader queued just before being stopped
+    can never be mistaken for the new source's first frame.
+
+    `get_nowait`/`put` are the only two `queue.Queue` methods
+    `reader._run_reader` calls, so this is a drop-in substitute -- the
+    underlying slot still holds at most one item, same as before."""
+
+    def __init__(self, slot, generation: int):
+        self._slot = slot
+        self._generation = generation
+
+    def get_nowait(self):
+        return self._slot.get_nowait()
+
+    def put(self, item) -> None:
+        header, outputs = item
+        self._slot.put((self._generation, header, outputs))
+
+
+class _GenerationSensorState:
+    """Generation-guards `SensorState.feed` (issue #101 step 1): a frame from
+    an already-superseded reader thread (still draining its socket/file when
+    the controller swapped) must not write orientation/env state a NEWER
+    reader has already reset via `_begin_new_timeline`. Checks the
+    CONTROLLER's LIVE `.generation` on every call, not the generation
+    captured at construction, so a swap that lands mid-read takes effect on
+    the very next frame rather than only the next reader spawn."""
+
+    def __init__(self, controller: "SessionController", generation: int, state):
+        self._controller = controller
+        self._generation = generation
+        self._state = state
+
+    def feed(self, frame) -> None:
+        if self._controller.generation == self._generation:
+            self._state.feed(frame)
+
+
+class _GenerationMetrics:
+    """Same generation guard as `_GenerationSensorState`, for the two
+    `MetricsRegistry` calls `reader._run_reader` makes directly from the
+    reader thread (`record`/`tick_transform`) -- issue #101 step 1."""
+
+    def __init__(self, controller: "SessionController", generation: int, metrics):
+        self._controller = controller
+        self._generation = generation
+        self._metrics = metrics
+
+    def record(self, header, nbytes, now) -> None:
+        if self._controller.generation == self._generation:
+            self._metrics.record(header, nbytes, now)
+
+    def tick_transform(self, now) -> None:
+        if self._controller.generation == self._generation:
+            self._metrics.tick_transform(now)
+
+
+class _GenerationOnFrame:
+    """Generation-guards the `on_frame` tap (`make_slam_feed`, SLAM
+    submission) -- issue #101 step 1: an obsolete reader must not submit
+    frames to a mapper that has already been reset for the new source."""
+
+    def __init__(self, controller: "SessionController", generation: int, on_frame):
+        self._controller = controller
+        self._generation = generation
+        self._on_frame = on_frame
+
+    def __call__(self, header, outputs) -> None:
+        if self._controller.generation == self._generation:
+            self._on_frame(header, outputs)
+
+
 class SessionController:
     """Owns the reader-thread lifecycle so the source can be swapped live<->replay
     at runtime without disturbing the single broadcaster or the shared `slot`
@@ -3679,6 +3809,16 @@ class SessionController:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # Source generation (issue #101 step 1): bumped on every live/replay
+        # source switch (`switch_to_live`/`switch_to_replay` -- NOT `seek`/
+        # `restart`, which stay on the same capture). Read by `_broadcaster`
+        # (`stream_generation` on the `state` echo, and to discard render-slot
+        # entries tagged with an old value) and captured into a
+        # `_GenerationSlot`/`_GenerationSensorState`/`_GenerationMetrics`/
+        # `_GenerationOnFrame` each time `_run` (re)spawns a reader, so a
+        # callback from a reader the controller has already superseded is
+        # discarded rather than corrupting the new source's state.
+        self.generation = 0
         self._record_started = 0.0
         self._last_recorded_name = None
         # Whether the CURRENT take was started automatically on entering Live
@@ -3735,11 +3875,25 @@ class SessionController:
             decoder = StreamDecoder()
             source = self._open_source()
             client = self.client if self.mode == "live" else None
+            # Capture THIS spawn's generation and wrap every per-frame sink so
+            # a callback landing after a later swap is discarded rather than
+            # writing state / submitting frames / queuing a render item under
+            # a generation the controller has already moved past (issue #101
+            # step 1). Replay looping (below) respawns without bumping
+            # `generation` -- deliberately: a loop wrap is a timeline
+            # discontinuity (`_begin_new_timeline`), not a source switch.
+            generation = self.generation
+            slot = _GenerationSlot(self.slot, generation)
+            state = (_GenerationSensorState(self, generation, self.sensor_state)
+                     if self.sensor_state is not None else None)
+            metrics = (_GenerationMetrics(self, generation, self.metrics)
+                      if self.metrics is not None else None)
+            on_frame = (_GenerationOnFrame(self, generation, self.on_frame)
+                       if self.on_frame is not None else None)
             _run_reader(
-                source, decoder, self.stage, self.stats, self.slot, self.fault,
+                source, decoder, self.stage, self.stats, slot, self.fault,
                 self.bus, client, self.recorder, self.pacer, self._stop.is_set,
-                state=self.sensor_state, metrics=self.metrics,
-                on_frame=self.on_frame)
+                state=state, metrics=metrics, on_frame=on_frame)
             if self._stop.is_set():
                 return                                    # manual stop / swap
             if self.mode == "replay" and self.loop:
@@ -3768,6 +3922,18 @@ class SessionController:
         if t is not None:
             t.join(timeout=2.0)
         self._thread = None
+
+    def _drain_slot(self) -> None:
+        """Discard whatever the just-stopped reader last queued (issue #101
+        step 2: "cached frames ... can survive a live -> capture transition").
+        Belt-and-suspenders alongside the generation tag every render-slot
+        entry now carries (`_GenerationSlot`) -- `_broadcaster` would already
+        ignore a stale-generation item, but there is no reason to leave one
+        sitting there for it to have to."""
+        try:
+            self.slot.get_nowait()
+        except queue.Empty:
+            pass
 
     # ---- timeline discontinuity (BUG-091 / issue #102) ----
 
@@ -3822,6 +3988,13 @@ class SessionController:
             self._seek_offset = 0
             self.pacer.interval = speed_to_interval(self.speed_fps)
             self.pacer.paused.clear()
+            # issue #101 step 1: a genuine source switch, not a same-capture
+            # seek -- bump the generation so `_broadcaster` discards anything
+            # still tagged with the reader we just stopped, and drop whatever
+            # that reader last queued so a stale frame is never the first
+            # thing the new generation's consumers see.
+            self.generation += 1
+            self._drain_slot()
             self._spawn()
             self.bus.publish(f"loaded capture {os.path.basename(self.replay_path)}")
 
@@ -3846,6 +4019,8 @@ class SessionController:
             self._seek_offset = 0
             self.pacer.interval = 0.0
             self.pacer.paused.clear()
+            self.generation += 1        # see switch_to_replay's comment
+            self._drain_slot()
             self._spawn()
             self.bus.publish("switched to live device")
 
@@ -4867,6 +5042,31 @@ async def _pump_mesh(state, now: float) -> None:
         flow.last_legacy_send = now
 
 
+async def _broadcast_mesh_reset(state, generation: int) -> None:
+    """Text control frame on `/ws-mesh` marking a source-generation boundary
+    (issue #101 step 5): every mesh client must clear its cached
+    geometry/pose so a mesh already in flight for the SUPERSEDED generation
+    can never render against the new source.
+
+    Ordering: the caller (`_broadcaster`'s generation-change handling) clears
+    `state.latest_mesh` BEFORE calling this, and this runs before that same
+    tick's `_pump_mesh` -- so nothing queued for the old generation can be
+    sent after this control frame goes out. `flow.last_sent_obj`/`in_flight`
+    are reset too, so a flow that was mid-ack on the old mesh doesn't sit
+    blocked for `MESH_ACK_TIMEOUT_S` before the new generation's first mesh
+    can reach it."""
+    msg = json.dumps({"type": "mesh_reset", "generation": generation})
+    for ws, flow in list(_mesh_clients(state).items()):
+        flow.in_flight = False
+        flow.last_sent_obj = None
+        if not _ws_is_connected(ws):
+            continue
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            await _drop_mesh_client(state, ws)
+
+
 def ws_flow_counters(state) -> dict:
     """`/ws` + `/ws-mesh` connection/credit health (BUG-061 Part A4) -- lands
     in `metrics.ws`, and from there in `rig_status` for free. Cheap: derived
@@ -5328,6 +5528,11 @@ async def _broadcaster() -> None:
     last_magcal = 0.0
     magpose_seq = 0
     next_pc = time.monotonic()   # deadline-based pacing: sleep to the next tick,
+    # issue #101 step 2: sentinel that never equals a real generation (an int,
+    # starting at 0), so the very first tick with a controller attached always
+    # runs the reset-on-generation-change branch once (harmless -- everything
+    # it resets is already at its fresh-start value).
+    last_seen_generation = None
 
     while True:
         # not for a fixed interval AFTER the work -- otherwise the true period is
@@ -5340,13 +5545,50 @@ async def _broadcaster() -> None:
         if next_pc <= now:       # a slow tick overran the interval: resync, don't burst-catch-up
             next_pc = now + POINT_INTERVAL
 
+        ctrl = getattr(state, "controller", None)
+        cur_gen = getattr(ctrl, "generation", None)
+        if cur_gen != last_seen_generation:
+            # issue #101 step 2: a live/replay/capture switch just landed --
+            # drop every piece of source-owned broadcaster state so the FIRST
+            # tick of the new generation can't show a leftover frame, a
+            # colour-keyed point-cloud cache built from the old source, or
+            # smoothed/jittered orientation eased in from the old source's
+            # last quat. `mesh_reset` similarly clears the cached MESH and
+            # tells every `/ws-mesh` flow to drop its geometry (step 5).
+            last_seen_generation = cur_gen
+            last_item = None
+            last_pc_key = None
+            last_pc_bytes = None
+            smoother.reset()
+            jitter.reset()
+            elevation.reset()
+            ui.ir_freeze_range = None
+            state.latest_mesh = None
+            if cur_gen is not None:
+                await _broadcast_mesh_reset(state, cur_gen)
+        ready = ui.source != "view" or _view_ready(ui, ctrl)
+
         # Latest-wins pull; a fresh frame ticks the device-fps render counter.
+        # Each entry is generation-tagged by `_GenerationSlot` whenever a
+        # `SessionController` is attached (real server + most tests); a bare
+        # `queue.Queue` fed directly by `reader._run_reader` (a few tests that
+        # bypass the controller) still yields the pre-#101 2-tuple, handled by
+        # the `else` branch for backward compatibility.
         try:
             item = state.slot.get_nowait()
-            last_item = item
-            metrics.tick_render(now)
         except queue.Empty:
             pass
+        else:
+            if ctrl is not None and isinstance(item, tuple) and len(item) == 3:
+                gen, header, outputs = item
+                if gen == ctrl.generation:
+                    last_item = (header, outputs)
+                    metrics.tick_render(now)
+                # else: a superseded reader's frame -- drop it, `last_item`
+                # (already reset above on the generation change) stays as-is.
+            else:
+                last_item = item
+                metrics.tick_render(now)
 
         # Reader fault: surface once, flip the fault flag, keep serving.
         if state.fault and not state.fault_reported:
@@ -5355,7 +5597,14 @@ async def _broadcaster() -> None:
             print(f"\n[FATAL] reader thread stopped: {err!r}", file=sys.stderr, flush=True)
             bus.publish(f"reader stopped: {err!r}")
 
-        if last_item is not None:
+        # issue #101 step 3: while View has no ready capture (browsing, or a
+        # swap still in flight), emit no point-cloud / SLAM / IR data at all --
+        # even though `last_item` may hold a perfectly good frame, because on
+        # `set_source view` with nothing selected the reader is deliberately
+        # left running against whatever it was already playing (see
+        # `set_source`'s comment). Live/Splat are unaffected: `ready` is True
+        # for them unconditionally.
+        if ready and last_item is not None:
             header, outputs = last_item
             tof_meta = outputs.get("tof_meta")
             if tof_meta is not None:
@@ -5491,24 +5740,28 @@ async def _broadcaster() -> None:
         # Sensor (streams 9/10) on its own cadence; silent until 9/10 arrives.
         if now - last_sensor >= SENSOR_INTERVAL:
             last_sensor = now
-            # One outbound HTTP GET per 30 min, fire-and-forget off the loop
-            # (weather.py). A box with no uplink just keeps reporting
-            # msl_source="fallback"; nothing here can raise or block.
-            msl.maybe_refresh()
-            snap = msl.snapshot()
-            smsg = build_sensor_message(state.sensor_state, state.mag_cal, jitter,
-                                         orientation_mode=state.ui_state.orientation_mode,
-                                         axis_labels=state.ui_state.orientation_labels,
-                                         yaw_offset_deg=state.ui_state.yaw_offset_deg,
-                                         ir_display_quat=smoother.held,
-                                         msl_pa=snap["msl_pa"],
-                                         msl_source=snap["msl_source"],
-                                         msl_age_s=snap["msl_age_s"],
-                                         elevation_datum_ft=state.ui_state.elevation_datum_ft,
-                                         altitude_smoother=elevation,
-                                         tof_meta=state.tof_meta)
-            if smsg is not None:
-                await _broadcast_text(clients, json.dumps(smsg))
+            # issue #101 step 3: no sensor data while View isn't ready --
+            # `state.sensor_state` is still being fed by whatever the reader
+            # is doing (possibly live), and a browsing tab must see nothing.
+            if ready:
+                # One outbound HTTP GET per 30 min, fire-and-forget off the loop
+                # (weather.py). A box with no uplink just keeps reporting
+                # msl_source="fallback"; nothing here can raise or block.
+                msl.maybe_refresh()
+                snap = msl.snapshot()
+                smsg = build_sensor_message(state.sensor_state, state.mag_cal, jitter,
+                                             orientation_mode=state.ui_state.orientation_mode,
+                                             axis_labels=state.ui_state.orientation_labels,
+                                             yaw_offset_deg=state.ui_state.yaw_offset_deg,
+                                             ir_display_quat=smoother.held,
+                                             msl_pa=snap["msl_pa"],
+                                             msl_source=snap["msl_source"],
+                                             msl_age_s=snap["msl_age_s"],
+                                             elevation_datum_ft=state.ui_state.elevation_datum_ft,
+                                             altitude_smoother=elevation,
+                                             tof_meta=state.tof_meta)
+                if smsg is not None:
+                    await _broadcast_text(clients, json.dumps(smsg))
 
         # Magnetometer sweep (owner ask, 2026-07-29). Feed at the full loop
         # rate so a tumble is sampled as densely as the env stream allows, but
@@ -5553,10 +5806,14 @@ async def _broadcaster() -> None:
             stats = getattr(state, "stats", None)
             if stats is not None:
                 snap = replace(snap, drops=stats.dropped_flags, gaps=stats.seq_gaps)
-            msg = build_metrics_message(snap)
-            msg["transport"] = transport_counters(state)
-            msg["ws"] = ws_flow_counters(state)
-            await _broadcast_text(clients, json.dumps(msg))
+            # issue #101 step 3: "stream rows identify only capture streams" --
+            # while View isn't ready, the reader may still be the live device,
+            # and its rates must never reach a browsing tab.
+            if ready:
+                msg = build_metrics_message(snap)
+                msg["transport"] = transport_counters(state)
+                msg["ws"] = ws_flow_counters(state)
+                await _broadcast_text(clients, json.dumps(msg))
             ctrl = getattr(state, "controller", None)
             if ctrl is not None:
                 pos = _replay_position(ctrl, last_item)
@@ -6136,10 +6393,20 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             log.warning("invalid set_display: %r", display)
             return
         if display == "preview":
-            if ui.source != "view" or not ui.selected_capture:
+            # issue #101 step 3: Preview is View-only, and readiness means the
+            # ONE predicate -- not just "a name is selected", which used to
+            # pass even mid-swap, before `replay_path` had caught up.
+            if not _view_ready(ui, ctrl):
                 state.bus.publish("Preview -> load a capture in View first")
                 return
         elif display != "point_cloud":
+            # SLAM/Detailed while browsing View (no capture, or a swap still
+            # in flight) must refuse, same as Preview -- but this must NOT
+            # reject Live SLAM (`ui.source == "live"`), which is a real,
+            # separate feature `_view_ready` says nothing about.
+            if ui.source == "view" and not _view_ready(ui, ctrl):
+                state.bus.publish(f"{display} -> select a capture in View first")
+                return
             if ctrl is not None and ctrl.mode == "replay" and not ctrl.index.get("has_stream_9"):
                 state.bus.publish("SLAM -> unavailable: this legacy capture has no stream 9 orientation")
                 return
@@ -6192,6 +6459,12 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         mode = msg.get("mode")
         if mode not in _VALID_MODES:
             log.warning("invalid set_mode: %r", mode)
+            return
+        # issue #101 step 3: same View-readiness gate as `set_display` -- this
+        # legacy alias is still how the rig_* MCP tools arm SLAM, and it must
+        # not bypass the check `set_display` enforces.
+        if mode == "slam" and ui.source == "view" and not _view_ready(ui, ctrl):
+            state.bus.publish("slam -> select a capture in View first")
             return
         # Compatibility for existing rig clients: mode maps exactly onto the
         # shared display control, never to Detailed.

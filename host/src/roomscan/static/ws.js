@@ -19,6 +19,22 @@
 // with state ∈ {"connecting","open","closed","error"} so hud/topbar can render
 // the connection dot without reaching into this module.
 //
+// Client reset barrier (issue #101 step 4): the `state` echo carries
+// `stream_generation` (bumps on every live/replay/capture swap) and
+// `stream_ready` (server truth for "safe to display end-to-end" -- see
+// `web._view_ready`). This module tracks both and emits a LOCAL
+// `stream_reset` event -- BEFORE the `state` event itself -- whenever either
+// one actually TRANSITIONS: the generation changed, or readiness dropped
+// true -> false (entering View with nothing loaded yet, or a capture
+// mismatch mid-swap). Every display module (scene/slam/ir/sensors/hud)
+// subscribes to `stream_reset` and clears its own OLD-source state before
+// the state/data that follows.
+//
+// Edge-triggered on purpose: `state` re-broadcasts on every unrelated
+// setting change (color, point size, ...), and firing on every one of those
+// would wipe a live view constantly -- the same trap noted throughout web.py
+// for client-owned state riding the `state` echo.
+//
 // Second socket, `/ws-mesh` (BUG-061, Part A): MESH (tag 3) moved off `/ws` so
 // a whole-map re-send can never sit in front of the 30 Hz pose JSON. It is a
 // SEPARATE WebSocket with its own connect/reconnect-with-backoff, mirroring
@@ -57,6 +73,11 @@ export function createHub() {
     const clientId = makeClientId();
     let socket = null;
     let meshSocket = null;
+    // Client reset barrier bookkeeping (issue #101 step 4) — null means
+    // "no `state` message seen yet", distinct from any real generation/ready
+    // value so the very first message's generation always reads as a change.
+    let lastStreamGeneration = null;
+    let lastStreamReady = null;
 
     function on(type, fn) {
         let set = handlers.get(type);
@@ -120,9 +141,20 @@ export function createHub() {
         meshSocket.onerror = () => { D('mesh: ERROR (see close code next)', 'error'); };
 
         meshSocket.onmessage = (event) => {
-            // The mesh socket only ever carries binary tag-3 frames, but demux
-            // it the same defensive way as the main socket rather than assume.
+            // The mesh socket carries binary tag-3 MESH frames plus one JSON
+            // text control frame, `mesh_reset` (issue #101 step 5): sent right
+            // after a source-generation boundary, ordered after anything
+            // already queued for the SUPERSEDED generation, so slam.js can
+            // drop its cached geometry/pose before a new-generation mesh can
+            // arrive. Any other text frame is unexpected and dropped.
             if (typeof event.data === 'string') {
+                let msg;
+                try { msg = JSON.parse(event.data); }
+                catch (e) {
+                    D('mesh: non-JSON text frame dropped: ' + event.data.slice(0, 80), 'error');
+                    return;
+                }
+                if (msg && msg.type === 'mesh_reset') { emit('mesh_reset', msg); return; }
                 D('mesh: unexpected text frame dropped: ' + event.data.slice(0, 80), 'error');
                 return;
             }
@@ -168,7 +200,20 @@ export function createHub() {
                 let msg;
                 try { msg = JSON.parse(event.data); }
                 catch (e) { D('non-JSON text frame dropped: ' + event.data.slice(0, 80), 'error'); return; }
-                if (msg && typeof msg.type === 'string') emit(msg.type, msg);
+                if (msg && typeof msg.type === 'string') {
+                    if (msg.type === 'state') {
+                        const gen = msg.stream_generation;
+                        const rdy = !!msg.stream_ready;
+                        const genChanged = typeof gen === 'number' && gen !== lastStreamGeneration;
+                        const becameNotReady = lastStreamReady === true && rdy === false;
+                        if (genChanged || becameNotReady) {
+                            emit('stream_reset', { generation: gen, ready: rdy });
+                        }
+                        if (typeof gen === 'number') lastStreamGeneration = gen;
+                        lastStreamReady = rdy;
+                    }
+                    emit(msg.type, msg);
+                }
                 else D('JSON frame missing string `type`, dropped', 'error');
                 return;
             }

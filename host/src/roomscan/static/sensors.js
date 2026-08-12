@@ -341,6 +341,36 @@ export function createSensors(hub) {
         });
     }
 
+    // Client reset barrier (issue #101 step 4): the gizmo/compass/sparklines
+    // and the fusion-warning timers all reflect whatever the reader was
+    // producing a moment ago -- a generation/readiness change means that
+    // reader is no longer this display's source, so blank every readout back
+    // to its pre-first-frame placeholder rather than let it sit frozen (or
+    // worse, keep counting down a fusion-warning fade timer against data that
+    // no longer applies).
+    function clearForNewStream() {
+        drawGizmo(gizmo, null);
+        drawCompass(compass, null);
+        if (headingEl) headingEl.textContent = '—';
+        drawSparkline(elevSpark, null);
+        drawSparkline(tempSpark, null);
+        if (elevVal) elevVal.textContent = '—';
+        if (pressHpa) pressHpa.textContent = '—';
+        if (pressVal) pressVal.textContent = '—';
+        if (tempVal) tempVal.textContent = '—';
+        if (mslPaEl) mslPaEl.textContent = '—';
+        if (mslSourceEl) mslSourceEl.textContent = '—';
+        if (mslAgeEl) mslAgeEl.textContent = '—';
+        clearTimeout(fusionWarningTimer);
+        clearTimeout(fusionWarningFadeTimer);
+        if (fusionEl) { fusionEl.textContent = '—'; fusionEl.className = ''; fusionEl.title = ''; }
+        if (fusionHelpEl) { fusionHelpEl.textContent = ''; fusionHelpEl.className = 'hud-note hidden'; }
+        if (singularityWarn) singularityWarn.classList.add('hidden');
+        if (worldWarn) worldWarn.classList.add('hidden');
+        window.__gotSensor = false;
+    }
+    hub.on('stream_reset', clearForNewStream);
+
     hub.on('state', (msg) => {
         if (Array.isArray(msg.orientation_labels)) {
             msg.orientation_labels.forEach((lbl, i) => {

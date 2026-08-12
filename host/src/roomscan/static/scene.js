@@ -629,6 +629,20 @@ export function createScene(hub) {
     function resetCamera() { applyPose(viewMode); }
     hub.on('reset_camera', resetCamera);
 
+    // Client reset barrier (issue #101 step 4): a source-generation boundary
+    // (or View losing readiness) means every point/surface buffer currently
+    // on screen belongs to a source the server has already moved past —
+    // clear both draw ranges so nothing renders until fresh `point_cloud` /
+    // `surface_cloud` data for the NEW generation arrives. The underlying
+    // typed arrays are left alone (same geometry-reuse pattern as slam.js);
+    // only the draw range, which bounds what actually reaches the GPU pass.
+    hub.on('stream_reset', () => {
+        geometry.setDrawRange(0, 0);
+        uncovGeom.setDrawRange(0, 0);
+        meshGeom.setDrawRange(0, 0);
+        window.__gotFrame = false;
+    });
+
     window.addEventListener('resize', () => {
         camera.aspect = window.innerWidth / window.innerHeight;
         camera.updateProjectionMatrix();

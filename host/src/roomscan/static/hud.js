@@ -92,6 +92,22 @@ export function createHud(hub) {
 
     hub.on('view_fps', (n) => { if (viewFpsEl) viewFpsEl.textContent = String(n); });
 
+    // Client reset barrier (issue #101 step 4): the Stream rows/drops/gaps
+    // are source-owned telemetry -- a generation/readiness change means the
+    // numbers on screen describe a source the server has already moved past
+    // (or, entering View with nothing loaded, a source the server has now
+    // stopped reporting on entirely, per the broadcaster's `ready` gate).
+    // Blank them rather than leave the last live reading frozen under a
+    // capture's name.
+    hub.on('stream_reset', () => {
+        if (deviceFpsEl) deviceFpsEl.textContent = fmtHz(null);
+        if (dropsEl) dropsEl.textContent = '0';
+        if (gapsEl) gapsEl.textContent = '0';
+        if (streamsEl) streamsEl.innerHTML = '';
+        if (linkValueEl) linkValueEl.textContent = fmtRate(0);
+        if (linkFillEl) linkFillEl.style.width = '0%';
+    });
+
     hub.on('metrics', (msg) => {
         if (deviceFpsEl) deviceFpsEl.textContent = fmtHz(msg.render_fps);
         if (dropsEl) dropsEl.textContent = String(msg.drops ?? 0);

@@ -561,6 +561,36 @@ export function createSlam(hub, sceneApi) {
         scanner.visible = slamOn && scannerHasPose && state.view_mode === 'world';
     }
 
+    // --- reset barriers (issue #101) ---------------------------------------
+    //
+    // `mesh_reset` (step 5): the dedicated `/ws-mesh` control frame, ordered
+    // by the server AFTER anything already queued for the superseded
+    // generation -- the authoritative "clear the mesh geometry now" signal.
+    function clearMeshGeometry() {
+        nonWallMesh.geometry.setDrawRange(0, 0);
+        wallMesh.geometry.setDrawRange(0, 0);
+        floorLines.geometry.setDrawRange(0, 0);
+        lastMeshes = null;
+        window.__gotMesh = false;
+    }
+    hub.on('mesh_reset', clearMeshGeometry);
+
+    // `stream_reset` (step 4): the main-socket `state`-driven barrier -- clear
+    // everything ELSE this module owns (trajectory, scanner pose, Detailed
+    // build progress, the processed-frame-rate EMA) in addition to the mesh
+    // geometry, since a generation/readiness change can land before the mesh
+    // channel's own barrier does.
+    function clearForNewStream() {
+        clearMeshGeometry();
+        trajLine.geometry.setDrawRange(0, 0);
+        scannerHasPose = false;
+        detailedBuild = null;
+        procRatePrev = null;
+        procRateEma = null;
+        updateScannerVisibility();
+    }
+    hub.on('stream_reset', clearForNewStream);
+
     function applyState() {
         const slamOn = state.display === 'slam' || state.display === 'detailed';
         group.visible = slamOn;

@@ -2067,11 +2067,16 @@ def _make_controller(tmp_path, *, live_source=None, live_label="test",
 
 
 def _drain_depth_mean(slot, timeout):
+    """Pull from a `SessionController`'s real render slot. Entries are
+    generation-tagged (`_GenerationSlot`, issue #101) -- `(generation, header,
+    outputs)` -- rather than the pre-#101 `(header, outputs)`, since these
+    tests read straight off `ctrl.slot`, the same queue `_run_reader` writes
+    through the wrapper. The generation itself isn't this helper's concern."""
     import queue
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            _, outputs = slot.get(timeout=0.1)
+            _, _header, outputs = slot.get(timeout=0.1)
             return float(outputs["depth"].mean())
         except queue.Empty:
             continue
@@ -2133,7 +2138,7 @@ def test_controller_switch_to_replay_changes_stream(tmp_path):
         deadline = time.time() + 4.0
         while time.time() < deadline:
             try:
-                _, outputs = slot.get(timeout=0.1)
+                _, _header, outputs = slot.get(timeout=0.1)
             except queue.Empty:
                 continue
             if float(outputs["depth"].mean()) > 5000.0:
@@ -3774,9 +3779,14 @@ def test_save_is_live_slam_only():
 
 def test_set_display_refuses_slam_on_a_legacy_capture():
     """A capture with no stream 9 has no rotation prior, so SLAM would build an
-    empty map. Refuse with an explanation and leave the display untouched."""
+    empty map. Refuse with an explanation and leave the display untouched.
+
+    `selected_capture` must match `_FakeCtrl`'s `replay_path` -- a genuinely
+    LOADED capture, per `_view_ready` (issue #101) -- so this test exercises
+    the has-stream-9 rejection specifically, not the (also-real, separately
+    tested) "nothing loaded yet" rejection."""
     import asyncio
-    ui = web.UiState(source="view", display="point_cloud")
+    ui = web.UiState(source="view", display="point_cloud", selected_capture="take.bin")
     state, published = _inbound_state(ui, _FakeCtrl(has_stream_9=False))
     asyncio.run(web._handle_inbound(state, {"type": "set_display", "display": "slam"}))
     assert ui.display == "point_cloud"
