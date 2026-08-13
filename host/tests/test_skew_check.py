@@ -215,3 +215,31 @@ def test_collect_frames_two_tof_frames_each_keep_their_own_imu_raw_sends(tmp_pat
     assert by_seq[1]["n_ts"] == 3
     assert by_seq[2]["n_imu_raw_sends"] == 1
     assert by_seq[2]["n_ts"] == 3
+
+
+def test_collect_frames_records_signed_quat_lead(tmp_path):
+    """#155: the stream-9 batch-midpoint lead must be reported per frame, SIGNED —
+    it measured +5.1 ms on 2026-08 rigs but NEGATIVE on officeFullScanAug6, so a
+    magnitude (or an assumed constant) would hide exactly the fact that killed the
+    constant-offset plan. Wrap-safety and the value itself are protocol.py's tests;
+    this pins the plumbing into skew_check rows."""
+    import struct
+
+    def sync_payload(lsm, mid):
+        return struct.pack("<IIIIHHBB", lsm, 217, 24_109, mid, 44, 15, 1, 0)
+
+    data = (_wire_frame(FrameType.DATA, StreamId.RAW_3DMD, 42, 1_000_000, b"\x00")
+            + _wire_frame(FrameType.DATA, StreamId.IMU_SYNC, 42, 1_000_000,
+                          sync_payload(10_010, 10_358))       # lead: +358 ticks + latch
+            + _wire_frame(FrameType.DATA, StreamId.RAW_3DMD, 43, 1_033_333, b"\x00")
+            + _wire_frame(FrameType.DATA, StreamId.IMU_SYNC, 43, 1_033_333,
+                          sync_payload(20_010, 19_662)))      # NEGATIVE: mid before latch
+    p = tmp_path / "cap.bin"
+    p.write_bytes(data)
+
+    rows, tick_us, _ = collect_frames(p)
+    assert len(rows) == 2
+    # +348 ticks (mid - latch) + 10 ticks (latch back-out at 217 us) = +358 ticks
+    assert rows[0]["quat_lead_us"] == pytest.approx(358 * tick_us)
+    # -348 ticks + 10 ticks = -338 ticks: the sign must survive
+    assert rows[1]["quat_lead_us"] == pytest.approx(-338 * tick_us)

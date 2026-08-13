@@ -228,6 +228,9 @@ def collect_frames(path: str | Path) -> tuple[list[dict], float, bool]:
             rec["latch_delay_us"] = float(sync.latch_delay_us)
             rec["drain_delay_us"] = float(sync.drain_delay_us)
             rec["read_us"] = float(sync.read_us)
+            lead = sync.quat_offset_us(tick_us)
+            if lead is not None:
+                rec["quat_lead_us"] = float(lead)
         out.append(rec)
     return out, tick_us, tick_from_device
 
@@ -292,6 +295,24 @@ def check_capture(path: str | Path, window_s: float = DEFAULT_WINDOW_S) -> dict:
                 "std": round(float(v.std()), 1),
                 "p95": round(float(np.percentile(v, 95)), 1),
                 "max": round(float(v.max()), 1),
+            }
+        # The stream-9 quat's batch-midpoint lead over the frame-ready edge. This is
+        # the distribution that killed the constant-offset plan (#155): +7.76 ms on
+        # the 2026-07 golden capture, +5.1 ms on 2026-08 rigs, NEGATIVE (-3.9 ms) on
+        # officeFullScanAug6 -- it drifts with firmware/profile and even flips sign,
+        # so report it per capture instead of assuming the number on record. Signed:
+        # positive = the quat is valid AFTER frame-ready (it leads the depth frame).
+        lead = np.array([r["quat_lead_us"] for r in rows if "quat_lead_us" in r])
+        if lead.size:
+            report["quat_lead_us"] = {
+                "n": int(lead.size),
+                "mean": round(float(lead.mean()), 1),
+                "median": round(float(np.median(lead)), 1),
+                "std": round(float(lead.std()), 1),
+                "p5": round(float(np.percentile(lead, 5)), 1),
+                "p95": round(float(np.percentile(lead, 95)), 1),
+                "min": round(float(lead.min()), 1),
+                "max": round(float(lead.max()), 1),
             }
     return report
 

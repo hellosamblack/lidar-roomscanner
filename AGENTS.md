@@ -216,5 +216,10 @@ in the repo. The evidence for every one is in `docs/roadmap-history.md`.
   the field was a `float` (BUG-050, which reported 1.78e9 s for a 90 s take).
 - **A new default is invisible without a migration** — `_persist_ui` writes every field on any change,
   so a stale persisted value shadows a new default forever.
+- **Know what your null actually nulls.** #155's wrong-direction control was built to void
+  smoothing-flattered wins, but it shared the exact-group association fix with the treatment — so
+  when it "passed", it was attributing the win to the shared component, not voiding the result.
+  A null voids only what it does not share; write down what each control arm retains vs inverts
+  before reading its verdict, and shape the arms so every pairwise gate answers one named component.
 
 Guiding order (per project owner): mature the visualizer and UI/config on the ToF sensor alone **before** adding the IKS4A1 board. *(Satisfied — both are done; Phase 6 SLAM should likewise be validated against recorded captures before hardware-in-the-loop.)*

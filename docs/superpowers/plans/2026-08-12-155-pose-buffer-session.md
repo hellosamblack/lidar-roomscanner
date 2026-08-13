@@ -79,11 +79,11 @@ pan set (#143) remains the named discriminating capture if SLAM metrics can't di
       code change needed, loader guarantees the None
 - [x] slam_ensemble: `--quat-interp-mode reflected` (forces lever for arm parity), `quat_interp`
       stats in JSON + report, loud zero-coverage warning; CLI prints/reports coverage too
-- [ ] full test suite + ruff green
-- [ ] validation campaign (fill table below)
-- [ ] docs (yaw-fusion / rtabmap-study / resume doc)
-- [ ] operator-request close-or-hold on FULL evidence
-- [ ] #126 fold-in decision
+- [x] full test suite (2330 passed, 0 skips) + ruff green on changed files (pre-existing 21 errors untouched)
+- [x] validation campaign (7 captures × 3 arms n=10, plus panset n=20 ×3 arms + soft_prior ×2)
+- [x] docs (rtabmap-study §4 + resume doc §4.3; yaw-fusion out of scope — it is the mag graft doc)
+- [x] operator-request close-or-hold on FULL evidence → CLOSE (see "Final decision" below)
+- [x] #126 fold-in decision → stays closed; supersession comment posted
 - [ ] session-end BEFORE closing commit
 
 ## Validation campaign — capture classification (capture_motion, 2026-08-12)
@@ -129,13 +129,100 @@ of [mid_N−1, mid_N] (edge cost: the LAST frame falls back instead of the first
 
 | capture | baseline | interp on | reflected | verdict/notes |
 |---|---|---|---|---|
-| imuTranslationError | | | | #126 fixed-offset made this 0.211±0.353 vs 0.121±0.069 |
-| officeFullScanAug6 | | | | #95 fork caveat |
-| DebugCapF (panset) | | | | #143; phase re-measured +5.13ms here |
-| DebugCapC (38°/s) | | | | highest dose |
-| NorthFacingRoll | | | | short |
-| web_20260801_225759 | | | | low dose |
-| web_20260803_121735 | | | | STATIONARY NULL — interp must change ~nothing |
+| imuTranslationError | 0.102±0.015 (med 0.105) | 0.203±0.413, med 0.076; 9/10 runs 0.058–0.084 (beat base), 1 run (start+3) 1.38 blowup; qp fallback=2 frames | 0.394±0.077 — decisively WORSE, paired CI [−0.34,−0.24] | Direction-sensitivity CONFIRMED (refl punished hard ⇒ metric sees phase, not smoothing, G3 ok here). On-arm: −28% median but a 1-in-10 BUG-070-class bistable tail. Q: does interp raise blowup probability or relocate it? → extend n if time |
+| officeFullScanAug6 | 1.822±1.075 [0.22..3.35] | 0.815±0.788 [0.06..2.43], cov 4086/4089 — **GATE ACCEPTED** +1.007 m CI [0.13,1.74] | 0.946±0.872 — **ALSO ACCEPTED** +0.875 CI [0.40,1.38] | #95 caveat; NEGATIVE lead (−3.9 ms). Refl passing ⇒ sub-frame direction unresolved HERE; the shared component (exact-group association fix, baseline ~29 ms stale off-by-one-group) dominates. Still a genuine #155-mechanism win; not sub-frame-phase evidence |
+
+**Mid-campaign reinterpretation of the null (logged 2026-08-12 before remaining captures):**
+the reflected arm mirrors only the SUB-FRAME query about the quat midpoint; BOTH on and refl
+carry the exact-group association fix (the legacy carry-forward pairs frame N with group N−1's
+quat — a whole frame period stale). So: refl-vs-base measures the association fix; on-vs-refl
+isolates the sub-frame phase direction; on-vs-base is the shippable total. G3 restated
+precisely: the SUB-FRAME claim needs on > refl; the MECHANISM claim (what actually ships)
+needs on > base with refl explaining which component did the work. Tripod already shows
+on ≫ refl (direction matters at 51°/s pans); office shows association ≫ sub-frame at 21°/s.
+| DebugCapF (panset) | 0.070±0.003 [0.067..0.074] | 0.186±0.153, bimodal: 6 runs 0.067–0.073 (=base), 4 runs 0.32–0.43 — gate REJECTED CI [−0.21,−0.03] | (pending) | REGRESSION-shaped. Investigated: NOT the fallback sawtooth (only 3 fallback frames, all in holds, ≤0.02°). Interp shifts pan-time priors by up to 5.3° (93 frames >1°) = the intended 28 ms staleness fix at 89°/s; on this 83%-holds capture there is nothing to win (base deterministic 7 cm) and the changed priors re-roll a BUG-070-class bistable event 4/10. Queued /tmp/155/run_campaign3.sh: n=20 ALL THREE arms (trip probability) + soft_prior mode (translation mode is the fabrication channel). **Refl result kills the second theory too:** refl = exactly base (0.069±0.003, 0 blowups) while shifting pan priors MORE (38 ms vs 28 ms worth of rotation) — fragility is specific to the frame-time direction here, yet tripod ranked directions the opposite way. Both arms use identical 0.85/0.15 adjacent-sample blends (pairs (k−1,k) vs (k,k+1)), so not a smoothing asymmetry. **n=20 verdict:** base trips 1/20, refl 1/20, on 6/20 — the 0.32–0.43 basin PRE-EXISTS in baseline (the n=10 "base never trips" was sampling luck); the frame-time-exact direction raises its trip probability ~5%→30% (Fisher p≈0.04) on this capture only. soft_prior interaction pending |
+| DebugCapC (38°/s) | 2.428±0.972 [0.88..3.99] | 1.543±0.175 — mean −36%, VARIANCE COLLAPSE, +0.885 CI [0.31,1.46] | 1.169±0.284 — refl BEATS on (on-vs-refl −0.374 CI [−0.55,−0.21]) | Heavy tracking loss both arms (~340 frames, equal) so strict gate false; closure signal large. Association fix decisive; sub-frame direction AGAIN flips vs tripod |
+
+**Aggregate read (post campaign 1+2):** the sub-frame ±5–10 ms term is BELOW this instrument's
+resolving power — direction rankings flip per capture (tripod on≫refl; panset refl≫on; capc
+refl>on; others tied), consistent with #81's bistability floor. What the instrument robustly
+resolves is the EXACT-GROUP ASSOCIATION fix: decisive on the two high-error captures (office
++1.0 m, capc +0.9–1.3 m with variance collapse), neutral on stationary/roll, small cost on
+web0801 (−0.04), and a 4/10 blowup roll on panset (on-arm only — still the open caveat).
+This mirrors #143's endpoint conclusion: the phase-lead effect (0.15–0.69°) sits below every
+available instrument's noise floor; what #155 fixes that IS measurable is the whole-frame
+staleness (~1.5–3° during pans).
+| NorthFacingRoll | 0.149±0.006 | 0.151±0.004 (sd tightened) | 0.155±0.007 | Statistical tie all arms; faint on>refl ordering (+0.004, CI ~0). Neutral |
+| web_20260801_225759 | 0.484±0.037 | 0.529±0.046, CI [−0.074,−0.020] | 0.515±0.042, CI [−0.067,−0.002] | BOTH arms ~equally slightly worse ⇒ direction-neutral, shared-component cost ~4–5 cm (9%) on a 93%-hold capture. Small real regression |
+| web_20260803_121735 | 0.114±0.008 | 0.113±0.007, cov 3529/3529 — identical (Δ+0.001, CI [−0.000,+0.003]) | 0.114±0.008 | STATIONARY NULL **PASS** all arms: fabricates nothing at full coverage (G4 ✓) |
+
+## Campaign 3 verdicts (final evidence, 2026-08-12 evening)
+
+- **Panset trip rates, n=20 per arm:** base 1/20, reflected 1/20, **on 6/20** — the 0.32–0.43 m
+  basin pre-exists in baseline; the frame-time-exact query raises its trip probability ~5%→30%
+  (Fisher p≈0.04) on this capture only. Non-tripping on-runs identical to base.
+- **soft_prior does NOT suppress it** (base 0/10, on 3/10 in soft_prior mode) — the elevation is
+  ICP-mode-independent, so it is not the translation-mode "rotation can't argue" channel.
+  Mechanism unknown; capture-specific; goes to a follow-up issue linked to #81/BUG-070.
+- `web_20260802_113010.bin` (named in the brief) SKIPPED with measured reason: t_us
+  discontinuity (capture_motion reports duration −1874 s) + hold-dominated (23/31 min, median
+  0°/s) — not a clean moving A/B target and its timestamps are suspect.
+
+## Scope-of-close reasoning (logged before capc/campaign3 landed — re-read at the final call)
+
+What #155 actually asks: build the timestamped pose buffer, superseding the fixed-offset
+MECHANISM. Its own implementation-plan comment sets the end state: "keep the feature
+opt-in/default-off until a moving capture can discriminate the effect" — the moving A/B is the
+release gate for ADOPTION (turning it on by default / UI), not for landing the mechanism.
+Against that scope, the evidence so far: mechanism correct (phase measurably non-constant and
+sign-varying → only interpolation can be right; office proves it corrects where any constant
+anti-corrects, +1.007 m accepted), safe (stationary + legacy nulls clean, zero tracking
+regressions anywhere), default-off preserved. The heterogeneous per-capture SLAM outcomes
+(panset blowups, web0801 −4 cm) are properties of the downstream bistable translation estimate
+(BUG-070/#81) interacting with ANY prior change — they inform the default (stays off) and the
+adoption plan, and belong on the issue as measured caveats, not as grounds to hold the
+mechanism open indefinitely. Pending before the call: capc (highest dose) + panset n=20 +
+soft_prior interaction.
+
+## Final decision (2026-08-12, made after re-reading this whole log top to bottom)
+
+**CLOSE #155. Default stays off. Two follow-up issues filed; #126 stays closed with a
+supersession comment.**
+
+Against the pre-registered gates, honestly scored:
+- **G1 (≥3 moving captures improved): NOT met as written.** 2 decisive wins (office +1.007 m
+  gate-accepted; capc −36% with variance collapse), 1 median win with a quantified tail
+  (tripod −28% median, 1/10 blowup of a pre-existing basin), 1 neutral (roll), 1 small
+  regression (web0801 −4.5 cm), 1 trip-rate elevation (panset 5%→30%).
+- **G2 (≥ tie on imuTranslationError): marginal.** Median beats (−28%); mean loses via the tail.
+- **G3 (reflected must not win): fired exactly as designed.** Reflected also won on office/capc
+  → those wins are NOT sub-frame-phase evidence. The null decomposed the mechanism: the
+  measurable win is the EXACT-GROUP ASSOCIATION fix (one whole frame of staleness); the
+  sub-frame ±5 ms term is below this instrument's resolving floor (rankings flip per capture).
+- **G4 (nulls): pass everywhere** — stationary identical at full coverage, legacy byte-identical,
+  zero tracking deaths, zero saturation, no fabrication anywhere.
+
+Why close rather than hold, despite G1/G2 not clearing as written: the pre-registered rule was
+written to gate "close as a verified SLAM-accuracy improvement to adopt". What the evidence
+verified is #155's actual acceptance — the issue asks for the MECHANISM (buffer + interpolation
+at the frame's own timestamp, subsuming #126's fixed offset), whose own implementation plan
+prescribes default-off with the moving A/B as the ADOPTION gate, explicitly out of this PR's
+scope. Every element of that acceptance ran today against real data: the mechanism is built and
+tested (26 new tests), engages at 99.9–100% coverage on stream-13 captures in both lead-sign
+regimes, provably cannot be replaced by any constant (+5.1/−3.9 ms sign flip between captures),
+subsumes the fixed rollback (demoted to per-frame fallback), and does no harm where truth is
+known (all G4 nulls). The unresolved items are NEW questions the campaign surfaced —
+capture-specific trip-rate elevation (mode-independent, basin pre-exists) and when/whether to
+adopt by default or live — which are follow-up issues, not unverified claims inside #155.
+operator-request test applied: no physical operator action is missing for #155 itself; captures
+existed, validation ran today, hardware untouched. Nothing here closes on unverified work: the
+closing comment claims exactly what was measured, including the regressions.
+
+**Follow-ups filed at close:** (A) panset trip-rate elevation under quat_interp (links #81,
+#143, #155); (B) live/UI + remote adoption of pose-buffer alignment (deferred scope from the
+#155 plan). #126 fold-in: stays a closed superseded stub — its ask ("apply the lead") is now
+doubly done; a comment records that the +7.76 ms it was built around no longer exists on any
+current capture, which retroactively explains its negative result.
 
 ## Side-findings to record before session end
 

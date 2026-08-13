@@ -194,6 +194,12 @@ def capture_skew(path: str, window_s: float = 2.0) -> dict:
     negative `shift_us` with a large |welch_t| means the pairing moves with
     processing load.
 
+    `quat_lead_us` (#155) is the signed distribution of the stream-9 quaternion's
+    batch-midpoint lead over the frame-ready edge -- positive = the quat is valid
+    AFTER the frame. Measure it per capture, never assume the number on record:
+    it was +7.76 ms on the 2026-07 golden capture, +5.1 ms on 2026-08 rigs, and
+    NEGATIVE (-3.9 ms) on officeFullScanAug6.
+
     Wraps `host/tools/skew_check.py::check_capture()`.
     """
     from tools.skew_check import check_capture
@@ -274,6 +280,7 @@ def capture_heading(path: str, cal_path: str = "") -> dict:
 @mcp.tool()
 def slam_ensemble(capture: str, n: int = 10, device: str = "", voxel_size: float = 0.0,
                   block_count: int = 0, icp_mode: str = "", max_frames: int = 0,
+                  apply_quat_phase: bool = False, quat_interp_mode: str = "",
                   include_runs: bool = True, timeout_s: int = 3600) -> dict:
     """Score a capture with an ensemble of SLAM runs -- one run is NOT a measurement.
 
@@ -305,6 +312,13 @@ def slam_ensemble(capture: str, n: int = 10, device: str = "", voxel_size: float
     about 5 minutes. Drop `n` to 5 for a triage pass; keep 10 for anything a formal
     decision rides on.
 
+    `apply_quat_phase` enables #155's timestamp alignment (each frame's quat
+    SLERP-interpolated at its own frame-ready instant; default off, needs
+    stream 11+13); the report's `quat_interp` says what it DID (applied/eligible).
+    `quat_interp_mode="reflected"` is the validation-only wrong-direction null arm
+    (implies the lever): if it scores as well as the real arm, the win is not
+    sub-frame phase -- see the #155 session ledger before quoting either.
+
     Wraps `host/tools/slam_ensemble.py::run_ensemble()`.
     """
     import json
@@ -319,9 +333,12 @@ def slam_ensemble(capture: str, n: int = 10, device: str = "", voxel_size: float
         out = Path(td) / "ensemble.json"
         cmd = [str(VENV_PY), str(HOST / "tools" / "slam_ensemble.py"), str(p),
                "-n", str(n), "--json", str(out), "--quiet"]
-        for flag, val in (("--device", device), ("--icp-mode", icp_mode)):
+        for flag, val in (("--device", device), ("--icp-mode", icp_mode),
+                          ("--quat-interp-mode", quat_interp_mode)):
             if val:
                 cmd += [flag, val]
+        if apply_quat_phase:
+            cmd += ["--apply-quat-phase"]
         for flag, val in (("--voxel-size", voxel_size), ("--block-count", block_count),
                           ("--max-frames", max_frames)):
             if val:
@@ -1140,7 +1157,6 @@ def splat_render(ply: str, out: str, transform: str = "", azimuth: float = 35.0,
 
     Wraps `host/tools/splat_render.py`.
     """
-    import json
     import os
 
     p = (REPO / ply) if not Path(ply).is_absolute() else Path(ply)

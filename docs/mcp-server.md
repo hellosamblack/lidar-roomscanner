@@ -146,7 +146,7 @@ ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, com
 `profile_estimate(profile?, ranging_mode?, fps?, exposure_ms?, power_mode?, imu_env_rate_hz?, transport?)`,
 `profile_tuning(ranging_mode?, power_config?, resolution?, dss?, output_interface?, fps?, exposure_ms?, ambient_lux?)`,
 `slam_rerender(capture, voxel_size?, block_count?, device?, max_frames?)`,
-`slam_ensemble(capture, n?, device?, voxel_size?, block_count?)`,
+`slam_ensemble(capture, n?, device?, voxel_size?, block_count?, icp_mode?, max_frames?, apply_quat_phase?, quat_interp_mode?)`,
 `slam_stall_profile(capture, frames?, device?, decimate?)`,
 `slam_icp_bench(capture?, what?, frames?, raycast_frames?, ensemble_n?, device?, ab_pairs?, ab_frames?, baseline_icp_device?, candidate_icp_device?)`,
 `splat_list()`, `splat_build(video, name, force?, fps?, iters?, max_gaussians?)`,
@@ -266,12 +266,20 @@ required input, which nothing else in the repo computed — split from
 `vertical_error_m` on the real world-up axis (**−Y**, not −Z). Check `runs_died` and
 `any_saturated` before quoting anything; and remember closure is only *drift* if the
 operator actually returned to the start pose. Budget ≈ frames × n × 7 ms on CUDA:0.
+`apply_quat_phase=True` enables #155's timestamp alignment (report field `quat_interp`
+says what it *did* — applied/eligible), and `quat_interp_mode="reflected"` runs the
+validation-only wrong-direction null arm; a "win" that the reflected arm matches is
+not sub-frame-phase evidence (see the 2026-08-12 #155 session ledger).
 
 `capture_skew` measures where a depth frame actually sits on the IMU's clock, from stream 13
 `IMU_SYNC` (BUG-031). ⚠ Its number is **window-dependent** — 18/38/150 µs RMS at `window_s`
 2/5/20 — because what survives the fix is the two oscillators drifting apart, not per-frame skew
 (lag-1 autocorrelation 0.992). Quote the window alongside the figure, or use the window-free
-10–11 µs. It also reports the quaternion's phase offset, which is a **+7.8 ms lead**, not a lag.
+10–11 µs. It also reports `quat_lead_us`, the **signed** distribution of the stream-9
+quaternion's batch-midpoint lead over the frame-ready edge — measure it per capture rather than
+assuming the number on record: +7.76 ms on the 2026-07 golden capture, +5.1 ± 0.7 ms on 2026-08
+rigs, and **−3.9 ms (opposite sign) on officeFullScanAug6** — the sign flip is what killed the
+constant-offset plan (#126 → #155).
 
 `capture_meta` decodes the 100-byte `vl53l9_meta_t` tail every RAW_3DMD frame carries (and the host
 has always archived but never read). Use it to recover what a capture *actually* ran at — the
