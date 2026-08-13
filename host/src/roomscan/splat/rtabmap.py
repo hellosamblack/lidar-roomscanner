@@ -77,20 +77,30 @@ class RtabmapExportError(Exception):
 #   pose = t1.inverse() * pose_in                        # world-axis remap
 #   pose = t2.inverse() * pose * t2                       # + a SECOND local-axis remap
 #
-# Composing (both t1, t2 have zero translation, so this is exact, not an approximation):
-#   R_out = (t2^-1 t1^-1) @ R_in @ t2   =  W_inv @ R_in @ O_inv          [W = O = as below]
-#   t_out = (t2^-1 t1^-1) @ t_in         =  W_inv @ t_in
+# Composing (both t1, t2 have zero translation, so this is exact, not an approximation) gives
+# the EXPORTER's forward transform, from `pose_in` (what we want to recover) to `pose_out`
+# (what the poses.txt file actually contains):
 #
-# `rtabmap_format1_pose_to_world_T_camera_optical` below undoes exactly that (W = W_inv^-1,
-# O = O_inv^-1; both are pure rotations so inverse == transpose), recovering `pose_in` --
-# i.e. `map_T_optical` in RTAB-Map's own map frame. Numerically verified by round-tripping a
-# random rigid pose through the forward formula above and back (see
+#   R_out = (t2^-1 @ t1^-1) @ R_in @ t2
+#   t_out = (t2^-1 @ t1^-1) @ t_in
+#
+# `rtabmap_format1_pose_to_world_T_camera_optical` below inverts that, solving for R_in/t_in:
+#
+#   R_in = (t1 @ t2) @ R_out @ t2^-1
+#   t_in = (t1 @ t2) @ t_out
+#
+# (both t1, t2 are pure rotations, so `^-1` == transpose throughout). `_WORLD_REMAP_INV` below
+# is that `(t1 @ t2)` left factor -- i.e. the inverse of the exporter's own left factor
+# `(t2^-1 @ t1^-1)`, applied to undo it -- and `_LOCAL_REMAP_INV` is `t2^-1`, the inverse of
+# the exporter's own right factor `t2`. Recovering `pose_in` this way gives `map_T_optical` in
+# RTAB-Map's own map frame. Numerically verified by round-tripping a random rigid pose through
+# the forward formula above and back (see
 # `test_splat_rtabmap.py::test_format1_round_trip_matches_pinned_source_algebra`), and by the
 # hand-derived identity/translation/90-degree-rotation cases in the same test module.
 _T1_ROT = np.array([[0.0, 0.0, 1.0], [0.0, -1.0, 0.0], [1.0, 0.0, 0.0]])
 _OPTICAL_ROT = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])  # opticalRotation()
-_WORLD_REMAP_INV = _T1_ROT @ _OPTICAL_ROT          # == W: undoes the world-axis remap
-_LOCAL_REMAP_INV = _OPTICAL_ROT.T                  # == O: undoes the local-axis remap
+_WORLD_REMAP_INV = _T1_ROT @ _OPTICAL_ROT          # (t1 @ t2): undoes the world-axis remap
+_LOCAL_REMAP_INV = _OPTICAL_ROT.T                  # (t2^-1): undoes the local-axis remap
 
 
 def _quat_xyzw_to_matrix(q: np.ndarray) -> np.ndarray:
@@ -211,7 +221,12 @@ def _find_camera_poses_file(export_dir: Path, base_name: str | None) -> tuple[st
 _BLOCK_KEY_RE = re.compile(r"^(\w+):\s*(.*)$")
 
 
-def _parse_opencv_yaml_lite(text: str) -> dict:
+def _parse_opencv_yaml_lite(text: str, *, path: Path | None = None) -> dict:
+    """Parse the fixed `CameraModel::save()` structure. Raises `RtabmapExportError` (never a
+    bare `ValueError`) on a malformed `data: [...]` entry, naming `path` and the field --
+    `_load_calibration`/`summarize_rtabmap_export`'s "never raises a traceback" contract
+    depends on every parse failure here surfacing as that type."""
+    where = f"{path}: " if path is not None else ""
     lines = [ln for ln in text.splitlines()
              if ln.strip() and not ln.startswith("%") and ln.strip() != "---"]
     sections: dict[str, list[str]] = {}
@@ -237,7 +252,10 @@ def _parse_opencv_yaml_lite(text: str) -> dict:
         cols_m = re.search(r"cols:\s*(\d+)", block_text)
         data_m = re.search(r"data:\s*\[(.*?)\]", block_text)
         if rows_m and cols_m and data_m:
-            values = [float(x) for x in data_m.group(1).split(",") if x.strip()]
+            try:
+                values = [float(x) for x in data_m.group(1).split(",") if x.strip()]
+            except ValueError as e:
+                raise RtabmapExportError(f"{where}field {key!r}: malformed data entry: {e}") from e
             result[key] = {"rows": int(rows_m.group(1)), "cols": int(cols_m.group(1)), "data": values}
     return result
 
@@ -245,15 +263,24 @@ def _parse_opencv_yaml_lite(text: str) -> dict:
 def _load_calibration(path: Path) -> tuple[np.ndarray, int | None, int | None]:
     if not path.exists():
         raise RtabmapExportError(f"calibration file not found: {path}")
-    parsed = _parse_opencv_yaml_lite(path.read_text(encoding="utf-8"))
+    parsed = _parse_opencv_yaml_lite(path.read_text(encoding="utf-8"), path=path)
     cm = parsed.get("camera_matrix")
     if not isinstance(cm, dict) or cm.get("rows") != 3 or cm.get("cols") != 3 or len(cm.get("data", [])) != 9:
         raise RtabmapExportError(f"{path}: missing or malformed camera_matrix "
                                  "(expected a 3x3 camera_matrix block)")
     k = np.array(cm["data"], dtype=float).reshape(3, 3)
-    width = int(parsed["image_width"]) if "image_width" in parsed else None
-    height = int(parsed["image_height"]) if "image_height" in parsed else None
+    width = _parse_calib_int(path, "image_width", parsed.get("image_width"))
+    height = _parse_calib_int(path, "image_height", parsed.get("image_height"))
     return k, width, height
+
+
+def _parse_calib_int(path: Path, key: str, raw: str | None) -> int | None:
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as e:
+        raise RtabmapExportError(f"{path}: field {key!r} is not an integer: {raw!r} ({e})") from e
 
 
 def _image_size(path: Path) -> tuple[int, int]:
@@ -306,7 +333,7 @@ def _associate_frames(export_dir: Path, base_name: str,
             problems.append(str(e))
             continue
 
-        if calib_w and calib_h and (calib_w, calib_h) != (width, height):
+        if calib_w is not None and calib_h is not None and (calib_w, calib_h) != (width, height):
             problems.append(f"frame {stamp_token}: calibration size {calib_w}x{calib_h} "
                             f"!= image size {width}x{height} ({calib_path} vs {rgb_path})")
             continue
@@ -419,7 +446,6 @@ def summarize_rtabmap_export(export_dir, *, base_name: str | None = None,
         "frames_with_depth": sum(1 for f in frames if f.depth_path is not None),
         "frames_with_confidence": sum(1 for f in frames if f.confidence_path is not None),
         "distinct_calibrations": len(calib_signatures),
-        "poses_valid": len(frames),  # every constructed PosedFrame already passed pose validation
         "timestamps_present": len(frames) > 0 and all(f.timestamp is not None for f in frames),
         "timestamp_domains": domains,
         "geometry_paths": [str(p) for p in capture.geometry_paths],

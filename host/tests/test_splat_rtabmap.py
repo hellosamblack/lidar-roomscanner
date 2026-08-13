@@ -286,6 +286,38 @@ def test_missing_rgb(tmp_path):
         load_rtabmap_export(export_dir)
 
 
+def test_malformed_calibration_scalar_raises_rtabmap_error_not_value_error(tmp_path):
+    """image_width/image_height (and any other scalar `_parse_opencv_yaml_lite` field) must
+    fail through the RtabmapExportError contract, not leak a bare ValueError -- that would
+    break `summarize_rtabmap_export`'s documented "never raises" guarantee (a corrupt
+    calibration scalar is exactly the kind of malformed-record input a real export could
+    contain, not a hypothetical)."""
+    export_dir = _copy_fixture(tmp_path)
+    calib = export_dir / "session_calib" / "1699999900.100000.yaml"
+    calib.write_text(calib.read_text().replace("image_width: 64", "image_width: abc"))
+
+    with pytest.raises(RtabmapExportError, match=r"1699999900\.100000\.yaml.*image_width"):
+        load_rtabmap_export(export_dir)
+
+    # And the "never raises" contract holds even though the underlying error is a parse
+    # failure, not a missing/duplicate/orphan record.
+    report = summarize_rtabmap_export(export_dir)
+    assert report["ok"] is False
+    assert "image_width" in report["reason"]
+
+
+def test_malformed_calibration_matrix_data_entry_raises_rtabmap_error(tmp_path):
+    """A non-numeric entry inside a `data: [ ... ]` block (e.g. camera_matrix) must also
+    raise RtabmapExportError, not a bare ValueError from `_parse_opencv_yaml_lite`'s own
+    `float(x)` conversion."""
+    export_dir = _copy_fixture(tmp_path)
+    calib = export_dir / "session_calib" / "1699999900.100000.yaml"
+    calib.write_text(calib.read_text().replace("5.0000000000000000e+01, 0.,",
+                                               "not-a-number, 0.,"))
+    with pytest.raises(RtabmapExportError, match=r"1699999900\.100000\.yaml.*camera_matrix"):
+        load_rtabmap_export(export_dir)
+
+
 def test_duplicate_stamp_in_poses_file(tmp_path):
     export_dir = _copy_fixture(tmp_path)
     poses = export_dir / "session_camera_poses.txt"
@@ -384,7 +416,7 @@ def test_summarize_golden_fixture_reports_expected_counts():
     assert report["frames_with_depth"] == 2
     assert report["frames_with_confidence"] == 2
     assert report["distinct_calibrations"] == 2
-    assert report["poses_valid"] == 2
+    assert "poses_valid" not in report   # definitionally == frame_count; dropped, not reported
     assert report["timestamps_present"] is True
     assert report["timestamp_domains"] == ["rtabmap_export_stamp_s"]
     assert report["geometry_paths"] and report["geometry_paths"][0].endswith("session_cloud.ply")
