@@ -125,3 +125,9 @@ node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-reso
 node_modules/@openai/codex-sdk/LICENSE
 node_modules/@openai/codex-sdk/package.json
 node_modules/@openai/codex-sdk/README.md
+
+# Generated operator-action page (host/tools/operator_page.py, #184). A snapshot of the
+# `needs/operator` queue at one moment, written into the web server's static dir so it is
+# reachable at /static/operator.html next to the app the runbooks tell the owner to open.
+# Regenerate rather than commit -- a stale copy would show holds that are already closed.
+host/src/roomscan/static/operator.html

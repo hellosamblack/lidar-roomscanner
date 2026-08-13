@@ -137,6 +137,18 @@ own hand-back phrase. Cross-link it from each issue.
 Order the takes so the fussiest configuration comes last, and put anything needing the tripod
 adjacent — recomposing the rig between takes is the slow part.
 
+**Batching the whole standing queue is a tool, not a judgement call.** Batch mode above is for
+requests you are writing *together*; the queue also accumulates runbooks written weeks apart, each
+with its own power-up preamble, and read literally it asks for one trip per issue. `operator_page()`
+scrapes all of them and answers what the queue actually costs — it resolves the cross-reference
+requests below into free riders, clusters near-duplicate setup steps so a shared power-up happens
+once per sitting, and groups issues needing the same **venue** into one setup. That last grouping is
+the one to look at when writing a *new* runbook: two runbooks can share a venue and no wording at
+all (#142's recording is started by Claude, so it shares no step text with #144, yet both need the
+owner stood in the same metal-free spot), and the page is where that shows up. It writes
+`/static/operator.html` beside the app the runbooks already tell the owner to open. Regenerate it
+after posting or revising any runbook — it is a snapshot, not a live view.
+
 ### When another issue already asked for the same artifact
 
 Batch mode is for requests you are writing together. The commoner case is that the artifact you
@@ -236,6 +248,10 @@ gh issue edit NNN --repo hellosamblack/lidar-roomscanner \
 - `issue-fleet` — its veto rule is Part 1 of this skill applied at planning time.
 - `tof-scan-diagnosis` — what to run when a returned capture reconstructs wrongly.
 - `docs/mcp-server.md` — the `rig_*` and `capture_*` tools these runbooks drive.
+- `host/tools/operator_page.py` — the owner-facing page behind `operator_page()`. Its `TAG_RULES`
+  lexicon is the one hand-maintained part: edit it when a runbook introduces a genuinely new kind of
+  constraint. Everything else (aliases, shared setup, venue grouping) is derived from the runbook
+  text, so it cannot drift when a runbook is revised.
 - `host/tools/operator_queue.py` — the queue behind `operator_queue()`; its `SUBTYPES` and
   heading constants are the source of truth the label table above must agree with.
 - `host/tests/test_operator_skill.py` — the execution guards on all of the above, including the

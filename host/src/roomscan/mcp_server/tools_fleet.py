@@ -166,3 +166,32 @@ def operator_queue(detailed: bool = True) -> dict:
     """
     from tools.operator_queue import collect
     return collect(include_comments=detailed)
+
+
+@mcp.tool()
+def operator_page(out: str = "", repo: str = "") -> dict:
+    """Generate the owner-facing HTML page of everything waiting on the owner.
+
+    `operator_queue()` is the flat list; this is the *plan*. It scrapes every
+    `## 🔧 Operator Request` runbook and works out what the queue actually costs the
+    owner, which is not one trip per issue: it resolves the aliases that say "covered by
+    the request on #NNN", clusters near-duplicate setup steps so a shared power-up is
+    done once per sitting rather than once per issue, and groups issues that need the
+    same *venue* -- the same metal-free spot, the same blank wall -- into one setup.
+
+    Returns the plan (`sittings`, each with `legs` in the order to do them, plus
+    `riders` and `missing`) and writes a self-contained page the owner can tick through
+    while holding the hardware. Written by default to the web server's static dir, so it
+    is reachable at <http://localhost:8000/static/operator.html> -- next to the app the
+    runbooks already tell the owner to open. Pass `out` to write elsewhere.
+
+    Two things worth reading in the result. `missing` lists issues held with no runbook:
+    they cannot be planned, and they are the same dead end `operator_queue().problems`
+    reports. `riders` lists issues that close for free with another issue's action --
+    they appear nowhere else on the page, so the trip count stays honest.
+
+    Regenerate after posting or revising any runbook; the page is a snapshot, not live.
+    """
+    from tools.operator_page import DEFAULT_OUT, build_page
+    from tools.operator_queue import REPO
+    return build_page(repo=repo or REPO, out=out or DEFAULT_OUT)

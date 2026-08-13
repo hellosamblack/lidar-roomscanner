@@ -63,7 +63,10 @@ the capture file, or a human's eyes, the issue **stays open** with `needs/operat
 `status/blocked`. The same skill writes the owner-facing runbook — plain language, strictly
 alternating `[Claude]`/`[You]` steps composed from its step library, posted as an issue comment —
 and processes the result when it comes back. `operator_queue()` answers "what do you need from me?"
-in one call. `status-sync`, `session-end`, `session-start` and `issue-fleet` all route through it;
+in one call, and `operator_page()` answers the follow-up the owner actually cares about — *how few
+trips is that?* — by scraping every runbook into a generated `/static/operator.html`: free riders
+resolved, shared power-ups hoisted, same-venue issues merged into one setup. `status-sync`,
+`session-end`, `session-start` and `issue-fleet` all route through it;
 `host/tests/test_operator_skill.py` pins that wiring, because a gate nobody consults is worth
 nothing (`status/fix-unverified` sat unused in the tracker for weeks). **A candid "not verified on
 hardware" paragraph inside a closing comment is not a hold** — the retroactive audit (#174) reopened
