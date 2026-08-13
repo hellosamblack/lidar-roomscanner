@@ -164,7 +164,12 @@ an issue comment: plain language, strictly alternating `[Claude]`/`[You]` steps 
 step library, with a machine-readable footer naming the artifact and the gate. `operator_queue()`
 lists what is outstanding, and `host/tests/test_operator_skill.py` pins the routing from
 `status-sync`, `session-end`, `session-start` and `issue-fleet` — a gate nobody consults is worth
-nothing, which is what `status/fix-unverified` had been until then.
+nothing, which is what `status/fix-unverified` had been until then. **One exception to "the label is
+a promise the instructions exist" (2026-08-13, #175):** a `priority/later` hold may carry
+`needs/operator` *before* its runbook is written, deliberately, so it stays findable while queued
+behind the now/next tiers. `operator_queue()` reports that as `parked` and keeps it out of
+`problems`; nothing else is excused, since a `now`/`next` hold, a malformed footer or an unreadable
+comment thread each mean someone is waiting or a runbook exists and is broken.
 
 **Working several issues at once (2026-08-12, #170).** The `issue-fleet` skill runs a fleet of
 subagent workers across open issues, one git worktree each, under an owner-declared usage ceiling;

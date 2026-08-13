@@ -76,6 +76,16 @@ host/.venv/bin/python host/tools/fleet_plan.py --max-agents 3 --priorities "now,
 Check this at Step 1 rather than discovering it at Step 8.5 — **whether the MCP tools exist decides
 which issues you may claim at all**, because they are how the orchestrator does its own verification.
 
+**An MCP tool can also be present but *stale in its signature*, which reads like a bug in the tool.**
+On 2026-08-13 `fleet_plan(max_agents=3, priorities="now,next")` failed with *"plan_fleet_live() got
+an unexpected keyword argument 'triage'"*. Nothing was broken: the wrapper on disk passes `triage=`,
+and the long-lived `roomscan-mcp` process had booted a `fleet_plan.py` from before the triage-digest
+feature landed. The tell is that the rejected parameter is one a **recent commit added**. **Do not
+"fix" the signature** — that edits working code to match a stale process, and it is code you are
+forbidden to author anyway. Fall through to the same CLI front end above, which reads disk on every
+invocation. Absent, stale-in-behaviour and stale-in-signature are one root cause with three faces;
+only the first announces itself.
+
 **Re-checking the budget mid-run re-forecasts; it does not re-measure.** `seven_day.pct` is pinned to
 the `observed_week_pct` you passed, so it will read the same at every wave boundary. The measured
 quantity is `seven_day.weighted_tokens` — diff it between invocations to see what the fleet actually
@@ -282,6 +292,19 @@ Rather than leaving a vetoed issue silently unclaimed, run `operator-request` on
 runbook, apply `needs/operator` + a subtype — so the next wave finds it actionable instead of
 re-deriving the same veto. `operator_queue()` lists what is already waiting, so you can skip
 issues whose request is outstanding.
+
+**A `deferred` file conflict is a hypothesis, not a fact — check it before accepting it.** The
+conflict test runs on the **expanded** footprint, and expansion is a co-edit correlation over
+`git log`, not a statement about the change in front of you. On 2026-08-13 #175 was deferred with
+`conflicts_with: [159]` when the two share **zero** files: #175 is `host/tools/operator_queue.py`,
+#159's stated seeds are all `host/src/roomscan/splat/**`, and #159's expansion had ballooned to 32
+files, sweeping in unrelated `host/src/roomscan/mcp_server/` modules that merely co-occurred in old
+commits. #175 then
+landed alone, clean, first try. Each `footprint` entry is tagged `seed` / `sibling` / `coedit`, and
+**only `seed` is a claim about the actual change** — so compare the two issues' seed-tier files, and
+overrule a conflict that rests only on `coedit` entries. This is the mirror of the veto advice
+below, and the more expensive direction: a wrong veto you can see in the batch, while a wrongly
+deferred issue never reaches your review at all.
 
 Where the planner reports a soft conflict, **assign the contested file exclusively** instead of
 hoping. Name it in both spawn prompts — "X owns `foo.py`; you stop and report rather than edit it" —

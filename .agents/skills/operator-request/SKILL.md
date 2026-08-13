@@ -137,6 +137,24 @@ own hand-back phrase. Cross-link it from each issue.
 Order the takes so the fussiest configuration comes last, and put anything needing the tripod
 adjacent — recomposing the rig between takes is the slow part.
 
+### When another issue already asked for the same artifact
+
+Batch mode is for requests you are writing together. The commoner case is that the artifact you
+need **has already been requested on a different issue** — then you must not write a second
+runbook for the same physical action. Two live runbooks for one recording is precisely the
+ambiguity the red flag below forbids, and the duplicate is the one the owner will do twice.
+
+Post a **cross-reference request** instead: a real `## 🔧 Operator Request` comment, titled
+`Covered by the request on #MMM (<why it is the same take>)`, whose steps are "do the runbook on
+#MMM; nothing here", carrying the hand-back phrase **of the other issue** and its own footer with
+**this** issue's number and *its own* gate. #16 is the standing example ("Covered by the request on
+#145 — same cable, same five recordings"); #159 → #161 was written this way on 2026-08-13.
+
+This keeps three things true at once: the label stays a promise that instructions exist, the issue
+appears in `operator_queue()` with a parseable footer instead of landing in `problems`, and the
+owner is asked for the recording exactly once. Say plainly in the comment that there is nothing
+extra for them to do.
+
 ## Part 3 — Processing the result
 
 Triggered when the owner says the hand-back phrase, or anything like it.
@@ -198,7 +216,12 @@ gh issue edit NNN --repo hellosamblack/lidar-roomscanner \
 - You wrote "good coverage", "a reasonable amount", or "until it looks right" instead of a number.
 - You are scoring a capture without having checked `continuity.complete` and `capture_motion`.
 - An issue carries `needs/operator` but has no `## 🔧 Operator Request` comment — the label is a
-  promise that the instructions exist.
+  promise that the instructions exist. **One exception, and only one:** a `priority/later` hold may
+  be labelled before its runbook is written, deliberately, so it stays findable while queued behind
+  the now/next tiers. `operator_queue()` reports that as `pending[i]["parked"] == True` and keeps it
+  out of `problems` (#175). Nothing else is excused — `priority/now`/`priority/next`, a malformed
+  footer, and a comment-read failure are all still problems, because each means someone is waiting
+  or a runbook exists and is broken.
 - You are posting a second request to an issue that already has an unanswered one. Revise the
   existing one instead; two live runbooks on one issue is exactly the ambiguity this skill exists
   to remove.
