@@ -147,8 +147,16 @@ def operator_queue(detailed: bool = True) -> dict:
     that will score it.
 
     Read `problems`. It reports held issues whose runbook comment is missing or has no
-    parseable footer: the label is a promise that the instructions exist, and an issue
-    carrying it with nothing to act on is a dead end the issue list cannot show you.
+    parseable footer, or whose comments could not be read: the label is a promise that
+    the instructions exist, and an issue carrying it with nothing to act on is a dead
+    end the issue list cannot show you. One exception: a `priority/later` hold with no
+    runbook yet is a deliberately *parked* hold, not a broken one -- it is labelled
+    `needs/operator` early, before its runbook is written, so it stays findable while
+    queued behind the now/next tiers. That case is reported per-issue as
+    `pending[i]["parked"] == True`, not folded into `problems` -- nobody is waiting on
+    it yet. A malformed footer or a comment-read failure is still a problem even on a
+    `priority/later` issue, since either means a runbook exists (or was attempted) and
+    is broken, which `priority/later` cannot excuse.
 
     This is also the input to batch mode -- group the result by `kind` and by shared
     setup so the owner powers the rig up once rather than once per issue. See the

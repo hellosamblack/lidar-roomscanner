@@ -310,6 +310,159 @@ def test_status_sync_gates_closing_on_the_decision_table():
         "status-sync should name the hold labels it may have to apply instead of closing")
 
 
+# --------------------------------------------------------------------------------
+# #175 -- a deliberately deferred (priority/later) hold must not read as a problem
+# --------------------------------------------------------------------------------
+
+def _issue(number, labels, created="2026-08-01T00:00:00Z"):
+    return {
+        "number": number,
+        "title": f"issue {number}",
+        "labels": [{"name": lb} for lb in labels],
+        "createdAt": created,
+        "updatedAt": created,
+    }
+
+
+def _stub_gh(monkeypatch, issues, comments_by_number):
+    """Replace `tools.operator_queue._gh_json` with a fake that answers exactly the
+    two calls `collect()` makes: the `issue list` and, per issue, `issue view ...
+    --json comments`. Anything else raises so a shape drift in `collect()` is loud
+    rather than silently returning `null`.
+    """
+    import tools.operator_queue as oq
+
+    def fake(args):
+        if args[:2] == ["issue", "list"]:
+            return issues
+        if args[:2] == ["issue", "view"]:
+            number = int(args[2])
+            if number not in comments_by_number:
+                raise RuntimeError(f"unexpected issue view for #{number}")
+            payload = comments_by_number[number]
+            if payload == "FAIL":
+                raise RuntimeError("gh: network error")
+            return {"comments": payload}
+        raise AssertionError(f"unexpected gh args: {args}")
+
+    monkeypatch.setattr(oq, "_gh_json", fake)
+    return oq
+
+
+_VALID_FOOTER = (
+    "## 🔧 Operator Request\n\nDo the thing.\n\n"
+    "<!-- operator-request: issue=175 kind=decision artifact=x gate=y -->"
+)
+_MALFORMED_FOOTER = "## 🔧 Operator Request\n\nDo the thing.\n\n<!-- not-a-footer -->"
+
+
+def test_priority_later_hold_with_no_runbook_is_parked_not_a_problem(monkeypatch):
+    oq = _stub_gh(
+        monkeypatch,
+        issues=[_issue(1, ["needs/operator", "needs/decision", "priority/later"])],
+        comments_by_number={1: []},
+    )
+    report = oq.collect()
+    assert report["ok"] is True
+    entry = report["pending"][0]
+    assert entry["parked"] is True
+    assert entry["has_request"] is False
+    assert report["problems"] == []
+
+
+@pytest.mark.parametrize("priority", ["priority/now", "priority/next"])
+def test_actionable_priority_hold_with_no_runbook_is_still_a_problem(monkeypatch, priority):
+    oq = _stub_gh(
+        monkeypatch,
+        issues=[_issue(2, ["needs/operator", "needs/decision", priority])],
+        comments_by_number={2: []},
+    )
+    report = oq.collect()
+    entry = report["pending"][0]
+    assert entry["parked"] is False
+    assert len(report["problems"]) == 1
+    assert "#2" in report["problems"][0]
+
+
+def test_hold_with_no_priority_label_at_all_is_still_a_problem(monkeypatch):
+    """Only `priority/later` excuses a missing runbook -- absence of any priority
+    label is not itself a deferral signal."""
+    oq = _stub_gh(
+        monkeypatch,
+        issues=[_issue(3, ["needs/operator", "needs/decision"])],
+        comments_by_number={3: []},
+    )
+    report = oq.collect()
+    entry = report["pending"][0]
+    assert entry["parked"] is False
+    assert len(report["problems"]) == 1
+
+
+def test_malformed_footer_is_a_problem_even_when_priority_later(monkeypatch):
+    """A runbook that exists but fails to parse is broken, not deferred -- someone
+    already wrote it, so `priority/later` cannot excuse it."""
+    oq = _stub_gh(
+        monkeypatch,
+        issues=[_issue(4, ["needs/operator", "needs/decision", "priority/later"])],
+        comments_by_number={4: [{"body": _MALFORMED_FOOTER, "createdAt": "x", "url": "u"}]},
+    )
+    report = oq.collect()
+    entry = report["pending"][0]
+    assert entry["parked"] is False
+    assert len(report["problems"]) == 1
+    assert "no parseable footer" in report["problems"][0]
+
+
+def test_comment_read_failure_is_a_problem_even_when_priority_later(monkeypatch):
+    """`priority/later` excuses a runbook we confirmed is absent -- it cannot excuse
+    one we failed to even look for."""
+    oq = _stub_gh(
+        monkeypatch,
+        issues=[_issue(5, ["needs/operator", "needs/decision", "priority/later"])],
+        comments_by_number={5: "FAIL"},
+    )
+    report = oq.collect()
+    entry = report["pending"][0]
+    assert entry["parked"] is False
+    assert entry["request_error"] == "could not read comments"
+    assert len(report["problems"]) == 1
+
+
+def test_valid_runbook_with_priority_later_reports_normally(monkeypatch):
+    """A parked issue that already got its runbook written early is not `parked` --
+    it is a normal actionable hold, same as any other."""
+    oq = _stub_gh(
+        monkeypatch,
+        issues=[_issue(6, ["needs/operator", "needs/decision", "priority/later"])],
+        comments_by_number={6: [{"body": _VALID_FOOTER, "createdAt": "x", "url": "u"}]},
+    )
+    report = oq.collect()
+    entry = report["pending"][0]
+    assert entry["parked"] is False
+    assert entry["request"] is not None
+    assert report["problems"] == []
+
+
+def test_fast_mode_never_fetches_comments_or_reports_the_parked_problem(monkeypatch):
+    """`detailed=False` (fast mode) skips the per-issue comment fetch entirely --
+    a `priority/later` hold with no runbook is neither `parked` nor a problem, it is
+    simply undetermined, same as before this change."""
+    import tools.operator_queue as oq
+
+    def fake(args):
+        if args[:2] == ["issue", "list"]:
+            return [_issue(7, ["needs/operator", "needs/decision", "priority/later"])]
+        raise AssertionError(f"fast mode should never call: {args}")
+
+    monkeypatch.setattr(oq, "_gh_json", fake)
+    report = oq.collect(include_comments=False)
+    entry = report["pending"][0]
+    assert entry["parked"] is False
+    assert entry["has_request"] is None
+    assert report["problems"] == []
+    assert report["detailed"] is False
+
+
 def test_agents_md_documents_the_skill():
     text = (REPO / "AGENTS.md").read_text()
     assert "operator-request" in text, "the canonical agent guidance should list the skill"
