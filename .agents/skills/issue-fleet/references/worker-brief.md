@@ -39,6 +39,7 @@ the mistake is invisible until it has cost a cycle.
 | Thing | Why |
 |---|---|
 | `ROADMAP.md`, `AGENTS.md`, `CLAUDE.md`, `BUGS.md`, `docs/**`, `.remember/**`, `docs/issue-migration-map.*` | every issue touches these via `status-sync`, so N workers editing them is N guaranteed conflicts. Report them as `doc_deltas` and the orchestrator applies them once |
+| `.claude/**` | holds the agent definitions and hooks — including `fleet-worker.md`, **this brief's own contract**. Definitions load at session start, so an edit here would not fail visibly; it would silently change how the *next* wave's workers behave |
 | port 8000 | the owner's server. A worker once killed it and relaunched from a worktree, serving unmerged code. Use your assigned port or start nothing |
 | `gh` (any subcommand) | the orchestrator owns the issue tracker |
 | `run_tests`, `ui_*`, any `mcp__roomscan__*` tool | they all run from the **main** checkout: `run_tests` cannot see a test you just wrote, and `ui_*` serves code you did not edit (#103) |

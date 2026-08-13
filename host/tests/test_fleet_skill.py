@@ -190,3 +190,82 @@ def test_shared_doc_prohibition_matches_the_planner():
         assert name in brief, f"{name} is dropped by the planner but not forbidden to workers"
     assert "docs/" in mod.SHARED_DOC_PREFIXES
     assert "docs/**" in brief
+
+
+# --------------------------------------------------------------------------------
+# Orchestrator context cost (#182)
+# --------------------------------------------------------------------------------
+
+def test_dot_claude_is_forbidden_to_workers_as_well_as_to_the_planner(skill_text):
+    """`.claude/agents/fleet-worker.md` is a worker's own contract, and definitions load
+    at session start -- so an edit there would not fail visibly, it would silently
+    change how the next wave behaves."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "fp_x", REPO / "host" / "tools" / "fleet_plan.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert ".claude/" in mod.SHARED_DOC_PREFIXES
+    assert ".claude/**" in (BRIEF.read_text() + skill_text)
+
+
+def test_the_skill_states_the_rotation_policy(skill_text):
+    """A tooling-enforced gate nobody is told to obey is just a field in a dict."""
+    assert "rotate" in skill_text
+    assert "rotation.context_tokens" in skill_text or "rotation.session_id" in skill_text
+    assert "instructions, not advice" in skill_text
+
+
+def test_the_skill_names_the_handoff_file_and_requires_memory_candidates(skill_text):
+    """Rotation without `memory_candidates` destroys every pre-rotation wave's lessons,
+    because `session-end` only ever records the session it runs in."""
+    assert ".claude/fleet/" in skill_text
+    assert "memory_candidates" in skill_text
+
+
+def test_the_skill_no_longer_mandates_an_inline_multi_issue_gh_triage_loop(skill_text):
+    """The planner already fetched every body and comment thread, so the orchestrator
+    should never pull a whole thread again.
+
+    Counts *unbounded invocations* -- a `gh issue view` whose output is not narrowed by
+    `--json` -- rather than every mention of the string. Prose that tells you NOT to run
+    the loop necessarily names it, and a test that cannot tell an instruction from a
+    prohibition would force the guidance to be deleted in order to pass.
+    """
+    unbounded = [ln.strip() for ln in skill_text.splitlines()
+                 if "gh issue view" in ln and "--json" not in ln and ln.lstrip().startswith("gh ")]
+    assert not unbounded, f"unbounded `gh issue view` invocations remain: {unbounded}"
+    assert "triage" in skill_text
+    assert "instead of running" in skill_text
+
+
+def test_the_claim_race_read_back_survives(skill_text):
+    """The one `gh issue view` that must NOT be optimised away: it reads the tracker
+    *after* your own write, to catch a session that claimed the same issue in the same
+    second. Labels are last-write-wins with no compare-and-swap, so deleting this
+    re-opens the double-claim window the earliest-timestamp rule closes."""
+    assert "Session start" in skill_text
+    assert "earliest\ntimestamp wins" in skill_text or "earliest timestamp wins" in skill_text
+    assert re.search(r"gh issue view NNN .*--json comments", skill_text, re.DOTALL)
+
+
+def test_the_skill_tells_the_orchestrator_not_to_author_code(skill_text):
+    assert "You coordinate; you do not author" in skill_text
+    for path in ("host/src/", "host/tests/", "host/tools/"):
+        assert path in skill_text
+
+
+def test_the_skill_warns_that_a_total_will_not_show_the_win(skill_text):
+    """Delegating and rotating move spend BETWEEN seats. A reader checking
+    `seven_day.weighted_tokens` will see almost no change and conclude it failed."""
+    assert "by_seat" in skill_text
+
+
+def test_the_ledger_exists_and_disclaims_the_comparison_it_cannot_support():
+    """`test_named_repo_files_exist` already requires the file; this requires it to be
+    honest. The per-run spread here is ~7x, so no realistic number of runs supports a
+    model-vs-model A/B, and a ledger implying one is worse than no ledger."""
+    ledger = (REPO / "docs" / "fleet-ledger.md").read_text()
+    assert "orch_share" in ledger
+    assert "cannot" in ledger
+    assert "A/B" in ledger

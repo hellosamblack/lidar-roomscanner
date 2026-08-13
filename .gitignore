@@ -1,3 +1,7 @@
+# issue-fleet run state: the handoff file a rotating orchestrator writes so a fresh
+# session can resume mid-run. Local to one machine's run, never shared.
+.claude/fleet/
+
 # CMake (from GitHub template)
 CMakeLists.txt.user
 CMakeCache.txt

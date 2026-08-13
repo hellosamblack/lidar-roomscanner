@@ -83,6 +83,67 @@ spent (2026-08-12: a 2-worker wave with one review round-trip and one full suite
 tokens ≈ 0.32 weekly points). Report the percentage as *the owner's figure* and the delta as *the
 measurement*; presenting a re-read of the anchor as evidence the run is on budget is circular.
 
+## Step 1.5 — Session rotation
+
+`fleet_budget()` also measures **your own context**, and returns `rotate` / `rotate_hard` when
+carrying it another wave costs more than handing off. **These are instructions, not advice.**
+
+- **`rotate`** (context ≥ 300K): finish the wave in flight — merge it, run its Step 8.5 — then write
+  the handoff and **stop**. Do not start another wave.
+- **`rotate_hard`** (≥ 450K): do not start the next *issue* either. Land whatever has a branch, park
+  the rest, hand off.
+- Pin `session_id` from the first call's `rotation.session_id` so later calls do not re-infer it.
+- If `rotation.ok` is false the verdict silently covers the budget windows only and says so in
+  `notes`. Fall back to turn count and say you are doing that.
+
+**Rotating beats shrinking the wave.** A smaller wave inside a 400K context still pays 400K on every
+turn; wave size attacks the growth term, which is the part rotation cannot touch and the part you
+are paying for anyway. That is why `rotate` outranks `reduce`.
+
+**The arithmetic is one-sided.** A fresh session re-caches ~45K of system prompt and reads a ~5K
+handoff — about 250K weighted. Continuing at 300K costs ~20M weighted more over the next wave; at
+477K it was 43M, and at 660K, 62M. **The reason not to rotate is never cost. It is lost state — and
+that is exactly what the handoff file exists to carry.**
+
+Measured before any of this existed: orchestrator cache-read outweighed output 160–380x, context ran
+45K → 478–660K in a single session, the last quartile of turns cost ~4x per turn what the first did,
+and **94.3%** of a week's weighted spend sat in the orchestrator seat rather than in its workers.
+
+### The handoff file — `.claude/fleet/<run-id>.md`
+
+Gitignored, local to this machine. **Carry only what cannot be reconstructed** — Step 0's four
+commands already recover the claims (`gh issue list --label status/in-progress`), the worktrees and
+branches (`git worktree list`), and what merged (`git branch --merged main`). So the file holds:
+
+```
+run_id, session_chain[]              # append your session id on every rotation
+ceiling_pct / observed_week_pct / observed_block_pct    # the anchors as declared at Step 1
+budget_at_rotation                   # five_hour + seven_day weighted_tokens, for the run's delta
+mcp_tools_available                  # which fleet_*/run_tests/ui_* this session actually had
+waves_done
+claims[]        {issue, worktree, branch, state: claimed|merged|yielded|parked, model}
+vetoes[]        {issue, reason}      # so the next session does not re-derive them
+step_8_5_pending[]  {issue, check, tool_required}
+doc_deltas_collected[]               # union so far; Step 9 applies them once
+memory_candidates[]                  # REQUIRED -- see below
+orchestrator_code_edits              # count, for the ledger
+```
+
+**`memory_candidates` is not optional.** `session-end` records *this* session's memory, so a rotated
+fleet loses every earlier wave's lessons unless the handoff carries them forward. Rotation without
+that field actively destroys what `session-end` exists to preserve.
+
+**Only the last session runs `session-end`.** Intermediate rotations write the handoff and stop — no
+memory write, no commit, no label drop. The `Stop` hook does not interfere: it fires only when HEAD
+carries `Closes #NNN`, and an intermediate session ends at a worker's `Refs #NNN` ff-merge. Do not
+"fix" that.
+
+**If the fresh session lacks an MCP tool its claims depended on**, it must not land them unverified
+(Step 1 already says tool availability decides what may be claimed at all). Park those issues via
+`operator-request` with `needs/eyes` or `needs/hardware`, drop `status/in-progress`, and record them
+in `step_8_5_pending`. Rotation *helps* in the other direction: an agent definition written in one
+session is live in the next.
+
 ## Step 2 — Plan the batch
 
 ```
@@ -102,22 +163,20 @@ exploration slot for an issue with no discoverable footprint. What it hands to *
 - `suggested_model` — advisory. `orchestrator-only` means firmware or transform work: it needs the
   rig, and its error paths spin forever instead of returning, so a worker cannot recover unattended.
 
-**Cross-check the batch against `operator_queue()` before anything else — the planner does not.**
-`fleet_plan` has no idea an issue is already parked on the owner, so a `needs/operator` issue ranks
-exactly as if it were actionable. On 2026-08-12 that put **two of its three picks** (#60 at 105, the
-top score, and #57 at 85) into a wave when both were already in the operator queue, out of nine held
-issues repo-wide. One `operator_queue(detailed=False)` call at Step 2 removes the whole class. Treat
-an outstanding `needs/operator` as a **veto** — somebody is already waiting on the owner for it.
+**Held issues are already excluded — do not cross-check `operator_queue()` to filter the batch.**
+`excluded_reason()` vetoes `needs/operator` before scoring (#177), so held issues arrive in
+`plan["excluded"]` labelled with their subtype. The instruction that used to live here — *"the
+planner does not"* — described the tracker before that fix and is no longer true;
+`test_needs_operator_is_excluded_so_the_skill_need_not_cross_check` pins the two together. Call
+`operator_queue()` for its **`problems`** field, which the planner genuinely cannot see (held issues
+whose runbook comment is missing or unparseable), or when you are about to *write* a request.
 
-**Probe the tracker with `--json`, or you will invent a defect.** `gh issue view N --comments -q
-'...'` fails with *"cannot use `--jq` without specifying `--json`"* — and with `2>/dev/null` on the
-end it prints **nothing at all**, which reads exactly like "this issue has no comments." On
-2026-08-12 that cost a wrongly-filed planner defect: #158 was reported as credited *"prior work x2
-(implementation plan comment)"* with no comments to justify it, and the worker sent to fix it
-correctly found `has_prior_work()` only ever reads `comments`, never `body`. It could not reproduce
-the bug because there was no bug — #158 has a real `## Implementation plan` comment. Use
-`--json comments -q '.comments | length'`, and never `2>/dev/null` a probe whose emptiness is your
-evidence.
+**If you do run a `gh` probe, use `--json`.** `gh issue view N --comments -q '...'` fails with
+*"cannot use `--jq` without specifying `--json`"*, and with `2>/dev/null` on the end it prints
+nothing at all — indistinguishable from "no comments," which is how a planner defect got wrongly
+filed against #158. Use `--json comments -q '.comments | length'`, and never `2>/dev/null` a probe
+whose emptiness is your evidence. The full story is in `has_prior_work()`'s docstring in
+`host/tools/fleet_plan.py` — the file anyone hunting that bug will already have open.
 
 **A worker's "I could not reproduce this" is data, not an obstacle.** That worker refused to invent
 a mechanism, hardened the invariant instead, and said plainly it could not confirm the root cause.
@@ -129,8 +188,15 @@ paired capture (#161) is `status/blocked`. Its coordinate-convention half — wh
 as the BUG-051/058 failure mode — had nothing to validate against. `ls` the directory before
 claiming.
 
-**Read the body of every issue you are about to claim. A high score is not actionability.** The
-planner ranks on labels, prior work and footprint — it cannot see a sentence. On 2026-08-12 two of
+**Read the `triage` digest of every issue you are about to claim. A high score is not
+actionability.** The planner ranks on labels, prior work and footprint — it cannot see a sentence,
+so each selected issue now carries a bounded digest that brings the sentence to you: `plan_excerpt`
+(the **latest** plan comment, not the first — plans get superseded), `latest_comment` with its
+`kind`, `body_excerpt`, `acceptance_hint` and `chars_elided`. **Read that instead of running
+`gh issue view`.** `fleet_plan` already fetched every open issue's full body and comment thread in
+one call, so a per-issue `gh` loop re-pays for text you are holding — measured on the live tracker,
+974 tokens carried where the loop pulled ~19,300, and a token spent here is re-sent on every
+remaining turn of the run. On 2026-08-12 two of
 the three top-ranked issues were un-workable for reasons only their prose states: #60 (scored 105,
 `priority/now`, handed the exploration slot twice) names **owner action** as its next step — a
 physical experiment flexing the Ethernet patch cable to discriminate link-bounce from bridge roaming
@@ -147,6 +213,11 @@ whose acceptance is *entirely* "does it look right in the viewport", in a sessio
 tools. Landing that code unverified would have shipped a green diff nobody had ever seen run. Also
 veto issues the body itself parks on someone else: #127 says **blocked on orientation ground truth
 (DC-F)**, and the `data-collection` issues (#128, #142–#144) are owner captures, not code.
+
+`triage.acceptance_hint` pre-sorts exactly this: `visual` needs the browser, `hardware` needs the
+rig, `pytest` is the shape you want. If your session lacks the tool the hint names, that is the
+veto — and you know it before spawning anything, rather than at Step 8.5 with a branch already
+merged.
 
 Ask of each candidate: *what would prove this fixed, and can I run it today?* If the honest answer is
 no, leave it and say so — a run that lands three unverifiable diffs is worse than a run that lands one
@@ -166,6 +237,37 @@ hoping. Name it in both spawn prompts — "X owns `foo.py`; you stop and report 
 and in the claim comments. Cheap, and it converts a gamble into a rule. Note the footprint model
 does not see **shared test files**: two workers appending to the same `test_*.py` is common and only
 shows up at the second one's rebase.
+
+## Step 2.5 — Delegate the deep read; never do it yourself
+
+When `triage.chars_elided` is large and the digest has not settled whether an issue is workable,
+**spawn an `Explore` agent** rather than reading the thread. Its context is discarded when it
+returns; yours is re-sent on every remaining turn of the run, so the same paragraphs cost you a
+hundred times what they cost it.
+
+Give it the issue number, the digest you already hold, and this response contract:
+
+> At most **120 words per issue**. Exactly these fields: `verdict` (`workable` | `veto` | `unclear`),
+> a one-sentence reason, the acceptance check and whether it can be run **today** with the tools this
+> session has, and citations as comment dates. **Do not paste issue text.**
+
+Use the built-in `Explore` type, not a new `fleet-triage` agent definition:
+
+- **Agent definitions load at session start**, so a definition written now is invisible until the
+  next session — including to the session that wrote it. `Explore` works on the first run.
+- Workers "never run `gh` and never call an MCP tool" is a four-incident invariant enforced by
+  `test_agents_are_denied_gh_and_mcp`. A triage worker would need `Bash` for `gh`, which either
+  carves an exception into that rule or forks the test. `Explore` is not a fleet worker, so the
+  sentence stays literally true.
+- `Explore` is read-only **by construction** — no `Edit`, `Write`, or `Agent` — rather than by a
+  prose promise of the kind that failed on 2026-07-10.
+
+If `Explore` is unavailable in this session, fall back to `subagent_type: "claude"` with
+`model: sonnet` and paste the contract into the prompt. The contract is the load-bearing part.
+
+**Expect the total not to move much.** Explore's spend lands in the `subagent` seat; what drops is
+the `top_level` seat, which is the one multiplied by every remaining turn. Read
+`seven_day.by_seat`, not `seven_day.weighted_tokens`, or this will look like it did nothing.
 
 Model tiers: **Haiku 4.5** for mechanical work (a declared footprint of ≤3 files, doc-shaped or
 test-shaped changes, grep-checkable rules); **Sonnet 5** for ordinary implementation; **you (Opus)**
@@ -192,8 +294,13 @@ Then **read back**. Labels are last-write-wins with no compare-and-swap, so anot
 the same issue in the same second:
 
 ```bash
-gh issue view NNN --repo hellosamblack/lidar-roomscanner --comments
+gh issue view NNN --repo hellosamblack/lidar-roomscanner --json comments \
+  -q '[.comments[] | select(.body | test("\\*\\*Session start\\*\\*")) | {createdAt, login: .author.login}]'
 ```
+
+**This one stays** — it is the only `gh issue view` the triage digest cannot replace, because it
+must read the tracker *after* your write to see a racing claim. But it is scoped to the claim
+timestamps: ~100 bytes instead of the whole thread.
 
 If someone else's `**Session start**` on that issue is *older* than yours, yield it — earliest
 timestamp wins, drop your label, re-plan. A deterministic rule needs no negotiation.
@@ -241,8 +348,11 @@ The contract, restated in the spawn prompt because it is load-bearing:
   Stop hook mid-fleet.
 - **Explicit pathspecs, never `git add -A`.** The two symlinks show as untracked, and a multi-path
   `git add` aborts entirely and silently if one pathspec matches nothing.
-- Forbidden: `ROADMAP.md`, `AGENTS.md`/`CLAUDE.md`, `BUGS.md`, `docs/**`, `.remember/**`, the issue
-  migration map. Report intended doc changes as a `doc_deltas` block; you apply them once, at the end.
+- Forbidden: `ROADMAP.md`, `AGENTS.md`/`CLAUDE.md`, `BUGS.md`, `docs/**`, `.remember/**`,
+  `.claude/**`, the issue migration map. Report intended doc changes as a `doc_deltas` block; you
+  apply them once, at the end. `.claude/**` is on that list because it holds the agent definitions —
+  including `fleet-worker.md`, a worker's own contract. Since definitions load at session start, a
+  worker rewriting it would take effect on the *next* wave rather than failing visibly.
 - **Do not touch :8000.** Your port is the assigned one, or none at all.
 - No `gh`. No MCP tools — every one of them runs from the main checkout, so `run_tests` cannot see a
   test the worker just wrote and `ui_*` serves code the worker did not edit (`docs/web-ui-testing.md`
@@ -286,7 +396,7 @@ mid-proof leaves it on the owner's shared checkout.
 git -C . diff --name-only main...issue-NNN                 # incoming
 # ABORT if incoming intersects the owner's uncommitted files
 git -C <wt> rebase main                                    # conflicts stay in the private worktree
-cd <wt>/host && /path/to/main/host/.venv/bin/python -m pytest -q --no-header -k <narrow>
+cd <wt>/host && /path/to/main/host/.venv/bin/python -m pytest -q --no-header --tb=line -k <narrow> 2>&1 | tail -n 20
 git -C . merge --ff-only issue-NNN
 rm <wt>/captures <wt>/host/transform/build                 # or `worktree remove` refuses
 git -C . worktree remove <wt> && git -C . branch -d issue-NNN
@@ -333,13 +443,45 @@ before you do, check what the tool you are about to verify with is actually runn
 
 ## Step 9 — Close out once, at the end
 
-Run the full suite once after all merges, not per branch. Then run `session-end` **once** for the
+Run the full suite once after all merges, not per branch — **via `run_tests()`, not Bash.** It
+already returns `counts`, `failures[:50]`, a one-line `summary`, and `tail` only when the run failed;
+piping 2000+ tests through Bash puts the whole transcript in your context, where it is re-sent on
+every remaining turn. (`--tb=line | tail -n 20` is the Bash fallback when MCP tools are absent —
+`--tb=line` is the load-bearing half, turning multi-KB tracebacks into one line each.) `run_tests`
+always means the **main** checkout; that flatness is deliberate, so do not reach for a worktree
+parameter. Then run `session-end` **once** for the
 whole fleet: it records memory, posts one comment per claimed issue, runs `status-sync` over the
 union of every worker's `doc_deltas`, and lands a single commit carrying every `Closes #NNN`. One
 closing commit at HEAD, one marker write, and `session-end`'s own invariants hold unmodified.
 
 Finally, drop `status/in-progress` from every issue you claimed — including the ones you yielded or
 deferred mid-run.
+
+Then append one row to **`docs/fleet-ledger.md`**, differencing the `fleet_budget()` call you made at
+Step 1 against one now. `orch_share` (`weighted_top_level / weighted_total`) is the headline; fill in
+`confounds` honestly, because a blank there is a claim that nothing changed. Read that file's header
+before drawing any conclusion from it — the per-run spread in this project is ~7x, so it supports a
+within-arm trend and paired comparisons, and **not** a model-vs-model A/B.
+
+## What you may write
+
+**You coordinate; you do not author.** Your legitimate `Edit`/`Write` targets are exactly:
+
+- comment/claim body files for `gh --body-file`,
+- the run handoff file,
+- the union of workers' `doc_deltas` at Step 9 — the files workers are *forbidden*,
+- the ledger row,
+- whatever `session-end` writes in its own phases,
+- conflict hunks during `git rebase` inside a worktree. That is landing, not authoring.
+
+**Nothing under `host/src/`, `host/tests/`, `host/tools/`, `firmware/` or `host/transform/` is
+yours.** A review-gate finding goes **back to the same worker** — it still holds the context, and
+re-deriving it in your session pays for that context on every remaining turn. If no worker holds it,
+that is a new claim and a new spawn, not an inline fix. `suggested_model: orchestrator-only` is a
+veto, not a licence to write the code yourself.
+
+One session made **57** such edits. They are counted into the ledger's `orch_code_edits`, so if this
+rule is not working the ledger will say so.
 
 ## Verified end to end, 2026-08-12 (issue #170)
 
@@ -373,3 +515,11 @@ One full round trip, one Haiku worker, on this repo:
   actually fired.
 - A worker report that is **silent** about a conditional step of its issue's plan.
 - A non-empty `git stash list` at the review gate.
+- An `Edit` or `Write` from **you** onto a file under `host/src/`, `host/tests/`, `host/tools/` or
+  `firmware/`. Count them: one session ran 57.
+- `verdict: "rotate"` treated as advice, or a new wave started after one.
+- A `gh issue view --comments` you ran when the issue's `triage` digest was sitting in the plan you
+  already had.
+- A full-suite run whose output landed in your context instead of `run_tests()`'s counts.
+- Judging this change by `seven_day.weighted_tokens`. Delegating and rotating move spend *between*
+  seats; only `by_seat` can show they worked.

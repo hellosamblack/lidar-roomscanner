@@ -58,6 +58,25 @@ points here; keep this doc short and binding.
   The orchestrator still owns every boundary beyond that branch: it reviews, rebases in the
   worktree, `merge --ff-only`s onto `main`, and writes the single `Closes` commit. A worker still
   never touches `main`, shared docs, or `gh`.
+  **Orchestrator half (owner-approved, 2026-08-13, issue #182):** that ownership is a *ceiling, not
+  a floor*. The orchestrator owns the merge, the doc deltas and the closing commit, and it does
+  **not author implementation code**. Its legitimate `Edit`/`Write` targets are comment body files,
+  the run handoff, the union of workers' `doc_deltas`, the ledger row, whatever `session-end`
+  writes, and rebase conflict hunks inside a worktree. Nothing under `host/src/`, `host/tests/`,
+  `host/tools/`, `firmware/` or `host/transform/` is the orchestrator's to write. A review finding
+  goes **back to the worker that produced the diff** — it still holds the context, and re-deriving
+  it in the orchestrator's session pays for that context on every remaining turn of the run. One
+  session made 57 such edits; `issue-fleet` now counts them into `docs/fleet-ledger.md`.
+- **Context is a budgeted resource (2026-08-13, issue #182).** Long-lived coordinating sessions pay
+  for accumulated context on *every* turn, so cost grows roughly quadratically in turn count.
+  Measured on this repo: an orchestrator's cache-read outweighs its output **160–380x**, context
+  climbs from ~45K to 478–660K, the last quartile of a session's turns costs ~4x per turn what the
+  first does, and **94.3%** of weighted spend sat in the orchestrator seat rather than in its
+  workers. So: prefer a bounded digest over a raw fetch, a discarded subagent context over your own,
+  and a fresh session at a natural boundary over one long one. `fleet_budget()` measures this and
+  returns `rotate` when it applies — and `rotate` is an instruction, not a suggestion. The
+  by-seat breakdown is the only place a change that moves work off the orchestrator becomes visible;
+  a total will barely move.
 - **Path lengths.** Repo-relative paths stay ≤150 characters (longer breaks `git worktree add` and
   fresh clones on default Windows git).
 
