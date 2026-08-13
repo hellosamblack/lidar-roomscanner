@@ -257,6 +257,51 @@ def test_parse_ccusage_accepts_the_captured_shape(blocks_payload):
 
 
 # --------------------------------------------------------------------------------
+# Records-for-detail / blocks-for-totals
+# --------------------------------------------------------------------------------
+
+def test_the_two_weekly_derivations_actually_disagree(read, blocks_payload):
+    """Power check for the guard below: if block-prorated and record-summed weekly
+    totals happened to agree, `test_ccusage_path_prorates_the_weekly_over_blocks`
+    would pass no matter which one the code picked, and would be worth nothing.
+
+    On the captured fixtures they disagree by ~2600x -- the ccusage payload is a real
+    account's week, the synthetic transcript tree is eight hand-written records."""
+    records, _ = read
+    blocks = fb.parse_ccusage_blocks(blocks_payload)
+    from_blocks = fb.rolling_window_blocks(blocks, fb.WEEK_HOURS, NOW)
+    from_records = fb.rolling_window(records, fb.WEEK_HOURS, NOW)
+    assert from_blocks != from_records
+    assert from_blocks > from_records * 100
+
+
+def test_ccusage_path_prorates_the_weekly_over_blocks(blocks_payload):
+    """The regression guard for keeping `records` on the ccusage path.
+
+    `read_transcripts` is now called for its records as well as its coverage, because
+    the seat/model/context breakdowns are record-level facts. The headline totals must
+    not notice. This previously read `if records`, which was equivalent only while the
+    ccusage path threw its records away -- flipping it to the record derivation would
+    have reported ~104K where the block derivation reports ~271M, i.e. near-infinite
+    headroom, on every call the skill makes."""
+    r = fb.fleet_budget(source="ccusage", ccusage_payload=blocks_payload,
+                        limit_basis="owner", limit_tokens=1_000_000,
+                        now=NOW, root=TRANSCRIPTS)
+    blocks = fb.parse_ccusage_blocks(blocks_payload)
+    assert r["seven_day"]["weighted_tokens"] == round(
+        fb.rolling_window_blocks(blocks, fb.WEEK_HOURS, NOW), 1)
+
+
+def test_ccusage_path_still_reports_subagent_coverage(blocks_payload):
+    """The reason `read_transcripts` was called here in the first place: ccusage's own
+    payload cannot say whether worker transcripts were counted."""
+    r = fb.fleet_budget(source="ccusage", ccusage_payload=blocks_payload,
+                        limit_basis="owner", limit_tokens=1_000_000,
+                        now=NOW, root=TRANSCRIPTS)
+    assert r["coverage"]["includes_subagents"] is True
+
+
+# --------------------------------------------------------------------------------
 # Verdicts and forecasting
 # --------------------------------------------------------------------------------
 
@@ -366,3 +411,194 @@ def test_rolling_window_over_blocks_prorates_the_edge():
 def test_full_result_is_json_serialisable():
     result = fb.fleet_budget(source="transcripts", now=NOW, root=TRANSCRIPTS)
     json.dumps(result)
+
+
+# --------------------------------------------------------------------------------
+# Record identity and the context proxy
+# --------------------------------------------------------------------------------
+
+GROWTH_PROJECT = "-proj-ctxgrowth"
+GROWTH_SESSION = "sess-grow0001"
+
+
+def test_records_carry_session_identity(read):
+    records, _ = read
+    assert all(r["session_id"] for r in records)
+    assert all(r["project_dir"] for r in records)
+
+
+def test_a_subagent_is_attributed_to_its_PARENT_session(read):
+    """A worker's spend belongs to the run that spawned it. The transcript carries the
+    parent's `sessionId`, and the filename fallback has to mirror that -- a subagent's
+    own stem is `agent-<id>`, so a naive `path.stem` would invent a session per worker
+    and scatter one run's spend across as many buckets as it had agents."""
+    records, _ = read
+    subs = [r for r in records if r["source"] == "subagent"]
+    assert subs, "fixture must contain subagent records"
+    assert all(not r["session_id"].startswith("agent-") for r in subs)
+    assert all(r["session_id"] == "sess-aaaa1111" for r in subs)
+
+
+def test_context_proxy_is_not_the_weighted_token(read):
+    """`weighted` discounts cache reads by CACHE_READ_WEIGHT and scales by model, which
+    is right for load and destroys the growth signal. A large-context record must show
+    a context far above its weighted cost, or the rotation metric is measuring spend
+    again under a different name."""
+    records, _ = read
+    grown = [r for r in records if r["session_id"] == GROWTH_SESSION]
+    biggest = max(grown, key=lambda r: r["context"])
+    assert biggest["context"] >= 400_000
+    assert biggest["context"] > biggest["weighted"] * 10
+
+
+# --------------------------------------------------------------------------------
+# Seat and model composition
+# --------------------------------------------------------------------------------
+
+def test_by_seat_splits_the_orchestrator_from_its_workers(read):
+    records, _ = read
+    b = fb.breakdown(records, fb.WEEK_HOURS, NOW)
+    assert b["by_seat"]["top_level"] > 0
+    assert b["by_seat"]["subagent"] > 0
+
+
+def test_by_model_separates_the_tiers(read):
+    records, _ = read
+    b = fb.breakdown(records, fb.WEEK_HOURS, NOW)
+    assert "claude-opus-5" in b["by_model"]
+    assert "claude-haiku-4-5-20251001" in b["by_model"]
+
+
+def test_breakdown_declares_it_is_not_a_second_opinion_on_the_total(read):
+    """On the ccusage path the block aggregates are authoritative and these record-level
+    sums will not match them. Without the disclaimer the first reader who notices the
+    mismatch 'fixes' one of the two numbers."""
+    records, _ = read
+    b = fb.breakdown(records, fb.WEEK_HOURS, NOW)
+    assert "will not add up" in b["basis"]
+    assert "ccusage" in b["basis"]
+
+
+def test_seat_breakdown_is_attached_to_both_windows():
+    r = fb.fleet_budget(source="transcripts", limit_basis="owner", limit_tokens=1_000_000,
+                        now=NOW, root=TRANSCRIPTS)
+    for window in ("five_hour", "seven_day"):
+        assert "by_seat" in r[window]
+        assert "by_model" in r[window]
+
+
+# --------------------------------------------------------------------------------
+# Context growth and the rotate verdict
+# --------------------------------------------------------------------------------
+
+def _grown(records, ctx_tokens):
+    """One synthetic top-level session sitting at `ctx_tokens` of context."""
+    return [{"ts": NOW - timedelta(seconds=10), "model": "claude-opus-5",
+             "weighted": 1.0, "source": "top_level", "session_id": "synthetic",
+             "project_dir": "-proj-x", "cache_read": ctx_tokens, "context": ctx_tokens}]
+
+
+def test_rotate_fires_at_the_threshold_and_not_below():
+    below = fb.session_context(_grown(None, fb.ROTATE_AT_CONTEXT - 1), NOW)
+    at = fb.session_context(_grown(None, fb.ROTATE_AT_CONTEXT + 1), NOW)
+    assert fb.decide_rotation(below) == "hold"
+    assert fb.decide_rotation(at) == "rotate"
+
+
+def test_hard_rotate_fires_above_the_hard_threshold():
+    ctx = fb.session_context(_grown(None, fb.HARD_ROTATE_AT_CONTEXT + 1), NOW)
+    assert fb.decide_rotation(ctx) == "rotate_hard"
+
+
+def test_the_rotation_trigger_is_raw_tokens_not_weighted():
+    """A weighted trigger would scale with MODEL_WEIGHT, so the same one-weekly-point
+    rule would sit near 1.3M for a Sonnet/Fable-class orchestrator and never fire --
+    one model would run 600-turn sessions while another rotated at 200, and any later
+    model comparison would be measuring the rotation policy instead of the model."""
+    big = fb.ROTATE_AT_CONTEXT + 50_000
+    opus = _grown(None, big)
+    cheap = [{**opus[0], "model": "claude-sonnet-5"}]
+    assert fb.decide_rotation(fb.session_context(opus, NOW)) == "rotate"
+    assert fb.decide_rotation(fb.session_context(cheap, NOW)) == "rotate"
+
+
+def test_rotation_saving_is_a_weighted_delta_not_a_percentage():
+    """This module has no trustworthy denominator; a percentage here would be exactly
+    the fabricated-authority failure its own calibration note warns about."""
+    ctx = fb.session_context(_grown(None, 400_000), NOW)
+    assert isinstance(ctx["rotation_saving_weighted"], float)
+    assert "%" not in ctx["saving_basis"]
+    assert "%" not in ctx["cost_basis"]
+
+
+def test_the_saving_reflects_the_model_weight_even_though_the_trigger_does_not():
+    opus = fb.session_context(_grown(None, 400_000), NOW)
+    cheap = fb.session_context([{**_grown(None, 400_000)[0], "model": "claude-sonnet-5"}], NOW)
+    assert opus["rotation_saving_weighted"] > cheap["rotation_saving_weighted"]
+
+
+def test_a_stale_newest_record_refuses_to_identify_a_session():
+    """The newest-top-level-record heuristic only holds while the caller is actually
+    live. Guessing on a day-old record would attribute a stranger's context to you."""
+    stale = _grown(None, 400_000)
+    stale[0]["ts"] = NOW - timedelta(hours=3)
+    ctx = fb.session_context(stale, NOW)
+    assert ctx["ok"] is False
+    assert fb.decide_rotation(ctx) == "unknown"
+
+
+def test_a_pinned_session_id_beats_recency():
+    older = {**_grown(None, 400_000)[0], "session_id": "wanted",
+             "ts": NOW - timedelta(minutes=30)}
+    newer = {**_grown(None, 50_000)[0], "session_id": "noise"}
+    ctx = fb.session_context([older, newer], NOW, session_id="wanted")
+    assert ctx["confidence"] == "pinned"
+    assert ctx["context_tokens"] == 400_000
+
+
+def test_a_pinned_session_that_does_not_exist_is_not_silently_inferred():
+    ctx = fb.session_context(_grown(None, 400_000), NOW, session_id="absent")
+    assert ctx["ok"] is False
+
+
+# --------------------------------------------------------------------------------
+# Verdict composition
+# --------------------------------------------------------------------------------
+
+def test_stop_outranks_rotate_and_rotate_outranks_reduce():
+    """`rotate` beats `reduce` because rotating IS how you reduce -- a smaller wave in a
+    400K context still pays 400K on every turn. `stop` beats `rotate` because a rotated
+    session with no budget has burned a fresh 45K only to be told to stop."""
+    assert fb.combine_verdicts("stop", "rotate") == "stop"
+    assert fb.combine_verdicts("reduce", "rotate") == "rotate"
+    assert fb.combine_verdicts("go", "rotate_hard") == "rotate_hard"
+    assert fb.combine_verdicts("reduce", "hold") == "reduce"
+
+
+def test_the_original_budget_verdict_survives_alongside_the_combined_one():
+    """Callers that only know go/reduce/stop/unknown must not break when the combined
+    verdict becomes `rotate`."""
+    r = fb.fleet_budget(source="transcripts", limit_basis="owner", limit_tokens=1_000_000,
+                        now=NOW, root=TRANSCRIPTS)
+    assert r["budget_verdict"] in fb.VERDICTS
+
+
+def test_unmeasurable_context_does_not_make_the_verdict_unknown():
+    """`unknown` means 'stop and ask' to every caller. Firing it whenever the
+    newest-record heuristic misfires is how a useful guard gets deleted."""
+    r = fb.fleet_budget(source="transcripts", limit_basis="owner", limit_tokens=1_000_000,
+                        now=NOW + timedelta(days=30), root=TRANSCRIPTS,
+                        session_id="does-not-exist")
+    assert r["rotation"]["ok"] is False
+    assert r["verdict"] == r["budget_verdict"]
+    assert r["verdict"] != "unknown"
+    assert any("context growth not measured" in n for n in r["notes"])
+
+
+def test_binding_window_is_not_overloaded_with_context():
+    """`binding_window` answers 'which WINDOW drives the verdict'. Context is not a
+    window, so it gets its own field rather than corrupting that one's meaning."""
+    r = fb.fleet_budget(source="transcripts", limit_basis="owner", limit_tokens=1_000_000,
+                        now=NOW, root=TRANSCRIPTS)
+    assert r["binding_window"] in ("five_hour", "seven_day")
+    assert "binding_constraint" in r

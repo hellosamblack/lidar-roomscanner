@@ -15,6 +15,9 @@ because several tests assert against specific issue numbers in `issues_open.json
 
 ## What the transcript tree encodes
 
+Two project directories. `-proj-roomscanner/` carries the properties below;
+`-proj-ctxgrowth/` is a **fourth** property, kept apart deliberately (see below).
+
 Three properties, each measured against the real store before being written down:
 
 1. **The nested subagent path.** Subagent spend lives at
@@ -30,6 +33,19 @@ Three properties, each measured against the real store before being written down
    `ccusage weekly`, which buckets by calendar week.
 
 Plus a malformed line and a usage-free line, which the reader must skip rather than raise on.
+
+4. **Context growth** — `-proj-ctxgrowth/sess-grow0001.jsonl`, 12 records whose
+   `input + cache_creation + cache_read` climbs 45,000 → 480,000, crossing both
+   `ROTATE_AT_CONTEXT` (300K) and `HARD_ROTATE_AT_CONTEXT` (450K). The floor is the
+   measured one: ~45K across six real sessions, which is `input + cache_creation +
+   cache_read` and **not** cache-read alone — at turn 1 the system prompt is being
+   cache-*created*, so reading cache_read by itself reports ~17K and understates the
+   floor by 28K.
+
+   It lives in its own project directory, and is Haiku-weighted with near-zero
+   `output_tokens`, so that a fixture whose whole point is a large `cache_read` series
+   cannot move the shared weighted totals that the tests in this tree assert against.
+   Context tests isolate it with `project_dir=` or `session_id=`.
 
 ## Verified against ccusage
 
