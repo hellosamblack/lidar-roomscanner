@@ -555,3 +555,112 @@ def test_firmware_work_is_not_handed_to_a_cheap_tier():
     returning, so a worker cannot recover unattended."""
     tier = fp.suggest_tier(_stub(labels=["area/firmware-scanner-stream"]), {}, "planned")
     assert tier == "orchestrator-only"
+
+
+# --------------------------------------------------------------------------------
+# Triage digest
+# --------------------------------------------------------------------------------
+
+def _plan(issues, tracked, commits, **kw):
+    return fp.plan_fleet(issues, tracked, commits, max_agents=3,
+                         generated_at="2026-08-13T00:00:00", **kw)
+
+
+def _digest_chars(t):
+    """Every string the digest carries into the orchestrator's context."""
+    n = len(t["plan_excerpt"]) + len(t["body_excerpt"])
+    if t["latest_comment"]:
+        n += len(t["latest_comment"]["excerpt"])
+    return n
+
+
+def test_triage_digest_respects_the_hard_char_cap(issues, tracked, commits):
+    """The test that stops the digest becoming the thing it replaced. Without a cap,
+    'carry the plan forward' grows back into the unbounded `gh issue view` payload it
+    exists to remove -- and at Step 2, the earliest step, every carried token is
+    re-sent on all of the run's remaining turns."""
+    plan = _plan(issues, tracked, commits)
+    seen = 0
+    for item in plan["batch"]:
+        seen += 1
+        assert _digest_chars(item["triage"]) <= fp.TRIAGE_CHARS_PER_ISSUE
+    assert seen, "fixture must produce a batch"
+
+
+def test_triage_reports_what_it_elided(issues, tracked, commits):
+    """A truncated plan reads exactly like a complete one. `chars_elided` is what makes
+    'the digest did not settle it' an observable rather than a hunch."""
+    plan = _plan(issues, tracked, commits)
+    digests = [i["triage"] for i in plan["batch"]]
+    assert all(d["chars_elided"] >= 0 for d in digests)
+    assert any(d["chars_elided"] > 0 for d in digests), \
+        "at least one fixture issue has more prose than the caps carry"
+
+
+def test_triage_picks_the_latest_plan_not_the_first():
+    """Plans get superseded in a thread. Reading the first one re-runs a design the
+    tracker has already moved past."""
+    issue = {"number": 1, "title": "t", "body": "b", "labels": [], "comments": [
+        {"author": {"login": "a"}, "createdAt": "2026-08-01T00:00Z",
+         "body": "## Implementation plan\nOLD-AND-SUPERSEDED"},
+        {"author": {"login": "a"}, "createdAt": "2026-08-02T00:00Z",
+         "body": "## Implementation plan\nNEW-AND-CURRENT"},
+    ]}
+    t = fp.triage_digest(issue)
+    assert "NEW-AND-CURRENT" in t["plan_excerpt"]
+    assert "OLD-AND-SUPERSEDED" not in t["plan_excerpt"]
+
+
+@pytest.mark.parametrize("body,kind", [
+    ("**Session start** — 2026-08-12T02:56Z\nTask: x", "session_start"),
+    ("## Implementation plan\nstep 1", "implementation_plan"),
+    ("## \N{HAMMER AND WRENCH} Operator Request\nplease record", "operator_request"),
+    ("files_changed: a.py\ntests_run: pytest -q", "worker_report"),
+    ("just a remark", "other"),
+])
+def test_triage_classifies_the_latest_comment_kind(body, kind):
+    """The kind alone changes the claim decision -- a dangling `Session start` means a
+    session died mid-flight, an operator request means it is parked on the owner, a
+    worker report means a branch already exists. None of that needs the prose."""
+    issue = {"number": 1, "title": "t", "body": "", "labels": [],
+             "comments": [{"author": {"login": "a"}, "createdAt": "x", "body": body}]}
+    assert fp.triage_digest(issue)["latest_comment"]["kind"] == kind
+
+
+def test_triage_is_absent_from_excluded(issues, tracked, commits):
+    """Excluded issues are not being claimed; digesting them would multiply the payload
+    by ~20 to answer a question nobody asked."""
+    plan = _plan(issues, tracked, commits)
+    assert all("triage" not in i for i in plan["excluded"])
+
+
+def test_triage_can_be_switched_off(issues, tracked, commits):
+    plan = _plan(issues, tracked, commits, triage=False)
+    assert all("triage" not in i for i in plan["batch"])
+
+
+def test_acceptance_hint_names_the_tool_the_check_needs(issues, tracked, commits):
+    """Pre-sorts the verification veto: if the session lacks the tool the hint names,
+    that is the veto, and it is known before a worker is spawned."""
+    plan = _plan(issues, tracked, commits)
+    hints = {i["triage"]["acceptance_hint"] for i in plan["batch"]}
+    assert hints <= {"visual", "hardware", "pytest", "unstated"}
+
+
+def test_needs_operator_is_excluded_so_the_skill_need_not_cross_check(holds_issues, tracked, commits):
+    """Ties the SKILL.md edit to planner behaviour. SKILL.md used to mandate an
+    `operator_queue()` cross-check 'because the planner does not' -- it does, since
+    #177. If `excluded_reason` ever stops excluding, the doc claim fails with it."""
+    plan = _plan(holds_issues, tracked, commits)
+    held = {i["number"] for i in plan["excluded"]
+            if "needs/operator" in i["reason"]}
+    assert held, "held issues must be excluded outright, not merely ranked lower"
+    assert not ({i["number"] for i in plan["batch"]} & held)
+
+
+def test_dot_claude_is_a_shared_doc_prefix():
+    """`.claude/agents/fleet-worker.md` is a worker's own contract. Without this prefix
+    a worker could legally rewrite it mid-run -- and since agent definitions load at
+    session start, the edit would take effect on the next wave rather than failing."""
+    assert ".claude/" in fp.SHARED_DOC_PREFIXES
+    assert fp.is_shared_doc(".claude/agents/fleet-worker.md")

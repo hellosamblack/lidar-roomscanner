@@ -56,7 +56,12 @@ SHARED_DOC_FILES = frozenset({
     "docs/issue-migration-map.md", "docs/issue-migration-map.json",
     "host/tests/test_doc_links.py",
 })
-SHARED_DOC_PREFIXES = ("docs/", ".remember/", ".agents/skills/")
+#: `.claude/` is here because it holds the agent definitions and hooks -- including
+#: `.claude/agents/fleet-worker.md`, a worker's OWN contract. Without this prefix a
+#: worker claiming an issue about the worker contract could legally rewrite it mid-run,
+#: and because agent definitions load at session start, the edit would take effect on
+#: the next wave rather than visibly failing.
+SHARED_DOC_PREFIXES = ("docs/", ".remember/", ".agents/skills/", ".claude/")
 
 #: Files so central that any two issues reaching them must never run concurrently,
 #: even when the overlap is only inferred. Cheaper to defer an issue a wave than to
@@ -145,6 +150,41 @@ BLOCKER_PHRASE_RE = re.compile(
     re.IGNORECASE)
 
 FOOTPRINT_CONFIDENCE = ("declared", "planned", "mentioned", "none")
+
+# --------------------------------------------------------------------------------
+# Triage digest
+# --------------------------------------------------------------------------------
+#
+# `fetch_issues` already pulls every open issue with its full body and comment threads
+# -- ~260 KB in one gh call -- and the planner used to throw all of that text away,
+# after which the skill instructed the orchestrator to fetch it back one issue at a
+# time. That second fetch is the single largest avoidable cost in a fleet run: it is
+# unbounded prose, it is O(candidates), and it lands in the most expensive context in
+# the run. These caps exist so the digest replaces that loop instead of relocating it.
+#
+# The caps are small on purpose. A token added at turn `t` is re-sent on every one of
+# the remaining turns, so bloat introduced at Step 2 -- the earliest step -- is the most
+# expensive bloat there is.
+TRIAGE_CHARS_PER_ISSUE = 1200
+TRIAGE_SLICE_CHARS = 400
+TRIAGE_COMMENT_CHARS = 300
+TRIAGE_BODY_CHARS = 300
+#: A few beyond the wave, so a hand-veto can be replaced without re-planning.
+TRIAGE_EXTRA_CANDIDATES = 5
+
+#: Mirrors `operator_queue.REQUEST_HEADING`. Kept as a literal rather than imported so
+#: the planner stays free of that module; `test_operator_heading_matches_operator_queue`
+#: pins them together.
+OPERATOR_REQUEST_RE = re.compile(r"^##\s*\N{HAMMER AND WRENCH}?\s*Operator Request",
+                                 re.IGNORECASE | re.MULTILINE)
+#: The worker report contract from `references/worker-brief.md`.
+WORKER_REPORT_RE = re.compile(
+    r"^\s*[-*]?\s*(files_changed|tests_run|doc_deltas|blocked_on)\b",
+    re.IGNORECASE | re.MULTILINE)
+#: Acceptance that needs a human's eyes or a browser. Evidence: 6/29 open issues.
+VISUAL_ACCEPTANCE_RE = re.compile(
+    r"\b(looks? right|in the viewport|visually|by eye|screenshot|render(?:s|ed)? correctly)\b",
+    re.IGNORECASE)
 
 SLUG_STRIP_RE = re.compile(r"[^a-z0-9]+")
 
@@ -524,6 +564,95 @@ def worktree_name(issue: dict) -> str:
     return f"issue-{issue['number']}-{slugify(issue.get('title') or '')}"
 
 
+def _clip(text: str, limit: int) -> str:
+    """Collapse whitespace and cut to `limit`, marking the cut."""
+    flat = " ".join((text or "").split())
+    return flat if len(flat) <= limit else flat[:limit - 1].rstrip() + "…"
+
+
+def _comment_kind(body: str) -> str:
+    """What KIND of comment this is, which is most of what triage needs from it.
+
+    A `Session start` with no outcome after it means a session died mid-flight; an
+    operator request means the issue is parked on the owner; a worker report means a
+    branch already exists. Each changes the claim decision, and none of them requires
+    reading the comment.
+    """
+    if OPERATOR_REQUEST_RE.search(body):
+        return "operator_request"
+    if SESSION_START_RE.search(body):
+        return "session_start"
+    if PLAN_HEADING_RE.search(body):
+        return "implementation_plan"
+    if WORKER_REPORT_RE.search(body):
+        return "worker_report"
+    return "other"
+
+
+def triage_digest(issue: dict, footprint: set[str] | None = None,
+                  resources: set[str] | None = None,
+                  chars: int = TRIAGE_CHARS_PER_ISSUE) -> dict:
+    """A bounded read of what an issue's prose says, so nobody has to re-fetch it.
+
+    Pure and deterministic. Answers the three questions Step 2 actually asks -- is
+    there a plan, what happened most recently, and can its acceptance be run here --
+    within a hard character budget, and says how much it left out.
+
+    `chars_elided` is not decoration. A truncated plan reads exactly like a complete
+    one, and the orchestrator's whole job at this step is judging whether it has enough
+    to claim on. It is also the trigger for delegating a deeper read.
+    """
+    comments = issue.get("comments") or []
+    body = issue.get("body") or ""
+    footprint = footprint or set()
+    resources = resources or set()
+
+    plan_excerpt = ""
+    for c in reversed(comments):          # the LATEST plan, not the first
+        cb = c.get("body") or ""
+        m = PLAN_HEADING_RE.search(cb)
+        if m:
+            plan_excerpt = _clip(cb[m.start():], TRIAGE_SLICE_CHARS)
+            break
+
+    latest = comments[-1] if comments else None
+    latest_comment = None
+    if latest:
+        latest_comment = {
+            "author": (latest.get("author") or {}).get("login", ""),
+            "createdAt": latest.get("createdAt", ""),
+            "kind": _comment_kind(latest.get("body") or ""),
+            "excerpt": _clip(latest.get("body") or "", TRIAGE_COMMENT_CHARS),
+        }
+
+    haystack = body + " " + " ".join((c.get("body") or "") for c in comments)
+    if {"device", "rig", "gpu"} & resources:
+        hint = "hardware"
+    elif "browser" in resources or VISUAL_ACCEPTANCE_RE.search(haystack):
+        hint = "visual"
+    elif any(f.rsplit("/", 1)[-1].startswith("test_") for f in footprint):
+        hint = "pytest"
+    else:
+        hint = "unstated"
+
+    digest = {
+        "comment_count": len(comments),
+        "plan_excerpt": plan_excerpt,
+        "latest_comment": latest_comment,
+        "body_excerpt": _clip(body, TRIAGE_BODY_CHARS),
+        "acceptance_hint": hint,
+    }
+    carried = sum(len(v) for v in (plan_excerpt, digest["body_excerpt"]))
+    carried += len(latest_comment["excerpt"]) if latest_comment else 0
+    digest["chars_elided"] = max(0, len(haystack) - carried)
+
+    # Enforce the budget here rather than trusting the individual slices to add up.
+    over = carried - chars
+    if over > 0 and plan_excerpt:
+        digest["plan_excerpt"] = _clip(plan_excerpt, max(0, len(plan_excerpt) - over))
+    return digest
+
+
 def excluded_reason(issue: dict) -> str | None:
     labels = label_names(issue)
     if NEEDS_OPERATOR_LABEL in labels:
@@ -621,8 +750,15 @@ def plan_fleet(issues: list[dict], tracked: set[str], commits: list[dict], *,
                include_priorities: tuple[str, ...] = ("now", "next"),
                exclude_areas: tuple[str, ...] = (),
                include_unknown_footprint: bool = True,
+               triage: bool = True,
+               triage_chars: int = TRIAGE_CHARS_PER_ISSUE,
                generated_at: str | None = None) -> dict:
-    """Pure planner. Every input is data; no network, no git, no clock unless given."""
+    """Pure planner. Every input is data; no network, no git, no clock unless given.
+
+    `triage` attaches a bounded prose digest to each selected issue and to a few
+    near-misses. It defaults on because the alternative is the orchestrator re-fetching
+    the same bodies one `gh issue view` at a time -- the planner already holds them.
+    """
     coedit = build_coedit_graph(commits)
     area_prior = build_area_prior(commits, tracked)
     blocks, dep_notes = build_dep_graph(issues)
@@ -678,6 +814,20 @@ def plan_fleet(issues: list[dict], tracked: set[str], commits: list[dict], *,
     batch, deferred, sel_notes = select_batch(candidates, max_agents=max_agents)
     for item in batch:
         item["footprint_size"] = len(item["footprint"])
+
+    # Triage digests go on the batch and on a few near-misses only. Attaching them to
+    # `deferred`/`excluded` too would multiply the payload by ~20 for issues nobody is
+    # about to claim -- which would recreate, inside the planner, the unbounded fetch
+    # this is here to remove. `select_batch` rebuilds its dicts, so look the source
+    # issue back up by number rather than carrying it through.
+    if triage:
+        by_number = {i["number"]: i for i in issues}
+        for item in list(batch) + list(deferred[:TRIAGE_EXTRA_CANDIDATES]):
+            source = by_number.get(item["number"])
+            if source is not None:
+                item["triage"] = triage_digest(source, set(item.get("footprint", ())),
+                                               set(item.get("resources", ())),
+                                               chars=triage_chars)
 
     return {
         "batch": batch,
