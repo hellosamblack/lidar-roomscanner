@@ -506,6 +506,13 @@ Not everything should be wrapped. The scratch tier, the deprecated-panel tools, 
 the rare one-shot rigs stay CLI-only; each is listed in `EXCLUDED` with its reason,
 and the test fails on any script that is neither exposed nor excluded.
 
+**`fleet_run.py` is the structural exclusion, not a judgement call.** It chains
+orchestrator sessions across a rotating fleet run, so it has to outlive every session it
+spawns — and an MCP tool runs *inside* the session being rotated, dying with it. The
+lifetime is the argument: anything that must survive a session boundary is a CLI the owner
+runs, never a tool the session calls. It is documented in the `issue-fleet` skill, and its
+per-link record lands in `.fleet/<run-id>.chain.json`.
+
 ## Browser backend
 
 `session.py` defines the browser as an interface (`goto`, `evaluate`, `wait_for`,

@@ -89,7 +89,8 @@ measurement*; presenting a re-read of the anchor as evidence the run is on budge
 carrying it another wave costs more than handing off. **These are instructions, not advice.**
 
 - **`rotate`** (context ≥ 300K): finish the wave in flight — merge it, run its Step 8.5 — then write
-  the handoff and **stop**. Do not start another wave.
+  the handoff and **stop**. Do not start another wave. Under `fleet_run.py` your successor starts
+  itself; see "Supervised rotation" below.
 - **`rotate_hard`** (≥ 450K): do not start the next *issue* either. Land whatever has a branch, park
   the rest, hand off.
 - Pin `session_id` from the first call's `rotation.session_id` so later calls do not re-infer it.
@@ -109,9 +110,29 @@ Measured before any of this existed: orchestrator cache-read outweighed output 1
 45K → 478–660K in a single session, the last quartile of turns cost ~4x per turn what the first did,
 and **94.3%** of a week's weighted spend sat in the orchestrator seat rather than in its workers.
 
-### The handoff file — `.claude/fleet/<run-id>.md`
+### Supervised rotation — the chain runs itself
 
-Gitignored, local to this machine. **Carry only what cannot be reconstructed** — Step 0's four
+If `host/tools/fleet_run.py` spawned you, **rotation is automatic and you must not ask the owner to
+restart the run.** Your prompt says so, names your link number, and pins your `session_id`. Write the
+handoff, end your turn, and the supervisor starts your successor. It also stops the chain — on a
+permission denial, a token ceiling, `--max-sessions`, or no progress — so a link that quietly achieves
+nothing does not get repeated six times.
+
+Pass the `session_id` from your prompt to **every** `fleet_budget()` call. At your turn 1 the newest
+top-level records on disk are still your *predecessor's*; an unpinned call reads that 400K context and
+rotates you before you have done anything.
+
+You may also be started by hand, with no supervisor. Then Step 1.5 ends the way it always did: write
+the handoff and stop.
+
+### The handoff file — `.fleet/<run-id>.md`
+
+Gitignored, local to this machine. **Deliberately outside `.claude/`**, where this lived until
+2026-08-13: an unattended session cannot `Write` anywhere under that tree even when its allowlist
+grants `Write`, and no path-scoped rule lifts it — measured three ways, recorded in `fleet_run.py`'s
+`FLEET_DIR` note. A handoff the next session cannot write is not a handoff.
+
+**Carry only what cannot be reconstructed** — Step 0's four
 commands already recover the claims (`gh issue list --label status/in-progress`), the worktrees and
 branches (`git worktree list`), and what merged (`git branch --merged main`). So the file holds:
 
@@ -128,6 +149,33 @@ doc_deltas_collected[]               # union so far; Step 9 applies them once
 memory_candidates[]                  # REQUIRED -- see below
 orchestrator_code_edits              # count, for the ledger
 ```
+
+**Plus one fenced `run-state` block, which is the only part a supervisor reads.** Write it even when
+no supervisor started you — it costs four lines and it is what makes the run resumable by one.
+
+````
+```run-state
+run_id: fleet-20260813-1600
+run_state: rotated        # rotated -> spawn my successor | complete -> stop | halted -> stop
+link: 2                   # your position in the chain
+session_chain: [<uuid>, <uuid>]
+waves_done: 3
+issues_landed: [170, 171]
+issues_open: [178]
+halt_reason:              # required when run_state is halted; name the tool or the person
+```
+````
+
+Two ways a chain stops that are easy to trip by accident:
+
+- **No block at all** stops it, because a finished run and a crashed one are indistinguishable from
+  outside the session.
+- **`waves_done` and `issues_landed` both unchanged** stops it as no-progress. If you deliberately
+  spend a link on something that advances neither — a long review round-trip, a doc sweep — set
+  `run_state: halted` and say so, rather than leaving a successor to repeat you.
+
+`run_state: complete` is a claim that the run is done **and** that you ran `session-end`. It is the
+only end state the supervisor treats as success.
 
 **`memory_candidates` is not optional.** `session-end` records *this* session's memory, so a rotated
 fleet loses every earlier wave's lessons unless the handoff carries them forward. Rotation without

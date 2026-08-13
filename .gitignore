@@ -1,6 +1,11 @@
-# issue-fleet run state: the handoff file a rotating orchestrator writes so a fresh
-# session can resume mid-run. Local to one machine's run, never shared.
-.claude/fleet/
+# issue-fleet run state: the handoff a rotating orchestrator writes so a fresh session can
+# resume mid-run, plus the supervisor's per-link logs and chain record. Local to one
+# machine's run, never shared.
+#
+# NOT under `.claude/`, where this lived until 2026-08-13 (#183): a headless link cannot
+# Write anywhere in that tree even with the permission granted, so the handoff was
+# unwritable by the very sessions that exist to write it. See fleet_run.py's FLEET_DIR.
+.fleet/
 
 # CMake (from GitHub template)
 CMakeLists.txt.user

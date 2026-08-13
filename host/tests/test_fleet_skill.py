@@ -219,8 +219,27 @@ def test_the_skill_states_the_rotation_policy(skill_text):
 def test_the_skill_names_the_handoff_file_and_requires_memory_candidates(skill_text):
     """Rotation without `memory_candidates` destroys every pre-rotation wave's lessons,
     because `session-end` only ever records the session it runs in."""
-    assert ".claude/fleet/" in skill_text
+    assert ".fleet/" in skill_text
     assert "memory_candidates" in skill_text
+
+
+def test_the_skill_keeps_the_handoff_out_of_the_unwritable_dot_claude_tree(skill_text):
+    """A headless link cannot Write under `.claude/` even with `Write` allowlisted (#183,
+    measured three ways against CLI 2.1.228), so a handoff there is one an automated
+    successor can never produce. The path is load-bearing, not cosmetic."""
+    stale = [ln for ln in skill_text.splitlines() if ".claude/fleet" in ln]
+    assert not stale, f"handoff moved to .fleet/, but the skill still names: {stale}"
+
+
+def test_the_skill_documents_the_run_state_block_a_supervisor_reads(skill_text):
+    """`fleet_run.py` parses exactly this block. If the skill stops describing it, links
+    write prose the supervisor reads as a crash and the chain stops after one link."""
+    assert "```run-state" in skill_text
+    for field in ("run_state:", "session_chain:", "waves_done:", "issues_landed:", "halt_reason:"):
+        assert field in skill_text, field
+    for state in ("rotated", "complete", "halted"):
+        assert state in skill_text, state
+    assert "no-progress" in skill_text
 
 
 def test_the_skill_no_longer_mandates_an_inline_multi_issue_gh_triage_loop(skill_text):

@@ -57,6 +57,31 @@ change failed. `orch_share` is the column that answers the question.
 | `orch_code_edits` | orchestrator `Edit`/`Write` calls onto `host/src`, `host/tests`, `host/tools`, `firmware/` — should be 0 |
 | `confounds` | anything that makes this row non-comparable. Blank means "nothing changed" and is a claim |
 
+## Supervised runs (`fleet_run.py`, #183)
+
+When a run is chained by `host/tools/fleet_run.py`, most of the row is already written for
+you: `.fleet/<run-id>.chain.json` holds one record per link — session id, turns, duration,
+permission denials, the weighted delta measured across that link, and the decision that
+ended it. `sessions` is `len(links)`, and `weighted_total` is the supervisor's own sum.
+
+**Rotation is not free, and this table is where that shows up.** Every link re-caches a
+fresh system prompt — the measured floor is ~45K raw, so an Opus link starts ~250K weighted
+in debt before it does anything, and a 4-link run pays that four times. The saving it buys
+is `turns × (C − B)`, which at a 300K rotation point is ~20M weighted over the following
+wave. The ratio is one-sided at the thresholds we use, but it is a ratio, not a law: a
+policy that rotated every 30 turns would spend more on fresh contexts than it recovered.
+Record `sessions` honestly so the trend can be read against `orch_share`.
+
+Two entries in `confounds` matter for chained runs specifically, because both change what
+a link *is*: the `--max-sessions` value the run was launched with, and any `--allow-add`
+granted after a `denied` stop. A run that halted on a denial and was relaunched is two
+partial runs sharing a `run_id`, not one run — say so.
+
+Measured overhead, 2026-08-13 (`smoke-chain`, two Haiku links, chain mechanics only, no
+fleet work): 8,980 and 8,834 weighted tokens per link, 23s and 24s, 3 turns each. That is
+the floor a link costs before it does anything — the supervisor's own tax, on the cheapest
+model.
+
 ## Runs
 
 | run_id | date | orchestrator_model | sessions | waves | claimed | landed | weighted_total | weighted_top_level | weighted_subagent | orch_share | max_context | orch_code_edits | confounds |

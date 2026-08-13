@@ -77,6 +77,15 @@ points here; keep this doc short and binding.
   returns `rotate` when it applies — and `rotate` is an instruction, not a suggestion. The
   by-seat breakdown is the only place a change that moves work off the orchestrator becomes visible;
   a total will barely move.
+- **A policy whose next step is a human noticing gets skipped (2026-08-13, issue #183).** `rotate`
+  was decidable from the day #182 landed, but acting on it meant the owner spotting a stopped run and
+  starting the next session by hand — so the expensive path stayed the default. `host/tools/fleet_run.py`
+  closes that loop: it spawns each successor from the run's handoff and stops the chain on a
+  permission denial, a token ceiling, `--max-sessions`, or no progress. Generalise the shape, not the
+  script: when a rule fires automatically but is *applied* manually, the manual half is where it dies.
+  Two mechanics that automation surfaced and nothing else would have — an unattended session cannot
+  `Write` under `.claude/` even when its allowlist grants `Write`, and a denied tool still exits
+  `is_error: false` — are recorded in that file's module docstring.
 - **Path lengths.** Repo-relative paths stay ≤150 characters (longer breaks `git worktree add` and
   fresh clones on default Windows git).
 

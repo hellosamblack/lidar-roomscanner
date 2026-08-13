@@ -74,6 +74,9 @@ EXCLUDED: dict[str, str] = {
     "build_flatfield.py": "one-shot: builds a calibration .npz from a panned capture",
     "roll_capture.py": "one-shot: rewrites a capture's quaternions",
     "measure_scene.py": "one-shot: physical deprojection validation",
+    # Must outlive the session it manages, so it cannot live inside one.
+    "fleet_run.py": "supervises a chain of orchestrator sessions from OUTSIDE them; an MCP "
+                    "tool runs inside the session being rotated and would die with it",
     "migrate_issues.py": "one-shot: migrated BUGS.md/bugs/ + ROADMAP.md's tracker sections "
                           "to GitHub Issues (2026-08-10) + strip-prefixes title cleanup; "
                           "not an ongoing agent capability",

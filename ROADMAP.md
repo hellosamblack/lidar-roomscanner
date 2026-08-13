@@ -175,6 +175,14 @@ on its own branch inside its own worktree, and the orchestrator still owns revie
 carve-out are stated in `docs/engineering-practices.md` → Branch discipline and in the `status-sync`
 skill.
 
+**A fleet run rotates itself (2026-08-13, #183).** An orchestrator's cost is accumulated context, so
+`fleet_budget()` returns `rotate` at 300K and the skill hands off to a fresh session (#182). The
+restart used to be manual, which meant the expensive path stayed the default. `host/tools/fleet_run.py`
+now owns the chain: it spawns each successor from `.fleet/<run-id>.md`, and stops on a permission
+denial, a weighted-token ceiling, `--max-sessions`, or no progress. Deliberately a CLI, not an MCP
+tool — it has to outlive the session it rotates. Chain mechanics verified live; **one real supervised
+fleet run is still outstanding** (#183, `needs/operator` + `needs/decision`).
+
 ## Completed phases
 
 Full narratives, with measured outcomes, are in [`docs/roadmap-history.md`](docs/roadmap-history.md)
