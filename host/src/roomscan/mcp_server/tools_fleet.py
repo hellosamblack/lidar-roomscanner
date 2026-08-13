@@ -19,7 +19,8 @@ sys.path.insert(0, str(HOST))  # `tools` is a top-level package rooted at host/
 
 @mcp.tool()
 def fleet_plan(max_agents: int = 3, priorities: str = "now,next",
-               exclude_areas: str = "", include_unknown: bool = True) -> dict:
+               exclude_areas: str = "", include_unknown: bool = True,
+               triage: bool = True) -> dict:
     """Choose a conflict-free batch of open issues for parallel workers.
 
     Ranks open issues by priority, doubles the score of any issue that already has
@@ -35,23 +36,46 @@ def fleet_plan(max_agents: int = 3, priorities: str = "now,next",
     Read `notes`: soft conflicts and prose-inferred dependencies are surfaced there
     for your judgement rather than applied silently.
 
+    **Read each selected issue's `triage` digest instead of running `gh issue view`.**
+    This call already fetched every open issue's full body and comment thread, so a
+    per-issue `gh` loop re-pays for text you are holding. The digest is bounded and
+    carries: `plan_excerpt` (the LATEST implementation-plan comment, not the first --
+    plans get superseded), `latest_comment` with its `kind` (`session_start` /
+    `implementation_plan` / `operator_request` / `worker_report` / `other`),
+    `body_excerpt`, `comment_count`, `acceptance_hint`, and `chars_elided`.
+
+    `acceptance_hint` pre-sorts the verification veto: `visual` needs the browser,
+    `hardware` needs the rig. If this session lacks the tool the hint names, that is
+    the veto -- and you know it before spawning anything.
+
+    When `chars_elided` is large and the digest has not settled the question, spawn an
+    `Explore` agent to read the thread and report back a short verdict. Do not read it
+    yourself: a thread you read stays in your context for every remaining turn of the
+    run, while a subagent's context is discarded when it returns.
+
+    Held issues arrive in `excluded` labelled `needs/operator (<subtype>)`; the planner
+    vetoes them outright, so no `operator_queue()` cross-check is needed to filter the
+    batch. Call that tool for its `problems` field, or when writing an operator request.
+
     `priorities` and `exclude_areas` are comma-separated (`"now,next"`,
     `"firmware,host-slam"`). Set `include_unknown=False` to skip issues whose
-    footprint cannot be determined from their text.
+    footprint cannot be determined from their text. `triage=False` drops the digests.
     """
     from tools.fleet_plan import plan_fleet_live
     return plan_fleet_live(
         max_agents=max_agents,
         include_priorities=tuple(p.strip() for p in priorities.split(",") if p.strip()),
         exclude_areas=tuple(a.strip() for a in exclude_areas.split(",") if a.strip()),
-        include_unknown_footprint=include_unknown)
+        include_unknown_footprint=include_unknown,
+        triage=triage)
 
 
 @mcp.tool()
 def fleet_budget(ceiling_pct: float = 80.0, limit_basis: str = "peak",
                  limit_tokens: float = 0.0, forecast_agents: int = 0,
                  forecast_minutes: int = 0, observed_week_pct: float = 0.0,
-                 observed_block_pct: float = 0.0, source: str = "auto") -> dict:
+                 observed_block_pct: float = 0.0, source: str = "auto",
+                 session_id: str = "", project_dir: str = "") -> dict:
     """Estimate Claude usage against a not-to-exceed ceiling before starting a wave.
 
     **ASK THE OWNER FOR THEIR CURRENT PERCENTAGES AND PASS THEM.** `observed_week_pct`
@@ -77,6 +101,29 @@ def fleet_budget(ceiling_pct: float = 80.0, limit_basis: str = "peak",
     spend). `forecast_agents`/`forecast_minutes` matter because parallel workers are
     invisible until they return.
 
+    **`verdict` can be `"rotate"` or `"rotate_hard"`, and neither is advice.** They mean
+    your own context has grown expensive enough that continuing costs more than handing
+    off: finish the wave in flight, write the handoff file, and stop. `rotate_hard` means
+    do not start the next issue either. `budget_verdict` always carries the original
+    `go`/`reduce`/`stop`/`unknown`, and `binding_constraint` says whether the budget or
+    your context drove the call. Rotating beats shrinking the wave -- a smaller wave in a
+    400K context still pays 400K on every turn.
+
+    `rotation` carries the evidence: `context_tokens`, `turns`, and
+    `rotation_saving_weighted` versus `rotation_cost_weighted`. Those are weighted-token
+    DELTAS, not percentages -- this module has no trustworthy denominator, and the saving
+    is what a fresh session avoids re-sending, not a share of anything.
+
+    `rotation.confidence` is `"inferred"` when the session was identified by recency
+    (the newest top-level transcript record, which is normally you). Pass
+    `session_id` from the first call's `rotation.session_id` to pin it for the rest of
+    the run. If the context cannot be measured the verdict silently covers the budget
+    windows only and says so in `notes` -- it does NOT become `unknown`.
+
+    Read `seven_day.by_seat`: `top_level` is your own turns, `subagent` is every worker
+    you spawned. Delegating moves spend between those two buckets and rotating shrinks
+    the first, so both changes look like nothing against a total and only show up here.
+
     Any failure returns `verdict: "unknown"` with a reason, never a number.
     """
     from tools.fleet_budget import fleet_budget as _budget
@@ -85,7 +132,8 @@ def fleet_budget(ceiling_pct: float = 80.0, limit_basis: str = "peak",
                    forecast_agents=forecast_agents, forecast_minutes=forecast_minutes,
                    observed_week_pct=observed_week_pct or None,
                    observed_block_pct=observed_block_pct or None,
-                   source=source)
+                   source=source,
+                   session_id=session_id or None, project_dir=project_dir or None)
 
 
 @mcp.tool()
