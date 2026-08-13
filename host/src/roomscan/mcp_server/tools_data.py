@@ -39,9 +39,16 @@ def _survey(path: Path, max_frames: int = 400) -> dict:
 
     Deliberately not `analyze_capture.scan()` -- that decodes and CRCs the whole
     file, which is far too slow to run across a whole directory just to answer
-    "does this one have stream 9?".
+    "does this one have stream 9?". It DOES share `analyze_capture`'s framing
+    constants, including `SUPPORTED_VERSIONS` -- this used to hardcode its own
+    `ver != 1` check, which silently reported `streams: {}` for every capture
+    since the wire format moved to v2 (2b8a9ee, 2026-08-03) even though
+    `analyze_capture.scan()` (and therefore `capture_analyze`) had already been
+    taught v2 (commit 56ee9ba). Two tools reading the same bytes must read the
+    same version list, so this imports it rather than re-declaring it (#178).
     """
-    from tools.analyze_capture import _HEADER, HEADER_SIZE, MAGIC, MAX_PAYLOAD, STREAMS
+    from tools.analyze_capture import (_HEADER, HEADER_SIZE, MAGIC, MAX_PAYLOAD,
+                                       STREAMS, SUPPORTED_VERSIONS)
 
     counts: dict[str, int] = {}
     frames = 0
@@ -60,7 +67,7 @@ def _survey(path: Path, max_frames: int = 400) -> dict:
             break
         _m, ver, _ft, stream, _fl, _seq, _t, _w, _h, plen, _r = _HEADER.unpack(
             data[pos:pos + HEADER_SIZE])
-        if ver != 1 or plen > MAX_PAYLOAD:
+        if ver not in SUPPORTED_VERSIONS or plen > MAX_PAYLOAD:
             pos += 1
             continue
         total = HEADER_SIZE + plen + 4

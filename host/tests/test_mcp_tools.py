@@ -18,8 +18,8 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 def _frame(*, stream: int = 7, seq: int = 0, payload: bytes = b"\x01\x02\x03\x04",
-           ftype: int = 1, corrupt_crc: bool = False) -> bytes:
-    header = struct.pack("<4sBBBBIQHHII", MAGIC, 1, ftype, stream, 0, seq, 1000 * seq,
+           ftype: int = 1, corrupt_crc: bool = False, version: int = 1) -> bytes:
+    header = struct.pack("<4sBBBBIQHHII", MAGIC, version, ftype, stream, 0, seq, 1000 * seq,
                          2, 2, len(payload), 0)
     body = header + payload
     crc = zlib.crc32(body)
@@ -255,6 +255,45 @@ def test_survey_is_bounded_by_max_frames(tmp_path):
     p.write_bytes(b"".join(_frame(seq=i) for i in range(50)))
 
     assert _survey(p, max_frames=10)["frames_sampled"] == 10
+
+
+def test_survey_matches_analyze_capture_on_a_v2_capture(tmp_path):
+    """Regression for #178: analyze_capture.scan() was taught protocol v2
+    (SUPPORTED_VERSIONS, commit 56ee9ba) but `_survey()` kept its own
+    hardcoded `ver != 1` check, so `capture_list(surveyed=True)` silently
+    reported `streams: {}` / `frames_sampled: 0` / `has_stream_9: false` for
+    every capture recorded since the wire format moved to v2 (2b8a9ee,
+    2026-08-03) while `capture_analyze` decoded the identical bytes fine.
+
+    Pin `_survey()`'s per-stream census against `scan()`'s over the SAME
+    v2-shaped bytes so the two tools cannot desync again on the next version
+    bump.
+    """
+    from collections import Counter
+
+    from roomscan.mcp_server.tools_data import _survey
+    from tools.analyze_capture import scan
+
+    p = tmp_path / "v2.bin"
+    p.write_bytes(
+        _frame(version=2, stream=7, seq=0)     # RAW_3DMD
+        + _frame(version=2, stream=9, seq=1)   # IMU_QUAT
+        + _frame(version=2, stream=7, seq=2)   # RAW_3DMD
+        + _frame(version=2, stream=10, seq=3)  # ENV
+        + _frame(version=2, stream=7, seq=4))  # RAW_3DMD
+
+    reference = scan(str(p))
+    expected_streams = Counter(
+        rec["stream_id"] for rec in reference["frame_log"] if rec["frame_type"] == "DATA")
+
+    survey = _survey(p)
+
+    assert reference["frames_decoded"] == 5, "fixture itself must be v2-decodable"
+    assert survey["frames_sampled"] == 5
+    assert dict(survey["streams"]) == dict(expected_streams)
+    assert survey["streams"]["RAW_3DMD"] == 3
+    assert survey["streams"]["IMU_QUAT"] == 1
+    assert survey["streams"]["ENV"] == 1
 
 
 def test_only_ok_counts_as_a_successful_command():
