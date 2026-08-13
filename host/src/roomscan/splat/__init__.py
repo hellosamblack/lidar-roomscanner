@@ -11,12 +11,16 @@ import anywhere; ``pipeline.build_splat`` pulls the heavy training stack lazily.
 from __future__ import annotations
 
 from .config import SplatPreset
+from .posed import PosedCapture, PosedFrame, PosedFrameError
+from .rtabmap import RtabmapExportError, load_rtabmap_export, summarize_rtabmap_export
 from .sidecar import (delete_splat, list_source_videos, list_splats, sidecar_paths,
                       sidecar_status, slugify, splat_defaults, write_import_manifest)
 
 __all__ = ["SplatPreset", "list_splats", "list_source_videos", "splat_defaults",
            "delete_splat", "sidecar_paths", "sidecar_status", "slugify", "build_splat",
-           "compare_scan_to_reference", "choose_reference", "write_import_manifest"]
+           "compare_scan_to_reference", "choose_reference", "write_import_manifest",
+           "PosedCapture", "PosedFrame", "PosedFrameError",
+           "RtabmapExportError", "load_rtabmap_export", "summarize_rtabmap_export"]
 
 
 def build_splat(*args, **kwargs):

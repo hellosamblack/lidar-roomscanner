@@ -94,6 +94,16 @@ def _cmd_compare(args) -> int:
     return 0 if report.get("ok") else 2
 
 
+def _cmd_inspect_rtabmap(args) -> int:
+    from .rtabmap import summarize_rtabmap_export   # GPU-free, no torch/gsplat/pycolmap
+
+    report = summarize_rtabmap_export(
+        args.export_dir, base_name=args.base_name,
+        require_depth=not args.no_require_depth, require_confidence=not args.no_require_confidence)
+    _emit(report, args.json)
+    return 0 if report.get("ok") else 2
+
+
 def _emit(report: dict, json_path: str | None) -> None:
     text = json.dumps(report, indent=2)
     if json_path:
@@ -150,6 +160,18 @@ def main(argv=None) -> int:
     cmp.add_argument("--allow-scale", action="store_true", dest="allow_scale",
                      help="let ICP estimate scale (diagnostic only; default rigid)")
     cmp.set_defaults(func=_cmd_compare)
+
+    insp = sub.add_parser("inspect-rtabmap", help="validate a documented RTAB-Map export "
+                          "directory (GPU-free; see docs/rtabmap-pixel10-capture.md)")
+    insp.add_argument("export_dir", help="rtabmap-export --images --poses_camera "
+                      "--poses_format 1 output directory")
+    insp.add_argument("--base-name", dest="base_name", default=None,
+                      help="override the auto-detected export base name")
+    insp.add_argument("--no-require-depth", action="store_true", dest="no_require_depth",
+                      help="diagnostic only: do not require registered depth per frame")
+    insp.add_argument("--no-require-confidence", action="store_true", dest="no_require_confidence",
+                      help="diagnostic only: do not require depth confidence per frame")
+    insp.set_defaults(func=_cmd_inspect_rtabmap)
 
     args = ap.parse_args(argv)
     return args.func(args)
