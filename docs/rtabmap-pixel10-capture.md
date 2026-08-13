@@ -247,6 +247,21 @@ BUG-051 / BUG-058 failure mode, twice burned. Check with a capture whose true ge
 (a corridor, a right-angled corner) before running it on anything that matters. The ingest work is
 tracked in #158 (OFFLINE-5).
 
+## 6a. Validate the export before training
+
+Before feeding an export into anything: `roomscan-splat inspect-rtabmap <output_dir>`
+(GPU-free; imports no torch/gsplat/pycolmap). It reports frame/calibration/depth/confidence
+counts, per-frame calibration variability, pose validity, timestamp domain, and optional
+geometry — and fails loudly (non-zero exit, named frame/path) on any missing, duplicate,
+or ambiguously-associated record. It validates; it does not train — #159 is the consumer
+that will actually seed/replace SfM with this data.
+
+Canonical pose direction: `roomscan.splat.rtabmap.load_rtabmap_export()` returns a
+`PosedCapture` whose `PosedFrame.pose_camera_from_world` is a 4x4 world-to-camera matrix
+(camera_from_world, standard pinhole/optical axes) in RTAB-Map's own map/world frame —
+the `--poses_format 1` (RGBD-SLAM) axis remap is undone, not left in place. Depth/confidence
+are preserved as opaque paths (native encoding, never rescaled to ToF metric truth).
+
 ---
 
 ## 7. Checklist

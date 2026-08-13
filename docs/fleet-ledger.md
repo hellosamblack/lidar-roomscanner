@@ -87,3 +87,4 @@ model.
 | run_id | date | orchestrator_model | sessions | waves | claimed | landed | weighted_total | weighted_top_level | weighted_subagent | orch_share | max_context | orch_code_edits | confounds |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | _(baseline, pre-#182)_ | 2026-08-13 | claude-opus-5 | — | — | — | — | 593.8M | 560.1M | 33.7M | **94.3%** | 660K | 57 (one session) | trailing-7d snapshot across all sessions, not a single run; no rotation gate, no triage digest, orchestrator authored code freely |
+| fleet-20260813-1845 | 2026-08-13 | claude-fable-5 | 1 | 1 | 2 (#158, #178) | 2 | ~3.4M | ~0.95M | ~2.44M | **~28%** | 141K | 0 | totals are per-model 7d deltas (fable=orch, sonnet=workers/reviewer/triage), because the 5h block aggregate was polluted by a concurrent opus-5 session; rolling-window roll-off may understate; weekly pct unanchored (no owner figure); one review round-trip on #158; full suite once via run_tests |

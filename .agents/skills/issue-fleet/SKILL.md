@@ -234,7 +234,10 @@ It was right and the orchestrator was wrong. Re-run your own probe before overri
 the rtabmap checkout's `data/samples.zip` is bag-of-words vocabulary imagery, not an export, and the
 paired capture (#161) is `status/blocked`. Its coordinate-convention half — which its own body flags
 as the BUG-051/058 failure mode — had nothing to validate against. `ls` the directory before
-claiming.
+claiming. **And the mirror image: a recorded veto goes stale when the plan is superseded** — that
+same #158 veto was correct on 2026-08-12, then a newer plan re-scoped the issue to fixture-level
+validation and it landed cleanly on 2026-08-13. Re-triage against the *latest* plan comment before
+re-applying a veto from a prior run or from this file's examples.
 
 **Read the `triage` digest of every issue you are about to claim. A high score is not
 actionability.** The planner ranks on labels, prior work and footprint — it cannot see a sentence,
