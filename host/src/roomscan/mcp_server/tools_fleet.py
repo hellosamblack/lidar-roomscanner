@@ -190,7 +190,9 @@ def operator_page(out: str = "", repo: str = "") -> dict:
     reports. `riders` lists issues that close for free with another issue's action --
     they appear nowhere else on the page, so the trip count stays honest.
 
-    Regenerate after posting or revising any runbook; the page is a snapshot, not live.
+    Regenerate after posting or revising any runbook, or after any `needs/*` label changes on
+    any issue (including a close) -- the page is a snapshot, not live, and a label change with
+    no runbook edit is the case that is easy to miss (#183, 2026-08-14).
     """
     from tools.operator_page import DEFAULT_OUT, build_page
     from tools.operator_queue import REPO

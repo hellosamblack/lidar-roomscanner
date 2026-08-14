@@ -66,6 +66,16 @@ Then continue the checklist below — a held issue still needs its doc deltas la
    `host/tests/test_mcp_registry.py`, `docs/mcp-server.md` updated. Did it change a `/ws` message
    the `rig_*` tools read or send? Then check those tools still verify the *effect* rather than
    just the echo (`docs/mcp-server.md` → "Two invariants").
+9. **`needs/*` labels — regenerate the operator page.** Did this commit add, remove, or change a
+   `needs/operator`/`needs/capture`/`needs/network`/`needs/hardware`/`needs/eyes`/`needs/decision`
+   label on any issue — including closing one that carried them? Then `operator_page()` (or
+   `host/.venv/bin/python host/tools/operator_page.py`) regenerates `/static/operator.html` in the
+   same pass. It is a snapshot, not a live view, and this is the choke point that catches a closed
+   issue's stale entry even when the close happened outside the `operator-request` skill's own
+   Part 3 flow — #183 closed 2026-08-14 via this checklist's own step 1, dropping `needs/operator`
+   and `needs/decision`, and the page still showed it a full day later because nothing here called
+   it. Not gated behind "did a runbook change" — a label change without a runbook edit (e.g. this
+   close) is exactly the case that was missed.
 
 ## Branch discipline (owner workflow, 2026-07-16)
 

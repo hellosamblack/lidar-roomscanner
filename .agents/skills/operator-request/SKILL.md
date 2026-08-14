@@ -126,6 +126,12 @@ substitutes them before `gh` sees them.
 
 8. **Re-read it once as the operator.** Every `[You]` step must be one action. No acronyms. If a
    step says "and then", split it. If you cannot picture doing it, neither can they.
+9. **Regenerate `/static/operator.html`.** Not optional, not batch-mode-only — every runbook post
+   changes what the page should show. `operator_page()` (or, if the MCP tool is unavailable,
+   `host/.venv/bin/python host/tools/operator_page.py`). This step went missing for exactly one
+   issue's worth of the session (#183, 2026-08-14) because it previously lived only as a
+   prose aside inside "Batch mode" below — a single-runbook post never read that far and the page
+   sat stale a full day, still telling the owner a *closed* issue needed a decision from them.
 
 ### Batch mode
 
@@ -146,8 +152,8 @@ once per sitting, and groups issues needing the same **venue** into one setup. T
 the one to look at when writing a *new* runbook: two runbooks can share a venue and no wording at
 all (#142's recording is started by Claude, so it shares no step text with #144, yet both need the
 owner stood in the same metal-free spot), and the page is where that shows up. It writes
-`/static/operator.html` beside the app the runbooks already tell the owner to open. Regenerate it
-after posting or revising any runbook — it is a snapshot, not a live view.
+`/static/operator.html` beside the app the runbooks already tell the owner to open — see step 9
+above for when to regenerate it; it is a snapshot, not a live view.
 
 ### When another issue already asked for the same artifact
 
@@ -215,6 +221,14 @@ gh issue edit NNN --repo hellosamblack/lidar-roomscanner \
   --remove-label "needs/operator" --remove-label "needs/capture" \
   --remove-label "status/fix-unverified"
 ```
+
+7. **Regenerate `/static/operator.html`.** Same rule as posting (Part 2 step 9) — a resolved hold
+   is exactly as stale as an unposted one until the page catches up. This applies even when an
+   issue closes **without** going through this Part's numbered flow at all — e.g. a session re-runs
+   the close-or-hold judgement itself and closes directly, as #183 did on 2026-08-14, dropping
+   `needs/operator`/`needs/decision` via `status-sync` rather than an "Operator Result" hand-back.
+   The page went stale a full day because nothing regenerated it either way. **The trigger is "a
+   `needs/*` label changed on any issue," not "Part 3 ran."**
 
 ## Red flags
 
