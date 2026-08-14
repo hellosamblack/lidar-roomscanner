@@ -546,3 +546,63 @@ def test_soft_prior_solve_reduces_to_translation_block_at_large_weight():
 def test_unknown_mode_still_rejected():
     with pytest.raises(ValueError):
         register(_plane_cloud(), _plane_cloud(), np.eye(4), mode="nonsense")
+
+
+# ---- #81 / BUG-070: invariance to a constant world-frame heading graft --------
+
+
+def _rotate_cloud(pc, R):
+    """A COPY of `pc` with positions (and normals, if present) rotated by `R`."""
+    out = o3d.t.geometry.PointCloud(pc.point.positions.device)
+    pts = pc.point.positions.numpy()
+    out.point.positions = o3d.core.Tensor((R @ pts.T).T.astype(np.float32))
+    if "normals" in pc.point:
+        n = pc.point.normals.numpy()
+        out.point.normals = o3d.core.Tensor((R @ n.T).T.astype(np.float32))
+    return out
+
+
+def test_translation_icp_is_exactly_equivariant_under_a_rigid_graft():
+    """#81: a constant heading graft on the rotation prior is claimed to be a
+    physically null relabelling of the world frame -- rotate source, target
+    (positions + normals) and the locked rotation prior by the SAME rigid `R`,
+    and the SOLVED correction must have IDENTICAL magnitude, rotated by exactly
+    `R` (assert the vector equality, not just that both runs are "ok" -- a
+    type/ok check can't see a magnitude change, BUG-050's trap).
+
+    This module is graft-OBLIVIOUS in the live pipeline in the first place:
+    `Mapper.step` always calls `register_escalating` with `init_pose=np.eye(4)`
+    (the source/target are already re-expressed in T_pred's own local frame, so
+    ICP's initial guess is identity -- see mapper.py's `step` docstring), never
+    a graft-shifted rotation. This test pins the stronger, general claim
+    (arbitrary `R`, not just world-Z) so a future change that makes the solve
+    depend on `init_pose`'s rotation in some non-equivariant way is caught here,
+    at the module boundary, rather than only 900 frames into a captured run.
+
+    It does NOT explain the drift swing measured end-to-end on
+    captures/imuTranslationError.bin (0.81+-0.53 m at graft 0 deg vs
+    2.89+-0.14 m at graft 90 deg, #81's repro): that divergence is invariant
+    through ~600 frames of frame-to-model tracking and only bifurcates between
+    frames ~600-900, i.e. it lives in the TSDF/raycast recursion (mapper.py /
+    tsdf.py), not in this module's math -- see the #81 session notes."""
+    target = _corner_cloud()
+    shift = np.array([0.03, -0.02, 0.04], dtype=np.float32)
+    source = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
+    source.point.positions = o3d.core.Tensor(target.point.positions.numpy() + shift)
+
+    baseline = register(source, target, np.eye(4), mode="translation")
+    assert baseline.ok
+
+    # An arbitrary, non-axis-aligned rotation -- deliberately NOT a coordinate
+    # permutation (which a 90 deg world-axis graft degenerates to), so this
+    # exercises the general equivariance claim, not a special case.
+    R = _rotation_matrix(np.array([0.2, 1.0, -0.3]), np.radians(37.0))
+    target_g = _rotate_cloud(target, R)
+    init_g = np.eye(4)
+    init_g[:3, :3] = R
+    grafted = register(source, target_g, init_g, mode="translation")
+    assert grafted.ok
+
+    assert np.allclose(grafted.pose[:3, 3], R @ baseline.pose[:3, 3], atol=1e-5)
+    assert np.linalg.norm(grafted.pose[:3, 3]) == pytest.approx(
+        np.linalg.norm(baseline.pose[:3, 3]), abs=1e-6)
