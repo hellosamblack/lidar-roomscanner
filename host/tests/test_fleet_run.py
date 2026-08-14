@@ -173,6 +173,17 @@ def test_stops_on_an_unrecognised_run_state():
     assert (d.action, d.code) == ("stop", "bad_state")
 
 
+# ------------------------------------------------------------ default allowlist coverage
+
+
+def test_default_allowlist_covers_python_from_repo_root_and_from_host():
+    # fleet-20260814-1204: a worker's cwd is its own worktree, and once it `cd`s into
+    # `host/` its relative invocation is `.venv/bin/python`, not `host/.venv/bin/python` --
+    # a rule anchored on the latter alone silently excludes every worker running from there.
+    assert "Bash(host/.venv/bin/python:*)" in fr.DEFAULT_ALLOWED_TOOLS
+    assert "Bash(.venv/bin/python:*)" in fr.DEFAULT_ALLOWED_TOOLS
+
+
 # ------------------------------------------------------------------- $HOME correction
 #
 # fleet-20260814-0157 found gh unauthenticated because the supervisor was launched as

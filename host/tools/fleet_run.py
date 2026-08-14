@@ -116,11 +116,19 @@ DEFAULT_LINK_TIMEOUT_S = 5400  # 90 min; a wave plus a review round-trip, measur
 #:   measured by the ledger's `orch_code_edits`, not something this allowlist enforces --
 #:   the orchestrator's legitimate writes (comment bodies, the handoff, doc deltas, the
 #:   ledger row) and its illegitimate ones use the same tool.
+#: * `Bash(host/.venv/bin/python:*)` alone denied a real worker (#81, fleet-20260814-1204):
+#:   a worker's cwd is its own worktree, and once it `cd`s into `host/` its relative
+#:   invocation is `.venv/bin/python`, which doesn't match a rule anchored on `host/`.
+#:   `Bash(.venv/bin/python:*)` covers that case too. Note this does not exhaust what can
+#:   halt a link -- some denials that day (bare `python3`, and a lone `rm` even with
+#:   `Bash(rm:*)` already granted) look like the auto-mode classifier acting independently
+#:   of this allowlist (a known, intermittent behavior -- see the `gh` mutation case in
+#:   memory `gh-mutating-calls-blocked-in-bash`), which no entry here can pre-empt.
 DEFAULT_ALLOWED_TOOLS = (
     "Read", "Glob", "Grep", "Skill", "Task", "Agent", "TodoWrite",
     "Edit", "Write",
     "Bash(git:*)", "Bash(gh:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(mkdir:*)",
-    "Bash(ln:*)", "Bash(rm:*)", "Bash(host/.venv/bin/python:*)",
+    "Bash(ln:*)", "Bash(rm:*)", "Bash(host/.venv/bin/python:*)", "Bash(.venv/bin/python:*)",
     "mcp__roomscan__fleet_plan", "mcp__roomscan__fleet_budget",
     "mcp__roomscan__run_tests", "mcp__roomscan__operator_queue", "mcp__roomscan__doctor",
 )
