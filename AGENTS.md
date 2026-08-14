@@ -224,5 +224,13 @@ in the repo. The evidence for every one is in `docs/roadmap-history.md`.
   when it "passed", it was attributing the win to the shared component, not voiding the result.
   A null voids only what it does not share; write down what each control arm retains vs inverts
   before reading its verdict, and shape the arms so every pairwise gate answers one named component.
+- **A permission denial's error message does not tell you why — verify a permission-scope fix
+  live before trusting it.** Two successive "fixes" to `fleet_run.py`'s Bash allowlist were each
+  wrong, guessed from a denial's tool name rather than tested: a directory-only rule
+  (`Bash(host/.venv/bin/:*)`) that matched nothing at all, and a denial blamed on "the auto-mode
+  classifier acting independently" that was actually simpler outside-repo-path scoping. Both
+  shipped with passing unit tests, because the tests checked the guess's own logic, not the real
+  CLI. A cheap, real `--task` probe (`permcheck-20260814`+, `docs/fleet-ledger.md`) settled both
+  in minutes; six real runs and real dollars had been spent guessing first (#183).
 
 Guiding order (per project owner): mature the visualizer and UI/config on the ToF sensor alone **before** adding the IKS4A1 board. *(Satisfied — both are done; Phase 6 SLAM should likewise be validated against recorded captures before hardware-in-the-loop.)*
