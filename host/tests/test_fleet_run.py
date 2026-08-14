@@ -173,6 +173,54 @@ def test_stops_on_an_unrecognised_run_state():
     assert (d.action, d.code) == ("stop", "bad_state")
 
 
+# ------------------------------------------------------------------- $HOME correction
+#
+# fleet-20260814-0157 found gh unauthenticated because the supervisor was launched as
+# root ($HOME=/root) while gh was only ever authenticated for sam. Patching that with an
+# exported GH_CONFIG_DIR uncovered a second, same-cause split at fleet-20260814-0322: the
+# link's auto-memory landed under /root/.claude/... , unreadable by sam. Both are $HOME
+# splits, so resolve_run_env fixes $HOME itself rather than chasing each downstream tool.
+
+
+def test_resolve_run_env_corrects_home_to_the_repo_owner(monkeypatch):
+    monkeypatch.setattr(fr.pwd, "getpwuid", lambda uid: type("pw", (), {"pw_dir": "/home/sam"}))
+    env, warning = fr.resolve_run_env(fr.REPO, {"HOME": "/root", "PATH": "/usr/bin"})
+    assert warning is None
+    assert env["HOME"] == "/home/sam"
+    assert env["PATH"] == "/usr/bin"  # untouched
+
+
+def test_resolve_run_env_drops_stale_overrides_only_when_home_was_wrong():
+    # XDG_CONFIG_HOME/GH_CONFIG_DIR were the manual workaround before this existed --
+    # they must not linger and mask the fix, or shadow it, on a future debugging session.
+    import pwd as real_pwd
+    owner_home = real_pwd.getpwuid(fr.REPO.stat().st_uid).pw_dir
+    env, warning = fr.resolve_run_env(fr.REPO, {
+        "HOME": "/root", "XDG_CONFIG_HOME": "/root/.config", "GH_CONFIG_DIR": "/home/sam/.config/gh",
+    })
+    assert warning is None
+    assert env["HOME"] == owner_home
+    assert "XDG_CONFIG_HOME" not in env
+    assert "GH_CONFIG_DIR" not in env
+
+
+def test_resolve_run_env_leaves_env_alone_when_home_already_matches():
+    import pwd as real_pwd
+    owner_home = real_pwd.getpwuid(fr.REPO.stat().st_uid).pw_dir
+    env, warning = fr.resolve_run_env(fr.REPO, {"HOME": owner_home, "XDG_CONFIG_HOME": "/kept"})
+    assert warning is None
+    assert env["XDG_CONFIG_HOME"] == "/kept"  # not stripped -- HOME was never wrong
+
+
+def test_resolve_run_env_warns_rather_than_crashes_when_owner_lookup_fails(monkeypatch):
+    def _raise(uid):
+        raise KeyError(uid)
+    monkeypatch.setattr(fr.pwd, "getpwuid", _raise)
+    env, warning = fr.resolve_run_env(fr.REPO, {"HOME": "/root"})
+    assert warning is not None
+    assert env["HOME"] == "/root"  # unchanged -- the chain still runs, just as before
+
+
 # ------------------------------------------------------------------- argv and prompting
 
 

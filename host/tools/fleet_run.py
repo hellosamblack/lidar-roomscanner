@@ -21,8 +21,8 @@ It deliberately lives OUTSIDE the session it manages:
   but then a session the owner walked away from keeps spending. Owner's call, 2026-08-13:
   only supervisor-started runs rotate automatically.
 
-Three mechanics were measured against the real CLI (2.1.228) before this was written, and
-two of them are not what the flag names suggest:
+Four mechanics were measured against the real CLI (2.1.228) before this was written, and
+three of them are not what the flag names suggest:
 
 1. **`--allowedTools` is ADDITIVE, not restrictive.** `--allowedTools Read` does not stop
    Bash: a probe that asked for `git status --porcelain` under exactly that flag ran it,
@@ -39,6 +39,14 @@ two of them are not what the flag names suggest:
    turn-1 trap: at its first `fleet_budget()` call the newest top-level records on disk
    still belong to its *predecessor*, so an unpinned call reads a 400K context and rotates
    a session that has done nothing.
+4. **The spawned link inherits `$HOME` from whoever's shell launched the supervisor, and
+   both `claude` and `gh` key their config off it.** The first real run (fleet-20260814-0157)
+   was launched as root and came up with `gh` unauthenticated; patching that with an
+   exported `GH_CONFIG_DIR` only fixed `gh` and left a second split running --
+   fleet-20260814-0322's auto-memory landed under `/root/.claude/...`, unreadable by the
+   account that actually owns this checkout. `resolve_run_env()` now sets `$HOME` to the
+   repo owner's home for every spawned link, which fixes both at once and needs no env var
+   from whoever runs this.
 
 The chain is bounded three ways, all required by the owner: a cumulative weighted-token
 ceiling, `--max-sessions` (default 6), and a no-progress detector. The last one matters
@@ -49,6 +57,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import pwd
 import re
 import subprocess
 import sys
@@ -340,6 +350,41 @@ halt_reason:
 # ------------------------------------------------------------------------- the driver
 
 
+def resolve_run_env(repo: Path, base_env: dict[str, str]) -> tuple[dict[str, str], str | None]:
+    """Env for the spawned link, with `$HOME` corrected to the repo's owner.
+
+    `claude -p` and `gh` both resolve their config off `$HOME` (`~/.claude`, `~/.config/gh`).
+    The supervisor is a CLI meant to be launched from whatever shell the owner happens to be
+    in -- and on this box that has been root, whose `$HOME` is `/root`, not `/home/sam`. Two
+    splits followed from the *same* mismatch: `gh` came up unauthenticated (fleet-20260814-0157),
+    and once that was patched with `GH_CONFIG_DIR`, the link's auto-memory writes landed under
+    `/root/.claude/projects/.../memory/` -- a directory `sam` cannot even read back
+    (fleet-20260814-0322). Both are `$HOME`-rooted, so fixing `$HOME` once fixes both, and does
+    it whether the owner launches this as root, sam, or anyone else: the repo checkout's owner
+    is the identity whose config should apply, not whoever's shell happens to invoke the CLI.
+
+    Returns `(env, warning)`. `warning` is set (not raised) when the repo owner can't be looked
+    up via `pwd` -- e.g. a container with no matching `/etc/passwd` entry -- so a link still
+    runs with the caller's own `$HOME` rather than crashing the whole chain over it; the
+    supervisor prints the warning so the split doesn't silently reproduce.
+    """
+    env = dict(base_env)
+    try:
+        owner_home = pwd.getpwuid(repo.stat().st_uid).pw_dir
+    except (KeyError, OSError) as exc:
+        return env, f"could not resolve the repo owner's home ({exc}); links inherit $HOME={env.get('HOME')!r} as-is"
+    if env.get("HOME") != owner_home:
+        env["HOME"] = owner_home
+        # XDG_CONFIG_HOME, if the caller's shell set one, would keep pointing at the wrong
+        # place even with HOME corrected -- gh and claude both fall back to $HOME/.config
+        # only when it is absent.
+        env.pop("XDG_CONFIG_HOME", None)
+        # GH_CONFIG_DIR was the manual workaround before this existed; drop it too so a
+        # caller's exported override doesn't linger and mask the real fix in future debugging.
+        env.pop("GH_CONFIG_DIR", None)
+    return env, None
+
+
 def build_argv(prompt: str, *, session_id: str, model: str | None,
                allowed_tools: tuple[str, ...]) -> list[str]:
     argv = ["claude", "-p", prompt,
@@ -452,8 +497,13 @@ def run_link(prompt: str, *, session_id: str, link: int, model: str | None,
     started = datetime.now(UTC)
     before = weighted_7d(started)
 
+    run_env, home_warning = resolve_run_env(REPO, dict(os.environ))
+    if home_warning and echo:
+        print(f"    ! {home_warning}", file=sys.stderr)
+
     proc = subprocess.Popen(argv, cwd=str(REPO), stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+                            stderr=subprocess.STDOUT, text=True, bufsize=1,
+                            env=run_env)
 
     def _kill():
         res.timed_out = True
