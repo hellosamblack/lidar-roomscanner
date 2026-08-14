@@ -176,12 +176,36 @@ def test_stops_on_an_unrecognised_run_state():
 # ------------------------------------------------------------ default allowlist coverage
 
 
-def test_default_allowlist_covers_python_from_repo_root_and_from_host():
-    # fleet-20260814-1204: a worker's cwd is its own worktree, and once it `cd`s into
-    # `host/` its relative invocation is `.venv/bin/python`, not `host/.venv/bin/python` --
-    # a rule anchored on the latter alone silently excludes every worker running from there.
-    assert "Bash(host/.venv/bin/python:*)" in fr.DEFAULT_ALLOWED_TOOLS
-    assert "Bash(.venv/bin/python:*)" in fr.DEFAULT_ALLOWED_TOOLS
+def _bash_prefixes(allowed_tools):
+    """The literal prefixes a `Bash(<prefix>:*)` rule matches against -- mirrors the CLI's
+    own prefix check, not just string membership, so a test here actually proves a given
+    command would be granted rather than merely that some rule string exists."""
+    return [t[len("Bash("):-len(":*)")] for t in allowed_tools if t.startswith("Bash(") and t.endswith(":*)")]
+
+
+@pytest.mark.parametrize("command", [
+    # fleet-20260814-1204: relative from repo root (the orchestrator's own cwd).
+    "host/.venv/bin/python -m pytest -q",
+    # fleet-20260814-1204: relative from inside a worktree's own `host/` -- a rule
+    # anchored on `host/.venv/bin/python` alone silently excludes every worker cd'd there.
+    ".venv/bin/python -m pytest -q",
+    # fleet-20260814-1552: absolute path -- used because a worker's cwd wasn't always the
+    # venv's own worktree (e.g. probing issue-81's tools from issue-180's worktree).
+    "/home/sam/git/personal/lidar-roomscanner/host/.venv/bin/python -c \"print(1)\"",
+    # fleet-20260814-1552: a different console script in the same directory -- a rule that
+    # names `python` specifically does not cover it.
+    "host/.venv/bin/pytest -q --no-header",
+])
+def test_default_allowlist_covers_every_venv_invocation_form_seen_live(command):
+    prefixes = _bash_prefixes(fr.DEFAULT_ALLOWED_TOOLS)
+    assert any(command.startswith(p) for p in prefixes), \
+        f"no Bash(...) rule in DEFAULT_ALLOWED_TOOLS covers: {command!r}"
+
+
+def test_default_allowlist_anchors_the_absolute_python_rule_on_this_repo():
+    # A hardcoded absolute path would silently stop matching on a different checkout;
+    # anchoring on `fr.REPO` keeps it correct wherever this repo happens to live.
+    assert f"Bash({fr.REPO}/host/.venv/bin/:*)" in fr.DEFAULT_ALLOWED_TOOLS
 
 
 # ------------------------------------------------------------------- $HOME correction

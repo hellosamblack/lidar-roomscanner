@@ -116,19 +116,27 @@ DEFAULT_LINK_TIMEOUT_S = 5400  # 90 min; a wave plus a review round-trip, measur
 #:   measured by the ledger's `orch_code_edits`, not something this allowlist enforces --
 #:   the orchestrator's legitimate writes (comment bodies, the handoff, doc deltas, the
 #:   ledger row) and its illegitimate ones use the same tool.
-#: * `Bash(host/.venv/bin/python:*)` alone denied a real worker (#81, fleet-20260814-1204):
-#:   a worker's cwd is its own worktree, and once it `cd`s into `host/` its relative
-#:   invocation is `.venv/bin/python`, which doesn't match a rule anchored on `host/`.
-#:   `Bash(.venv/bin/python:*)` covers that case too. Note this does not exhaust what can
-#:   halt a link -- some denials that day (bare `python3`, and a lone `rm` even with
-#:   `Bash(rm:*)` already granted) look like the auto-mode classifier acting independently
-#:   of this allowlist (a known, intermittent behavior -- see the `gh` mutation case in
-#:   memory `gh-mutating-calls-blocked-in-bash`), which no entry here can pre-empt.
+#: * A single `host/.venv/bin/python:*` rule kept denying real workers -- each run found a
+#:   new *form* of the same invocation, not a new binary: fleet-20260814-1204 hit the
+#:   relative form from inside a worktree's `host/` (`.venv/bin/python`, not
+#:   `host/.venv/bin/python`); fleet-20260814-1552 then hit the *absolute* form
+#:   (`/home/sam/.../host/.venv/bin/python`, used because the worker's cwd wasn't always
+#:   the venv's own worktree) and, separately, `host/.venv/bin/pytest` -- a different
+#:   console script in the same directory, not covered by a rule that names `python`
+#:   specifically. Enumerating one binary name at a time is a losing game against a model
+#:   that will invoke a trusted interpreter however its cwd makes convenient. These three
+#:   rules anchor on the *directory* instead (relative-from-root, relative-from-`host/`,
+#:   absolute), so every script inside the repo's own venv is covered regardless of form.
+#:   Note this does not exhaust what can halt a link -- some denials look like the
+#:   auto-mode classifier acting independently of this allowlist (a known, intermittent
+#:   behavior -- see the `gh` mutation case in memory `gh-mutating-calls-blocked-in-bash`),
+#:   which no entry here can pre-empt.
 DEFAULT_ALLOWED_TOOLS = (
     "Read", "Glob", "Grep", "Skill", "Task", "Agent", "TodoWrite",
     "Edit", "Write",
     "Bash(git:*)", "Bash(gh:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(mkdir:*)",
-    "Bash(ln:*)", "Bash(rm:*)", "Bash(host/.venv/bin/python:*)", "Bash(.venv/bin/python:*)",
+    "Bash(ln:*)", "Bash(rm:*)",
+    "Bash(host/.venv/bin/:*)", "Bash(.venv/bin/:*)", f"Bash({REPO}/host/.venv/bin/:*)",
     "mcp__roomscan__fleet_plan", "mcp__roomscan__fleet_budget",
     "mcp__roomscan__run_tests", "mcp__roomscan__operator_queue", "mcp__roomscan__doctor",
 )
