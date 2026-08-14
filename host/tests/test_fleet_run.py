@@ -250,6 +250,14 @@ def test_build_argv_passes_a_model_when_given():
     assert argv[argv.index("--model") + 1] == "claude-opus-5"
 
 
+def test_build_argv_excludes_user_settings():
+    # fleet-20260814-1503: a user-level PreToolUse hook (rtk) rewrites every Bash command
+    # before the allowlist checks it, so a link denies commands its allowlist explicitly
+    # grants. "project"/"local" carry what a link needs and neither rewrites Bash.
+    argv = fr.build_argv("hi", session_id="sid-1", model=None, allowed_tools=("Read",))
+    assert argv[argv.index("--setting-sources") + 1] == "project,local"
+
+
 def test_prompt_pins_session_id_against_the_turn_one_trap():
     # Without this the successor's first fleet_budget() call reads its PREDECESSOR's
     # records -- the newest on disk at that moment -- and rotates a session that has done

@@ -877,12 +877,14 @@ def plan_fleet_live(max_agents: int = 3,
                     include_priorities: tuple[str, ...] = ("now", "next"),
                     exclude_areas: tuple[str, ...] = (),
                     include_unknown_footprint: bool = True,
+                    triage: bool = True,
                     repo: Path = REPO) -> dict:
     """Collect from gh + git, then plan. The one function the MCP tool calls."""
     return plan_fleet(
         fetch_issues(), fetch_tracked_files(repo), fetch_commits(repo),
         max_agents=max_agents, include_priorities=include_priorities,
-        exclude_areas=exclude_areas, include_unknown_footprint=include_unknown_footprint)
+        exclude_areas=exclude_areas, include_unknown_footprint=include_unknown_footprint,
+        triage=triage)
 
 
 def _render(plan: dict) -> str:

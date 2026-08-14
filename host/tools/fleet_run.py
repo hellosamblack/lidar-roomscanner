@@ -398,7 +398,18 @@ def build_argv(prompt: str, *, session_id: str, model: str | None,
     argv = ["claude", "-p", prompt,
             "--output-format", "stream-json", "--verbose",
             "--session-id", session_id,
-            "--allowedTools", ",".join(allowed_tools)]
+            "--allowedTools", ",".join(allowed_tools),
+            # fleet-20260814-1503: the owner's global ~/.claude/settings.json installs a
+            # PreToolUse hook (rtk) that transparently rewrites every Bash command --
+            # `git status` becomes `rtk git status` -- before the allowlist checks it. The
+            # rewritten command no longer starts with `git`/`gh`/etc, so it matches nothing
+            # in DEFAULT_ALLOWED_TOOLS and every Bash call in the link was denied, even ones
+            # explicitly granted. That hook lives in the "user" setting source; "project"
+            # and "local" carry what a link actually needs (orch-edit-count.sh,
+            # session-end-guard.sh, the repo's own permission grants) and neither rewrites
+            # Bash. Excluding "user" here, not disabling hooks wholesale (`--bare` also
+            # drops auto-memory and CLAUDE.md discovery, both of which a link needs).
+            "--setting-sources", "project,local"]
     if model:
         argv += ["--model", model]
     return argv

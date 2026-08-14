@@ -639,6 +639,24 @@ def test_triage_can_be_switched_off(issues, tracked, commits):
     assert all("triage" not in i for i in plan["batch"])
 
 
+@pytest.mark.parametrize("triage", [True, False])
+def test_plan_fleet_live_accepts_and_forwards_triage(monkeypatch, issues, tracked, commits, triage):
+    """Regression for fleet-20260814-1503: the MCP wrapper (`tools_fleet.fleet_plan`)
+    always calls `plan_fleet_live(..., triage=triage)`, but `plan_fleet_live` neither
+    accepted nor forwarded that kwarg -- every live call raised `TypeError:
+    plan_fleet_live() got an unexpected keyword argument 'triage'`, with no coverage
+    catching it because every other test here calls `plan_fleet` directly, skipping
+    the live wrapper the MCP tool and the CLI both actually call. Two runs
+    (fleet-20260813-2118, fleet-20260814-1503) hit this and reported it "unpatched"
+    rather than being fixed live from an unattended session -- fixed here, not routed
+    around, because the fix is a one-line passthrough, not a design call."""
+    monkeypatch.setattr(fp, "fetch_issues", lambda limit=200: issues)
+    monkeypatch.setattr(fp, "fetch_tracked_files", lambda repo=fp.REPO: tracked)
+    monkeypatch.setattr(fp, "fetch_commits", lambda repo=fp.REPO, since="6.months": commits)
+    plan = fp.plan_fleet_live(max_agents=3, triage=triage)
+    assert bool(plan["batch"]) and any("triage" in i for i in plan["batch"]) == triage
+
+
 def test_acceptance_hint_names_the_tool_the_check_needs(issues, tracked, commits):
     """Pre-sorts the verification veto: if the session lacks the tool the hint names,
     that is the veto, and it is known before a worker is spawned."""
