@@ -120,6 +120,18 @@ Found during review of `<APP>/Src/vl53l9_app.c`; fix these in our fork, leave th
   host app selects by USB VID/PID, never by "first port found".
 - **`-Ofast` on float depth data**: implies `-ffast-math` (no NaN semantics). Any NaN/invalid-depth
   sentinel handling must live host-side or use explicit sentinel values, not NaN checks, in firmware.
+- **Frame-to-model chaos reads as a discrete bug, and two open issues are mis-scoped because of it**
+  (2026-08-14, #81 + #180). A rotation-prior change that is *legitimately more accurate but
+  different* is enough to flip the TSDF/raycast recursion into another basin, so the symptom looks
+  like a defect in whatever module produced the prior. Both issues were investigated concurrently by
+  independent workers over disjoint files and both cleared their own modules: #81's graft-yaw swing
+  is invariant through ~600 frames of `imuTranslationError.bin` and only bifurcates between frames
+  ~600–900 with **zero** ICP escalations either side, while `odometry.register()` provably never
+  sees the graft (`Mapper.step` always passes `init_pose=np.eye(4)`, `mapper.py`); #180's trip-rate
+  elevation survives every interpolation-level hypothesis and instead correlates with
+  `slam_ensemble`'s `start_frame` perturbation. **Before attributing a drift delta to a module,
+  bisect by frame count and check whether the divergence is a bifurcation rather than a bias** — and
+  see the standing rule that ensembles, not single runs, are the unit of evidence here.
 
 ## Plans and specifications register (audited 2026-08-11)
 

@@ -135,6 +135,22 @@ rotates you before you have done anything.
 You may also be started by hand, with no supervisor. Then Step 1.5 ends the way it always did: write
 the handoff and stop.
 
+**Under a supervisor, "end your turn" means end the LINK — so never do it while workers are still
+running.** `fleet_run.py` waits on your process exit, so ending your turn mid-wave ends the link with
+its workers' output unread and, if `waves_done`/`issues_landed` have not moved, stops the chain as
+no-progress. You must therefore stay in-turn until the wave is reviewed and merged. Two tempting ways
+to wait are unavailable: `Monitor` is **not** in `DEFAULT_ALLOWED_TOOLS` (calling it is a denial,
+which halts the chain), and foreground `sleep` is blocked by the harness. What works is the granted
+venv interpreter as a blocking wait, issued as its own Bash call:
+
+```
+<abs venv python> -c "__import__('time').sleep(480)"
+```
+
+No `;` (a semicolon even inside the quotes risks reading as a compound command), no redirection, one
+command. Between blocks, check side effects — `git -C <wt> status --porcelain` and the Step 0
+tripwire — rather than inferring liveness from transcript size.
+
 ### Bash calls under supervision — no compound commands, no ops outside the repo
 
 Verified live 2026-08-14 (`permcheck-20260814`/`-b`/`-c`: three real `claude -p` probes run under
@@ -302,6 +318,27 @@ veto issues the body itself parks on someone else: #127 says **blocked on orient
 rig, `pytest` is the shape you want. If your session lacks the tool the hint names, that is the
 veto — and you know it before spawning anything, rather than at Step 8.5 with a branch already
 merged.
+
+**But confirm the hint before honouring it — it false-positives, and in the expensive direction.**
+On 2026-08-14 #81 came back `acceptance_hint: "hardware"` and is **replay-only**: the capture it
+needs (`captures/imuTranslationError.bin`) was already on disk and `host/tools/slam_ensemble.py`
+runs it with no rig. The hint fired on prose that *mentions* the rig, not on what the acceptance
+requires. That tier held three issues, so honouring it would have vetoed the run's entire workable
+pool and produced an empty wave. **Before accepting a `hardware` or `capture` hint, `ls captures/`
+for the file the issue names — if the capture already exists, the work is replay and the hint is
+wrong.** This is the same shape as the co-edit false conflict below: a heuristic that suppresses
+workable issues silently costs you more than one that lets a bad issue through, because a suppressed
+issue never reaches your review.
+
+**And an ungranted MCP tool is not an absent capability.** Under `fleet_run.py`'s scoped allowlist a
+link typically gets only `fleet_plan`, `fleet_budget`, `run_tests`, `operator_queue` and `doctor`.
+That does **not** veto every issue whose verification is normally an MCP call: most of these tools
+are a thin wrapper over a pure function that also has a CLI under `host/tools/` (`AGENTS.md`'s "one
+implementation, two front ends"), and the allowlist grants the venv interpreter. `slam_ensemble` the
+**tool** was ungranted while `host/tools/slam_ensemble.py` ran fine and produced both workers' n=8
+ensembles. `ls host/tools/` before vetoing. The veto genuinely holds only for `ui_*` browser checks
+and anything that must go through the long-lived `roomscan-web` process, which binds the device.
+Keep using `run_tests()` as MCP even so — it keeps a 2500-test transcript out of your context.
 
 Ask of each candidate: *what would prove this fixed, and can I run it today?* If the honest answer is
 no, leave it and say so — a run that lands three unverifiable diffs is worse than a run that lands one

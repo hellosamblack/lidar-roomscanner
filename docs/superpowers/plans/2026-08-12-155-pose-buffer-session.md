@@ -231,3 +231,42 @@ current capture, which retroactively explains its negative result.
   (area/host-tools) — mirrored-constants class.
 - `ImuFusion._tick_span_us`/`_sample_dts` ignore stream-12 `tick_us` (use the nominal constant)
   — latent ~3% clock error if #127 ever enables it. Note on #127.
+
+## Addendum 2026-08-14 — #180 re-measured, and the mechanism is NOT in the interpolation
+
+Fleet run `fleet-20260814-1716`. A worker re-ran the campaign on current `main` and then tried to
+root-cause the elevation. **The numbers reproduce; the mechanism is not here.**
+
+Fresh repro (n=8 matched arms, `DebugCapF.bin`, translation ICP, default config):
+
+| arm | trips | `horizontal_closure_m` |
+|---|---|---|
+| baseline (no interp) | 0/8 | 0.066–0.073 (tight) |
+| quat-interp on | 4/8 | non-trip 0.069–0.075; trip 0.341–0.403 |
+
+Consistent with this session's n=20 figures (5% → 30%, Fisher p≈0.04), and `quat_phase_count: 3` per
+on-arm run matches exactly — so the fallback-sawtooth remains ruled out.
+
+**Hypotheses now dead, by instrumentation rather than by re-reading the source:**
+
+- **Exact-tie / interpolation boundary** — the strongest prior candidate, and it is gone.
+  Instrumented `TimestampedQuaternionBuffer.at()` over all **2008** interpolated frames: the query
+  fraction into its bracket is **never** 0 or 1 (`on` clusters 0.75–0.87, `reflected` 0.08–0.27).
+  Zero exact hits, so `at()`'s exact-match branch is never taken at all.
+- **Dropped samples** — 0 of 2063 `buf.add()` calls rejected; no monotonicity violation in the raw
+  stream.
+- **Double-cover / hemisphere** — 0 sign flips across 2066 consecutive raw stream-9 quaternions,
+  min |dot| = 0.9986, so `slerp`'s hemisphere correction has nothing to mishandle.
+
+**New localizing observation:** the trip correlates with `slam_ensemble`'s **`start_frame`
+perturbation, and only for the `on` arm** (3/3 trips at `start_frame=1`, 0/3 at `start_frame=0`,
+1/2 at 2); the baseline arm shows zero `start_frame` correlation (0/8 regardless). Per-frame,
+interpolated vs legacy quaternions differ by **<0.01°** across the first 10 frames — this is not one
+dramatic bad sample.
+
+**Conclusion:** the elevation is bootstrap-orientation sensitivity in the frame-to-model ICP/TSDF
+recursion (`mapper.py` / `tsdf.py`), amplifying a legitimately-more-accurate-but-different prior
+sequence into a different chaotic attractor basin — not a defect in the interpolation. #81 reached
+the same localization independently in the same wave, over a disjoint file set and a different
+capture. **#180 is scoped to the wrong files**; see its issue thread for the recommended re-scope
+onto `mapper.py` + `tsdf.py` claimed together.
