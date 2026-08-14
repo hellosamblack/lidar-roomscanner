@@ -116,27 +116,47 @@ DEFAULT_LINK_TIMEOUT_S = 5400  # 90 min; a wave plus a review round-trip, measur
 #:   measured by the ledger's `orch_code_edits`, not something this allowlist enforces --
 #:   the orchestrator's legitimate writes (comment bodies, the handoff, doc deltas, the
 #:   ledger row) and its illegitimate ones use the same tool.
-#: * A single `host/.venv/bin/python:*` rule kept denying real workers -- each run found a
-#:   new *form* of the same invocation, not a new binary: fleet-20260814-1204 hit the
-#:   relative form from inside a worktree's `host/` (`.venv/bin/python`, not
-#:   `host/.venv/bin/python`); fleet-20260814-1552 then hit the *absolute* form
-#:   (`/home/sam/.../host/.venv/bin/python`, used because the worker's cwd wasn't always
-#:   the venv's own worktree) and, separately, `host/.venv/bin/pytest` -- a different
-#:   console script in the same directory, not covered by a rule that names `python`
-#:   specifically. Enumerating one binary name at a time is a losing game against a model
-#:   that will invoke a trusted interpreter however its cwd makes convenient. These three
-#:   rules anchor on the *directory* instead (relative-from-root, relative-from-`host/`,
-#:   absolute), so every script inside the repo's own venv is covered regardless of form.
-#:   Note this does not exhaust what can halt a link -- some denials look like the
-#:   auto-mode classifier acting independently of this allowlist (a known, intermittent
-#:   behavior -- see the `gh` mutation case in memory `gh-mutating-calls-blocked-in-bash`),
-#:   which no entry here can pre-empt.
+#: * A rule anchored on a bare directory (no binary name), e.g. `Bash(host/.venv/bin/:*)`,
+#:   is INVALID -- it silently matches nothing. Verified live 2026-08-14 (`permcheck-20260814`):
+#:   with exactly that rule in place, even `host/.venv/bin/python -c "print(1)"` -- the
+#:   original, previously-working form -- was denied. The CLI's Bash(<prefix>:*) match
+#:   needs the prefix to end on a real executable name, not a directory boundary. Every
+#:   venv entry point below is therefore named explicitly, once per anchor form (see
+#:   `_venv_bin_rules`) -- more lines, but each one is proven to actually match, which the
+#:   directory form was not.
+#: * Compound commands are denied independently of whether every piece is individually
+#:   allowed. Verified live in the same probe: `mkdir -p X && rm -rf X` was denied even
+#:   though `Bash(mkdir:*)` and `Bash(rm:*)` are both granted -- neither `rm` nor `mkdir`
+#:   nor `cd` is special-cased here; it is the `&&` itself. No allowlist entry can pre-empt
+#:   this (there is no `Bash(&&:*)` to grant) -- the fix is in what a link is *told*, not
+#:   in this tuple: `.agents/skills/issue-fleet/SKILL.md` used to instruct exactly this
+#:   shape (`cd <wt>/host && ... pytest ...`) for both workers and the orchestrator, which
+#:   is fine interactively (a denial there is just a prompt) and fatal unattended. Prefer
+#:   separate Bash calls over `&&`/`;` chains when writing a link's instructions.
+#: * An op targeting a path OUTSIDE the repo is denied independently of the allowlist too --
+#:   verified live (`permcheck-20260814c`): `rm -f /tmp/x` was denied with `Bash(rm:*)`
+#:   granted, while `rm -f <path inside the repo>` succeeded in the same probe; `>` file
+#:   redirection was denied both outside the repo and inside it. This SUPERSEDES an earlier,
+#:   wrong guess in this file and in fleet-run-supervisor memory: fleet-20260814-1204's
+#:   `rm /tmp/probe_graft.py` denial was attributed to "the auto-mode classifier acting
+#:   independently of the allowlist" (an inference from one denial, never tested). The
+#:   simpler, now-confirmed explanation is outside-repo scoping -- no separate classifier
+#:   layer needs to be invoked to explain it.
+VENV_BIN_SCRIPTS = ("python", "pytest")
+_VENV_BIN_ANCHORS = ("host/.venv/bin", ".venv/bin", f"{REPO}/host/.venv/bin")
+
+
+def _venv_bin_rules() -> tuple[str, ...]:
+    return tuple(f"Bash({anchor}/{script}:*)"
+                for anchor in _VENV_BIN_ANCHORS for script in VENV_BIN_SCRIPTS)
+
+
 DEFAULT_ALLOWED_TOOLS = (
     "Read", "Glob", "Grep", "Skill", "Task", "Agent", "TodoWrite",
     "Edit", "Write",
     "Bash(git:*)", "Bash(gh:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(mkdir:*)",
     "Bash(ln:*)", "Bash(rm:*)",
-    "Bash(host/.venv/bin/:*)", "Bash(.venv/bin/:*)", f"Bash({REPO}/host/.venv/bin/:*)",
+    *_venv_bin_rules(),
     "mcp__roomscan__fleet_plan", "mcp__roomscan__fleet_budget",
     "mcp__roomscan__run_tests", "mcp__roomscan__operator_queue", "mcp__roomscan__doctor",
 )

@@ -14,8 +14,11 @@ below is ambiguous. The rules that have actually been broken here, in order of c
 **Your cwd is the MAIN checkout, not your worktree.** The task text will name an absolute worktree
 path; use it for every file operation. The two trees are byte-identical until your first edit, so a
 relative path edits the wrong one and nothing looks wrong until it has cost a full cycle
-(2026-07-10). Every git call is `git -C <abs worktree>`. pytest is
-`cd <abs worktree>/host && <main>/host/.venv/bin/python -m pytest -q --no-header -k <narrow>`.
+(2026-07-10). Every git call is `git -C <abs worktree>`. For pytest: `cd <abs worktree>/host` as
+its own Bash call, then `<main>/host/.venv/bin/python -m pytest -q --no-header -k <narrow>` as a
+**separate** call — never chain them with `&&`. Under `fleet_run.py` supervision a compound `cd X
+&& Y` is denied outright even when both halves are individually allowed (verified 2026-08-14); cwd
+persists across separate Bash calls, so splitting them loses nothing.
 
 **Commit `Refs #NNN`, never `Closes #NNN`.** A `Closes` at HEAD after the orchestrator fast-forwards
 your branch trips the repo's Stop hook and blocks the whole run.

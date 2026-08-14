@@ -19,10 +19,20 @@ the mistake is invisible until it has cost a cycle.
 
 - Every file you read or write: absolute, under the worktree path.
 - Every git call: `git -C <abs worktree> ...`
-- pytest: `cd <abs worktree>/host && <main>/host/.venv/bin/python -m pytest -q --no-header -k <narrow>`
-  The venv lives in the main checkout and is an editable install; `host/pyproject.toml` sets
-  `pythonpath = ["src", "."]` so it resolves *your* code, but only if cwd is your `host/`.
+- pytest: `cd <abs worktree>/host` as its own Bash call, then
+  `<main>/host/.venv/bin/python -m pytest -q --no-header -k <narrow>` as a **separate** call —
+  never chain the two with `&&`. Under `fleet_run.py` supervision a compound `cd X && Y` is denied
+  outright even when both halves are individually allowed (verified live 2026-08-14,
+  `permcheck-20260814`); working directory persists across separate Bash calls, so splitting them
+  loses nothing. The venv lives in the main checkout and is an editable install;
+  `host/pyproject.toml` sets `pythonpath = ["src", "."]` so it resolves *your* code, but only if
+  cwd is your `host/`.
 - ruff on the files you touched: `<main>/host/.venv/bin/python -m ruff check <files>`
+- Scratch files: use the `Write` tool, not shell `>` redirection (unreliable regardless of
+  target — verified live). If you scratch under `/tmp`, do not plan to `rm` it afterward under
+  supervision — a destructive op targeting a path outside the repo is denied even with `Bash(rm:*)`
+  granted (verified live). Leave it (harmless, untracked) or scratch inside your own worktree
+  instead, where `rm` works normally.
 
 ## Git
 

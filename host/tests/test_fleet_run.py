@@ -177,10 +177,22 @@ def test_stops_on_an_unrecognised_run_state():
 
 
 def _bash_prefixes(allowed_tools):
-    """The literal prefixes a `Bash(<prefix>:*)` rule matches against -- mirrors the CLI's
-    own prefix check, not just string membership, so a test here actually proves a given
-    command would be granted rather than merely that some rule string exists."""
     return [t[len("Bash("):-len(":*)")] for t in allowed_tools if t.startswith("Bash(") and t.endswith(":*)")]
+
+
+def _grants(command, allowed_tools):
+    """Whether some `Bash(<prefix>:*)` rule would grant `command` -- word-boundary match
+    (exact, or followed by a space), not a raw substring `startswith`.
+
+    Verified live 2026-08-14 (`permcheck-20260814`, a real `claude -p` probe, not a read of
+    documentation): a rule ending mid-token -- `Bash(host/.venv/bin/:*)`, no binary name --
+    matched NOTHING. Even the original, previously-working `host/.venv/bin/python -c
+    "print(1)"` was denied under it. A naive `command.startswith(prefix)` test would have
+    passed that rule anyway (the string genuinely is a prefix), which is exactly how the
+    directory-only rule shipped without a red test. This helper requires the match to end
+    on a real token boundary so a test using it can't repeat that mistake.
+    """
+    return any(command == p or command.startswith(p + " ") for p in _bash_prefixes(allowed_tools))
 
 
 @pytest.mark.parametrize("command", [
@@ -197,15 +209,27 @@ def _bash_prefixes(allowed_tools):
     "host/.venv/bin/pytest -q --no-header",
 ])
 def test_default_allowlist_covers_every_venv_invocation_form_seen_live(command):
-    prefixes = _bash_prefixes(fr.DEFAULT_ALLOWED_TOOLS)
-    assert any(command.startswith(p) for p in prefixes), \
+    assert _grants(command, fr.DEFAULT_ALLOWED_TOOLS), \
         f"no Bash(...) rule in DEFAULT_ALLOWED_TOOLS covers: {command!r}"
 
 
-def test_default_allowlist_anchors_the_absolute_python_rule_on_this_repo():
+def test_default_allowlist_does_not_use_directory_only_rules():
+    # permcheck-20260814: a rule ending on a bare directory (no binary name) matched
+    # nothing live, even though it looks like a valid prefix as a string. Every venv rule
+    # must end on one of VENV_BIN_SCRIPTS, never on a trailing "/".
+    for rule in fr.DEFAULT_ALLOWED_TOOLS:
+        if rule.startswith("Bash(") and ".venv/bin/" in rule:
+            prefix = rule[len("Bash("):-len(":*)")]
+            assert not prefix.endswith("/"), f"directory-only rule matches nothing live: {rule!r}"
+            assert prefix.rsplit("/", 1)[-1] in fr.VENV_BIN_SCRIPTS, \
+                f"venv rule names a script outside VENV_BIN_SCRIPTS: {rule!r}"
+
+
+def test_default_allowlist_anchors_the_absolute_venv_rules_on_this_repo():
     # A hardcoded absolute path would silently stop matching on a different checkout;
     # anchoring on `fr.REPO` keeps it correct wherever this repo happens to live.
-    assert f"Bash({fr.REPO}/host/.venv/bin/:*)" in fr.DEFAULT_ALLOWED_TOOLS
+    for script in fr.VENV_BIN_SCRIPTS:
+        assert f"Bash({fr.REPO}/host/.venv/bin/{script}:*)" in fr.DEFAULT_ALLOWED_TOOLS
 
 
 # ------------------------------------------------------------------- $HOME correction

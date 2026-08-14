@@ -17,8 +17,11 @@ The full contract is `.agents/skills/issue-fleet/references/worker-brief.md`. Th
 
 **Your cwd is the MAIN checkout, not your worktree.** Use the absolute worktree path given in the
 task for every file operation. The trees are byte-identical until your first edit, so a relative
-path edits the wrong one invisibly. Every git call is `git -C <abs worktree>`. pytest is
-`cd <abs worktree>/host && <main>/host/.venv/bin/python -m pytest -q --no-header -k <narrow>`.
+path edits the wrong one invisibly. Every git call is `git -C <abs worktree>`. For pytest: `cd <abs
+worktree>/host` as its own Bash call, then `<main>/host/.venv/bin/python -m pytest -q --no-header
+-k <narrow>` as a **separate** call — never chain them with `&&`. Under `fleet_run.py` supervision
+a compound `cd X && Y` is denied outright even when both halves are individually allowed (verified
+2026-08-14); cwd persists across separate Bash calls, so splitting them loses nothing.
 
 **Commit `Refs #NNN` on your branch. Never `Closes #NNN`** — it trips the repo's Stop hook once the
 orchestrator fast-forwards you.

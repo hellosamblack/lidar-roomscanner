@@ -135,6 +135,29 @@ rotates you before you have done anything.
 You may also be started by hand, with no supervisor. Then Step 1.5 ends the way it always did: write
 the handoff and stop.
 
+### Bash calls under supervision — no compound commands, no ops outside the repo
+
+Verified live 2026-08-14 (`permcheck-20260814`/`-b`/`-c`: three real `claude -p` probes run under
+`fleet_run.py`'s own allowlist, not a reading of documentation) — two mechanics that cost real runs
+before they were pinned down, both fixed the same way: **split into separate Bash calls.**
+
+- **A compound command (`&&`, `;`) is denied even when every piece is individually allowed.**
+  `mkdir -p X && rm -rf X` was denied though both `mkdir` and `rm` are granted on their own; so was
+  `cd <dir> && <command>` — the exact pattern this skill used to recommend for pytest, until today.
+  No allowlist entry fixes this; there is no `Bash(&&:*)` to grant. Issue `cd <dir>` and the
+  following command as **two separate Bash calls** instead. Working directory persists between
+  them — verified: a `.venv/bin/python` call issued right after a bare `cd host` ran correctly in
+  `host/`, with no error. A single command with a pipe (`| cat`, `| tail`) or a stderr merge
+  (`2>&1`) is fine on its own; it is specifically chaining with `&&`/`;` — or `cd` as half of
+  one — that gets denied.
+- **A destructive or output-redirecting op targeting a path outside the repo is denied regardless
+  of the allowlist.** `rm -f /tmp/x` was denied even with `Bash(rm:*)` granted, while
+  `rm -f <path inside the repo>` succeeded in the same probe. File redirection via `>` was denied
+  both outside the repo (`/tmp/x`) and inside it (`.fleet/x`) — `>` redirection is unreliable
+  everywhere; use the `Write` tool for anything that needs to persist, not shell redirection. If
+  you scratch a file under `/tmp`, do not plan to `rm` it afterward under supervision — leave it
+  (harmless, untracked) or scratch inside the repo instead, where cleanup actually works.
+
 ### The handoff file — `.fleet/<run-id>.md`
 
 Gitignored, local to this machine. **Deliberately outside `.claude/`**, where this lived until
@@ -417,7 +440,9 @@ The contract, restated in the spawn prompt because it is load-bearing:
 
 - **Absolute paths for everything.** A subagent's cwd is the main checkout even when its worktree is
   elsewhere; a relative path silently edits the wrong tree.
-- `git -C <abs worktree>` for every git call. `cd <abs worktree>/host` for pytest.
+- `git -C <abs worktree>` for every git call. For pytest: `cd <abs worktree>/host` as its own Bash
+  call, then the pytest invocation as a **separate** call — never `cd X && pytest`. See "Bash calls
+  under supervision" above.
 - Commit `Refs #NNN` on the worktree branch. **Never `Closes`** — fast-forwarded to HEAD it trips the
   Stop hook mid-fleet.
 - **Explicit pathspecs, never `git add -A`.** The two symlinks show as untracked, and a multi-path
@@ -470,7 +495,8 @@ mid-proof leaves it on the owner's shared checkout.
 git -C . diff --name-only main...issue-NNN                 # incoming
 # ABORT if incoming intersects the owner's uncommitted files
 git -C <wt> rebase main                                    # conflicts stay in the private worktree
-cd <wt>/host && /path/to/main/host/.venv/bin/python -m pytest -q --no-header --tb=line -k <narrow> 2>&1 | tail -n 20
+cd <wt>/host                                                # its OWN Bash call -- see below
+/path/to/main/host/.venv/bin/python -m pytest -q --no-header --tb=line -k <narrow> 2>&1 | tail -n 20
 git -C . merge --ff-only issue-NNN
 rm <wt>/captures <wt>/host/transform/build                 # or `worktree remove` refuses
 git -C . worktree remove <wt> && git -C . branch -d issue-NNN
