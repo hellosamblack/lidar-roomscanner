@@ -192,13 +192,21 @@ on its own branch inside its own worktree, and the orchestrator still owns revie
 carve-out are stated in `docs/engineering-practices.md` → Branch discipline and in the `status-sync`
 skill.
 
-**A fleet run rotates itself (2026-08-13, #183).** An orchestrator's cost is accumulated context, so
-`fleet_budget()` returns `rotate` at 300K and the skill hands off to a fresh session (#182). The
-restart used to be manual, which meant the expensive path stayed the default. `host/tools/fleet_run.py`
-now owns the chain: it spawns each successor from `.fleet/<run-id>.md`, and stops on a permission
-denial, a weighted-token ceiling, `--max-sessions`, or no progress. Deliberately a CLI, not an MCP
-tool — it has to outlive the session it rotates. Chain mechanics verified live; **one real supervised
-fleet run is still outstanding** (#183, `needs/operator` + `needs/decision`).
+**A fleet run rotates itself (2026-08-13, #183, closed 2026-08-14).** An orchestrator's cost is
+accumulated context, so `fleet_budget()` returns `rotate` at 300K and the skill hands off to a fresh
+session (#182). The restart used to be manual, which meant the expensive path stayed the default.
+`host/tools/fleet_run.py` now owns the chain: it spawns each successor from `.fleet/<run-id>.md`, and
+stops on a permission denial, a weighted-token ceiling, `--max-sessions`, or no progress. Deliberately
+a CLI, not an MCP tool — it has to outlive the session it rotates. **A real supervised run landed real
+work unattended 2026-08-14** (`fleet-20260814-1716`: claimed and worked two issues, merged a fix with
+a regression test, closed one out with a well-evidenced negative result, ran its own `session-end`) —
+after six attempts and four live diagnostic probes surfaced and fixed a chain of environment-splitting
+bugs the mechanism itself never had: root-vs-`sam` `$HOME` and file-ownership splits, a user-level
+`rtk` hook rewriting Bash commands invisibly, a real `plan_fleet_live()` signature bug two sessions
+had misdiagnosed as process staleness, an invalid directory-only allowlist rule, and — the largest
+single cost — the `issue-fleet` skill's own instructions teaching a `cd X && Y` Bash pattern that is
+denied outright unattended (fine interactively, where a denial is just a permission prompt). Full
+trace in `docs/fleet-ledger.md` and #183's comment history.
 
 ## Completed phases
 
