@@ -3166,6 +3166,13 @@ class DetailedRunner:
         self._load_error = None
         self._last_mesh = object()
         self._mesh_seq = 0
+        # Packed MESH bytes for the current `_mesh_seq`, RETAINED. `MeshPrep.latest()`
+        # pops, and a finished Detailed build produces no further packets ever, so
+        # without this the mesh is deliverable exactly once -- any client that
+        # connects or reloads afterwards gets nothing (#186). Unlike live SLAM,
+        # where the next frame's packet re-fills the slot within ~33 ms, there is
+        # no next frame here.
+        self._mesh_bytes = None
         self._committed = False
         self._started_at = None
         # Wall time the build took, frozen the first time it reports done.
@@ -3206,6 +3213,7 @@ class DetailedRunner:
             self._loading_started_at = None
             self._load_error = None
             self._last_mesh, self._mesh_seq, self._committed = object(), 0, False
+            self._mesh_bytes = None
             self._started_at = time.monotonic()
             self._elapsed_at_done = None
         self._bus.publish(f"[detailed] started {capture.name} ({self.preset.fingerprint()})")
@@ -3232,6 +3240,7 @@ class DetailedRunner:
             self._cached_mesh = None
             self._cached_pose = None
             self._last_mesh, self._mesh_seq = object(), 0
+            self._mesh_bytes = None
             self._started_at = None
             self._elapsed_at_done = None
             self._loading_capture = capture
@@ -3336,6 +3345,38 @@ class DetailedRunner:
             status["pose"] = pose
         return status
 
+    def _retain(self, mesh_bytes: bytes | None) -> None:
+        """Hold the newest packed MESH bytes. `MeshPrep.latest()` pops, so this is
+        the runner's only copy; `poll()` re-offers it every tick and the caller
+        de-dupes on identity, which is what lets a client that arrives after the
+        build finished -- or after a source-generation reset dropped
+        `state.latest_mesh` -- still be served (#186)."""
+        if mesh_bytes is not None:
+            self._mesh_bytes = mesh_bytes
+
+    def _retire(self, worker, progress) -> None:
+        """Release a COMPLETED build's worker, handing its mesh to the cached path.
+
+        A finished job is presentation state only. Leaving `_worker` set wedges the
+        runner: `poll()` stays in the worker branch (which never resubmits, since
+        `progress.mesh is _last_mesh`), and `begin_load_cached()` early-returns on
+        `_worker is not None` so the cached path can never take over either (#186).
+        `start()` already said as much in a comment, but only ever did the release
+        on the next Regenerate."""
+        with self._lock:
+            if self._worker is not worker:
+                return
+            pose = None
+            trajectory = getattr(progress, "trajectory", ())
+            if trajectory:
+                latest = np.asarray(trajectory[-1], dtype=np.float64)
+                if latest.shape == (4, 4) and np.all(np.isfinite(latest)):
+                    pose = latest
+            self._worker = None
+            self._cached_mesh = progress.mesh
+            self._cached_pose = pose
+        worker.stop()
+
     def poll(self, wall_mode: str) -> tuple[dict | None, bytes | None]:
         with self._lock:
             worker, prep, capture, cached_pose, cached_mesh, loading_capture = (
@@ -3350,12 +3391,12 @@ class DetailedRunner:
                 self._mesh_seq += 1
                 prep.submit(cached_mesh, mesh_seq=self._mesh_seq, glow_origin=None, wall_mode=wall_mode)
                 self._last_mesh = cached_mesh
-            packet = prep.latest()
+            self._retain(_packed_or_pack(prep.latest()))
             state = {"type": "detailed", "capture": capture.name, "phase": "cached", "done": True,
                      "mesh_seq": self._mesh_seq}
             if cached_pose is not None:
                 state["pose"] = [round(float(v), 5) for v in cached_pose.reshape(-1)]
-            return state, _packed_or_pack(packet)
+            return state, self._mesh_bytes
         progress = worker.latest()
         if progress is None:
             return self.status(), None
@@ -3363,14 +3404,18 @@ class DetailedRunner:
             self._mesh_seq += 1
             prep.submit(progress.mesh, mesh_seq=self._mesh_seq, glow_origin=None, wall_mode=wall_mode)
             self._last_mesh = progress.mesh
-        packet = prep.latest()
-        mesh = _packed_or_pack(packet)
+        self._retain(_packed_or_pack(prep.latest()))
         state = self.status() or {}
         state.update({"type": "detailed", "mesh_seq": self._mesh_seq})
         if progress.done and not self._committed:
             self._commit(capture, worker, progress)
             self._committed = True
-        return state, mesh
+        # Retire only once the mesh is actually packed, so the completion banner
+        # stays up for the whole extract-and-pack tail rather than vanishing the
+        # instant the sidecar lands.
+        if self._committed and self._mesh_bytes is not None:
+            self._retire(worker, progress)
+        return state, self._mesh_bytes
 
     def _commit(self, capture: Path, worker: PostProcessWorker, progress) -> None:
         if progress.mesh is None:
@@ -3408,6 +3453,7 @@ class DetailedRunner:
         with self._lock:
             worker, prep = self._worker, self._meshprep
             self._worker = self._meshprep = None
+            self._mesh_bytes = None
             self._cached_mesh = None
             self._cached_pose = None
             self._loading_capture = None
@@ -5723,7 +5769,12 @@ async def _broadcaster() -> None:
             dmsg, mesh_bytes = detailed.poll(ui.slam_walls)
             if dmsg is not None:
                 await _broadcast_text(clients, json.dumps(dmsg))
-            if mesh_bytes is not None:
+            # Detailed RE-OFFERS its retained bytes every tick (#186), so de-dupe on
+            # identity: re-caching the same object at tick rate would count a
+            # `superseded` miss per tick against every flow that had not yet sent it.
+            # A non-identical object here is either a genuinely new mesh or the same
+            # mesh after a generation reset cleared `latest_mesh` -- both need caching.
+            if mesh_bytes is not None and mesh_bytes is not getattr(state, "latest_mesh", None):
                 _cache_latest_mesh(state, mesh_bytes)
 
         # Splat build progress. Polled every tick REGARDLESS of display (a build

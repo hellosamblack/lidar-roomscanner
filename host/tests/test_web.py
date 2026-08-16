@@ -3732,6 +3732,123 @@ def test_detailed_runner_status_exposes_the_latest_scanner_pose(tmp_path):
     assert status["pose"] == pytest.approx(pose.reshape(-1).tolist())
 
 
+class _FakeDetailedPrep:
+    """MeshPrep stand-in with the property that matters here: `latest()` POPS.
+
+    Live SLAM refills that slot every frame, so the pop is invisible. A finished
+    Detailed build never produces another packet, which is what made #186 a
+    one-shot delivery.
+    """
+
+    def __init__(self):
+        self.submitted = []
+        self._slot = None
+        self.stopped = False
+
+    def submit(self, mesh, *, mesh_seq, glow_origin, wall_mode):
+        self.submitted.append(mesh_seq)
+        self._slot = SimpleNamespace(packed=b"MESH" + bytes(12))
+
+    def latest(self):
+        pkt, self._slot = self._slot, None
+        return pkt
+
+    def stop(self):
+        self.stopped = True
+
+
+def _finished_detailed_runner(tmp_path, mesh=object()):
+    """A runner whose build has just completed, wired to fakes."""
+    worker = SimpleNamespace(
+        timestamps=[0.0, 1.0],
+        stopped=False,
+        latest=lambda: SimpleNamespace(
+            fraction=1.0, done=True, stats={"frames": 2}, trajectory=(),
+            phase="offline_only", mesh=mesh),
+    )
+    worker.stop = lambda: setattr(worker, "stopped", True)
+    runner = web.DetailedRunner(bus=LogBus(), results_dir=tmp_path / "results")
+    runner._worker = worker
+    runner._meshprep = _FakeDetailedPrep()
+    runner._capture = tmp_path / "take.bin"
+    runner._started_at = 0.0
+    # The build already published this mesh, exactly as the real runner would
+    # have on the tick that first saw it.
+    runner._last_mesh = mesh
+    runner._committed = True
+    return runner, worker
+
+
+def test_detailed_keeps_serving_its_mesh_after_the_build_finishes(tmp_path):
+    """A client that connects AFTER a Detailed build finishes must still get the mesh.
+
+    #186: `MeshPrep.latest()` pops and a finished build produces no further
+    packets, so the mesh was deliverable exactly once -- the viewport stayed
+    empty for every later client, and reloading never helped. Asserting on the
+    returned BYTES, not on a runner flag, because the flag was never the thing
+    that was broken.
+    """
+    mesh = object()
+    runner, _ = _finished_detailed_runner(tmp_path, mesh)
+    runner._last_mesh = object()   # force one submit, as the build's own tick did
+
+    _state, first = runner.poll("split")
+    assert first is not None, "the build's own tick must deliver its mesh"
+
+    # Every later tick: MeshPrep's slot is empty forever. The mesh must survive.
+    for _ in range(5):
+        _state, later = runner.poll("split")
+        assert later == first, "a late client must still be served the same mesh"
+
+
+def test_detailed_retires_a_finished_worker_so_the_cached_path_is_reachable(tmp_path):
+    """A completed build must release its worker (#186).
+
+    While `_worker` stayed set, `poll()` was stuck in the worker branch (which
+    never resubmits, since `progress.mesh is _last_mesh`) AND
+    `begin_load_cached()` early-returned on `_worker is not None` -- so neither
+    path could ever show the mesh again. `start()` documented this release but
+    only performed it on the next Regenerate.
+    """
+    mesh = object()
+    runner, worker = _finished_detailed_runner(tmp_path, mesh)
+    runner._last_mesh = object()
+
+    runner.poll("split")            # packs the mesh
+    runner.poll("split")            # ...and retires on the next tick
+    assert runner._worker is None, "a finished build must not hold its worker"
+    assert worker.stopped is True
+    assert runner._cached_mesh is mesh, "the mesh must survive into the cached path"
+
+    # The cached path is now reachable: it refuses only for a missing sidecar,
+    # not because a long-finished build is still nominally 'running'.
+    results = tmp_path / "results"
+    results.mkdir(parents=True, exist_ok=True)
+    paths = web.sidecar_paths(runner._capture, results)
+    paths["ply"].write_bytes(b"ply\n")
+    assert runner.begin_load_cached(runner._capture) is True
+
+
+def test_detailed_reoffers_its_mesh_after_a_generation_reset(tmp_path):
+    """A source-generation bump clears `state.latest_mesh`; Detailed must refill it.
+
+    This is the sequence that reproduced #186 on demand: toggle display
+    slam -> detailed, `stream_generation` 5 -> 8, cached mesh dropped, and no
+    mesh ever again. `poll()` re-offering its retained bytes is what makes the
+    cache refillable without a 6-minute rebuild.
+    """
+    mesh = object()
+    runner, _ = _finished_detailed_runner(tmp_path, mesh)
+    runner._last_mesh = object()
+    _state, first = runner.poll("split")
+    runner.poll("split")
+
+    # The reset lives in the broadcaster (`state.latest_mesh = None`); what the
+    # runner owes it is bytes on the very next poll.
+    _state, after_reset = runner.poll("split")
+    assert after_reset == first
+
+
 def test_last_tum_pose_recovers_the_cached_detailed_camera_pose(tmp_path):
     """A finished Detailed build has no worker, so its FPV/Mirror camera must
     recover the final scanner pose from the sidecar that was saved with it."""
