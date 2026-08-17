@@ -22,6 +22,8 @@ Groups:
   ui_*       screenshot and drive the web UI in headless Chrome
   capture_*  inspect recorded captures
   fw_*       build and flash firmware
+  bridge_*   administer the Raspberry Pi bridge node (wireless uplink) and
+             recover frames from its local pcap tee
   fleet_*    plan a batch of issues for parallel workers, and check usage budget
   doctor / orientation_probe / run_tests  diagnostics
 
@@ -55,6 +57,7 @@ mcp = MCPServer(name="roomscan", instructions=INSTRUCTIONS, version="0.1.0",
 
 def build() -> MCPServer:
     """Import every tool module so decorators register, then hand back the server."""
-    from . import tools_build, tools_data, tools_fleet, tools_rig, tools_ui  # noqa: F401
+    from . import (tools_bridge, tools_build, tools_data, tools_fleet,  # noqa: F401
+                   tools_rig, tools_ui)  # noqa: F401
 
     return mcp

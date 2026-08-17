@@ -126,9 +126,35 @@ substitutes them before `gh` sees them.
 
 8. **Re-read it once as the operator.** Every `[You]` step must be one action. No acronyms. If a
    step says "and then", split it. If you cannot picture doing it, neither can they.
+   **Then prove it parsed.** The page is not a renderer of your prose — `operator_page.py`
+   *plans the owner's trip* from it, and it is literal in three ways that all fail silently
+   (all three hit #191 in one sitting):
+
+   ```bash
+   cd host && .venv/bin/python -c "
+   from tools.operator_page import parse_runbook
+   p = parse_runbook({'body': open('/tmp/operator-request.md').read(), 'issue': NNN})
+   print(len(p['steps']), p['tags'], p['duration_min'], p['footer'])"
+   ```
+
+   Non-zero steps, a tag set containing the venue you meant, a duration, a complete footer.
+   - Only steps under a literal `**Steps**` heading are parsed. `### Part A` subheadings are
+     fine *inside* it; without it the page renders **zero steps** — a checklist the owner
+     cannot follow, on the page whose only job is to be followed.
+   - `TAG_RULES` matches the step library's exact wording, **markdown bold included**
+     (`power button on the \*\*battery pack\*\*`). This is the concrete reason "compose, do
+     not reword" is a rule: plain-text "the battery pack" filed a job needing the rig, a
+     Raspberry Pi and an SD card under *"At your desk — no hardware"*.
+   - `tags_for()` lowercases before matching, so a new mixed-case pattern never fires.
+
+   Adding a genuinely new constraint means editing `TAG_RULES` **and** `RIG_TAGS`, `VENUES`
+   and `VENUE_ORDER` together — a lexicon entry alone gets a pill but no venue.
+
 9. **Regenerate `/static/operator.html`.** Not optional, not batch-mode-only — every runbook post
    changes what the page should show. `operator_page()` (or, if the MCP tool is unavailable,
-   `host/.venv/bin/python host/tools/operator_page.py`). This step went missing for exactly one
+   `host/.venv/bin/python host/tools/operator_page.py` — and use the script, not the tool,
+   whenever you have just edited `TAG_RULES`: the MCP tool runs inside a long-lived server
+   process still holding the old code). This step went missing for exactly one
    issue's worth of the session (#183, 2026-08-14) because it previously lived only as a
    prose aside inside "Batch mode" below — a single-runbook post never read that far and the page
    sat stale a full day, still telling the owner a *closed* issue needed a decision from them.
