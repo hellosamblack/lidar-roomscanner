@@ -270,6 +270,16 @@ when it is on, it leaves the radio untouched until Ethernet returns.
 
 ## 4. FileHub bridge and management
 
+> **Superseded in the primary path (2026-08-17, #191).** The
+> [Pi 3 bridge node](../../pi-bridge-runbook.md) replaces the FileHub as the rig's wireless
+> uplink. It carries **both** SSIDs as baked NetworkManager profiles — `home` and `travel`,
+> with autoconnect priorities — so it joins the travel AP with no bridge-mode dance and no
+> management address at all; day-2 administration is `bridge_status()` and friends over ssh.
+> **`travel-ap.sh` itself needs no changes**: its gating logic never cared which client
+> associates. This section stays as the operational contract for the FileHub while it remains
+> a cold spare, and until #191's hardware acceptance passes. Retiring
+> `filehub-bridgemode.sh` outright is tracked as #192.
+
 Matching SSID/passphrase lets the FileHub join the travel AP automatically, but
 it does **not** make bridge mode permanent.  Bridge recovery still follows the
 project's required order: unplug Ethernet from the FileHub, power-cycle the

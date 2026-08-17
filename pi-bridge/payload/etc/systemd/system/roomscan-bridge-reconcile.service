@@ -1,0 +1,8 @@
+[Unit]
+Description=roomscan bridge -- reconcile scanner reachability, NAT target, and required units
+# Triggered on a cadence by roomscan-bridge-reconcile.timer. Not meant to
+# be enabled directly (no [Install] WantedBy) -- the timer owns activation.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/roomscan-bridge-reconcile

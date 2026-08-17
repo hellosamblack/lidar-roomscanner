@@ -1,0 +1,83 @@
+#!/usr/sbin/nft -f
+#
+# roomscan-bridge.nft -- NAT/DNAT rules for the roomscan Wi-Fi<->eth0 bridge.
+#
+# LOADING APPROACH (pick ONE, documented here so build_image.py and anyone
+# reading this repo agree on how it gets loaded): this file is a STANDALONE
+# nft ruleset, loaded via an `include "/etc/nftables/roomscan-bridge.nft";`
+# line that install.sh idempotently appends to the end of the stock Debian
+# /etc/nftables.conf. The system nftables.service is unmodified -- it still
+# just runs `/usr/sbin/nft -f /etc/nftables.conf`, which pulls this file in
+# via the include. This was chosen over a second `roomscan-nftables.service`
+# because it lets the stock nftables.service remain the single source of
+# truth for "is the firewall loaded", so `systemctl status nftables` and
+# `nft list ruleset` show the complete picture in one place, and because
+# the stock unit already has correct ordering (After=network-pre.target,
+# Before=network.target) that a bolt-on unit would have to duplicate.
+#
+# Table self-flush idiom: `delete table ip roomscan_bridge` followed by
+# (re)declaring the table makes this file safe to `nft -f` repeatedly
+# (every boot, every `systemctl reload nftables`) without accumulating
+# duplicate rules. `delete table` on a table that does not exist yet would
+# normally error under `nft -f`, so it is wrapped in its own top-level
+# `table ip roomscan_bridge { }` declare-then-delete pair, which nft
+# accepts even on first load (declaring an empty table is a no-op if one
+# already exists, and deleting it then is always valid).
+table ip roomscan_bridge
+delete table ip roomscan_bridge
+
+table ip roomscan_bridge {
+	# Every rule below carries an explicit `counter` -- this is the
+	# truth-source roomscan-bridge-status and roomscan-bridge-reconcile
+	# read (`nft -j list table ip roomscan_bridge`) to decide "is traffic
+	# flowing", e.g. whether a live capture is in progress before the
+	# reconcile script would otherwise bounce eth0.
+
+	chain prerouting {
+		type nat hook prerouting priority dstnat; policy accept;
+
+		# Host's stream request / keepalive arrives on wlan0 addressed to
+		# the Pi's own wlan0 IP on UDP/{{STREAM_PORT}}; DNAT it to the
+		# scanner's static eth0 address. This is the rule
+		# roomscan-bridge-reconcile retargets to {{SCANNER_FALLBACK_IP}}
+		# when the scanner has fallen back to self-assigned mode, and back
+		# to {{SCANNER_IP}} once it re-leases.
+		iifname "wlan0" udp dport {{STREAM_PORT}} counter dnat to {{SCANNER_IP}}:{{STREAM_PORT}} comment "roomscan-dnat-to-scanner"
+	}
+
+	chain postrouting {
+		type nat hook postrouting priority srcnat; policy accept;
+
+		# Masquerade traffic leaving on eth0 toward the scanner (the DNAT'd
+		# host request above, and any other eth0-bound traffic originated
+		# from this box) so replies come back through this box rather than
+		# needing a route on the scanner back to the real host address.
+		oifname "eth0" counter masquerade comment "roomscan-masq-to-scanner"
+
+		# Masquerade the scanner's outbound stream as it leaves on wlan0
+		# toward the host, so the return path is symmetric through this
+		# box regardless of which wlan0 profile (home/travel) is active
+		# and what address space that network uses.
+		oifname "wlan0" counter masquerade comment "roomscan-masq-to-host"
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+
+		# Established/related traffic in both directions (covers the
+		# return leg of both the DNAT'd request and the scanner's stream).
+		ct state established,related counter accept comment "roomscan-fwd-established"
+
+		# New UDP/{{STREAM_PORT}} traffic from the host (wlan0) toward the
+		# scanner (eth0), post-DNAT -- destination here is already
+		# {{SCANNER_IP}}:{{STREAM_PORT}} (or
+		# {{SCANNER_FALLBACK_IP}}:{{STREAM_PORT}} while reconcile has
+		# retargeted it) by the time this chain runs.
+		iifname "wlan0" oifname "eth0" udp dport {{STREAM_PORT}} counter accept comment "roomscan-fwd-host-to-scanner"
+
+		# The scanner's own stream, originated from eth0 toward the host
+		# on wlan0 (unicast RSCN frames + any other UDP the scanner
+		# initiates back toward the discovered host).
+		iifname "eth0" oifname "wlan0" counter accept comment "roomscan-fwd-scanner-to-host"
+	}
+}

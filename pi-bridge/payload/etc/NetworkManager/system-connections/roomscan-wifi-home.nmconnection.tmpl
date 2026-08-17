@@ -1,0 +1,52 @@
+# roomscan-wifi-home.nmconnection.tmpl
+#
+# Wi-Fi client profile for the "home" network. Paired with
+# roomscan-wifi-travel.nmconnection.tmpl; NetworkManager autoconnects
+# whichever configured SSID is in range, preferring the higher
+# autoconnect-priority when both are.
+#
+# Placeholders substituted by the image builder:
+#   {{HOME_UUID}}      -- fixed UUID for this connection profile, stable
+#                          across rebuilds (see roomscan-eth0.nmconnection.tmpl)
+#   {{HOME_SSID}}      -- the home Wi-Fi network's SSID, verbatim
+#   {{HOME_PSK}}       -- the home Wi-Fi network's WPA-PSK passphrase
+#   {{HOME_PRIORITY}}  -- integer autoconnect-priority (higher wins)
+#   {{WIFI_COUNTRY}}   -- ISO 3166-1 alpha-2 regulatory domain, e.g. "US"
+#                          (also written to raspi-config's wpa_supplicant
+#                          country by the builder; repeated here so this
+#                          file is self-describing)
+#
+# Band is intentionally left unset: the Pi 3 Model B's onboard radio
+# (BCM43438) is 2.4 GHz only, so there is no 5 GHz band to select and
+# forcing band=bg would be redundant, not corrective.
+#
+# The builder renders this file to roomscan-wifi-home.nmconnection before
+# packaging; install.sh only installs already-rendered *.nmconnection files.
+
+[connection]
+id=roomscan-wifi-home
+uuid={{HOME_UUID}}
+type=wifi
+interface-name=wlan0
+autoconnect=true
+autoconnect-priority={{HOME_PRIORITY}}
+
+[wifi]
+mode=infrastructure
+ssid={{HOME_SSID}}
+# Regulatory domain for this profile's network, informational -- the
+# system-wide country is set via raspi-config / CRDA by the builder.
+# country={{WIFI_COUNTRY}}
+powersave=2
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk={{HOME_PSK}}
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=auto
+
+[proxy]

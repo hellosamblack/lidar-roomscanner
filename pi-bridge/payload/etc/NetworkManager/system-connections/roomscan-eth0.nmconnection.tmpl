@@ -1,0 +1,45 @@
+# roomscan-eth0.nmconnection.tmpl
+#
+# Static IP for eth0, the interface facing the STM32H563 scanner. No
+# gateway and no DNS are configured here on purpose: eth0 is a private
+# point-to-point link to the scanner, not an uplink, and this box's default
+# route must stay on wlan0.
+#
+# Placeholders substituted by the image builder:
+#   {{ETH0_UUID}}  -- a fixed, pre-generated UUID string (e.g. from `uuidgen`)
+#                     for this connection profile. Must be a valid UUID and
+#                     must be stable across rebuilds so NetworkManager treats
+#                     re-installs as the same profile rather than duplicating
+#                     it. (Builder alias: {{UUID_ETH0}} also resolves here.)
+#   {{ETH_CIDR}}   -- this box's eth0 address in CIDR form, e.g.
+#                     "172.31.100.1/24" (the address half is {{ETH_ADDR}},
+#                     the prefix length half is {{ETH_PREFIX}} -- this file
+#                     uses the combined form since that's what address1=
+#                     wants).
+#
+# The builder renders this file to
+#   roomscan-eth0.nmconnection   (note: .tmpl suffix dropped)
+# before it is placed in the payload tarball; install.sh only installs
+# already-rendered *.nmconnection files.
+
+[connection]
+id=roomscan-eth0
+uuid={{ETH0_UUID}}
+type=ethernet
+interface-name=eth0
+autoconnect=true
+autoconnect-priority=100
+
+[ethernet]
+
+[ipv4]
+method=manual
+address1={{ETH_CIDR}}
+# No gateway: this link never carries a default route.
+# No DNS: dnsmasq on this interface serves DHCP only (port=0), never DNS.
+dns-search=
+
+[ipv6]
+method=disabled
+
+[proxy]

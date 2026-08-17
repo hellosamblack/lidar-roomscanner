@@ -114,6 +114,20 @@ testable without connected hardware.
   keepalive to retain the device's unicast target, and reassembles UDP fragments.
 - `FileSource` replays a raw capture at a frame boundary.
 
+On the wireless rig the Ethernet hop runs through the **Pi 3 bridge node** rather
+than a commercial Wi-Fi bridge: the scanner plugs into the Pi's `eth0`
+(172.31.100.1/24, dnsmasq handing its compile-time MAC a static 172.31.100.20
+lease inside the firmware's 3000 ms DHCP window), and the Pi routes and NATs UDP
+5000 out over `wlan0`. It publishes the `roomscanner._roomscan._udp` service on
+`wlan0` only, so `UdpSource` resolves the Pi with no host-side change at all --
+the transport looks identical from here. The bridge is additive: with it absent,
+a plain Ethernet cable from the scanner to a laptop still works unchanged. It
+also tees every scanner packet to a bounded local pcap ring, which is what makes
+frames lost over the air recoverable after the fact
+(`bridge_tee_fetch`/`pcap2capture.py`). Build, operation and failure playbook:
+[`pi-bridge-runbook.md`](pi-bridge-runbook.md); design rationale:
+[`superpowers/specs/2026-08-17-pi3-bridge-node-design.md`](superpowers/specs/2026-08-17-pi3-bridge-node-design.md).
+
 `StreamDecoder` accepts arbitrary chunks from any source. It scans for the
 `RSCN` magic, bounds payload lengths, verifies CRC32, and resynchronizes after
 partial reads or corruption instead of trusting the link. `Recorder` tees the

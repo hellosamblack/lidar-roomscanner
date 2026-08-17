@@ -1,0 +1,22 @@
+<?xml version="1.0" standalone='no'?><!--*-nxml-*-->
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!--
+  roomscan-bridge.service - mDNS/DNS-SD announcement of the bridge Pi
+  itself, so MCP tooling and the operator can find it (e.g. for ssh) as
+  roomscan-bridge._roomscan-bridge._tcp.local. without knowing its IP.
+
+  Instance name is the literal string "roomscan-bridge", not %h, for the
+  same reason as roomscanner.service: a stable, predictable name the
+  consumer looks up verbatim.
+
+  The <type> below is tokenized ({{BRIDGE_MDNS_SERVICE}}); <port> is left
+  as the literal ssh port 22 (no token covers it) and <name> is left as
+  the literal instance name, per the note above.
+-->
+<service-group>
+  <name replace-wildcards="no">roomscan-bridge</name>
+  <service>
+    <type>{{BRIDGE_MDNS_SERVICE}}</type>
+    <port>22</port>
+  </service>
+</service-group>

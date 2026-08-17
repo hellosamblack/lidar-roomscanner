@@ -1,0 +1,180 @@
+#!/bin/bash
+# roomscan-bridge-reconcile -- periodic health/self-healing pass for the
+# roomscan Wi-Fi<->eth0 bridge. Run every 10s by
+# roomscan-bridge-reconcile.timer.
+#
+# Fail-closed: any unexpected error trips `set -e` and the script exits
+# non-zero, which systemd records as a failed run of the oneshot service
+# (visible in `systemctl status roomscan-bridge-reconcile.service` and the
+# journal) rather than silently doing nothing.
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Pull in shared nft/DNAT helpers and node-identity defaults
+# (SCANNER_IP, SCANNER_MAC, SCANNER_FALLBACK_IP, STREAM_PORT, ...),
+# overridden by /etc/roomscan-bridge/node.env when present. Try next to
+# this script first (matches a payload checkout / pre-install layout),
+# then the installed location. If neither is found, fall back to inline
+# defaults so this script still runs standalone.
+if [ -f "${SELF_DIR}/roomscan-bridge-common.sh" ]; then
+    # shellcheck disable=SC1091
+    . "${SELF_DIR}/roomscan-bridge-common.sh"
+elif [ -f /usr/local/sbin/roomscan-bridge-common.sh ]; then
+    # shellcheck disable=SC1091
+    . /usr/local/sbin/roomscan-bridge-common.sh
+else
+    : "${SCANNER_IP:=172.31.100.20}"
+    : "${SCANNER_MAC:=00:80:e1:00:00:00}"
+    : "${SCANNER_FALLBACK_IP:=172.31.253.1}"
+    : "${STREAM_PORT:=5000}"
+    [ -f /etc/roomscan-bridge/node.env ] && . /etc/roomscan-bridge/node.env
+    NFT_TABLE="ip roomscan_bridge"
+    NFT_CHAIN="prerouting"
+    DNAT_COMMENT="roomscan-dnat-to-scanner"
+    roomscan_dnat_rule_line() { nft list chain ${NFT_TABLE} ${NFT_CHAIN} 2>/dev/null | grep -F "${DNAT_COMMENT}" || true; }
+    roomscan_dnat_target_ip() { roomscan_dnat_rule_line | grep -oP 'dnat to \K[0-9.]+(?=:[0-9]+)' || true; }
+    roomscan_dnat_counter_bytes() { roomscan_dnat_rule_line | grep -oP 'bytes \K[0-9]+' || true; }
+    roomscan_dnat_rule_handle() { nft -a list chain ${NFT_TABLE} ${NFT_CHAIN} 2>/dev/null | grep -F "${DNAT_COMMENT}" | grep -oP 'handle \K[0-9]+' || true; }
+    roomscan_set_dnat_target() {
+        local new_ip="$1" handle
+        handle="$(roomscan_dnat_rule_handle)"
+        [ -n "${handle}" ] || return 1
+        nft replace rule ${NFT_TABLE} ${NFT_CHAIN} handle "${handle}" \
+            iifname "wlan0" udp dport "${STREAM_PORT}" counter dnat to "${new_ip}:${STREAM_PORT}" comment "${DNAT_COMMENT}"
+    }
+    roomscan_stream_is_live() {
+        local sample_secs="${1:-1}" before after
+        before="$(roomscan_dnat_counter_bytes)"; [ -n "${before}" ] || before=0
+        sleep "${sample_secs}"
+        after="$(roomscan_dnat_counter_bytes)"; [ -n "${after}" ] || after=0
+        if [ "${after}" -gt "${before}" ]; then echo "yes"; else echo "no"; fi
+    }
+fi
+
+PROBE_ALIAS_ADDR="${SCANNER_FALLBACK_IP%.*}.2"
+PROBE_ALIAS="${PROBE_ALIAS_ADDR}/24"
+LEASE_FILE="/var/lib/misc/dnsmasq.leases"
+
+REQUIRED_UNITS=(dnsmasq.service avahi-daemon.service nftables.service roomscan-tee.service)
+
+log() {
+    logger -t roomscan-bridge "reconcile: $*"
+}
+
+# ---------------------------------------------------------------------------
+# Scanner reachability
+# ---------------------------------------------------------------------------
+
+scanner_present() {
+    if [ -f "${LEASE_FILE}" ] && grep -qi "${SCANNER_IP}" "${LEASE_FILE}"; then
+        return 0
+    fi
+    local state
+    state="$(ip neigh show "${SCANNER_IP}" dev eth0 2>/dev/null | awk '{print $NF}' || true)"
+    case "${state}" in
+        REACHABLE|STALE|DELAY|PERMANENT)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Fallback-mode probe
+# ---------------------------------------------------------------------------
+
+# Adds a temporary alias on eth0 and pings the scanner's self-assigned
+# fallback address. Always removes the alias before returning, even on
+# failure. Echoes "yes" or "no" on stdout.
+probe_fallback_scanner() {
+    local answered="no"
+    ip addr add "${PROBE_ALIAS}" dev eth0 2>/dev/null || true
+    if ping -c 2 -W 1 "${SCANNER_FALLBACK_IP}" >/dev/null 2>&1; then
+        answered="yes"
+    fi
+    ip addr del "${PROBE_ALIAS}" dev eth0 2>/dev/null || true
+    echo "${answered}"
+}
+
+# ---------------------------------------------------------------------------
+# Handling for the "scanner absent" branch
+# ---------------------------------------------------------------------------
+
+handle_scanner_absent() {
+    log "scanner not present at ${SCANNER_IP}, probing fallback mode"
+    local answered
+    answered="$(probe_fallback_scanner)"
+    if [ "${answered}" != "yes" ]; then
+        log "fallback probe (${SCANNER_FALLBACK_IP}) did not answer; scanner is simply offline"
+        return 0
+    fi
+
+    log "scanner answered on fallback address ${SCANNER_FALLBACK_IP}"
+    local current_target
+    current_target="$(roomscan_dnat_target_ip)"
+    if [ "${current_target}" != "${SCANNER_FALLBACK_IP}" ]; then
+        log "retargeting DNAT to ${SCANNER_FALLBACK_IP}:${STREAM_PORT}"
+        roomscan_set_dnat_target "${SCANNER_FALLBACK_IP}" || log "ERROR: could not retarget DNAT rule"
+    else
+        log "DNAT already targets ${SCANNER_FALLBACK_IP}"
+    fi
+
+    local live
+    live="$(roomscan_stream_is_live 2)"
+    if [ "${live}" = "yes" ]; then
+        log "DNAT counters show live traffic to ${SCANNER_FALLBACK_IP}; NOT bouncing eth0 (capture may be in progress)"
+        return 0
+    fi
+
+    log "no live traffic observed; bouncing eth0 to push scanner's DHCP client back to INIT"
+    ip link set eth0 down
+    sleep 1
+    ip link set eth0 up
+    log "eth0 bounced"
+}
+
+# ---------------------------------------------------------------------------
+# Handling for the "scanner present" branch
+# ---------------------------------------------------------------------------
+
+handle_scanner_present() {
+    local current_target
+    current_target="$(roomscan_dnat_target_ip)"
+    if [ "${current_target}" = "${SCANNER_FALLBACK_IP}" ]; then
+        log "scanner reachable via DHCP at ${SCANNER_IP} but DNAT still points at fallback; restoring"
+        roomscan_set_dnat_target "${SCANNER_IP}" || log "ERROR: could not restore DNAT rule to ${SCANNER_IP}"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Unit health
+# ---------------------------------------------------------------------------
+
+restart_dead_units() {
+    local unit
+    for unit in "${REQUIRED_UNITS[@]}"; do
+        if ! systemctl is-active --quiet "${unit}"; then
+            log "unit ${unit} is not active, restarting"
+            if systemctl restart "${unit}"; then
+                log "restarted ${unit} successfully"
+            else
+                log "ERROR: failed to restart ${unit}"
+            fi
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+
+main() {
+    if scanner_present; then
+        handle_scanner_present
+    else
+        handle_scanner_absent
+    fi
+    restart_dead_units
+}
+
+main "$@"

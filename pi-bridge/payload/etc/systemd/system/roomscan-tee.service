@@ -1,0 +1,23 @@
+[Unit]
+Description=roomscan bridge -- bounded pcap ring of the scanner's UDP stream on eth0
+# Structurally fail-open: this unit is a passive observer via tcpdump, not
+# a component the data path depends on. The kernel forwards eth0<->wlan0
+# UDP/{{STREAM_PORT}} traffic via the nftables NAT rules regardless of
+# whether this service is running, enabled, installed, or crash-looping.
+# Nothing reads from it synchronously; it exists purely so a post-hoc pcap
+# ring is available for diagnosing a bad capture after the fact.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Nice=5
+StateDirectory=roomscan-bridge/tee
+ExecStart=/usr/bin/tcpdump -i eth0 -n -s 0 'udp port {{STREAM_PORT}}' -w /var/lib/roomscan-bridge/tee/ring.pcap -C 100 -W 20
+Restart=on-failure
+RestartSec=5
+# Bounded ring: 100 MB files x 20 = 2 GB max on disk, ~70 min of capture at
+# the measured ~466 KB/s stream rate.
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,28 @@
+<?xml version="1.0" standalone='no'?><!--*-nxml-*-->
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!--
+  roomscanner.service - mDNS/DNS-SD announcement the PC host discovers to
+  find the scanner's RSCN UDP stream.
+
+  Instance name is the literal string "roomscanner", NOT %h (the host's
+  hostname). This must match exactly what the host's zeroconf lookup of
+  roomscanner._roomscan._udp.local. expects; replace-wildcards="no" turns
+  off avahi's usual %h/%host substitution so the name is not accidentally
+  rewritten to this Pi's hostname.
+
+  Published only on wlan0, per allow-interfaces=wlan0 in
+  /etc/avahi/avahi-daemon.conf - this prevents colliding with the
+  scanner's own "roomscanner" announcement on eth0 and prevents eth0
+  details leaking onto the house/travel LAN.
+
+  The service <type> and <port> below are tokenized ({{MDNS_SERVICE}},
+  {{STREAM_PORT}}); the <name> instance is deliberately left as the
+  literal string "roomscanner", NOT a token, per the note above.
+-->
+<service-group>
+  <name replace-wildcards="no">roomscanner</name>
+  <service>
+    <type>{{MDNS_SERVICE}}</type>
+    <port>{{STREAM_PORT}}</port>
+  </service>
+</service-group>

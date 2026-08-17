@@ -16,6 +16,7 @@ Agent guidance lives one level up in [`AGENTS.md`](../AGENTS.md) (`CLAUDE.md` is
 ## <img src="https://api.iconify.design/material-symbols/electrical-services.svg?color=white#gh-dark-mode-only" width="28" height="28" align="absmiddle"><img src="https://api.iconify.design/material-symbols/electrical-services.svg#gh-light-mode-only" width="28" height="28" align="absmiddle"> Hardware & Setup Guides
 
 *   [**`headless-host-setup.md`**](headless-host-setup.md) - Guide for bringing up a GPU-less Linux host to run the web server.
+*   [**`pi-bridge-runbook.md`**](pi-bridge-runbook.md) - The Raspberry Pi 3 bridge node that replaces the FileHub as the rig's wireless uplink: build the SD image, flash, first boot, day-2 administration over MCP, recovering lost frames from the pcap tee, and the failure playbook.
 *   [**`iks4a1-stacking.md`**](iks4a1-stacking.md) - The hardware stacking recipe, jumper configurations, and bus-conflict resolution history for the sensor array.
 *   [**`web-ui-testing.md`**](web-ui-testing.md) - How to drive and test the headless web UI.
 *   [**`h563-optimization-notes.md`**](h563-optimization-notes.md) - Why the transform pipeline runs on the PC: measured M33 throughput limits and the deferred on-device optimizations.

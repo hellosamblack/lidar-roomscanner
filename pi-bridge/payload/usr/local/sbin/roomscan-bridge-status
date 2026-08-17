@@ -1,0 +1,237 @@
+#!/bin/bash
+# roomscan-bridge-status -- emit a single JSON object on stdout describing
+# the current state of the roomscan Wi-Fi<->eth0 bridge. This is the single
+# source of truth the MCP `bridge_status` tool consumes.
+#
+# Deliberately NOT `set -e`: a status script must report partial truth
+# (nulls for whatever it could not determine) rather than die partway
+# through and report nothing. `-u` and `pipefail` are kept since those
+# catch real bugs (typo'd variable names, a broken pipeline) without
+# punishing an individual command's expected nonzero exit.
+#
+# All shelling-out is done here in bash; the actual JSON construction is
+# delegated to python3 (guaranteed present on Raspberry Pi OS Lite) via
+# `python3 -c` with every value passed as argv, never via a stdin heredoc
+# (a heredoc here would be harmless since nothing else reads stdin, but
+# argv keeps this script safe to refactor without re-litigating that).
+
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Pull in node-identity defaults (SCANNER_IP, STREAM_PORT, ...),
+# overridden by /etc/roomscan-bridge/node.env when present. Same
+# resolution order as roomscan-bridge-reconcile: next to this script
+# first, then the installed location, then inline fallback defaults so
+# this script still runs standalone if the shared lib is missing.
+if [ -f "${SELF_DIR}/roomscan-bridge-common.sh" ]; then
+    # shellcheck disable=SC1091
+    . "${SELF_DIR}/roomscan-bridge-common.sh"
+elif [ -f /usr/local/sbin/roomscan-bridge-common.sh ]; then
+    # shellcheck disable=SC1091
+    . /usr/local/sbin/roomscan-bridge-common.sh
+else
+    : "${SCANNER_IP:=172.31.100.20}"
+    : "${STREAM_PORT:=5000}"
+    [ -f /etc/roomscan-bridge/node.env ] && . /etc/roomscan-bridge/node.env
+fi
+
+nft_get() {
+    nft list table ip roomscan_bridge 2>/dev/null
+}
+
+# --- host -------------------------------------------------------------
+MODEL="$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0')"
+HOSTNAME_VAL="$(hostname 2>/dev/null)"
+UPTIME_S="$(awk '{print int($1)}' /proc/uptime 2>/dev/null)"
+
+# --- wlan0 --------------------------------------------------------------
+IW_LINK="$(iw dev wlan0 link 2>/dev/null)"
+IW_POWERSAVE="$(iw dev wlan0 get power_save 2>/dev/null)"
+
+WLAN0_CONNECTED="no"
+if printf '%s' "${IW_LINK}" | grep -q '^Connected to'; then
+    WLAN0_CONNECTED="yes"
+fi
+WLAN0_SSID="$(printf '%s' "${IW_LINK}" | grep -oP 'SSID:\s*\K.*' || true)"
+WLAN0_RSSI="$(printf '%s' "${IW_LINK}" | grep -oP 'signal:\s*\K-?[0-9]+' || true)"
+WLAN0_BITRATE="$(printf '%s' "${IW_LINK}" | grep -oP 'tx bitrate:\s*\K[0-9.]+' || true)"
+WLAN0_POWERSAVE="$(printf '%s' "${IW_POWERSAVE}" | grep -oP 'Power save:\s*\K\S+' || true)"
+WLAN0_IPV4="$(ip -4 -o addr show wlan0 2>/dev/null | awk '{print $4; exit}')"
+
+# --- eth0 -----------------------------------------------------------------
+ETH0_CARRIER="$(cat /sys/class/net/eth0/carrier 2>/dev/null || true)"
+ETH0_IPV4="$(ip -4 -o addr show eth0 2>/dev/null | awk '{print $4; exit}')"
+ETH0_NEIGH="$(ip neigh show "${SCANNER_IP}" dev eth0 2>/dev/null | awk '{print $NF; exit}')"
+LEASES_RAW="$(cat /var/lib/misc/dnsmasq.leases 2>/dev/null)"
+
+# --- nftables ---------------------------------------------------------
+NFT_RAW="$(nft_get)"
+
+# --- tee ring ---------------------------------------------------------
+TEE_ACTIVE="$(systemctl is-active roomscan-tee.service 2>/dev/null || true)"
+RING_DIR="/var/lib/roomscan-bridge/tee"
+RING_FILES_COUNT="$(ls "${RING_DIR}"/ring.pcap* 2>/dev/null | wc -l | tr -d ' ')"
+RING_BYTES="$(du -cb "${RING_DIR}"/ring.pcap* 2>/dev/null | tail -1 | awk '{print $1}')"
+RING_NEWEST="$(ls -t "${RING_DIR}"/ring.pcap* 2>/dev/null | head -1)"
+RING_OLDEST="$(ls -t "${RING_DIR}"/ring.pcap* 2>/dev/null | tail -1)"
+
+# --- units --------------------------------------------------------------
+UNITS_LIST="dnsmasq.service avahi-daemon.service nftables.service roomscan-tee.service roomscan-bridge-reconcile.timer"
+UNITS_RAW=""
+for u in ${UNITS_LIST}; do
+    state="$(systemctl is-active "${u}" 2>/dev/null || true)"
+    UNITS_RAW="${UNITS_RAW}${u}=${state}
+"
+done
+
+# --- thermal / throttle ------------------------------------------------
+TEMP_C="$(awk '{printf "%.1f", $1/1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null || true)"
+THROTTLED="$(vcgencmd get_throttled 2>/dev/null | grep -oP 'throttled=\K\S+' || true)"
+
+# --- NTP ------------------------------------------------------------------
+NTP_SYNCED="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
+
+python3 -c '
+import json
+import re
+import sys
+
+(
+    model, hostname_val, uptime_s,
+    wlan0_ssid, wlan0_rssi, wlan0_bitrate, wlan0_powersave, wlan0_ipv4, wlan0_connected,
+    eth0_carrier, eth0_ipv4, eth0_neigh, leases_raw,
+    nft_raw,
+    tee_active, ring_files_count, ring_bytes, ring_newest, ring_oldest,
+    units_raw,
+    temp_c, throttled, ntp_synced,
+    scanner_ip, stream_port,
+) = sys.argv[1:26]
+
+
+def s(v):
+    v = v.strip()
+    return v if v else None
+
+
+def i(v):
+    v = v.strip()
+    if not v:
+        return None
+    try:
+        return int(v)
+    except ValueError:
+        return None
+
+
+def f(v):
+    v = v.strip()
+    if not v:
+        return None
+    try:
+        return float(v)
+    except ValueError:
+        return None
+
+
+def b01(v):
+    v = v.strip()
+    if v == "1":
+        return True
+    if v == "0":
+        return False
+    return None
+
+
+def yesno(v):
+    v = v.strip().lower()
+    if v == "yes":
+        return True
+    if v == "no":
+        return False
+    return None
+
+
+scanner_lease = None
+for line in leases_raw.splitlines():
+    parts = line.split()
+    if len(parts) >= 3 and parts[2] == scanner_ip:
+        scanner_lease = {
+            "expiry": s(parts[0]),
+            "mac": s(parts[1]),
+            "ip": s(parts[2]),
+        }
+        break
+
+nft_rules = []
+dnat_target = None
+rule_re = re.compile(
+    r"counter packets (\d+) bytes (\d+).*?comment \"([^\"]+)\""
+)
+dnat_re = re.compile(r"dnat to ([0-9.]+):" + re.escape(stream_port))
+for line in nft_raw.splitlines():
+    m = rule_re.search(line)
+    if not m:
+        continue
+    packets, bytes_, name = m.groups()
+    nft_rules.append({"name": name, "packets": int(packets), "bytes": int(bytes_)})
+    if name == "roomscan-dnat-to-scanner":
+        dm = dnat_re.search(line)
+        if dm:
+            dnat_target = dm.group(1)
+
+units = {}
+for line in units_raw.splitlines():
+    if "=" not in line:
+        continue
+    name, state = line.split("=", 1)
+    units[name] = s(state)
+
+ring_files = i(ring_files_count) or 0
+
+out = {
+    "model": s(model),
+    "hostname": s(hostname_val),
+    "uptime_s": i(uptime_s),
+    "wlan0": {
+        "ssid": s(wlan0_ssid),
+        "rssi_dbm": i(wlan0_rssi),
+        "bitrate_mbps": f(wlan0_bitrate),
+        "power_save": s(wlan0_powersave),
+        "ipv4": s(wlan0_ipv4),
+        "connected": yesno(wlan0_connected),
+    },
+    "eth0": {
+        "carrier": b01(eth0_carrier),
+        "ipv4": s(eth0_ipv4),
+        "scanner_lease": scanner_lease,
+        "scanner_neigh": s(eth0_neigh),
+    },
+    "nft": {
+        "rules": nft_rules,
+        "dnat_target": dnat_target,
+    },
+    "tee": {
+        "active": s(tee_active) == "active",
+        "ring_files": ring_files,
+        "ring_bytes": i(ring_bytes),
+        "newest": s(ring_newest),
+        "oldest": s(ring_oldest),
+    },
+    "units": units,
+    "temp_c": f(temp_c),
+    "throttled": s(throttled),
+    "ntp_synced": yesno(ntp_synced),
+}
+
+json.dump(out, sys.stdout)
+print()
+' \
+    "${MODEL}" "${HOSTNAME_VAL}" "${UPTIME_S}" \
+    "${WLAN0_SSID}" "${WLAN0_RSSI}" "${WLAN0_BITRATE}" "${WLAN0_POWERSAVE}" "${WLAN0_IPV4}" "${WLAN0_CONNECTED}" \
+    "${ETH0_CARRIER}" "${ETH0_IPV4}" "${ETH0_NEIGH}" "${LEASES_RAW}" \
+    "${NFT_RAW}" \
+    "${TEE_ACTIVE}" "${RING_FILES_COUNT}" "${RING_BYTES}" "${RING_NEWEST}" "${RING_OLDEST}" \
+    "${UNITS_RAW}" \
+    "${TEMP_C}" "${THROTTLED}" "${NTP_SYNCED}" \
+    "${SCANNER_IP}" "${STREAM_PORT}"

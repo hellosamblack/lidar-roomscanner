@@ -1,0 +1,11 @@
+[Unit]
+Description=roomscan bridge -- run roomscan-bridge-reconcile every 10s
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

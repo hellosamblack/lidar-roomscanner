@@ -1,0 +1,580 @@
+#!/bin/bash
+# install.sh -- idempotent installer for the roomscan bridge payload.
+#
+# Shared by two callers:
+#   1. firstrun.sh, immediately after extracting the payload tarball to
+#      /opt/roomscan-bridge, invoked as:  install.sh --first-boot
+#   2. bridge_update over ssh, re-run with no flags to push updated files to
+#      an already-provisioned Pi:          install.sh
+#
+# --first-boot additionally:
+#   - installs bundled .debs from /opt/roomscan-bridge/debs/*.deb via
+#     `dpkg -i` (no network access assumed at this point in first boot)
+#   - enables (rather than merely restarts) the managed systemd units
+#
+# --force overrides the in-flight-capture restart guard (see below).
+#
+# Both modes:
+#   - install /opt/roomscan-bridge/node.env (if staged) to
+#     /etc/roomscan-bridge/node.env and source it, EARLY, so every later
+#     step sees real HOSTNAME/USERNAME/SCANNER_IP/etc rather than
+#     roomscan-bridge-common.sh's built-in defaults
+#   - sync this box's hostname (and /etc/hosts' 127.0.1.1 line) to
+#     node.env's HOSTNAME
+#   - apply node.env's WIFI_COUNTRY as the Wi-Fi regulatory domain
+#   - copy the etc/ tree into /etc/, preserving modes
+#   - install usr/local/sbin/* as 0755
+#   - install a Wi-Fi credential override from
+#     /boot/firmware/wifi-override.nmconnection if present, on every run
+#   - install /opt/roomscan-bridge/authorized_keys (if staged) into the
+#     node.env USERNAME's ~/.ssh/authorized_keys, merging rather than
+#     clobbering
+#   - reload/restart the managed units -- EXCEPT that in update mode
+#     (no --first-boot), restarting dnsmasq/nftables is SKIPPED if the
+#     nftables DNAT counter shows live stream traffic, so a config push
+#     never interrupts an in-progress capture; --force overrides this
+#
+# Logging: every significant action goes to both stdout and `logger -t
+# roomscan-bridge` so it lands in the journal regardless of how this script
+# was invoked.
+#
+# Exit status:
+#   0   completed, everything (including unit restarts) applied
+#   1   a REQUIRED unit failed to come up -- hard failure
+#   75  completed, but the dnsmasq/nftables restart was skipped because a
+#       capture looked to be in progress (benign -- file changes ARE
+#       installed; only the restart was deferred). Distinct from 1 so a
+#       caller (bridge_update) can tell "everything's fine, try the
+#       restart again later" apart from a real failure.
+# Does not abort the whole script just because one OPTIONAL unit is
+# missing or fails to (re)start -- it logs and continues.
+
+set -euo pipefail
+
+PAYLOAD_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FIRST_BOOT=0
+FORCE=0
+
+for arg in "$@"; do
+    case "${arg}" in
+        --first-boot)
+            FIRST_BOOT=1
+            ;;
+        --force)
+            FORCE=1
+            ;;
+        *)
+            echo "install.sh: unknown argument: ${arg}" >&2
+            exit 2
+            ;;
+    esac
+done
+
+log() {
+    echo "install.sh: $*"
+    logger -t roomscan-bridge "install.sh: $*" || true
+}
+
+# Shared nft/DNAT helpers + node-identity defaults (SCANNER_IP,
+# SCANNER_MAC, SCANNER_FALLBACK_IP, STREAM_PORT, HOSTNAME, ...),
+# overridden below by node.env once install_node_env has installed it.
+COMMON_LIB="${PAYLOAD_ROOT}/usr/local/sbin/roomscan-bridge-common.sh"
+if [ -f "${COMMON_LIB}" ]; then
+    # shellcheck disable=SC1090
+    . "${COMMON_LIB}"
+else
+    log "WARNING: ${COMMON_LIB} not found in payload; using inline fallback defaults"
+    : "${SCANNER_IP:=172.31.100.20}"
+    : "${SCANNER_MAC:=00:80:e1:00:00:00}"
+    : "${SCANNER_FALLBACK_IP:=172.31.253.1}"
+    : "${STREAM_PORT:=5000}"
+    NFT_TABLE="ip roomscan_bridge"
+    NFT_CHAIN="prerouting"
+    DNAT_COMMENT="roomscan-dnat-to-scanner"
+    roomscan_dnat_counter_bytes() { nft list chain ${NFT_TABLE} ${NFT_CHAIN} 2>/dev/null | grep -F "${DNAT_COMMENT}" | grep -oP 'bytes \K[0-9]+' || true; }
+    roomscan_stream_is_live() {
+        local sample_secs="${1:-1}" before after
+        before="$(roomscan_dnat_counter_bytes)"; [ -n "${before}" ] || before=0
+        sleep "${sample_secs}"
+        after="$(roomscan_dnat_counter_bytes)"; [ -n "${after}" ] || after=0
+        if [ "${after}" -gt "${before}" ]; then echo "yes"; else echo "no"; fi
+    }
+fi
+
+NODE_ENV_INSTALLED="/etc/roomscan-bridge/node.env"
+
+# Units that MUST end up active; a failure here fails the whole install.
+REQUIRED_UNITS=(
+    "dnsmasq.service"
+    "nftables.service"
+    "avahi-daemon.service"
+)
+
+# Subset of REQUIRED_UNITS whose restart (in update mode) is guarded
+# against interrupting an in-progress capture -- see capture_in_progress.
+NET_RESTART_UNITS=(
+    "dnsmasq.service"
+    "nftables.service"
+)
+
+# Units that are nice-to-have; failures are logged but non-fatal.
+OPTIONAL_UNITS=(
+    "roomscan-tee.service"
+    "roomscan-bridge-reconcile.timer"
+)
+
+# Set by activate_units(); read by main() after it returns.
+ACTIVATE_FAILED_REQUIRED=0
+ACTIVATE_SKIPPED_NET=0
+
+require_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        log "ERROR: must run as root"
+        exit 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# node.env / hostname / Wi-Fi country
+# ---------------------------------------------------------------------------
+
+install_node_env() {
+    local src="${PAYLOAD_ROOT}/node.env"
+    if [ ! -f "${src}" ]; then
+        log "WARNING: no node.env staged in payload root; USERNAME/HOSTNAME/WIFI_COUNTRY are unset and SCANNER_IP/STREAM_PORT/etc fall back to built-in defaults (SCANNER_IP=${SCANNER_IP}, STREAM_PORT=${STREAM_PORT}); hostname-sync, Wi-Fi-country, and authorized_keys steps will be skipped"
+        return 0
+    fi
+    log "installing node.env to ${NODE_ENV_INSTALLED}"
+    mkdir -p "$(dirname "${NODE_ENV_INSTALLED}")"
+    install -o root -g root -m 0644 "${src}" "${NODE_ENV_INSTALLED}"
+    # Re-source the now-canonical installed copy, EARLY, so every later
+    # step in this run (hostname sync, Wi-Fi country, authorized_keys, the
+    # restart guard) sees real values instead of roomscan-bridge-common.sh's
+    # built-in defaults.
+    # shellcheck disable=SC1090
+    . "${NODE_ENV_INSTALLED}"
+}
+
+sync_hostname() {
+    local wanted="${HOSTNAME:-}"
+    if [ -z "${wanted}" ]; then
+        log "no HOSTNAME available (node.env missing or lacks HOSTNAME), skipping hostname sync"
+        return 0
+    fi
+    local current
+    current="$(hostname 2>/dev/null || true)"
+    if [ "${current}" != "${wanted}" ]; then
+        log "hostname is '${current}', setting to '${wanted}'"
+        if command -v hostnamectl >/dev/null 2>&1; then
+            hostnamectl set-hostname "${wanted}" || log "WARNING: hostnamectl set-hostname failed"
+        else
+            echo "${wanted}" > /etc/hostname
+        fi
+    else
+        log "hostname already '${wanted}', no change needed"
+    fi
+
+    # Keep /etc/hosts' 127.0.1.1 line in sync -- an unresolvable own
+    # hostname makes sudo (and anything else doing a self name lookup)
+    # hang for several seconds, which presents as a network fault when
+    # it is actually just /etc/hosts drift.
+    if grep -qE "^127\.0\.1\.1[[:space:]]+${wanted}([[:space:]]|\$)" /etc/hosts 2>/dev/null; then
+        : # already correct, no-op
+    elif grep -q '^127\.0\.1\.1[[:space:]]' /etc/hosts 2>/dev/null; then
+        sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t${wanted}/" /etc/hosts
+        log "updated /etc/hosts 127.0.1.1 line to '${wanted}'"
+    else
+        printf '127.0.1.1\t%s\n' "${wanted}" >> /etc/hosts
+        log "appended /etc/hosts 127.0.1.1 line for '${wanted}'"
+    fi
+}
+
+install_wifi_country() {
+    local country="${WIFI_COUNTRY:-}"
+    if [ -z "${country}" ]; then
+        log "no WIFI_COUNTRY available (node.env missing or lacks it), skipping regulatory-domain setup"
+        return 0
+    fi
+    log "applying Wi-Fi regulatory domain: ${country}"
+
+    # The Pi 3 radio stays soft-blocked / regulatory-limited until a
+    # country is set on some images -- this presents as "Wi-Fi just
+    # doesn't work" with no error, so every mechanism actually present on
+    # this system is applied, logging which one(s) fired.
+    if [ -f /etc/default/crda ]; then
+        if grep -q '^REGDOMAIN=' /etc/default/crda; then
+            sed -i "s/^REGDOMAIN=.*/REGDOMAIN=${country}/" /etc/default/crda
+        else
+            echo "REGDOMAIN=${country}" >> /etc/default/crda
+        fi
+        log "mechanism used: wrote REGDOMAIN=${country} to /etc/default/crda"
+    else
+        log "/etc/default/crda not present on this image, skipping that mechanism"
+    fi
+
+    if command -v raspi-config >/dev/null 2>&1; then
+        if raspi-config nonint do_wifi_country "${country}"; then
+            log "mechanism used: raspi-config nonint do_wifi_country ${country}"
+        else
+            log "WARNING: raspi-config nonint do_wifi_country ${country} failed"
+        fi
+    else
+        log "raspi-config not present on this system, skipping that mechanism"
+    fi
+
+    if command -v iw >/dev/null 2>&1; then
+        if iw reg set "${country}"; then
+            log "mechanism used: iw reg set ${country}"
+        else
+            log "WARNING: iw reg set ${country} failed"
+        fi
+    else
+        log "iw not present, skipping that mechanism"
+    fi
+
+    if command -v rfkill >/dev/null 2>&1; then
+        if rfkill unblock wifi; then
+            log "mechanism used: rfkill unblock wifi"
+        else
+            log "WARNING: rfkill unblock wifi failed"
+        fi
+    else
+        log "rfkill not present, skipping that mechanism"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# debs / etc tree / nftables include / sbin tools / wifi override
+# ---------------------------------------------------------------------------
+
+install_debs() {
+    local deb_dir="${PAYLOAD_ROOT}/debs"
+    if [ ! -d "${deb_dir}" ]; then
+        log "no debs/ directory present, skipping bundled package install"
+        return 0
+    fi
+    shopt -s nullglob
+    local debs=("${deb_dir}"/*.deb)
+    shopt -u nullglob
+    if [ "${#debs[@]}" -eq 0 ]; then
+        log "debs/ directory present but empty, skipping"
+        return 0
+    fi
+    log "installing ${#debs[@]} bundled .deb package(s) (no network)"
+    dpkg -i "${debs[@]}" || {
+        log "dpkg -i reported errors; attempting to continue (dependency ordering)"
+    }
+}
+
+copy_etc_tree() {
+    if [ ! -d "${PAYLOAD_ROOT}/etc" ]; then
+        log "no etc/ tree in payload, skipping"
+        return 0
+    fi
+    log "copying etc/ tree into /etc/, preserving modes"
+    # cp -a preserves mode/ownership/timestamps and recurses; run per-file so
+    # we can skip stray *.tmpl files defensively (the builder should already
+    # have rendered these away, but never install an un-rendered template).
+    while IFS= read -r -d '' src; do
+        rel="${src#"${PAYLOAD_ROOT}"/etc/}"
+        case "${rel}" in
+            *.tmpl)
+                log "WARNING: skipping unrendered template left in payload: ${rel}"
+                continue
+                ;;
+        esac
+        dest="/etc/${rel}"
+        mkdir -p "$(dirname "${dest}")"
+        cp -a "${src}" "${dest}"
+    done < <(find "${PAYLOAD_ROOT}/etc" -type f -print0)
+
+    # NetworkManager keyfiles are security-sensitive (contain PSKs) and NM
+    # itself refuses to load a keyfile connection that is not 0600 root:root.
+    if [ -d /etc/NetworkManager/system-connections ]; then
+        log "tightening permissions on NetworkManager system-connections/"
+        chown root:root /etc/NetworkManager/system-connections/*.nmconnection 2>/dev/null || true
+        chmod 0600 /etc/NetworkManager/system-connections/*.nmconnection 2>/dev/null || true
+    fi
+}
+
+ensure_nftables_include() {
+    local conf="/etc/nftables.conf"
+    local include_line='include "/etc/nftables/roomscan-bridge.nft";'
+    if [ ! -f "${conf}" ]; then
+        log "WARNING: ${conf} not found, cannot wire in roomscan-bridge.nft include"
+        return 0
+    fi
+    if grep -qF "${include_line}" "${conf}"; then
+        log "nftables.conf already includes roomscan-bridge.nft"
+        return 0
+    fi
+    log "appending roomscan-bridge.nft include to ${conf}"
+    {
+        echo ""
+        echo "# roomscan-bridge: load the Wi-Fi<->eth0 NAT/DNAT ruleset (see"
+        echo "# /etc/nftables/roomscan-bridge.nft for the full explanation)."
+        echo "${include_line}"
+    } >> "${conf}"
+}
+
+ensure_dnsmasq_reads_dropins() {
+    # Do not assume the vendor default in either direction (AGENTS.md, the
+    # VL53L9_TRANSFORM_LIGHT lesson). Debian/Raspberry Pi OS DO read
+    # /etc/dnsmasq.d, but *not* through /etc/dnsmasq.conf -- every `conf-dir=`
+    # line there ships commented out. It works because /etc/default/dnsmasq
+    # ships `CONFIG_DIR=/etc/dnsmasq.d,...` uncommented and the packaged
+    # systemd-helper passes it as `-7 ${CONFIG_DIR}`.
+    #
+    # That is a mechanism we depend on completely and do not own: if CONFIG_DIR
+    # is ever commented out or the helper changes, our whole dnsmasq config
+    # silently does not load, dnsmasq still starts, every unit reports active --
+    # and the scanner misses its 3000 ms DHCP window on every single boot,
+    # falling back to self-assigned mode forever. So assert it rather than hope.
+    local defaults="/etc/default/dnsmasq"
+    local conf="/etc/dnsmasq.conf"
+    if [ -f "${defaults}" ] && grep -qE '^[[:space:]]*CONFIG_DIR=' "${defaults}"; then
+        log "dnsmasq reads /etc/dnsmasq.d via CONFIG_DIR in ${defaults}"
+        return 0
+    fi
+    if [ -f "${conf}" ] && grep -qE '^[[:space:]]*conf-dir=/etc/dnsmasq\.d' "${conf}"; then
+        log "dnsmasq reads /etc/dnsmasq.d via conf-dir in ${conf}"
+        return 0
+    fi
+    if [ -f "${conf}" ]; then
+        log "WARNING: neither ${defaults} (CONFIG_DIR) nor ${conf} (conf-dir) reads /etc/dnsmasq.d; appending conf-dir so our DHCP config is actually loaded"
+        {
+            echo ""
+            echo "# roomscan-bridge: without this the drop-in in /etc/dnsmasq.d is never"
+            echo "# read, dnsmasq starts clean, and the scanner never gets its lease."
+            echo "conf-dir=/etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new"
+        } >> "${conf}"
+        return 0
+    fi
+    log "ERROR: ${conf} not found -- cannot confirm /etc/dnsmasq.d is read"
+    return 1
+}
+
+install_sbin_tools() {
+    local src_dir="${PAYLOAD_ROOT}/usr/local/sbin"
+    if [ ! -d "${src_dir}" ]; then
+        log "no usr/local/sbin in payload, skipping"
+        return 0
+    fi
+    mkdir -p /usr/local/sbin
+    local f name
+    for f in "${src_dir}"/*; do
+        [ -f "${f}" ] || continue
+        name="$(basename "${f}")"
+        log "installing /usr/local/sbin/${name} (0755)"
+        install -o root -g root -m 0755 "${f}" "/usr/local/sbin/${name}"
+    done
+}
+
+install_wifi_override() {
+    local override_src="/boot/firmware/wifi-override.nmconnection"
+    local override_dest="/etc/NetworkManager/system-connections/roomscan-wifi-override.nmconnection"
+    if [ ! -f "${override_src}" ]; then
+        return 0
+    fi
+    log "installing Wi-Fi credential override from ${override_src}"
+    install -o root -g root -m 0600 "${override_src}" "${override_dest}"
+    if command -v nmcli >/dev/null 2>&1; then
+        log "reloading NetworkManager connections after override install"
+        nmcli connection reload || log "WARNING: nmcli connection reload failed"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# ssh key (merge, don't clobber)
+# ---------------------------------------------------------------------------
+
+install_authorized_key() {
+    local key_src="${PAYLOAD_ROOT}/authorized_keys"
+    local user="${USERNAME:-}"
+    if [ ! -f "${key_src}" ]; then
+        log "no authorized_keys staged in payload root, skipping ssh key install"
+        return 0
+    fi
+    if [ -z "${user}" ]; then
+        log "ERROR: authorized_keys is staged but USERNAME is unset (node.env missing or lacks USERNAME) -- cannot install ssh key, remote administration (bridge_* MCP tools) will not work until this is fixed"
+        return 0
+    fi
+    local home
+    # `|| home=""` is load-bearing under `set -euo pipefail`. `getent` exits 2 for an
+    # unknown user, pipefail propagates that through the pipe, and because `local` is
+    # declared on its own line above there is no assignment-masking -- so `set -e` would
+    # kill install.sh HERE, three lines before the check below, with no log line and,
+    # critically, before activate_units() ever enables dnsmasq/nftables/avahi. On a first
+    # boot that also means firstrun.sh never reaches its `exit 0`, so systemd's
+    # run_success_action=reboot never fires and the Pi looks bricked. The account can
+    # legitimately not exist yet at this point: install.sh runs from
+    # kernel-command-line.target, while userconf.txt is processed during normal boot.
+    home="$(getent passwd "${user}" | cut -d: -f6)" || home=""
+    if [ -z "${home}" ]; then
+        log "ERROR: user '${user}' does not exist on this system -- cannot install ssh key, remote administration will not work until this is fixed"
+        return 0
+    fi
+
+    local key_line
+    key_line="$(head -n 1 "${key_src}")"
+    if [ -z "${key_line}" ]; then
+        log "ERROR: ${key_src} is empty, skipping ssh key install"
+        return 0
+    fi
+
+    local ssh_dir="${home}/.ssh"
+    local auth_file="${ssh_dir}/authorized_keys"
+
+    mkdir -p "${ssh_dir}"
+    chmod 0700 "${ssh_dir}"
+    chown "${user}:${user}" "${ssh_dir}"
+
+    if [ -f "${auth_file}" ] && grep -qF "${key_line}" "${auth_file}"; then
+        log "authorized_keys for ${user} already contains the bridge key, leaving untouched"
+    else
+        log "adding bridge ssh key to ${auth_file}"
+        touch "${auth_file}"
+        echo "${key_line}" >> "${auth_file}"
+    fi
+    chmod 0600 "${auth_file}"
+    chown "${user}:${user}" "${auth_file}"
+}
+
+# ---------------------------------------------------------------------------
+# in-flight-capture restart guard
+# ---------------------------------------------------------------------------
+
+# True (0) if the DNAT counter shows live stream traffic right now, in
+# which case dnsmasq/nftables restarts should be deferred rather than
+# risk interrupting a recording. Always false in --first-boot mode
+# (nothing is running yet to interrupt) and always false with --force.
+capture_in_progress() {
+    if [ "${FIRST_BOOT}" -eq 1 ]; then
+        return 1
+    fi
+    if [ "${FORCE}" -eq 1 ]; then
+        return 1
+    fi
+    if ! command -v nft >/dev/null 2>&1; then
+        return 1
+    fi
+    if ! nft list table ip roomscan_bridge >/dev/null 2>&1; then
+        # Table not loaded yet -- nothing to protect.
+        return 1
+    fi
+    local live
+    live="$(roomscan_stream_is_live 1)"
+    [ "${live}" = "yes" ]
+}
+
+is_net_restart_unit() {
+    local u="$1" x
+    for x in "${NET_RESTART_UNITS[@]}"; do
+        [ "${u}" = "${x}" ] && return 0
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# unit activation
+# ---------------------------------------------------------------------------
+
+unit_exists() {
+    systemctl list-unit-files "$1" --no-legend 2>/dev/null | grep -q "^$1"
+}
+
+activate_units() {
+    log "systemctl daemon-reload"
+    systemctl daemon-reload || log "WARNING: daemon-reload failed"
+
+    local skip_net=0
+    if capture_in_progress; then
+        skip_net=1
+        ACTIVATE_SKIPPED_NET=1
+        log "WARNING: nftables DNAT counter shows live stream traffic -- SKIPPING restart of ${NET_RESTART_UNITS[*]} so an in-progress capture is not interrupted. File changes ARE installed. Re-run install.sh (no flags) once the capture finishes, or re-run with --force to override now."
+    fi
+
+    local failed_required=0
+    local unit
+
+    for unit in "${REQUIRED_UNITS[@]}"; do
+        if ! unit_exists "${unit}"; then
+            log "ERROR: required unit ${unit} not found on this system"
+            failed_required=1
+            continue
+        fi
+        if [ "${FIRST_BOOT}" -eq 1 ]; then
+            log "enabling + starting required unit ${unit}"
+            if ! systemctl enable --now "${unit}"; then
+                log "ERROR: failed to enable+start required unit ${unit}"
+                failed_required=1
+            fi
+        else
+            if [ "${skip_net}" -eq 1 ] && is_net_restart_unit "${unit}"; then
+                log "skipping restart of ${unit} (capture in progress, see WARNING above)"
+                continue
+            fi
+            log "restarting required unit ${unit}"
+            if ! systemctl restart "${unit}"; then
+                log "ERROR: failed to restart required unit ${unit}"
+                failed_required=1
+            fi
+        fi
+    done
+
+    for unit in "${OPTIONAL_UNITS[@]}"; do
+        if ! unit_exists "${unit}"; then
+            log "optional unit ${unit} not found, skipping (non-fatal)"
+            continue
+        fi
+        if [ "${FIRST_BOOT}" -eq 1 ]; then
+            log "enabling + starting optional unit ${unit}"
+            systemctl enable --now "${unit}" || log "WARNING: optional unit ${unit} failed to enable+start"
+        else
+            log "restarting optional unit ${unit}"
+            systemctl restart "${unit}" || log "WARNING: optional unit ${unit} failed to restart"
+        fi
+    done
+
+    ACTIVATE_FAILED_REQUIRED="${failed_required}"
+}
+
+# ---------------------------------------------------------------------------
+
+main() {
+    require_root
+    log "starting (first_boot=${FIRST_BOOT}, force=${FORCE})"
+
+    install_node_env
+    sync_hostname
+    install_wifi_country
+
+    if [ "${FIRST_BOOT}" -eq 1 ]; then
+        install_debs
+    fi
+
+    copy_etc_tree
+    ensure_nftables_include
+    ensure_dnsmasq_reads_dropins
+    install_sbin_tools
+    install_wifi_override
+    install_authorized_key
+
+    activate_units
+
+    if [ "${ACTIVATE_FAILED_REQUIRED}" -ne 0 ]; then
+        log "FAILED: one or more required units did not come up"
+        exit 1
+    fi
+
+    if [ "${ACTIVATE_SKIPPED_NET}" -ne 0 ]; then
+        log "COMPLETED WITH SKIPPED RESTART: all files installed, but ${NET_RESTART_UNITS[*]} were NOT restarted because a capture appeared to be in progress"
+        echo "install.sh: SKIPPED-RESTART -- capture in progress, ${NET_RESTART_UNITS[*]} not restarted (re-run later, or use --force)"
+        exit 75
+    fi
+
+    log "completed successfully"
+    exit 0
+}
+
+main "$@"

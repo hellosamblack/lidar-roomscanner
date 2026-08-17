@@ -1,0 +1,49 @@
+# roomscan-wifi-travel.nmconnection.tmpl
+#
+# Wi-Fi client profile for the "travel" network (e.g. a mobile hotspot or
+# hotel AP). See roomscan-wifi-home.nmconnection.tmpl for the general
+# design notes; this file mirrors it with the travel-specific tokens.
+#
+# Placeholders substituted by the image builder:
+#   {{TRAVEL_UUID}}      -- fixed UUID for this connection profile, stable
+#                            across rebuilds
+#   {{TRAVEL_SSID}}      -- the travel Wi-Fi network's SSID, verbatim
+#   {{TRAVEL_PSK}}       -- the travel Wi-Fi network's WPA-PSK passphrase
+#   {{TRAVEL_PRIORITY}}  -- integer autoconnect-priority (higher wins;
+#                            typically lower than {{HOME_PRIORITY}} so home
+#                            is preferred when both are in range)
+#   {{WIFI_COUNTRY}}     -- ISO 3166-1 alpha-2 regulatory domain, shared
+#                            with the home profile (see that file's notes;
+#                            documentary only in this file)
+#
+# Band is intentionally left unset: the Pi 3 Model B's onboard radio
+# (BCM43438) is 2.4 GHz only.
+#
+# The builder renders this file to roomscan-wifi-travel.nmconnection before
+# packaging; install.sh only installs already-rendered *.nmconnection files.
+
+[connection]
+id=roomscan-wifi-travel
+uuid={{TRAVEL_UUID}}
+type=wifi
+interface-name=wlan0
+autoconnect=true
+autoconnect-priority={{TRAVEL_PRIORITY}}
+
+[wifi]
+mode=infrastructure
+ssid={{TRAVEL_SSID}}
+# country={{WIFI_COUNTRY}}
+powersave=2
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk={{TRAVEL_PSK}}
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=auto
+
+[proxy]
