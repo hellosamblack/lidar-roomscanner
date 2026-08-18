@@ -17,6 +17,18 @@
 
 set -uo pipefail
 
+# Every privileged probe below (`iw`, `nft`) lives in /usr/sbin, which is NOT
+# on a non-root login PATH on Debian/Raspberry Pi OS. `bridge_status` reaches
+# this script over ssh as the unprivileged bridge account, so on the first
+# real Pi every one of those probes died with `command not found` (issue
+# #191) -- and, worse, the failures were indistinguishable from real
+# readings: the script reported `wlan0 connected: false, ssid: null` for an
+# interface that was associated and carrying a lease, and `nft rules: []`
+# for a loaded ruleset. See the null-vs-false handling further down; this
+# line is the half that makes the probes work at all.
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+export PATH
+
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Pull in node-identity defaults (SCANNER_IP, STREAM_PORT, ...),
@@ -36,8 +48,41 @@ else
     [ -f /etc/roomscan-bridge/node.env ] && . /etc/roomscan-bridge/node.env
 fi
 
+# A probe that could not run must report "I do not know" (null), never the
+# reading it would have produced on a healthy box. `iw` missing from PATH
+# used to yield WLAN0_CONNECTED=no -- a confident false, for a link that was
+# up. An absent answer that reads as a real negative sends the next session
+# chasing a fault that does not exist. Same class as the |B| magnetometer
+# check in AGENTS.md: ask what wrong answers the check can actually see.
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# nft needs root; run under sudo -n when we are not root and the grant is
+# there (it is -- /etc/sudoers.d/roomscan-bridge). NFT_OK records whether the
+# ruleset was actually READ, so an unreadable table is reported as null
+# rather than as an empty ruleset, which would look exactly like "nftables is
+# loaded and has no rules" -- the symptom of a genuinely broken bridge.
+NFT_OK="no"
+NFT_RAW=""
+# Sets the globals NFT_RAW/NFT_OK rather than printing, and is therefore
+# called as a bare `nft_get`, NOT as `$(nft_get)`. Command substitution runs
+# the function in a subshell, so a flag assigned inside it would be discarded
+# on return and NFT_OK would read "no" forever -- the exact shape of bug this
+# flag exists to prevent.
 nft_get() {
-    nft list table ip roomscan_bridge 2>/dev/null
+    local out=""
+    if ! have nft; then
+        return 0
+    fi
+    if [ "$(id -u)" -eq 0 ]; then
+        out="$(nft list table ip roomscan_bridge 2>/dev/null)" || return 0
+    else
+        out="$(sudo -n nft list table ip roomscan_bridge 2>/dev/null)" || return 0
+    fi
+    [ -n "${out}" ] || return 0
+    NFT_OK="yes"
+    NFT_RAW="${out}"
 }
 
 # --- host -------------------------------------------------------------
@@ -46,12 +91,18 @@ HOSTNAME_VAL="$(hostname 2>/dev/null)"
 UPTIME_S="$(awk '{print int($1)}' /proc/uptime 2>/dev/null)"
 
 # --- wlan0 --------------------------------------------------------------
-IW_LINK="$(iw dev wlan0 link 2>/dev/null)"
-IW_POWERSAVE="$(iw dev wlan0 get power_save 2>/dev/null)"
-
-WLAN0_CONNECTED="no"
-if printf '%s' "${IW_LINK}" | grep -q '^Connected to'; then
-    WLAN0_CONNECTED="yes"
+# WLAN0_CONNECTED is deliberately tri-state: "yes", "no", or "" meaning the
+# question could not be asked (iw absent). yesno() maps "" to JSON null.
+IW_LINK=""
+IW_POWERSAVE=""
+WLAN0_CONNECTED=""
+if have iw; then
+    IW_LINK="$(iw dev wlan0 link 2>/dev/null)"
+    IW_POWERSAVE="$(iw dev wlan0 get power_save 2>/dev/null)"
+    WLAN0_CONNECTED="no"
+    if printf '%s' "${IW_LINK}" | grep -q '^Connected to'; then
+        WLAN0_CONNECTED="yes"
+    fi
 fi
 WLAN0_SSID="$(printf '%s' "${IW_LINK}" | grep -oP 'SSID:\s*\K.*' || true)"
 WLAN0_RSSI="$(printf '%s' "${IW_LINK}" | grep -oP 'signal:\s*\K-?[0-9]+' || true)"
@@ -66,7 +117,7 @@ ETH0_NEIGH="$(ip neigh show "${SCANNER_IP}" dev eth0 2>/dev/null | awk '{print $
 LEASES_RAW="$(cat /var/lib/misc/dnsmasq.leases 2>/dev/null)"
 
 # --- nftables ---------------------------------------------------------
-NFT_RAW="$(nft_get)"
+nft_get
 
 # --- tee ring ---------------------------------------------------------
 TEE_ACTIVE="$(systemctl is-active roomscan-tee.service 2>/dev/null || true)"
@@ -81,7 +132,13 @@ UNITS_LIST="dnsmasq.service avahi-daemon.service nftables.service roomscan-tee.s
 UNITS_RAW=""
 for u in ${UNITS_LIST}; do
     state="$(systemctl is-active "${u}" 2>/dev/null || true)"
-    UNITS_RAW="${UNITS_RAW}${u}=${state}
+    # NRestarts is the difference between "starting up" and "crash-looping".
+    # A unit sampled mid-backoff reports `activating`, which reads as healthy
+    # -- roomscan-tee looked exactly like that on the first real Pi while
+    # failing every 5 seconds since boot. The restart counter is the
+    # observable that tells those two apart in a single reading.
+    restarts="$(systemctl show -p NRestarts --value "${u}" 2>/dev/null || true)"
+    UNITS_RAW="${UNITS_RAW}${u}=${state}=${restarts}
 "
 done
 
@@ -101,12 +158,12 @@ import sys
     model, hostname_val, uptime_s,
     wlan0_ssid, wlan0_rssi, wlan0_bitrate, wlan0_powersave, wlan0_ipv4, wlan0_connected,
     eth0_carrier, eth0_ipv4, eth0_neigh, leases_raw,
-    nft_raw,
+    nft_raw, nft_ok,
     tee_active, ring_files_count, ring_bytes, ring_newest, ring_oldest,
     units_raw,
     temp_c, throttled, ntp_synced,
     scanner_ip, stream_port,
-) = sys.argv[1:26]
+) = sys.argv[1:27]
 
 
 def s(v):
@@ -181,11 +238,14 @@ for line in nft_raw.splitlines():
             dnat_target = dm.group(1)
 
 units = {}
+unit_restarts = {}
 for line in units_raw.splitlines():
     if "=" not in line:
         continue
-    name, state = line.split("=", 1)
+    name, _, rest = line.partition("=")
+    state, _, restarts = rest.partition("=")
     units[name] = s(state)
+    unit_restarts[name] = i(restarts)
 
 ring_files = i(ring_files_count) or 0
 
@@ -207,8 +267,12 @@ out = {
         "scanner_lease": scanner_lease,
         "scanner_neigh": s(eth0_neigh),
     },
+    # rules/dnat_target are null -- not [] and not "absent" -- when the
+    # ruleset could not be read at all, so "nftables is loaded with no rules"
+    # (a broken bridge) stays distinguishable from "this probe could not run".
     "nft": {
-        "rules": nft_rules,
+        "readable": yesno(nft_ok),
+        "rules": nft_rules if yesno(nft_ok) else None,
         "dnat_target": dnat_target,
     },
     "tee": {
@@ -219,6 +283,7 @@ out = {
         "oldest": s(ring_oldest),
     },
     "units": units,
+    "unit_restarts": unit_restarts,
     "temp_c": f(temp_c),
     "throttled": s(throttled),
     "ntp_synced": yesno(ntp_synced),
@@ -230,7 +295,7 @@ print()
     "${MODEL}" "${HOSTNAME_VAL}" "${UPTIME_S}" \
     "${WLAN0_SSID}" "${WLAN0_RSSI}" "${WLAN0_BITRATE}" "${WLAN0_POWERSAVE}" "${WLAN0_IPV4}" "${WLAN0_CONNECTED}" \
     "${ETH0_CARRIER}" "${ETH0_IPV4}" "${ETH0_NEIGH}" "${LEASES_RAW}" \
-    "${NFT_RAW}" \
+    "${NFT_RAW}" "${NFT_OK}" \
     "${TEE_ACTIVE}" "${RING_FILES_COUNT}" "${RING_BYTES}" "${RING_NEWEST}" "${RING_OLDEST}" \
     "${UNITS_RAW}" \
     "${TEMP_C}" "${THROTTLED}" "${NTP_SYNCED}" \

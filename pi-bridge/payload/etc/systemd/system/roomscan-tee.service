@@ -8,11 +8,31 @@ Description=roomscan bridge -- bounded pcap ring of the scanner's UDP stream on 
 # ring is available for diagnosing a bad capture after the fact.
 After=network-online.target
 Wants=network-online.target
+# Bound the restart loop. Without this, a tee that cannot start for a
+# structural reason (see the ExecStartPre below -- it could not write its own
+# ring directory) retries every 5 seconds forever, which on the real Pi meant
+# a permanently failing unit generating journal churn from first boot with
+# nothing ever escalating it. Five attempts in five minutes, then it stays
+# down and is visible as `failed` -- and roomscan-bridge-reconcile brings it
+# back on its next pass if the cause has cleared.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
 Nice=5
 StateDirectory=roomscan-bridge/tee
+# tcpdump drops privileges to the unprivileged `tcpdump` user right after it
+# opens the capture socket -- that is its security model, not something the
+# command line here turns on. But StateDirectory= creates the directory
+# root-owned 0755, so the post-drop process could not create its ring files:
+#
+#   tcpdump: /var/lib/roomscan-bridge/tee/ring.pcap00: Permission denied
+#
+# ExecStartPre runs as root (before the ExecStart process drops) and hands
+# the directory to the user that will actually be writing in it. `install -d`
+# is idempotent, so this is also the repair path for an already-broken box.
+ExecStartPre=/usr/bin/install -d -o tcpdump -g tcpdump -m 0750 /var/lib/roomscan-bridge/tee
 ExecStart=/usr/bin/tcpdump -i eth0 -n -s 0 'udp port {{STREAM_PORT}}' -w /var/lib/roomscan-bridge/tee/ring.pcap -C 100 -W 20
 Restart=on-failure
 RestartSec=5

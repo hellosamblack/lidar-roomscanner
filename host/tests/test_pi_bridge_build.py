@@ -621,6 +621,164 @@ def test_install_sh_survives_a_user_that_does_not_exist_yet():
         assert guarded, f"unguarded getent under set -e: {stripped}"
 
 
+# ---------------------------------------------------------------------------
+# First-boot regressions -- every test below pins a defect that shipped to the
+# real Pi 3 on 2026-08-18 and was found during bring-up (issue #191).
+# ---------------------------------------------------------------------------
+
+def test_the_ssh_key_does_not_depend_on_an_account_existing():
+    """The one failure that cannot be repaired remotely.
+
+    install.sh runs from `kernel-command-line.target`; the `roomscan` account is
+    created LATER, by userconf.txt during normal boot. So on the boot that
+    matters the home directory does not exist, and the first real Pi came up
+    fully provisioned and unreachable by key:
+
+        install.sh: ERROR: user 'roomscan' does not exist on this system
+
+    The key must therefore land somewhere that needs no account -- and sshd must
+    be told to read it.
+    """
+    text = (PAYLOAD / "install.sh").read_text()
+    assert "/etc/roomscan-bridge/authorized_keys" in text
+
+    # The account-independent write must NOT sit behind the getent lookup.
+    body = text.split("install_authorized_key()", 1)[1].split("\n}", 1)[0]
+    etc_at = body.index("/etc/roomscan-bridge/authorized_keys")
+    getent_at = body.index("getent passwd")
+    assert etc_at < getent_at, \
+        "the account-independent key install must happen BEFORE the user lookup"
+
+    dropin = (PAYLOAD / "etc" / "ssh" / "sshd_config.d" / "roomscan-bridge.conf").read_text()
+    assert "AuthorizedKeysFile" in dropin
+    assert "/etc/roomscan-bridge/authorized_keys" in dropin
+    # Scoped, not global: Debian's default `PermitRootLogin prohibit-password`
+    # still permits *publickey*, so a global AuthorizedKeysFile would hand the
+    # bridge key a root shell.
+    assert "Match User" in dropin, "AuthorizedKeysFile must be scoped to the bridge account"
+
+
+def test_remote_administration_has_the_sudo_grant_every_tool_assumes():
+    """`pi_bridge.py` shells out through `sudo` for nmcli, install.sh and reboot,
+    over a non-interactive ssh channel with no terminal to type a password into.
+    The account is in the `sudo` group, whose default rule *demands* a password,
+    so every day-2 tool failed on the first real Pi with
+
+        sudo: a terminal is required to read the password
+
+    A grant the tools already depend on belongs in the payload."""
+    sudoers = (PAYLOAD / "etc" / "sudoers.d" / "roomscan-bridge").read_text()
+    rules = [ln for ln in sudoers.splitlines()
+             if ln.strip() and not ln.strip().startswith("#")]
+    assert len(rules) == 1, rules
+    assert "NOPASSWD" in rules[0]
+
+    # A malformed sudoers fragment locks root out of the machine entirely, so
+    # the installer must validate it rather than trust the render.
+    text = (PAYLOAD / "install.sh").read_text()
+    assert "visudo -c" in text
+    assert "sshd -t" in text or '"${sshd_bin}" -t' in text, \
+        "an sshd drop-in must be validated too; a bad one is unrecoverable remotely"
+
+
+def test_install_sh_checks_units_are_still_alive_not_just_that_start_returned():
+    """The defect that let every other one reach the operator as 'it worked'.
+
+    `systemctl enable --now` exits 0 when the START JOB succeeded, not when the
+    service survived. install.sh believed that exit code, logged `completed
+    successfully`, and exited 0 while TWO of its three REQUIRED units (dnsmasq,
+    avahi-daemon) were crash-looping. REQUIRED_UNITS exists precisely to fail
+    the install in that case and it silently did not."""
+    text = (PAYLOAD / "install.sh").read_text()
+    assert "verify_unit_active" in text
+    assert "is-active" in text
+    # Sampling immediately would catch a unit mid-backoff and read `activating`
+    # as healthy, so there must be a settle before the verdict.
+    assert "UNIT_SETTLE_SECS" in text
+    verify_body = text.split("verify_unit_active()", 1)[1].split("\n}", 1)[0]
+    assert '"activating"' not in verify_body.replace("'", '"').split("return 0")[0], \
+        "`activating` is also what a crash-looping unit looks like mid-backoff"
+
+
+def test_dnsmasq_survives_an_eth0_that_has_no_address_yet():
+    """eth0 is a point-to-point link to a scanner that is unplugged most of the
+    time, and NM addresses it asynchronously after boot regardless.
+    `bind-interfaces` resolves the interface ONCE at startup and treats an
+    addressless one as fatal -- so dnsmasq crash-looped every 11 s from first
+    boot with `unknown interface eth0`, and would not have recovered when the
+    cable went in. `bind-dynamic` binds when the interface actually appears,
+    while keeping dnsmasq off the Wi-Fi side."""
+    conf = (PAYLOAD / "etc" / "dnsmasq.d" / "roomscan-bridge.conf").read_text()
+    active = [ln.strip() for ln in conf.splitlines()
+              if ln.strip() and not ln.strip().startswith("#")]
+    assert "bind-dynamic" in active
+    assert "bind-interfaces" not in active, \
+        "bind-interfaces cannot survive a cable that is not plugged in at boot"
+    assert "interface=eth0" in active, "dnsmasq must still never answer on wlan0"
+
+
+def test_the_tee_can_write_the_ring_it_is_pointed_at():
+    """tcpdump drops privileges to the unprivileged `tcpdump` user immediately
+    after opening its socket -- that is its security model, not a flag. systemd's
+    StateDirectory= creates the directory root-owned 0755, so the post-drop
+    process could not create its own ring files:
+
+        tcpdump: /var/lib/roomscan-bridge/tee/ring.pcap00: Permission denied
+
+    which crash-looped roomscan-tee every 5 s from first boot."""
+    import configparser
+    cp = configparser.ConfigParser(strict=False, allow_no_value=True)
+    cp.optionxform = str
+    cp.read_string((PAYLOAD / "etc" / "systemd" / "system"
+                    / "roomscan-tee.service").read_text())
+    pre = cp["Service"]["ExecStartPre"]
+    assert "tcpdump" in pre and "/var/lib/roomscan-bridge/tee" in pre, pre
+    # An unbounded retry of a structural failure is journal churn that never
+    # escalates; bound it so a dead tee is visible as `failed`.
+    assert cp["Unit"].get("StartLimitBurst"), "the restart loop must be bounded"
+    # And the installer must repair an already-broken box, not wait for a start.
+    assert "prepare_tee_state_dir" in (PAYLOAD / "install.sh").read_text()
+
+
+def test_avahi_does_not_enforce_the_rlimits_debian_ships_commented_out():
+    """avahi-daemon crash-looped on the first real Pi with `Out of memory,
+    aborting` ~1 s into every startup, on a box with 790 MB free. The malloc was
+    failing against an RLIMIT we imposed, not against the machine.
+
+    Debian ships the whole `[rlimits]` block **commented out** -- those values
+    are upstream's example, not the running config. Copying them into a derived
+    file and dropping the `#` switches on caps nothing on Debian exercises,
+    while the file still reads as 'stock, plus one change'. Same family as
+    VL53L9_TRANSFORM_LIGHT and `enableOptionalEffects`: read what the vendor
+    *applies*, not what its file contains."""
+    conf = (PAYLOAD / "etc" / "avahi" / "avahi-daemon.conf").read_text()
+    active = [ln.strip() for ln in conf.splitlines()
+              if ln.strip() and not ln.strip().startswith("#")]
+    offenders = [ln for ln in active if ln.startswith("rlimit-")]
+    assert not offenders, f"uncommented avahi rlimits: {offenders}"
+
+
+def test_status_probes_report_unknown_rather_than_a_confident_negative():
+    """`iw` and `nft` live in /usr/sbin, which is not on a non-root login PATH --
+    and bridge_status runs over ssh as the unprivileged account. Every probe died
+    with `command not found`, and the script turned that into readings: `wlan0
+    connected: false, ssid: null` for an associated interface holding a lease,
+    and `nft rules: []` for a loaded ruleset. An absent answer that reads as a
+    real negative sends the next session chasing a fault that does not exist."""
+    text = (PAYLOAD / "usr" / "local" / "sbin" / "roomscan-bridge-status").read_text()
+    assert "/usr/sbin" in text.split("SELF_DIR", 1)[0], "PATH must be fixed before any probe"
+    assert 'NFT_OK="no"' in text
+    assert '"readable"' in text
+    # nft_get sets globals; calling it in a subshell would discard the flag it
+    # exists to set, leaving `readable` false forever.
+    assert 'NFT_RAW="$(nft_get)"' not in text, \
+        "command substitution runs nft_get in a subshell and discards NFT_OK"
+    # The tri-state: "" (unknown) must be reachable, not just yes/no.
+    assert 'WLAN0_CONNECTED=""' in text
+    assert "NRestarts" in text, \
+        "a crash-looping unit reads as `activating`; the restart count separates them"
+
+
 def test_install_sh_verifies_dnsmasq_actually_reads_the_dropin():
     """Debian reads /etc/dnsmasq.d via `CONFIG_DIR` in /etc/default/dnsmasq and
     the helper's `-7` flag -- *not* via /etc/dnsmasq.conf, where every

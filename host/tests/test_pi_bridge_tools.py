@@ -166,6 +166,39 @@ def test_a_dead_unit_is_named():
     assert any("dnsmasq" in w and "failed" in w for w in pb._status_warnings(d))
 
 
+def test_a_crash_looping_unit_is_not_excused_by_reading_activating():
+    """`activating` is on the pass list because it is what a healthy unit looks
+    like while starting -- and it is ALSO what a crash-looping one looks like
+    when sampled mid-backoff. roomscan-tee sat at `activating` on the first real
+    Pi while failing every 5 seconds since boot (issue #191). The restart counter
+    is the observable that tells the two apart."""
+    d = {**HEALTHY,
+         "units": {**HEALTHY["units"], "roomscan-tee": "activating"},
+         "unit_restarts": {"roomscan-tee": 47}}
+    warns = pb._status_warnings(d)
+    assert any("roomscan-tee" in w and "crash-looping" in w for w in warns), warns
+
+
+def test_a_unit_that_is_genuinely_starting_is_not_slandered():
+    d = {**HEALTHY,
+         "units": {**HEALTHY["units"], "roomscan-tee": "activating"},
+         "unit_restarts": {"roomscan-tee": 0}}
+    assert pb._status_warnings(d) == []
+
+
+def test_an_unreadable_ruleset_is_reported_as_unknown_not_as_absent():
+    """`nft` needs root and lives in /usr/sbin. When the probe cannot run, the
+    answer is 'unknown' -- reporting an empty ruleset would look exactly like
+    the symptom of a genuinely broken bridge."""
+    d = {**HEALTHY, "nft": {"readable": False, "rules": None}}
+    assert any("UNKNOWN" in w for w in pb._status_warnings(d))
+
+
+def test_an_undeterminable_wlan_association_is_not_reported_as_disconnected():
+    d = {**HEALTHY, "wlan0": {**HEALTHY["wlan0"], "connected": None}}
+    assert any("unknown, not negative" in w for w in pb._status_warnings(d))
+
+
 def test_undervoltage_throttling_is_surfaced():
     # The Pi 3 spikes past 700 mA on Wi-Fi + CPU; an undersized rail on the rig
     # presents as flaky wireless, not as an obvious power fault.

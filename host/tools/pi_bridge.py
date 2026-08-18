@@ -222,9 +222,29 @@ def _status_warnings(d: dict) -> list[str]:
     if d.get("ntp_synced") is False:
         warn.append("clock not NTP-synced; the Pi 3 has no RTC, so tee and journal "
                     "timestamps are meaningless until it syncs")
+    restarts = d.get("unit_restarts") or {}
     for unit, state in (d.get("units") or {}).items():
+        n = restarts.get(unit)
         if state not in ("active", "activating", None):
             warn.append(f"unit {unit} is {state}")
+        elif isinstance(n, int) and n > 0:
+            # `activating` is what a crash-looping unit looks like when it is
+            # sampled mid-backoff, and it is on the pass list above because it
+            # is also what a healthy unit looks like while starting. The
+            # restart counter separates them: roomscan-tee sat at `activating`
+            # on the first real Pi while failing every 5 seconds since boot,
+            # and this check is the reason that now surfaces (issue #191).
+            warn.append(f"unit {unit} is {state} but has restarted {n} time(s) -- "
+                        f"it is crash-looping, not starting up; "
+                        f"`bridge_logs {unit}` for why")
+
+    nft = d.get("nft") or {}
+    if nft.get("readable") is False:
+        warn.append("could not read the nftables ruleset (needs root on the Pi) -- "
+                    "the DNAT rule and its counters are UNKNOWN here, not absent")
+    if wlan.get("connected") is None:
+        warn.append("could not determine wlan0 association (iw missing from PATH?) -- "
+                    "the wlan0 readings below are unknown, not negative")
     thr = d.get("throttled")
     if thr and thr not in ("0x0", "throttled=0x0"):
         warn.append(f"firmware reports throttling ({thr}) -- check the 5 V supply")

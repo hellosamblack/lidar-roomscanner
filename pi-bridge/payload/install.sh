@@ -395,8 +395,46 @@ install_authorized_key() {
         log "no authorized_keys staged in payload root, skipping ssh key install"
         return 0
     fi
+
+    local key_line
+    key_line="$(head -n 1 "${key_src}")"
+    if [ -z "${key_line}" ]; then
+        log "ERROR: ${key_src} is empty, skipping ssh key install"
+        return 0
+    fi
+
+    # PRIMARY path: a root-owned key file that depends on no account and no
+    # home directory. On a first boot install.sh runs from
+    # kernel-command-line.target while the USERNAME account is not created
+    # until userconf.txt is processed during normal boot -- so the
+    # home-directory path below CANNOT work on the boot that matters, and on
+    # the first real Pi it did not (issue #191: the box came up fully
+    # provisioned and unreachable by key). /etc/ssh/sshd_config.d/
+    # roomscan-bridge.conf points sshd here; see that file for why it is
+    # scoped to Match User rather than set globally.
+    local etc_auth="/etc/roomscan-bridge/authorized_keys"
+    mkdir -p "$(dirname "${etc_auth}")"
+    if [ -f "${etc_auth}" ] && grep -qF "${key_line}" "${etc_auth}"; then
+        log "${etc_auth} already contains the bridge key, leaving untouched"
+    else
+        log "installing bridge ssh key to ${etc_auth} (account-independent path)"
+        touch "${etc_auth}"
+        echo "${key_line}" >> "${etc_auth}"
+    fi
+    # 0644 root:root: sshd refuses an AuthorizedKeysFile that is writable by
+    # anyone but root, and this path is read by sshd running as root before
+    # any privilege drop.
+    chown root:root "${etc_auth}"
+    chmod 0644 "${etc_auth}"
+
+    # SECONDARY path, best-effort: also merge into the account's own
+    # ~/.ssh/authorized_keys when the account does exist (every update-mode
+    # run, and first boots on images that create the user earlier). This
+    # keeps the box reachable if the sshd drop-in is ever removed, and keeps
+    # a hand-run `ssh-copy-id` recovery consistent with what the payload
+    # believes is installed.
     if [ -z "${user}" ]; then
-        log "ERROR: authorized_keys is staged but USERNAME is unset (node.env missing or lacks USERNAME) -- cannot install ssh key, remote administration (bridge_* MCP tools) will not work until this is fixed"
+        log "USERNAME is unset (node.env missing or lacks USERNAME), skipping the home-directory copy of the ssh key -- ${etc_auth} is installed and is what sshd reads"
         return 0
     fi
     local home
@@ -406,19 +444,10 @@ install_authorized_key() {
     # kill install.sh HERE, three lines before the check below, with no log line and,
     # critically, before activate_units() ever enables dnsmasq/nftables/avahi. On a first
     # boot that also means firstrun.sh never reaches its `exit 0`, so systemd's
-    # run_success_action=reboot never fires and the Pi looks bricked. The account can
-    # legitimately not exist yet at this point: install.sh runs from
-    # kernel-command-line.target, while userconf.txt is processed during normal boot.
+    # run_success_action=reboot never fires and the Pi looks bricked.
     home="$(getent passwd "${user}" | cut -d: -f6)" || home=""
     if [ -z "${home}" ]; then
-        log "ERROR: user '${user}' does not exist on this system -- cannot install ssh key, remote administration will not work until this is fixed"
-        return 0
-    fi
-
-    local key_line
-    key_line="$(head -n 1 "${key_src}")"
-    if [ -z "${key_line}" ]; then
-        log "ERROR: ${key_src} is empty, skipping ssh key install"
+        log "user '${user}' does not exist yet (expected on a first boot -- userconf.txt creates it later); skipping the home-directory copy. Remote administration still works via ${etc_auth}"
         return 0
     fi
 
@@ -438,6 +467,78 @@ install_authorized_key() {
     fi
     chmod 0600 "${auth_file}"
     chown "${user}:${user}" "${auth_file}"
+}
+
+# ---------------------------------------------------------------------------
+# sudoers / sshd -- the two files that make remote administration possible
+# ---------------------------------------------------------------------------
+
+# Both of these were copied in by copy_etc_tree; this fixes up the modes and
+# validates them, because a malformed sudoers file locks root out and a
+# malformed sshd config kills the only way back in.
+harden_admin_access() {
+    local sudoers="/etc/sudoers.d/roomscan-bridge"
+    if [ -f "${sudoers}" ]; then
+        chown root:root "${sudoers}"
+        chmod 0440 "${sudoers}"
+        if command -v visudo >/dev/null 2>&1; then
+            if visudo -cf "${sudoers}" >/dev/null 2>&1; then
+                log "validated ${sudoers} with visudo -c"
+            else
+                log "ERROR: ${sudoers} FAILED visudo -c -- removing it rather than leaving a broken sudoers fragment that would break sudo for every user"
+                rm -f "${sudoers}"
+            fi
+        else
+            log "WARNING: visudo not present, installed ${sudoers} unvalidated"
+        fi
+    fi
+
+    local sshd_dropin="/etc/ssh/sshd_config.d/roomscan-bridge.conf"
+    if [ -f "${sshd_dropin}" ]; then
+        chown root:root "${sshd_dropin}"
+        chmod 0644 "${sshd_dropin}"
+        # sshd -t validates the WHOLE effective config including our drop-in.
+        # If it does not pass, take our file back out: an sshd that refuses to
+        # start is unrecoverable without physical access to the SD card.
+        if command -v sshd >/dev/null 2>&1 || [ -x /usr/sbin/sshd ]; then
+            local sshd_bin
+            sshd_bin="$(command -v sshd || echo /usr/sbin/sshd)"
+            if "${sshd_bin}" -t >/dev/null 2>&1; then
+                log "validated sshd config with sshd -t; reloading ssh"
+                systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || log "WARNING: could not reload ssh (it may not be running yet; the drop-in applies at next start)"
+            else
+                log "ERROR: sshd -t FAILED with ${sshd_dropin} installed -- removing it rather than risking an sshd that will not start"
+                rm -f "${sshd_dropin}"
+            fi
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# tee state directory
+# ---------------------------------------------------------------------------
+
+# tcpdump drops privileges to the unprivileged `tcpdump` user immediately
+# after opening the capture socket -- that is its whole security model and
+# it is not optional. systemd's StateDirectory= creates the directory
+# root-owned 0755, so the post-drop process cannot create ring.pcapNN in it:
+#
+#   tcpdump: /var/lib/roomscan-bridge/tee/ring.pcap00: Permission denied
+#
+# which on the real Pi crash-looped roomscan-tee every 5 seconds from first
+# boot onward (issue #191). The unit carries an ExecStartPre that does this
+# too -- it is repeated here so an update-mode run fixes an already-broken
+# box without waiting for the next unit start.
+prepare_tee_state_dir() {
+    local dir="/var/lib/roomscan-bridge/tee"
+    local owner="tcpdump"
+    if ! getent passwd "${owner}" >/dev/null 2>&1; then
+        log "WARNING: user '${owner}' does not exist; leaving ${dir} root-owned (roomscan-tee will not be able to write its ring)"
+        mkdir -p "${dir}"
+        return 0
+    fi
+    log "preparing ${dir} owned by ${owner} (tcpdump drops privileges before writing)"
+    install -d -o "${owner}" -g "${owner}" -m 0750 "${dir}"
 }
 
 # ---------------------------------------------------------------------------
@@ -481,6 +582,44 @@ is_net_restart_unit() {
 
 unit_exists() {
     systemctl list-unit-files "$1" --no-legend 2>/dev/null | grep -q "^$1"
+}
+
+# Settle time, in seconds, before believing a unit that "started fine".
+UNIT_SETTLE_SECS="${UNIT_SETTLE_SECS:-6}"
+
+# `systemctl enable --now` exiting 0 means "the start job succeeded", NOT
+# "the service is still running". A Type=simple/forking unit that starts and
+# then immediately dies -- or a Type=oneshot-ish daemon that fails its own
+# config check a moment later -- gives systemctl a clean exit, and install.sh
+# then reports `completed successfully` over a dead service.
+#
+# That is precisely what happened on the first real Pi (issue #191):
+# install.sh logged `completed successfully` and exited 0 while TWO of its
+# three REQUIRED units, dnsmasq and avahi-daemon, were crash-looping. The
+# whole point of REQUIRED_UNITS is to fail the install when they do not come
+# up, and it silently did not. Every other defect that boot -- no DHCP for
+# the scanner, no mDNS -- reached the operator as "it worked" because of
+# this one missing check.
+#
+# So: after starting things, wait out the restart window and ask systemd what
+# is ACTUALLY active now. Anything that is not gets named, with the tail of
+# its journal, which is the information a bring-up session actually needs.
+verify_unit_active() {
+    local unit="$1"
+    local state
+    state="$(systemctl is-active "${unit}" 2>/dev/null || true)"
+    if [ "${state}" = "active" ]; then
+        return 0
+    fi
+    # `activating` is a legitimate transient for a unit still coming up, but
+    # it is ALSO what a crash-looping unit with Restart= looks like when
+    # sampled mid-backoff, so it is not treated as success.
+    log "ERROR: unit ${unit} is '${state}', not 'active', ${UNIT_SETTLE_SECS}s after being started -- recent journal follows"
+    local line
+    while IFS= read -r line; do
+        log "  ${unit}: ${line}"
+    done < <(journalctl -u "${unit}" -n 12 --no-pager -o cat 2>/dev/null || true)
+    return 1
 }
 
 activate_units() {
@@ -536,6 +675,27 @@ activate_units() {
         fi
     done
 
+    # Second pass: what is actually still running? See verify_unit_active --
+    # a clean `systemctl` exit is not evidence a service survived.
+    log "waiting ${UNIT_SETTLE_SECS}s, then verifying units are still active"
+    sleep "${UNIT_SETTLE_SECS}"
+
+    for unit in "${REQUIRED_UNITS[@]}"; do
+        unit_exists "${unit}" || continue
+        if [ "${skip_net}" -eq 1 ] && is_net_restart_unit "${unit}"; then
+            # Deliberately not restarted, so its current state is whatever the
+            # in-progress capture is using -- not this run's to judge.
+            continue
+        fi
+        verify_unit_active "${unit}" || failed_required=1
+    done
+
+    for unit in "${OPTIONAL_UNITS[@]}"; do
+        unit_exists "${unit}" || continue
+        # A .timer is active-or-waiting; is-active reports 'active' for both.
+        verify_unit_active "${unit}" || log "WARNING: optional unit ${unit} is not active (non-fatal, but the capability it provides is absent)"
+    done
+
     ACTIVATE_FAILED_REQUIRED="${failed_required}"
 }
 
@@ -559,6 +719,8 @@ main() {
     install_sbin_tools
     install_wifi_override
     install_authorized_key
+    harden_admin_access
+    prepare_tee_state_dir
 
     activate_units
 

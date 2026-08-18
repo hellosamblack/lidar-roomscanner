@@ -208,6 +208,20 @@ Checklist before calling first boot done:
 - `units` shows `dnsmasq.service`, `nftables.service`, and
   `avahi-daemon.service` all `active` (these are required; a failure here
   fails the whole install with exit code 1).
+
+  **Check this yourself rather than trusting `Installer succeeded`.** On the
+  first real Pi (2026-08-18, issue #191) install.sh logged `completed
+  successfully` and exited 0 while *two* of those three required units were
+  crash-looping. `systemctl enable --now` exits 0 when the start *job*
+  succeeded, not when the service survived — so a daemon that dies a second
+  later looked identical to one that came up. install.sh now waits out the
+  restart window and re-asks `systemctl is-active`, logging the offending
+  unit's journal, but the habit is worth keeping: the banner reports what was
+  attempted, `bridge_status()` reports what is true.
+- `unit_restarts` is all zeros. A crash-looping unit sampled mid-backoff
+  reports state `activating`, which reads as healthy; the restart counter is
+  what separates "still starting" from "failing every five seconds since
+  boot".
 - `eth0.carrier` is `true` once the scanner is plugged in, and
   `eth0.scanner_lease` shows the static lease once the scanner boots.
 
@@ -288,6 +302,11 @@ session, before the ring wraps around it.
 | Bad Wi-Fi credentials (Pi unreachable over wireless) | Nothing responds on `wlan0` at all | Chicken-and-egg: you can't ssh in over Wi-Fi to fix Wi-Fi. Pull the SD card, mount its FAT partition on any laptop, and drop a rendered `.nmconnection` file at `/boot/firmware/wifi-override.nmconnection` — `install.sh` installs it (0600, `roomscan-wifi-override.nmconnection`) and reloads NetworkManager on **every** run, first-boot or update, so this recovers without a reflash |
 | Tee not running | `bridge_status()` → `tee.active` | `bridge_update()` (re-enables/restarts it) or `bridge_logs("roomscan-tee")`; the tee is deliberately fail-open, so its absence never affects the live stream — only future recoverability |
 | Clock looks wrong | `bridge_status()` → `ntp_synced` | The Pi 3 has no RTC, so its clock is meaningless (and tee/journal timestamps with it) until NTP sync completes after boot; this resolves itself once the Pi has had wireless connectivity for a bit — no fix needed unless it stays `false` indefinitely |
+| **Pi boots and is on Wi-Fi, but rejects the ssh key** | `ssh -v` shows the key offered and refused; `/boot/firmware/firstrun.log` has `ERROR: user '<name>' does not exist on this system` | The account-creation race (issue #191): `install.sh` runs from `kernel-command-line.target`, but `userconf.txt` creates the account later during normal boot, so there is no home directory to write `~/.ssh/authorized_keys` into. Fixed by installing to `/etc/roomscan-bridge/authorized_keys` (needs no account) with an sshd drop-in pointing at it. To recover a Pi built *before* that fix, `ssh-copy-id` with the password once, then `bridge_update()` to lay down the permanent path. Note the payload key is not a default identity — use `ssh -i ~/.ssh/roomscan-bridge -o IdentitiesOnly=yes`, or plain `ssh` will not even offer it and the failure looks like a rejected key rather than an unoffered one. |
+| **Every `bridge_*` tool fails with `sudo: a terminal is required`** | `ssh <pi> 'sudo -n true'` | The tools shell out through `sudo` over a non-interactive channel with no TTY to type a password into, and the `sudo` group's default rule demands one. The payload now ships `/etc/sudoers.d/roomscan-bridge` (NOPASSWD, validated with `visudo -c` by install.sh). To bootstrap a Pi built before that fix you need a TTY: `ssh -t <pi> '…'` — without `-t` the fix command fails the same way the tools do. |
+| `dnsmasq` failed, `unknown interface eth0` | `bridge_logs("dnsmasq")` | `bind-interfaces` resolves `interface=eth0` once at startup and treats an addressless interface as fatal — and eth0 has no address whenever the scanner is unplugged, which is most of the time. The config now uses `bind-dynamic`, which binds when the interface actually appears while still never answering on wlan0. |
+| `roomscan-tee` failed, `ring.pcap00: Permission denied` | `bridge_logs("roomscan-tee")` | tcpdump drops privileges to the `tcpdump` user right after opening its socket, but systemd's `StateDirectory=` creates the ring directory root-owned. The unit now has an `ExecStartPre` that hands the directory over first; `bridge_update()` repairs an already-broken box. |
+| `avahi-daemon` failed, `Out of memory, aborting` | `bridge_logs("avahi-daemon")`; `free -m` shows plenty free | Not the machine's memory — a malloc failing against an `RLIMIT` we imposed. Debian ships avahi's `[rlimits]` block **commented out**; those values are upstream's example, not the running config, and uncommenting them switches on caps nothing on Debian exercises. They are commented again. If you ever edit that file, remember it reads as "stock plus one change" while being nothing of the sort. |
 | Undervoltage / throttling | `bridge_status()` → `temp_c`, `throttled` (non-`0x0` means the firmware itself reported throttling) | A Pi 3 draws ~300–400 mA idle and spikes past 700 mA under Wi-Fi + CPU load at 5 V — it needs its own properly sized 5 V rail off the rig battery. Do not assume the FileHub's old supply is interchangeable; check the actual current budget before reusing it |
 
 ## 9. FileHub cold-spare rule

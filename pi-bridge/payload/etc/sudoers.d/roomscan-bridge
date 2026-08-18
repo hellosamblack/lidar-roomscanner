@@ -1,0 +1,36 @@
+# roomscan-bridge -- passwordless sudo for the bridge administration account.
+#
+# Why this exists (first-boot bring-up, 2026-08-18, issue #191):
+#
+#   Every day-2 tool in host/tools/pi_bridge.py already shells out through
+#   sudo over ssh -- `sudo nmcli connection modify`, `sudo install.sh`,
+#   `sudo systemctl reboot`, and the nft/journal reads behind
+#   bridge_status. The Raspberry Pi OS account is in the `sudo` group but
+#   the group's default rule requires a PASSWORD, and there is no terminal
+#   on the far side of a non-interactive ssh channel to type one into. So
+#   every one of those tools failed with
+#
+#     sudo: a terminal is required to read the password
+#
+#   on the first real Pi. The bridge was designed for unattended remote
+#   administration and then shipped without the one grant that makes it
+#   possible; this file closes that gap rather than leaving each tool to
+#   discover it.
+#
+# The grant is deliberately unrestricted (owner decision, 2026-08-18). A
+# scoped command list was considered and rejected: the set of commands a
+# bring-up session needs is not knowable in advance -- this session alone
+# needed to edit /etc/avahi, read root-only journals, chown a state
+# directory, and run visudo -- and a rule that is nearly right fails in a
+# way that reads as a network fault. Scope here would also be security
+# theatre: the account it restricts can already rewrite install.sh, which
+# runs as root.
+#
+# What this does NOT do is widen who can reach the box. Access is still
+# publickey-only for a single account, on a single-purpose appliance whose
+# eth0 side is a private point-to-point link to the scanner.
+#
+# Installed 0440 root:root by install.sh, which also runs `visudo -c`
+# against it before letting it take effect -- a malformed file here locks
+# root out of the system entirely.
+{{USERNAME}} ALL=(ALL) NOPASSWD: ALL
