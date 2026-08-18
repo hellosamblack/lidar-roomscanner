@@ -21,18 +21,36 @@ StartLimitBurst=5
 [Service]
 Type=simple
 Nice=5
-StateDirectory=roomscan-bridge/tee
+
+# Why this unit runs AS tcpdump rather than as root.
+#
 # tcpdump drops privileges to the unprivileged `tcpdump` user right after it
 # opens the capture socket -- that is its security model, not something the
-# command line here turns on. But StateDirectory= creates the directory
-# root-owned 0755, so the post-drop process could not create its ring files:
+# command line here turns on. Run as root, the post-drop process could not
+# create its own ring files in the root-owned state directory:
 #
 #   tcpdump: /var/lib/roomscan-bridge/tee/ring.pcap00: Permission denied
 #
-# ExecStartPre runs as root (before the ExecStart process drops) and hands
-# the directory to the user that will actually be writing in it. `install -d`
-# is idempotent, so this is also the repair path for an already-broken box.
-ExecStartPre=/usr/bin/install -d -o tcpdump -g tcpdump -m 0750 /var/lib/roomscan-bridge/tee
+# and the unit crash-looped every 5 s from first boot (issue #191).
+#
+# Handing the directory over from an ExecStartPre does NOT fix this, which was
+# measured on the real Pi rather than assumed: `install -d -o tcpdump` sets it
+# to tcpdump:tcpdump 0750 and exits 0, and the very next `systemctl restart`
+# shows it back at root:root 0755. StateDirectory= re-asserts ownership
+# matching the unit's User= on EVERY start, and wins over anything ExecStartPre
+# did. Fighting it is futile; the fix is to declare the owner we actually want.
+#
+# With User=tcpdump, systemd creates and maintains the state directory owned by
+# tcpdump, and the ambient capability replaces the root privileges tcpdump
+# needed only in order to open the interface: CAP_NET_RAW for the packet
+# socket, CAP_NET_ADMIN for promiscuous mode (kept rather than passing -p, so
+# capture semantics do not change along with the ownership fix).
+User=tcpdump
+Group=tcpdump
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+StateDirectory=roomscan-bridge/tee
+StateDirectoryMode=0750
 ExecStart=/usr/bin/tcpdump -i eth0 -n -s 0 'udp port {{STREAM_PORT}}' -w /var/lib/roomscan-bridge/tee/ring.pcap -C 100 -W 20
 Restart=on-failure
 RestartSec=5

@@ -518,29 +518,6 @@ harden_admin_access() {
 # tee state directory
 # ---------------------------------------------------------------------------
 
-# tcpdump drops privileges to the unprivileged `tcpdump` user immediately
-# after opening the capture socket -- that is its whole security model and
-# it is not optional. systemd's StateDirectory= creates the directory
-# root-owned 0755, so the post-drop process cannot create ring.pcapNN in it:
-#
-#   tcpdump: /var/lib/roomscan-bridge/tee/ring.pcap00: Permission denied
-#
-# which on the real Pi crash-looped roomscan-tee every 5 seconds from first
-# boot onward (issue #191). The unit carries an ExecStartPre that does this
-# too -- it is repeated here so an update-mode run fixes an already-broken
-# box without waiting for the next unit start.
-prepare_tee_state_dir() {
-    local dir="/var/lib/roomscan-bridge/tee"
-    local owner="tcpdump"
-    if ! getent passwd "${owner}" >/dev/null 2>&1; then
-        log "WARNING: user '${owner}' does not exist; leaving ${dir} root-owned (roomscan-tee will not be able to write its ring)"
-        mkdir -p "${dir}"
-        return 0
-    fi
-    log "preparing ${dir} owned by ${owner} (tcpdump drops privileges before writing)"
-    install -d -o "${owner}" -g "${owner}" -m 0750 "${dir}"
-}
-
 # ---------------------------------------------------------------------------
 # in-flight-capture restart guard
 # ---------------------------------------------------------------------------
@@ -636,6 +613,19 @@ activate_units() {
     local failed_required=0
     local unit
 
+    # Clear any latched start-rate-limit BEFORE trying to (re)start anything.
+    # A unit that already burned its StartLimitBurst answers every subsequent
+    # start with `Start request repeated too quickly` and never runs the new
+    # code -- so pushing the very fix for its crash appears to change nothing.
+    # That happened on the real Pi: roomscan-tee's fix landed and the unit
+    # stayed dead, because it was still rate-limited from the failures the fix
+    # addressed (issue #191). "Update repairs a broken box" is the whole point
+    # of this path, and a broken box is exactly where the latch is set.
+    for unit in "${REQUIRED_UNITS[@]}" "${OPTIONAL_UNITS[@]}"; do
+        unit_exists "${unit}" || continue
+        systemctl reset-failed "${unit}" 2>/dev/null || true
+    done
+
     for unit in "${REQUIRED_UNITS[@]}"; do
         if ! unit_exists "${unit}"; then
             log "ERROR: required unit ${unit} not found on this system"
@@ -720,7 +710,13 @@ main() {
     install_wifi_override
     install_authorized_key
     harden_admin_access
-    prepare_tee_state_dir
+
+    # Note for a future editor: do NOT add a step here that chowns the tee's
+    # ring directory to `tcpdump`. It looks like the fix for the tee's
+    # Permission denied failure and it is not -- systemd's StateDirectory=
+    # re-asserts ownership matching the unit's User= on every start, silently
+    # undoing it before ExecStart runs (measured on the real Pi, issue #191).
+    # roomscan-tee.service declares User=tcpdump, which is what actually works.
 
     activate_units
 

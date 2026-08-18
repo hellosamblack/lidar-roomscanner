@@ -8,6 +8,7 @@ an exception that kills the agent's turn.
 from __future__ import annotations
 
 import asyncio
+import shlex
 
 import pytest
 
@@ -164,6 +165,38 @@ def test_an_unsynced_clock_is_reported_because_the_pi_3_has_no_rtc():
 def test_a_dead_unit_is_named():
     d = {**HEALTHY, "units": {**HEALTHY["units"], "dnsmasq": "failed"}}
     assert any("dnsmasq" in w and "failed" in w for w in pb._status_warnings(d))
+
+
+def test_ssh_run_quotes_argv_because_ssh_hands_it_to_a_remote_shell(monkeypatch):
+    """ssh joins its trailing arguments with spaces and gives the result to the
+    REMOTE LOGIN SHELL as one string -- argv boundaries are not preserved.
+    Passing argv through unquoted re-parsed it remotely, so
+
+        ["bash", "-lc", "sudo mkdir -p /opt/x && ..."]
+
+    arrived as `bash -lc sudo mkdir -p /opt/x && ...`: bash took `sudo` alone as
+    its command string, bare `sudo` printed usage and exited 1, and the && chain
+    short-circuited. bridge_update() could not extract a payload at all, and
+    reported sudo's usage text as the install error (issue #191)."""
+    seen = {}
+
+    class R:
+        returncode = 0
+        stdout = b"{}"
+        stderr = b""
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return R()
+
+    monkeypatch.setattr(pb.subprocess, "run", fake_run)
+    pb.ssh_run(["bash", "-lc", "sudo mkdir -p /opt/x && sudo tar -xzf a.tgz"],
+               host="192.0.2.1")
+    # Everything after the user@host target must be ONE argument: the remote
+    # shell re-splits it, so the quoting has to survive that round trip.
+    tail = seen["cmd"][seen["cmd"].index("--") + 1:]
+    assert len(tail) == 1, tail
+    assert shlex.split(tail[0]) == ["bash", "-lc", "sudo mkdir -p /opt/x && sudo tar -xzf a.tgz"]
 
 
 def test_a_crash_looping_unit_is_not_excused_by_reading_activating():

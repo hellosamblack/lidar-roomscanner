@@ -114,7 +114,17 @@ def ssh_run(argv: list[str], *, host: str = "", user: str = "", key: Path | None
            "-o", "LogLevel=ERROR"]
     if key.is_file():
         cmd += ["-i", str(key), "-o", "IdentitiesOnly=yes"]
-    cmd += [f"{user}@{target['host']}", "--"] + argv
+    # ssh joins its trailing arguments with spaces and hands the result to the
+    # REMOTE LOGIN SHELL as one string -- it does not preserve argv boundaries.
+    # Passing `argv` through unquoted therefore re-parses it remotely, and
+    # `["bash", "-lc", "sudo mkdir -p /opt/x && ..."]` arrived as
+    # `bash -lc sudo mkdir -p /opt/x && ...`: bash took `sudo` alone as its
+    # command string, bare `sudo` printed its usage and exited 1, and the &&
+    # chain short-circuited. bridge_update() could not extract a payload at
+    # all, while reporting the sudo usage text as the install error (#191).
+    # shlex.join quotes each element so the remote shell reconstructs exactly
+    # the argv intended here.
+    cmd += [f"{user}@{target['host']}", "--", shlex.join(argv)]
 
     t0 = time.monotonic()
     try:

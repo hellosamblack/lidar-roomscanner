@@ -700,6 +700,28 @@ def test_install_sh_checks_units_are_still_alive_not_just_that_start_returned():
         "`activating` is also what a crash-looping unit looks like mid-backoff"
 
 
+def test_install_sh_clears_a_latched_start_limit_before_restarting():
+    """A unit that burned its StartLimitBurst answers every later start with
+    `Start request repeated too quickly` and never runs the new code -- so
+    pushing the very fix for its crash appears to change nothing. Observed on
+    the real Pi: roomscan-tee's fix landed and the unit stayed dead, still
+    rate-limited from the failures the fix addressed. `bridge_update()` exists
+    to repair a broken box, and a broken box is where the latch is set."""
+    # Match live code only. An earlier version of this test compared against the
+    # first textual `enable --now`, which lives in a COMMENT explaining the
+    # unit-liveness check, and so failed on correct code -- the same
+    # scope-your-match trap the repo has been bitten by before.
+    lines = [ln for ln in (PAYLOAD / "install.sh").read_text().splitlines()
+             if not ln.strip().startswith("#")]
+    reset = [i for i, ln in enumerate(lines) if "reset-failed" in ln]
+    start = [i for i, ln in enumerate(lines)
+             if "enable --now" in ln or "systemctl restart" in ln]
+    assert reset, "install.sh must clear the start-rate-limit latch"
+    assert start
+    assert min(reset) < min(start), \
+        "the latch must be cleared BEFORE the start attempt, or it changes nothing"
+
+
 def test_dnsmasq_survives_an_eth0_that_has_no_address_yet():
     """eth0 is a point-to-point link to a scanner that is unplugged most of the
     time, and NM addresses it asynchronously after boot regardless.
@@ -717,27 +739,40 @@ def test_dnsmasq_survives_an_eth0_that_has_no_address_yet():
     assert "interface=eth0" in active, "dnsmasq must still never answer on wlan0"
 
 
-def test_the_tee_can_write_the_ring_it_is_pointed_at():
+def test_the_tee_runs_as_the_user_that_must_write_its_ring():
     """tcpdump drops privileges to the unprivileged `tcpdump` user immediately
-    after opening its socket -- that is its security model, not a flag. systemd's
-    StateDirectory= creates the directory root-owned 0755, so the post-drop
-    process could not create its own ring files:
+    after opening its socket -- that is its security model, not a flag. Run as
+    root, the post-drop process could not create its own ring files:
 
         tcpdump: /var/lib/roomscan-bridge/tee/ring.pcap00: Permission denied
 
-    which crash-looped roomscan-tee every 5 s from first boot."""
+    which crash-looped roomscan-tee every 5 s from first boot.
+
+    Chowning the directory does NOT fix it, and the failure is silent: measured
+    on the real Pi, `install -d -o tcpdump` succeeds and the very next
+    `systemctl restart` shows the directory back at root:root 0755, because
+    StateDirectory= re-asserts ownership matching User= on every start. Declaring
+    the owner is the fix; fighting systemd for it is not."""
     import configparser
     cp = configparser.ConfigParser(strict=False, allow_no_value=True)
     cp.optionxform = str
     cp.read_string((PAYLOAD / "etc" / "systemd" / "system"
                     / "roomscan-tee.service").read_text())
-    pre = cp["Service"]["ExecStartPre"]
-    assert "tcpdump" in pre and "/var/lib/roomscan-bridge/tee" in pre, pre
+    svc = cp["Service"]
+    assert svc.get("User") == "tcpdump", "the unit must run as the writing user"
+    # Running as tcpdump costs the root privileges tcpdump needed to open the
+    # interface; the ambient capabilities are what replace them.
+    assert "CAP_NET_RAW" in svc.get("AmbientCapabilities", "")
     # An unbounded retry of a structural failure is journal churn that never
     # escalates; bound it so a dead tee is visible as `failed`.
     assert cp["Unit"].get("StartLimitBurst"), "the restart loop must be bounded"
-    # And the installer must repair an already-broken box, not wait for a start.
-    assert "prepare_tee_state_dir" in (PAYLOAD / "install.sh").read_text()
+
+    # And no chown may creep back into install.sh: it reads like a safeguard
+    # while being a guaranteed no-op.
+    install = (PAYLOAD / "install.sh").read_text()
+    live = [ln for ln in install.splitlines() if not ln.strip().startswith("#")]
+    assert not [ln for ln in live if "install -d" in ln and "tee" in ln], \
+        "StateDirectory= undoes this before ExecStart runs"
 
 
 def test_avahi_does_not_enforce_the_rlimits_debian_ships_commented_out():
