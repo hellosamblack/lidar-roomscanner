@@ -130,19 +130,19 @@ OVERALL SYSTEM MATURITY: 7.4 / 10.0 (High-Performing Research / Pre-Production)
 
 ### 3.1 Firmware Audit (`firmware/scanner-stream/`)
 
-#### Finding FW-01: Warning on Redefinition of `USE_NUCLEO_144`
+#### Finding FW_01: Warning on Redefinition of `USE_NUCLEO_144`
 * **File:** `firmware/scanner-stream/Inc/stm32h5xx_nucleo_conf.h:47`
 * **Severity:** Low / Code Hygiene
 * **Description:** The header defines `#define USE_NUCLEO_144` unconditionally, while CMake/compiler command lines also pass `-DUSE_NUCLEO_144`, generating compiler warnings across all compilation units (`warning: "USE_NUCLEO_144" redefined`).
 * **Fix:** Wrap with `#ifndef USE_NUCLEO_144 ... #endif`.
 
-#### Finding FW-02: Unused Static Function and Dead Variable in `vl53l9_app.c`
+#### Finding FW_02: Unused Static Function and Dead Variable in `vl53l9_app.c`
 * **File:** `firmware/scanner-stream/Src/vl53l9_app.c:2585`, `vl53l9_app.c:3219`
 * **Severity:** Low / Code Hygiene
 * **Description:** `float frame_rate;` is set but never used at line 2585. `static void print_frame(...)` at line 3219 is unreferenced when `CONF_TRANSFORM_ONBOARD` is disabled.
 * **Fix:** Remove `frame_rate` or log it; wrap `print_frame` with `#if CONF_TRANSFORM_ONBOARD`.
 
-#### Finding FW-03: USB CDC Write Timeout Drop Behavior
+#### Finding FW_03: USB CDC Write Timeout Drop Behavior
 * **File:** `firmware/scanner-stream/Src/vl53l9_app.c:580-610`
 * **Severity:** Medium / Robustness
 * **Description:** In `rs_cdc_send()`, if TinyUSB CDC TX FIFO is full and does not drain within 100 ms, the frame is dropped and the drop counter increments. However, if the host reader disconnects without closing the VCOM port cleanly, the 100 ms timeout executes synchronously inside the main ranging loop, stalling the sensor FSM and delaying I3C ACK handling.
@@ -150,14 +150,14 @@ OVERALL SYSTEM MATURITY: 7.4 / 10.0 (High-Performing Research / Pre-Production)
 
 ### 3.2 Host Ingestion & Processing Audit (`host/src/roomscan/`)
 
-#### Finding HOST-01: Native C-Shim Thread Safety
+#### Finding HOST_01: Native C-Shim Thread Safety
 * **File:** `host/transform/rs_transform_shim.c:135-220`
 * **Severity:** Medium / Concurrency
 * **Description:** `rst_create2` allocates an `rst_ctx_t` which holds internal ST transform pipeline pointers. The transform instance maintains internal state (such as temporal noise reduction history across successive frames). If two threads call `rst_process2` on the same `rst_ctx_t` simultaneously, memory corruption will occur.
 * **Current Mitigation:** `host/src/roomscan/pipeline.py` confines `TransformStage` to a single reader thread.
 * **Recommendation:** Document explicitly that `rst_ctx_t` is strictly single-threaded, or add an internal mutex if shared usage is ever planned.
 
-#### Finding HOST-02: Zeroconf File Descriptor Leak on Rapid Reconnect
+#### Finding HOST_02: Zeroconf File Descriptor Leak on Rapid Reconnect
 * **File:** `host/src/roomscan/sources.py:301-314`
 * **Severity:** Low / Resource Management
 * **Description:** In `UdpSource._resolve_target()`, a new `Zeroconf()` instance is created and closed per resolution attempt in `_maybe_keepalive()` if data has not arrived in 2.0 s. Creating/destroying `Zeroconf` objects at 0.5 Hz during connection recovery churns UDP listener sockets and threads.
@@ -165,13 +165,13 @@ OVERALL SYSTEM MATURITY: 7.4 / 10.0 (High-Performing Research / Pre-Production)
 
 ### 3.3 SLAM / 3D Vision Correctness Audit (`host/src/roomscan/slam/`)
 
-#### Finding SLAM-01: VoxelBlockGrid Hashmap Rehash Headroom & Latency Spikes
+#### Finding SLAM_01: VoxelBlockGrid Hashmap Rehash Headroom & Latency Spikes
 * **File:** `host/src/roomscan/slam/tsdf.py:180-240`
 * **Severity:** High / Performance & Reliability
 * **Description:** Open3D's tensor `VoxelBlockGrid` uses a spatial hash map with a fixed initial `block_count` (default 40,000 blocks ≈ 40 m³ at 10 mm voxels). When occupancy approaches capacity, Open3D triggers a rehash. On CUDA, querying `block_usage()` forces a GPU synchronization barrier. To avoid per-frame syncs, `tsdf.py` samples usage every 25 frames. However, if a fast sweep enters new space, block allocation can exhaust capacity between checks, causing Open3D to throw a CUDA runtime error or stall the pipeline for >100 ms during rehash.
 * **Recommendation:** Pre-allocate a 100,000-block table for room-scale scans (consumes ~48 MB VRAM), and use asynchronous CUDA stream queries where supported.
 
-#### Finding SLAM-02: In-Plane Degeneracy in Corridor Sweeps
+#### Finding SLAM_02: In-Plane Degeneracy in Corridor Sweeps
 * **File:** `host/src/roomscan/slam/odometry.py:89-132`
 * **Severity:** Medium / Algorithmic
 * **Description:** The eigenvalue floor `_COND_CAP = 20.0` prevents unbounded translation runaway along unconstrained axes (e.g. looking straight at a planar wall). However, in featureless hallways, the translation along the corridor axis is floored to zero movement rather than being integrated via IMU specific force / dead reckoning.
@@ -179,7 +179,7 @@ OVERALL SYSTEM MATURITY: 7.4 / 10.0 (High-Performing Research / Pre-Production)
 
 ### 3.4 Web & Visualization Correctness Audit (`host/src/roomscan/web.py`, `thin_render.py`)
 
-#### Finding WEB-01: Mesh WebSocket Serialization Head-of-Line Blocking
+#### Finding WEB_01: Mesh WebSocket Serialization Head-of-Line Blocking
 * **File:** `host/src/roomscan/web.py:6347-6415`
 * **Severity:** Medium / UX & Performance
 * **Description:** When the SLAM worker extracts a new Detailed mesh (120,000–300,000 vertices), packing the binary mesh payload (`TAG_MESH_SURFACE`) and compressing via Deflate/Gzip blocks the asyncio event loop if not yielded via `asyncio.sleep(0)`.
