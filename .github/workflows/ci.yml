@@ -23,8 +23,8 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install mtools (needed by test_pi_bridge_build)
-        run: sudo apt-get update && sudo apt-get install -y mtools
+      - name: Install mtools + expect (test_pi_bridge_build; test_web bridge-mode tests)
+        run: sudo apt-get update && sudo apt-get install -y mtools expect
 
       - name: Configure C shim (host/transform)
         run: cmake -S host/transform -B host/transform/build
