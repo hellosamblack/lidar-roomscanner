@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install mtools (needed by test_pi_bridge_build)
+        run: sudo apt-get update && sudo apt-get install -y mtools
+
+      - name: Configure C shim (host/transform)
+        run: cmake -S host/transform -B host/transform/build
+
+      - name: Build C shim
+        run: cmake --build host/transform/build
+
+      - name: Install host package (dev, web, mcp extras)
+        run: pip install -e "host/[dev,web,mcp]"
+
+      - name: Run pytest
+        working-directory: host
+        run: |
+          python -m pytest -q --no-header 2>&1 | tee /tmp/pytest-output.log
+          echo "---- skip summary ----"
+          grep -Eo '[0-9]+ skipped' /tmp/pytest-output.log || echo "0 skipped"
+
+  shim-macos:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure C shim (host/transform)
+        run: cmake -S host/transform -B host/transform/build
+
+      - name: Build C shim
+        run: cmake --build host/transform/build
+
+  firmware:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ARM toolchain + Ninja
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi ninja-build
+
+      # NOTE: a known USE_NUCLEO_144 redefinition warning exists today in the
+      # vendored CubeMX init; do NOT add -Werror here until that's cleaned up.
+      - name: Configure (Release preset)
+        working-directory: firmware/scanner-stream
+        run: cmake --preset Release
+
+      - name: Build (Release preset)
+        working-directory: firmware/scanner-stream
+        run: cmake --build build/Release
+
+      - name: Report firmware size
+        working-directory: firmware/scanner-stream
+        run: arm-none-eabi-size build/Release/*.elf
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-release
+          path: |
+            firmware/scanner-stream/build/Release/*.elf
+            firmware/scanner-stream/build/Release/*.bin
+            firmware/scanner-stream/build/Release/*.map
+          if-no-files-found: warn
