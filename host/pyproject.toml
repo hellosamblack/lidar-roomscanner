@@ -24,7 +24,11 @@ splat = ["torch>=2.4", "gsplat>=1.4", "pycolmap>=4.0", "imageio-ffmpeg>=0.5",
          "transformers>=4.40"]  # transformers: optional monocular-depth prior (Depth-Anything-V2)
          # (plyfile moved to core deps -- the compare tool needs it without this extra)
 # Web UI dependencies
-web = ["fastapi", "uvicorn", "websockets"]
+# simplejpeg: TurboJPEG-backed encode/decode for /ws-thin's negotiated JPEG
+# frame format (#197) -- the CrowPanel thin client's own hardware JPEG block
+# decodes it. Degrades gracefully (thin_hello_ack reports format:"raw") if
+# unimportable, so it is required here rather than optional-within-optional.
+web = ["fastapi", "uvicorn", "websockets", "simplejpeg>=1.9"]
 # Agent-facing MCP server (roomscan-mcp). Needs [web] too: the rig_* tools speak
 # the same /ws protocol and the ui_* tools drive Chrome over `websockets`.
 mcp = ["mcp>=2.0", "playwright>=1.40", "roomscan[web]"]

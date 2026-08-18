@@ -67,6 +67,8 @@ ORBIT_SETTLE_FRAMES = 2
 # here instead of silently decoding garbage.
 THIN_TAG = 1
 THIN_HEADER = struct.Struct("<IHH")  # u32 tag, u16 width, u16 height
+THIN_TAG_JPEG = 2
+THIN_HEADER_JPEG = struct.Struct("<IHHI")  # u32 tag, u16 width, u16 height, u32 jpeg_len
 
 #: a per-channel difference this small is dithering/compression, not a moved camera
 PIXEL_DIFF_THRESHOLD = 8
@@ -83,12 +85,16 @@ def _import_contract() -> None:
     "Mirrored constants drift per-tool"), so the literals above are only a
     fallback for running this file straight out of a checkout without the venv.
     """
-    global THIN_TAG, THIN_HEADER
+    global THIN_TAG, THIN_HEADER, THIN_TAG_JPEG, THIN_HEADER_JPEG
     try:
-        from roomscan.thin_render import THIN_HEADER as H, THIN_TAG as T
+        from roomscan.thin_render import (
+            THIN_HEADER as H, THIN_HEADER_JPEG as HJ, THIN_TAG as T,
+            THIN_TAG_JPEG as TJ,
+        )
     except Exception:  # noqa: BLE001 - the literals above still decode a frame
         return
     THIN_TAG, THIN_HEADER = T, H
+    THIN_TAG_JPEG, THIN_HEADER_JPEG = TJ, HJ
 
 
 _import_contract()
@@ -121,14 +127,56 @@ def rgb565_to_rgb(payload: bytes, width: int, height: int):
     return out
 
 
+def decode_thin_jpeg(payload: bytes, width: int, height: int) -> dict:
+    """Decode a tag-2 JFIF payload back to an (H, W, 3) uint8 array.
+
+    Returns `{"ok": False, "error": ...}` rather than raising when
+    `simplejpeg` is unavailable or the bytes do not decode -- the same
+    "report what happened" contract as `decode_thin_frame`.
+    """
+    try:
+        import simplejpeg
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"simplejpeg not importable: {exc!r}"}
+    try:
+        rgb = simplejpeg.decode_jpeg(payload, colorspace="rgb")
+    except Exception as exc:  # noqa: BLE001 - a torn JPEG is a finding
+        return {"ok": False, "error": f"JPEG decode failed: {exc!r}"}
+    if rgb.shape[:2] != (height, width):
+        return {"ok": False, "error": (f"decoded {rgb.shape[1]}x{rgb.shape[0]} "
+                                       f"!= header {width}x{height}")}
+    return {"ok": True, "rgb": rgb}
+
+
 def decode_thin_frame(buf: bytes) -> dict:
-    """Parse one `THIN_FRAME`: `<IHH` header, then `width*height*2` RGB565 bytes.
+    """Parse one binary `/ws-thin` frame -- tag 1 (`<IHH` + RGB565) or tag 2
+    (`<IHHI` + JFIF bytes, #197).
 
     Returns a dict with `ok` plus, when it parses, the decoded image under
     `rgb`. The length check is exact in both directions: a payload longer than
     the header claims means the packer and this reader have drifted, which on a
     real thin client shows up as a torn picture, not an exception.
     """
+    if len(buf) < 4:
+        return {"ok": False, "error": f"runt frame: {len(buf)} bytes"}
+    (tag,) = struct.unpack_from("<I", buf, 0)
+
+    if tag == THIN_TAG_JPEG:
+        if len(buf) < THIN_HEADER_JPEG.size:
+            return {"ok": False, "error": f"runt JPEG frame: {len(buf)} bytes"}
+        _tag, width, height, jpeg_len = THIN_HEADER_JPEG.unpack_from(buf, 0)
+        payload = buf[THIN_HEADER_JPEG.size:]
+        info = {"tag": int(tag), "width": int(width), "height": int(height),
+                "jpeg_len": int(jpeg_len), "payload_bytes": len(payload),
+                "total_bytes": len(buf)}
+        if len(payload) != jpeg_len:
+            info["ok"] = False
+            info["error"] = (f"payload is {len(payload)} bytes, expected "
+                             f"{jpeg_len} jpeg_len")
+            return info
+        info.update(decode_thin_jpeg(payload, int(width), int(height)))
+        return info
+
     if len(buf) < THIN_HEADER.size:
         return {"ok": False, "error": f"runt frame: {len(buf)} bytes"}
     tag, width, height = THIN_HEADER.unpack_from(buf, 0)
@@ -139,7 +187,7 @@ def decode_thin_frame(buf: bytes) -> dict:
             "total_bytes": len(buf)}
     if tag != THIN_TAG:
         info["ok"] = False
-        info["error"] = f"tag {tag} != THIN_FRAME tag {THIN_TAG}"
+        info["error"] = f"tag {tag} != THIN_FRAME tag {THIN_TAG} or JPEG tag {THIN_TAG_JPEG}"
         return info
     if len(payload) != expected:
         info["ok"] = False
@@ -299,6 +347,51 @@ class _ThinLink:
                     return payload
         return None
 
+    async def wait_hello_ack(self, timeout: float) -> dict | None:
+        """Next `thin_hello_ack` -- the server's echo of the CLAMPED effective
+        values, never the raw request (#197: "report what actually happened")."""
+        deadline = time.monotonic() + timeout
+        while (remain := deadline - time.monotonic()) > 0:
+            kind, payload = await self.next_message(remain)
+            if kind in ("timeout", "closed"):
+                return None
+            if kind == "json" and payload.get("type") == "thin_hello_ack":
+                return payload
+        return None
+
+
+async def _probe_hello(link: _ThinLink, report: dict, *, fmt: str | None,
+                       fps: int | None, width: int | None, height: int | None,
+                       quality: int | None, timeout: float) -> None:
+    """Negotiate `thin_hello` (#197) when any of `fmt`/`fps`/`width`/`height`/
+    `quality` was passed. A default run (nothing passed) sends nothing and
+    keeps today's behaviour -- tag-1 RGB565 480x480 @ 10 fps."""
+    hello: dict = {"type": "thin_hello"}
+    if fmt is not None:
+        hello["format"] = fmt
+    if fps is not None:
+        hello["fps"] = fps
+    if width is not None:
+        hello["width"] = width
+    if height is not None:
+        hello["height"] = height
+    if quality is not None:
+        hello["quality"] = quality
+    if len(hello) == 1:
+        report["hello"] = None
+        return
+
+    entry: dict = {"requested": hello}
+    report["hello"] = entry
+    if not await link.send(hello):
+        entry["error"] = "send failed"
+        return
+    ack = await link.wait_hello_ack(timeout)
+    if ack is None:
+        entry["error"] = f"no thin_hello_ack within {timeout:g}s"
+        return
+    entry["ack"] = ack
+
 
 async def _collect_initial(link: _ThinLink, frames: int, out_dir: Path,
                            report: dict, timeout: float) -> None:
@@ -318,8 +411,9 @@ async def _collect_initial(link: _ThinLink, frames: int, out_dir: Path,
             started = now  # start the clock on the FIRST frame: everything before
             # it is connect + the server's first-tick latency, not feed cadence
         last = now
-        entry = {"index": i, "width": info["width"], "height": info["height"],
-                 "total_bytes": info["total_bytes"], **frame_stats(info["rgb"])}
+        entry = {"index": i, "tag": info.get("tag"), "width": info["width"],
+                 "height": info["height"], "total_bytes": info["total_bytes"],
+                 **frame_stats(info["rgb"])}
         entry.update(save_png(info["rgb"], out_dir / f"frame_{i:02d}.png"))
         report["frames"].append(entry)
     got = len(report["frames"])
@@ -432,7 +526,10 @@ async def probe_async(frames: int = DEFAULT_FRAMES, url: str = DEFAULT_URL,
                       out_dir: str | Path | None = None,
                       orbit_yaw: float = DEFAULT_ORBIT_YAW,
                       modes=DEFAULT_MODES, record: bool = False,
-                      timeout: float = DEFAULT_TIMEOUT) -> dict:
+                      timeout: float = DEFAULT_TIMEOUT,
+                      format: str | None = None, fps: int | None = None,
+                      width: int | None = None, height: int | None = None,
+                      quality: int | None = None) -> dict:
     """Connect to `/ws-thin`, decode frames to PNG, round-trip the commands.
 
     The real implementation; `probe()` is the sync front end and
@@ -440,6 +537,11 @@ async def probe_async(frames: int = DEFAULT_FRAMES, url: str = DEFAULT_URL,
     asked for: a mode with no data, a server at its client cap, an unavailable
     renderer and a server that is not running are all *results* here, not
     exceptions.
+
+    `format`/`fps`/`width`/`height`/`quality` negotiate `thin_hello` (#197)
+    when any is given; leaving all five `None` sends no hello at all, so a
+    default run still proves the un-negotiated path -- today's tag-1 RGB565
+    480x480 @ 10 fps, byte-identical.
     """
     ws_url = url.rstrip("/")
     if not ws_url.endswith("/ws-thin"):
@@ -451,7 +553,7 @@ async def probe_async(frames: int = DEFAULT_FRAMES, url: str = DEFAULT_URL,
         "ok": False, "url": ws_url, "out_dir": str(out),
         "frames_requested": int(frames), "frames_received": 0,
         "measured_fps": None, "frames": [], "decode_errors": [],
-        "orbit": None, "modes": {}, "record": None,
+        "hello": None, "orbit": None, "modes": {}, "record": None,
         "telemetry": None, "telemetry_seen": 0,
         "commands_sent": [], "server_error": None, "errors": [],
     }
@@ -473,6 +575,8 @@ async def probe_async(frames: int = DEFAULT_FRAMES, url: str = DEFAULT_URL,
 
     link = _ThinLink(conn, report)
     try:
+        await _probe_hello(link, report, fmt=format, fps=fps, width=width,
+                           height=height, quality=quality, timeout=timeout)
         await _collect_initial(link, max(int(frames), 0), out, report, timeout)
 
         # A refusal (`thin_client_limit`, `thin_render_unavailable`) is JSON
@@ -531,6 +635,15 @@ def probe(**kwargs) -> dict:
 
 def _print(rep: dict) -> None:
     print(f"thin probe {rep['url']} -> {rep['out_dir']}")
+    if rep.get("hello"):
+        h = rep["hello"]
+        if h.get("ack"):
+            a = h["ack"]
+            print(f"  hello: requested {h['requested']} -> ack format={a.get('format')} "
+                  f"fps={a.get('fps')} {a.get('width')}x{a.get('height')} "
+                  f"quality={a.get('quality')}")
+        elif h.get("error"):
+            print(f"  hello: {h['error']}")
     if rep["server_error"]:
         e = rep["server_error"]
         print(f"  SERVER REFUSED: {e.get('error')}: {e.get('message')}")
@@ -589,12 +702,23 @@ def main(argv=None) -> int:
                     help="also round-trip thin_record -- this STARTS A REAL RECORDING")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                     help=f"per-message wait in seconds (default {DEFAULT_TIMEOUT:g})")
+    ap.add_argument("--format", choices=("raw", "jpeg"), default=None,
+                    help="negotiate thin_hello format (#197); default sends no hello")
+    ap.add_argument("--fps", type=int, default=None,
+                    help="negotiate thin_hello fps (#197)")
+    ap.add_argument("--width", type=int, default=None,
+                    help="negotiate thin_hello width, one of 320/480 (#197)")
+    ap.add_argument("--height", type=int, default=None,
+                    help="negotiate thin_hello height, one of 320/480 (#197)")
+    ap.add_argument("--quality", type=int, default=None,
+                    help="negotiate thin_hello JPEG quality 40-95 (#197)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
     rep = probe(frames=args.frames, url=args.url, out_dir=args.out_dir,
                 orbit_yaw=args.orbit_yaw, modes=args.modes, record=args.record,
-                timeout=args.timeout)
+                timeout=args.timeout, format=args.format, fps=args.fps,
+                width=args.width, height=args.height, quality=args.quality)
     if args.json:
         print(json.dumps(rep, indent=2, default=str))
     else:

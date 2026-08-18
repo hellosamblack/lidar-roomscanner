@@ -32,16 +32,38 @@ import struct
 import threading
 from concurrent.futures import Future
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
 
 log = logging.getLogger(__name__)
+
+
+class _RenderJob(NamedTuple):
+    """One queued render, including the per-job pack/format/size (#197) that
+    used to be a bare `(scene, camera, pack, fut)` tuple."""
+
+    scene: "ThinScene"
+    camera: "ThinCamera"
+    pack: bool
+    fut: Future
+    fmt: str
+    quality: int
+    out_width: int | None
+    out_height: int | None
 
 # --- wire contract (duplicated verbatim in the CrowPanelProp companion spec) ---
 THIN_TAG = 1
 THIN_WIDTH = 480
 THIN_HEIGHT = 480
 THIN_HEADER = struct.Struct("<IHH")  # u32 tag, u16 width, u16 height
+
+#: THIN_FRAME_JPEG (tag 2, #197): u32 tag=2, u16 width, u16 height,
+#: u32 jpeg_len, followed by exactly jpeg_len bytes of JFIF. Negotiated via
+#: `thin_hello`; a client that never sends one only ever sees tag 1.
+THIN_TAG_JPEG = 2
+THIN_HEADER_JPEG = struct.Struct("<IHHI")  # u32 tag, u16 width, u16 height, u32 jpeg_len
+DEFAULT_JPEG_QUALITY = 75
 
 THIN_MODES = ("point_cloud", "slam", "ir")
 DEFAULT_MODE = "point_cloud"
@@ -101,6 +123,60 @@ def pack_thin_frame(pixels_rgb565: bytes, width: int = THIN_WIDTH,
             f"pixel payload is {len(pixels_rgb565)} bytes, expected {expected} "
             f"for {width}x{height} RGB565")
     return THIN_HEADER.pack(THIN_TAG, width, height) + pixels_rgb565
+
+
+def pack_thin_jpeg(jpeg_bytes: bytes, width: int, height: int) -> bytes:
+    """THIN_FRAME_JPEG binary (tag 2): u32 tag=2 - u16 width - u16 height -
+    u32 jpeg_len - u8[jpeg_len] JFIF bytes, all little-endian."""
+    return THIN_HEADER_JPEG.pack(THIN_TAG_JPEG, width, height, len(jpeg_bytes)) + jpeg_bytes
+
+
+def jpeg_available() -> bool:
+    """Whether the JPEG encode path can run right now.
+
+    Checked live (not cached at import time) so a host/test without
+    `simplejpeg` -- or one that has poisoned `sys.modules["simplejpeg"]` the
+    way the `broken_renderer` fixture poisons `open3d` -- is honoured without
+    reloading this module. Callers use this to decide whether a `thin_hello`
+    asking for `format: "jpeg"` can actually be granted (#197 requirement 5).
+    """
+    try:
+        import simplejpeg  # noqa: F401,PLC0415 - deferred: see module docstring below
+    except Exception:  # noqa: BLE001 - any import failure means "not available"
+        return False
+    return True
+
+
+def encode_jpeg_frame(rgb: np.ndarray, quality: int = DEFAULT_JPEG_QUALITY) -> bytes:
+    """JFIF-encode an (H, W, 3) uint8 RGB image via `simplejpeg`.
+
+    Deferred import (like `open3d` in `ThinRenderer._run`) so a missing or
+    test-poisoned `simplejpeg` raises `ImportError` here rather than at module
+    load, which would take `/ws-thin`'s raw path down with it. Runs on the
+    render thread inside `ThinRenderer._finish` -- never on the asyncio loop.
+    """
+    import simplejpeg  # noqa: PLC0415 - deferred, see docstring
+    return simplejpeg.encode_jpeg(np.ascontiguousarray(rgb), quality=quality,
+                                  colorspace="rgb")
+
+
+def resize_nearest(rgb: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Nearest-neighbour resize of an (H, W, 3) uint8 image to (height, width, 3).
+
+    Used to serve a negotiated resolution below the renderer's native
+    THIN_WIDTH x THIN_HEIGHT -- the renderer itself is NEVER resized (a
+    second `OffscreenRenderer` aborts the process), so this is a host-side
+    numpy downscale of the already-rendered frame, per #197 requirement 2.
+    A no-op (returns `rgb` unchanged) when the size already matches.
+    """
+    src_h, src_w = rgb.shape[:2]
+    if (src_w, src_h) == (width, height):
+        return rgb
+    ys = np.clip(np.round(np.linspace(0, src_h - 1, height)).astype(np.int64),
+                 0, max(src_h - 1, 0))
+    xs = np.clip(np.round(np.linspace(0, src_w - 1, width)).astype(np.int64),
+                 0, max(src_w - 1, 0))
+    return rgb[ys][:, xs]
 
 
 def extract_ir_grid(rgb_or_refl: np.ndarray | None) -> list[int] | None:
@@ -468,9 +544,18 @@ class ThinRenderer:
     # -- submission --------------------------------------------------------
 
     def submit(self, scene: ThinScene, camera: ThinCamera, *,
-               pack: bool = True) -> Future:
-        """Queue a render. The future resolves to packed `THIN_FRAME` bytes
-        (`pack=True`) or an (H, W, 3) uint8 array.
+               pack: bool = True, fmt: str = "raw",
+               quality: int = DEFAULT_JPEG_QUALITY,
+               out_width: int | None = None,
+               out_height: int | None = None) -> Future:
+        """Queue a render. The future resolves to packed `THIN_FRAME`
+        (`fmt="raw"`) or `THIN_FRAME_JPEG` (`fmt="jpeg"`) bytes when
+        `pack=True`, or an (H, W, 3) uint8 array when `pack=False`.
+
+        `out_width`/`out_height`, when smaller than the renderer's native
+        size, downscale the already-rendered frame host-side (#197
+        requirement 2) -- the renderer itself is never resized. Encoding
+        happens on THIS render thread's `_finish`, never on the asyncio loop.
 
         Image scenes are resolved inline -- they are a numpy upscale, need no
         rendering context, and would only add a thread hop.
@@ -482,22 +567,39 @@ class ThinRenderer:
         if scene is not None and scene.kind == "image":
             try:
                 fut.set_result(self._finish(
-                    _letterbox(scene.image, self.width, self.height), pack))
+                    _letterbox(scene.image, self.width, self.height), pack,
+                    fmt=fmt, quality=quality,
+                    out_width=out_width, out_height=out_height))
             except BaseException as exc:  # noqa: BLE001 - reported to the caller
                 fut.set_exception(exc)
             return fut
-        self._jobs.put((scene, camera, pack, fut))
+        self._jobs.put(_RenderJob(scene, camera, pack, fut, fmt, quality,
+                                  out_width, out_height))
         return fut
 
     def render(self, scene: ThinScene, camera: ThinCamera, *,
-               pack: bool = True, timeout: float = 30.0):
+               pack: bool = True, fmt: str = "raw",
+               quality: int = DEFAULT_JPEG_QUALITY,
+               out_width: int | None = None, out_height: int | None = None,
+               timeout: float = 30.0):
         """Synchronous convenience wrapper. Do not call from the event loop."""
-        return self.submit(scene, camera, pack=pack).result(timeout)
+        return self.submit(scene, camera, pack=pack, fmt=fmt, quality=quality,
+                           out_width=out_width,
+                           out_height=out_height).result(timeout)
 
-    def _finish(self, rgb: np.ndarray, pack: bool):
+    def _finish(self, rgb: np.ndarray, pack: bool, *, fmt: str = "raw",
+               quality: int = DEFAULT_JPEG_QUALITY,
+               out_width: int | None = None, out_height: int | None = None):
         if not pack:
             return rgb
-        return pack_thin_frame(rgb_to_bytes(rgb), self.width, self.height)
+        out_width = out_width or self.width
+        out_height = out_height or self.height
+        if (rgb.shape[1], rgb.shape[0]) != (out_width, out_height):
+            rgb = resize_nearest(rgb, out_width, out_height)
+        if fmt == "jpeg":
+            return pack_thin_jpeg(encode_jpeg_frame(rgb, quality),
+                                  out_width, out_height)
+        return pack_thin_frame(rgb_to_bytes(rgb), out_width, out_height)
 
     # -- the owning thread -------------------------------------------------
 
@@ -531,16 +633,18 @@ class ThinRenderer:
                 renderer = None
                 self._fail_pending(ThinRenderUnavailable("renderer is closed"))
                 return
-            scene, camera, pack, fut = job
-            if not fut.set_running_or_notify_cancel():
+            if not job.fut.set_running_or_notify_cancel():
                 continue
             try:
-                current_key = self._draw(o3d, renderer, scene, camera, current_key)
+                current_key = self._draw(o3d, renderer, job.scene, job.camera,
+                                         current_key)
                 rgb = np.asarray(renderer.render_to_image())
-                fut.set_result(self._finish(rgb, pack))
+                job.fut.set_result(self._finish(
+                    rgb, job.pack, fmt=job.fmt, quality=job.quality,
+                    out_width=job.out_width, out_height=job.out_height))
             except BaseException as exc:  # noqa: BLE001 - reported to the caller
                 current_key = None
-                fut.set_exception(exc)
+                job.fut.set_exception(exc)
 
     def _drain(self) -> None:
         """Serve every later submission the cached init failure, so a host
@@ -552,8 +656,7 @@ class ThinRenderer:
             if job is None:
                 self._fail_pending(exc)
                 return
-            _scene, _camera, _pack, fut = job
-            fut.set_exception(exc)
+            job.fut.set_exception(exc)
 
     def _fail_pending(self, exc: BaseException) -> None:
         """Resolve anything still queued at shutdown -- a caller awaiting a
@@ -565,9 +668,8 @@ class ThinRenderer:
                 return
             if job is None:
                 continue
-            _scene, _camera, _pack, fut = job
-            if not fut.done():
-                fut.set_exception(exc)
+            if not job.fut.done():
+                job.fut.set_exception(exc)
 
     def _draw(self, o3d, renderer, scene: ThinScene, camera: ThinCamera,
               current_key):

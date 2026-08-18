@@ -6854,6 +6854,7 @@ class _FakeThinRenderer:
         self.fail = fail
         self.available = not fail
         self.submits: list = []
+        self.submit_kwargs: list = []
         self.closed = 0
         self.ensure_calls = 0
         self._frame = (frame if frame is not None
@@ -6865,8 +6866,12 @@ class _FakeThinRenderer:
         if self.fail:
             raise ThinRenderUnavailable("no offscreen context in tests")
 
-    def submit(self, scene, camera, *, pack: bool = True) -> _CFuture:
+    def submit(self, scene, camera, *, pack: bool = True, fmt: str = "raw",
+              quality: int = 75, out_width=None, out_height=None) -> _CFuture:
         self.submits.append((scene, camera))
+        self.submit_kwargs.append(
+            {"pack": pack, "fmt": fmt, "quality": quality,
+             "out_width": out_width, "out_height": out_height})
         fut: _CFuture = _CFuture()
         fut.set_result(self._frame)
         return fut
@@ -7159,6 +7164,182 @@ def test_handle_thin_inbound_unknown_type_is_ignored():
     assert state.controller.calls == []
 
 
+# --- 5b. `thin_hello` negotiation (#197) -----------------------------------
+
+
+class _FakeThinWs:
+    """Stand-in for a `/ws-thin` WebSocket -- records `send_text` calls."""
+
+    def __init__(self, fail: bool = False):
+        self.sent_text: list[str] = []
+        self._fail = fail
+
+    async def send_text(self, data: str) -> None:
+        if self._fail:
+            raise RuntimeError("send failed")
+        self.sent_text.append(data)
+
+
+def _default_flow_snapshot(flow: web.ThinFlow) -> tuple:
+    return (flow.format, flow.fps, flow.width, flow.height, flow.quality)
+
+
+def test_negotiate_thin_hello_clamps_fps_low_and_high():
+    flow = web.ThinFlow()
+    lo = web.negotiate_thin_hello({"type": "thin_hello", "fps": 0}, flow)
+    assert lo["fps"] == web.THIN_HELLO_FPS_MIN == 1
+    hi = web.negotiate_thin_hello({"type": "thin_hello", "fps": 120}, flow)
+    assert hi["fps"] == web.THIN_HELLO_FPS_MAX == 60
+
+
+def test_negotiate_thin_hello_clamps_width_to_nearest_valid_resolution():
+    flow = web.ThinFlow()
+    effective = web.negotiate_thin_hello(
+        {"type": "thin_hello", "width": 640, "height": 640}, flow)
+    assert (effective["width"], effective["height"]) == (480, 480)
+    effective = web.negotiate_thin_hello(
+        {"type": "thin_hello", "width": 300, "height": 300}, flow)
+    assert (effective["width"], effective["height"]) == (320, 320)
+
+
+def test_negotiate_thin_hello_rejects_non_square_and_keeps_prior_size():
+    flow = web.ThinFlow(width=320, height=320)
+    effective = web.negotiate_thin_hello(
+        {"type": "thin_hello", "width": 480, "height": 320}, flow)
+    assert (effective["width"], effective["height"]) == (320, 320)
+
+
+def test_negotiate_thin_hello_clamps_quality_low_and_high():
+    flow = web.ThinFlow()
+    lo = web.negotiate_thin_hello({"type": "thin_hello", "quality": 5}, flow)
+    assert lo["quality"] == web.THIN_HELLO_QUALITY_MIN == 40
+    hi = web.negotiate_thin_hello({"type": "thin_hello", "quality": 999}, flow)
+    assert hi["quality"] == web.THIN_HELLO_QUALITY_MAX == 95
+
+
+def test_negotiate_thin_hello_jpeg_degrades_to_raw_when_unavailable(monkeypatch):
+    """Requirement 5: an unavailable `simplejpeg` must never be promised."""
+    import sys
+    monkeypatch.setitem(sys.modules, "simplejpeg", None)
+    flow = web.ThinFlow()
+    effective = web.negotiate_thin_hello(
+        {"type": "thin_hello", "format": "jpeg"}, flow)
+    assert effective["format"] == "raw"
+
+
+def test_negotiate_thin_hello_accepts_jpeg_when_available():
+    flow = web.ThinFlow()
+    effective = web.negotiate_thin_hello(
+        {"type": "thin_hello", "format": "jpeg"}, flow)
+    assert effective["format"] == "jpeg"
+
+
+def test_negotiate_thin_hello_unknown_fields_ignored():
+    flow = web.ThinFlow()
+    effective = web.negotiate_thin_hello(
+        {"type": "thin_hello", "fps": 30, "bogus_field": "whatever"}, flow)
+    assert effective["fps"] == 30.0
+
+
+def test_negotiate_thin_hello_malformed_values_leave_prior_values():
+    """Wrong types for a field must not raise and must not change that
+    field -- "malformed hello leaves defaults untouched"."""
+    flow = web.ThinFlow(fps=15.0, width=320, height=320, quality=60,
+                        format="jpeg")
+    effective = web.negotiate_thin_hello(
+        {"type": "thin_hello", "fps": "not-a-number",
+         "width": "nope", "height": "nope", "quality": [1, 2]}, flow)
+    assert effective == {"format": "jpeg", "fps": 15.0, "width": 320,
+                         "height": 320, "quality": 60}
+
+
+def test_handle_thin_inbound_hello_applies_effective_values_to_the_flow():
+    state = _thin_state()
+    flow = web.ThinFlow()
+    ws = _FakeThinWs()
+    asyncio.run(web._handle_thin_inbound(
+        state, {"type": "thin_hello", "format": "jpeg", "fps": 30,
+                "width": 320, "height": 320, "quality": 50}, flow, ws))
+    assert flow.format == "jpeg"
+    assert flow.fps == 30.0
+    assert (flow.width, flow.height) == (320, 320)
+    assert flow.quality == 50
+
+
+def test_handle_thin_inbound_hello_acks_the_clamped_effective_values_not_the_request():
+    state = _thin_state()
+    flow = web.ThinFlow()
+    ws = _FakeThinWs()
+    asyncio.run(web._handle_thin_inbound(
+        state, {"type": "thin_hello", "fps": 999, "width": 640, "height": 640},
+        flow, ws))
+    assert len(ws.sent_text) == 1
+    ack = json.loads(ws.sent_text[0])
+    assert ack["type"] == "thin_hello_ack"
+    assert ack["fps"] == 60                     # clamped, not 999
+    assert (ack["width"], ack["height"]) == (480, 480)
+
+
+def test_handle_thin_inbound_hello_without_a_websocket_does_not_raise():
+    """Existing 3-arg callers (every other thin_* test in this file) must
+    keep working unmodified -- `websocket` is optional."""
+    state = _thin_state()
+    flow = web.ThinFlow()
+    asyncio.run(web._handle_thin_inbound(
+        state, {"type": "thin_hello", "fps": 20}, flow))
+    assert flow.fps == 20.0
+
+
+def test_handle_thin_inbound_malformed_hello_is_a_no_op():
+    state = _thin_state()
+    flow = web.ThinFlow()
+    before = _default_flow_snapshot(flow)
+    ws = _FakeThinWs()
+    asyncio.run(web._handle_thin_inbound(
+        state, {"type": "thin_hello", "format": "bogus", "fps": None,
+                "width": None, "height": None}, flow, ws))
+    assert _default_flow_snapshot(flow) == before
+    # still acks -- with the UNCHANGED defaults, "report what happened"
+    assert len(ws.sent_text) == 1
+    ack = json.loads(ws.sent_text[0])
+    assert (ack["format"], ack["fps"], ack["width"],
+            ack["height"], ack["quality"]) == before
+
+
+# --- 5c. per-flow pacing (#197) ---------------------------------------------
+
+
+def test_thin_next_tick_un_negotiated_flow_keeps_100ms():
+    flow = web.ThinFlow()
+    next_tick, skipped = web._thin_next_tick(flow, 100.0, 100.0)
+    assert next_tick == pytest.approx(100.1, abs=1e-9)
+    assert skipped is False
+
+
+def test_thin_next_tick_30fps_flow_targets_33ms():
+    flow = web.ThinFlow(fps=30.0)
+    next_tick, skipped = web._thin_next_tick(flow, 100.0, 100.0)
+    assert next_tick == pytest.approx(100.0 + 1.0 / 30.0, abs=1e-9)
+    assert skipped is False
+
+
+def test_thin_next_tick_resyncs_instead_of_bursting_on_overrun():
+    """An overrun tick must resync to `now + interval`, never burst-catch-up
+    -- same contract as the pre-#197 inline `THIN_INTERVAL` logic, now keyed
+    off the flow's own interval."""
+    flow = web.ThinFlow(fps=30.0)
+    # next_tick is far in the past relative to `now`: the render overran badly
+    next_tick, skipped = web._thin_next_tick(flow, 100.0, 105.0)
+    assert skipped is True
+    assert next_tick == pytest.approx(105.0 + 1.0 / 30.0, abs=1e-9)
+
+
+def test_thin_flow_interval_property_matches_fps():
+    assert web.ThinFlow().interval == pytest.approx(0.1)
+    assert web.ThinFlow(fps=30.0).interval == pytest.approx(1.0 / 30.0)
+    assert web.ThinFlow(fps=0.0).interval == pytest.approx(web.THIN_INTERVAL)
+
+
 # --- 6/7/8. the endpoint itself (fake renderer only) ----------------------
 
 
@@ -7197,6 +7378,59 @@ def test_ws_thin_sends_telemetry_and_a_well_formed_frame(thin_renderer):
 
     assert st.thin_clients == {}          # disconnect popped the flow
     assert fake.submits                   # the fake really did the render
+
+
+def test_ws_thin_un_negotiated_client_gets_todays_tag1_frame_unchanged(thin_renderer):
+    """The backward-compat contract: a client that never sends `thin_hello`
+    gets exactly the pre-#197 wire format -- tag 1, RGB565, 480x480."""
+    from starlette.testclient import TestClient
+    fake = thin_renderer()
+    _prime_app_state_for_thin()
+    client = TestClient(web.app)
+
+    with client.websocket_connect("/ws-thin") as ws:
+        ws.receive_json()
+        frame = ws.receive_bytes()
+
+    assert frame == fake._frame           # byte-identical to the fake's tag-1 frame
+    assert frame[:8] == struct.pack("<IHH", 1, 480, 480)
+    assert fake.submit_kwargs[0] == {"pack": True, "fmt": "raw", "quality": 75,
+                                     "out_width": 480, "out_height": 480}
+
+
+def test_ws_thin_hello_negotiates_jpeg_and_reaches_the_renderer(thin_renderer):
+    """`thin_hello` round-trips an ack with the CLAMPED effective values, and
+    the render loop's very next `submit()` uses the negotiated flow."""
+    from starlette.testclient import TestClient
+    fake = thin_renderer()
+    _prime_app_state_for_thin()
+    client = TestClient(web.app)
+
+    with client.websocket_connect("/ws-thin") as ws:
+        ws.send_text(json.dumps({"type": "thin_hello", "format": "jpeg",
+                                 "fps": 30, "width": 640, "height": 640,
+                                 "quality": 999}))
+        ack = None
+        for _ in range(20):
+            data = ws.receive()
+            if data.get("text"):
+                obj = json.loads(data["text"])
+                if obj.get("type") == "thin_hello_ack":
+                    ack = obj
+                    break
+        assert ack == {"type": "thin_hello_ack", "format": "jpeg", "fps": 30.0,
+                       "width": 480, "height": 480,          # 640 clamped to 480
+                       "quality": 95}                        # 999 clamped to 95
+
+        # drain messages until the render loop submits at least once more
+        # AFTER the negotiation landed
+        for _ in range(20):
+            data = ws.receive()
+            if data.get("bytes") and fake.submit_kwargs:
+                break
+
+    assert fake.submit_kwargs[-1] == {"pack": True, "fmt": "jpeg", "quality": 95,
+                                      "out_width": 480, "out_height": 480}
 
 
 def test_ws_thin_rejects_beyond_the_client_cap(thin_renderer):

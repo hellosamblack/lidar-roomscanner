@@ -155,6 +155,132 @@ def test_rgb565_feeds_pack_thin_frame_exactly():
 
 
 # --------------------------------------------------------------------------
+# 2b -- pack_thin_jpeg (THIN_FRAME_JPEG, tag 2, #197)
+# --------------------------------------------------------------------------
+
+
+def test_pack_thin_jpeg_header_bytes_are_hand_computed():
+    payload = b"\xff\xd8\xff\xd9"   # fake JFIF: SOI + EOI markers
+    frame = tr.pack_thin_jpeg(payload, 320, 240)
+    assert frame[0:4] == b"\x02\x00\x00\x00"     # u32 tag = 2, LE
+    assert frame[4:6] == b"\x40\x01"             # u16 width = 320 (0x0140), LE
+    assert frame[6:8] == b"\xf0\x00"             # u16 height = 240 (0x00F0), LE
+    assert frame[8:12] == b"\x04\x00\x00\x00"    # u32 jpeg_len = 4, LE
+    assert frame[12:] == payload
+    assert len(frame) == 12 + len(payload)
+
+
+def test_thin_tag_jpeg_and_header_constants():
+    assert tr.THIN_TAG_JPEG == 2
+    assert tr.THIN_HEADER_JPEG.size == 12
+    assert tr.THIN_HEADER_JPEG.format == "<IHHI"
+
+
+def test_pack_thin_jpeg_header_parses_back():
+    payload = b"\x01\x02\x03"
+    frame = tr.pack_thin_jpeg(payload, 480, 480)
+    tag, w, h, jlen = tr.THIN_HEADER_JPEG.unpack(frame[:12])
+    assert (tag, w, h, jlen) == (2, 480, 480, 3)
+    assert frame[12:] == payload
+
+
+def test_pack_thin_jpeg_empty_payload_is_a_valid_zero_length_frame():
+    frame = tr.pack_thin_jpeg(b"", 4, 4)
+    assert len(frame) == 12
+    tag, w, h, jlen = tr.THIN_HEADER_JPEG.unpack(frame)
+    assert (tag, w, h, jlen) == (2, 4, 4, 0)
+
+
+# --------------------------------------------------------------------------
+# 2c -- jpeg_available / encode_jpeg_frame (#197)
+# --------------------------------------------------------------------------
+
+
+def test_jpeg_available_is_true_with_the_real_dependency_installed():
+    assert tr.jpeg_available() is True
+
+
+def test_jpeg_available_is_false_when_simplejpeg_is_poisoned(monkeypatch):
+    """Mirrors `broken_renderer`'s technique for `open3d`: poisoning
+    `sys.modules` makes the deferred `import simplejpeg` fail without
+    actually uninstalling the real dependency."""
+    monkeypatch.setitem(sys.modules, "simplejpeg", None)
+    assert tr.jpeg_available() is False
+
+
+def test_encode_jpeg_frame_raises_import_error_when_simplejpeg_is_poisoned(monkeypatch):
+    """Reintroduces the defect this guards against: without the deferred
+    import + poison test, a caller could believe JPEG encoding "worked" on a
+    host where it cannot -- the #197 requirement 5 graceful-degrade path."""
+    monkeypatch.setitem(sys.modules, "simplejpeg", None)
+    with pytest.raises(ImportError):
+        tr.encode_jpeg_frame(np.zeros((4, 4, 3), dtype=np.uint8))
+
+
+def _gradient(n: int) -> np.ndarray:
+    """An n x n RGB gradient with real structure (not flat) so JPEG DCT error
+    is meaningful rather than a degenerate all-one-value block."""
+    img = np.zeros((n, n, 3), dtype=np.uint8)
+    xs = np.linspace(0, 255, n)
+    ys = np.linspace(0, 255, n)
+    img[:, :, 0] = xs[None, :]
+    img[:, :, 1] = ys[:, None]
+    img[:, :, 2] = (xs[None, :] + ys[:, None]) / 2
+    return img.astype(np.uint8)
+
+
+def test_encode_jpeg_frame_round_trips_within_a_quantitative_error_bound():
+    """Not just 'decodes' -- a quantitative similarity bound at the default
+    quality, per the #197 test requirement. simplejpeg is a real dependency
+    here (not mocked), so this exercises the actual codec."""
+    import simplejpeg
+
+    img = _gradient(64)
+    encoded = tr.encode_jpeg_frame(img, quality=75)
+    assert encoded[:2] == b"\xff\xd8"          # JFIF SOI marker
+    decoded = simplejpeg.decode_jpeg(encoded, colorspace="rgb")
+    assert decoded.shape == img.shape
+    mae = float(np.mean(np.abs(decoded.astype(np.int16) - img.astype(np.int16))))
+    assert mae < 8.0
+    # a real JPEG at q75 is meaningfully smaller than the raw RGB it encodes
+    assert len(encoded) < img.nbytes
+
+
+def test_encode_jpeg_frame_default_quality_is_75():
+    assert tr.DEFAULT_JPEG_QUALITY == 75
+
+
+# --------------------------------------------------------------------------
+# 2d -- resize_nearest (host-side downscale for a negotiated resolution)
+# --------------------------------------------------------------------------
+
+
+def test_resize_nearest_is_a_noop_at_matching_size():
+    img = _ramp(6)
+    out = tr.resize_nearest(img, 6, 6)
+    assert out is img
+
+
+def test_resize_nearest_shrinks_to_the_requested_shape():
+    img = _ramp(8)
+    out = tr.resize_nearest(img, 4, 4)
+    assert out.shape == (4, 4, 3)
+    assert out.dtype == np.uint8
+
+
+def test_resize_nearest_corners_map_to_source_corners():
+    """The four corners of a downscale must still be the source's own
+    corners -- proves this samples the source rather than, say, cropping or
+    interpolating a blend that would land somewhere else."""
+    img = _ramp(8)
+    out = tr.resize_nearest(img, 4, 4)
+    np.testing.assert_array_equal(out[0, 0], img[0, 0])
+    np.testing.assert_array_equal(out[-1, -1], img[-1, -1])
+    np.testing.assert_array_equal(out[0, -1], img[0, -1])
+    np.testing.assert_array_equal(out[-1, 0], img[-1, 0])
+
+
+# --------------------------------------------------------------------------
 # 3 -- ThinCamera
 # --------------------------------------------------------------------------
 
@@ -559,6 +685,62 @@ def test_image_scene_unpacked_returns_the_array(broken_renderer):
                                  pack=False).result(timeout=5.0)
     assert isinstance(rgb, np.ndarray)
     assert rgb.shape == (480, 480, 3) and rgb.dtype == np.uint8
+
+
+# --- fmt="jpeg" / negotiated resolution through `submit` (#197) ------------
+#
+# Image scenes are resolved INLINE by `submit` (no render thread), so they
+# are also the cheapest way to exercise the fmt/quality/out_width/out_height
+# plumbing end-to-end without a real OffscreenRenderer.
+
+
+def test_submit_jpeg_format_produces_a_tag2_frame(broken_renderer):
+    frame = broken_renderer.submit(image_scene(_ramp(7)), ThinCamera(),
+                                   fmt="jpeg", quality=80).result(timeout=5.0)
+    tag, w, h, jlen = tr.THIN_HEADER_JPEG.unpack_from(frame, 0)
+    assert tag == tr.THIN_TAG_JPEG
+    assert (w, h) == (480, 480)
+    assert jlen == len(frame) - tr.THIN_HEADER_JPEG.size
+    import simplejpeg
+    decoded = simplejpeg.decode_jpeg(
+        frame[tr.THIN_HEADER_JPEG.size:], colorspace="rgb")
+    assert decoded.shape == (480, 480, 3)
+
+
+def test_submit_raw_format_is_the_default_and_unchanged(broken_renderer):
+    """No `fmt=` kwarg at all must be byte-identical to the pre-#197 frame."""
+    a = broken_renderer.submit(image_scene(_ramp(7)), ThinCamera()).result(timeout=5.0)
+    b = broken_renderer.submit(image_scene(_ramp(7)), ThinCamera(),
+                               fmt="raw").result(timeout=5.0)
+    assert a == b
+    assert a[:4] == struct.pack("<I", tr.THIN_TAG)
+
+
+def test_submit_honours_a_negotiated_resolution_below_native(broken_renderer):
+    frame = broken_renderer.submit(image_scene(_ramp(7)), ThinCamera(),
+                                   out_width=320, out_height=320).result(timeout=5.0)
+    tag, w, h = THIN_HEADER.unpack_from(frame, 0)
+    assert (w, h) == (320, 320)
+    assert len(frame) == 8 + 320 * 320 * 2
+
+
+def test_submit_negotiated_resolution_also_applies_to_jpeg(broken_renderer):
+    frame = broken_renderer.submit(image_scene(_ramp(7)), ThinCamera(),
+                                   fmt="jpeg", out_width=320,
+                                   out_height=320).result(timeout=5.0)
+    tag, w, h, jlen = tr.THIN_HEADER_JPEG.unpack_from(frame, 0)
+    assert (w, h) == (320, 320)
+    assert jlen == len(frame) - tr.THIN_HEADER_JPEG.size
+
+
+def test_submit_jpeg_raises_when_simplejpeg_unavailable(broken_renderer, monkeypatch):
+    """`submit` itself does not degrade -- graceful fallback is a `web.py`
+    negotiation-time decision (#197 requirement 5); a caller that asks for
+    `fmt="jpeg"` when it is genuinely unavailable gets the failure reported."""
+    monkeypatch.setitem(sys.modules, "simplejpeg", None)
+    fut = broken_renderer.submit(image_scene(_ramp(7)), ThinCamera(), fmt="jpeg")
+    with pytest.raises(ImportError):
+        fut.result(timeout=5.0)
 
 
 def test_closed_renderer_fails_new_submissions(broken_renderer):
