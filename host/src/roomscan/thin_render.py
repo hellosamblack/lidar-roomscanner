@@ -147,6 +147,22 @@ def jpeg_available() -> bool:
     return True
 
 
+def warm_jpeg_import() -> bool:
+    """Force the (possibly first-ever, dlopen-costly) `import simplejpeg` to
+    happen HERE and now.
+
+    Identical to `jpeg_available()` -- it exists so a caller can name the
+    INTENT: run this once, off the asyncio loop (e.g. via
+    `asyncio.to_thread`), before any `thin_hello` negotiation gets a chance to
+    call `jpeg_available()` on the loop. The first `import` of a C-extension
+    module in a process's life does a real native `dlopen`; every import
+    after that is a `sys.modules` cache hit. Without this warm-up, the FIRST
+    client to negotiate JPEG pays that cold-import cost inline on the event
+    loop (#197 review finding 4).
+    """
+    return jpeg_available()
+
+
 def encode_jpeg_frame(rgb: np.ndarray, quality: int = DEFAULT_JPEG_QUALITY) -> bytes:
     """JFIF-encode an (H, W, 3) uint8 RGB image via `simplejpeg`.
 
@@ -554,24 +570,23 @@ class ThinRenderer:
 
         `out_width`/`out_height`, when smaller than the renderer's native
         size, downscale the already-rendered frame host-side (#197
-        requirement 2) -- the renderer itself is never resized. Encoding
-        happens on THIS render thread's `_finish`, never on the asyncio loop.
+        requirement 2) -- the renderer itself is never resized.
 
-        Image scenes are resolved inline -- they are a numpy upscale, need no
-        rendering context, and would only add a thread hop.
+        EVERY scene kind -- including `"image"` -- is queued to the render
+        thread and resolved there, never inline on the calling thread. The
+        caller, in production, is `_thin_render_loop` running ON THE ASYNCIO
+        LOOP: an inline image-scene fast path used to run the letterbox +
+        pack/encode (real CPU work once JPEG entered the picture, #197 review
+        finding 3) synchronously on that loop, exactly the "never on the
+        asyncio loop" contract this module documents everywhere else. `_run`
+        (and `_drain`, when the offscreen context never came up) special-case
+        `kind == "image"` to skip Filament entirely, so IR mode keeps working
+        even with no rendering context -- it just does so on the render
+        thread now, at the cost of one thread hop.
         """
         fut: Future = Future()
         if self._closed:
             fut.set_exception(ThinRenderUnavailable("renderer is closed"))
-            return fut
-        if scene is not None and scene.kind == "image":
-            try:
-                fut.set_result(self._finish(
-                    _letterbox(scene.image, self.width, self.height), pack,
-                    fmt=fmt, quality=quality,
-                    out_width=out_width, out_height=out_height))
-            except BaseException as exc:  # noqa: BLE001 - reported to the caller
-                fut.set_exception(exc)
             return fut
         self._jobs.put(_RenderJob(scene, camera, pack, fut, fmt, quality,
                                   out_width, out_height))
@@ -636,9 +651,14 @@ class ThinRenderer:
             if not job.fut.set_running_or_notify_cancel():
                 continue
             try:
-                current_key = self._draw(o3d, renderer, job.scene, job.camera,
-                                         current_key)
-                rgb = np.asarray(renderer.render_to_image())
+                if job.scene is not None and job.scene.kind == "image":
+                    # No Filament involved -- a numpy upscale -- so this
+                    # branch never touches `renderer`/`o3d` or `current_key`.
+                    rgb = _letterbox(job.scene.image, self.width, self.height)
+                else:
+                    current_key = self._draw(o3d, renderer, job.scene,
+                                             job.camera, current_key)
+                    rgb = np.asarray(renderer.render_to_image())
                 job.fut.set_result(self._finish(
                     rgb, job.pack, fmt=job.fmt, quality=job.quality,
                     out_width=job.out_width, out_height=job.out_height))
@@ -647,8 +667,16 @@ class ThinRenderer:
                 job.fut.set_exception(exc)
 
     def _drain(self) -> None:
-        """Serve every later submission the cached init failure, so a host
-        without a rendering context fails fast instead of hanging a client."""
+        """Serve every later submission the cached init failure -- EXCEPT
+        image scenes.
+
+        `kind == "image"` needs no Filament context at all (a numpy upscale +
+        pack/encode), so IR mode must keep working even on a host where the
+        offscreen renderer never came up -- it still runs HERE, on this
+        thread, never on the caller's (#197 review finding 3). Everything
+        else fails fast with the cached init error instead of hanging a
+        client.
+        """
         exc = ThinRenderUnavailable(
             f"offscreen renderer unavailable: {self._init_error}")
         while True:
@@ -656,6 +684,15 @@ class ThinRenderer:
             if job is None:
                 self._fail_pending(exc)
                 return
+            if job.scene is not None and job.scene.kind == "image":
+                try:
+                    rgb = _letterbox(job.scene.image, self.width, self.height)
+                    job.fut.set_result(self._finish(
+                        rgb, job.pack, fmt=job.fmt, quality=job.quality,
+                        out_width=job.out_width, out_height=job.out_height))
+                except BaseException as inner_exc:  # noqa: BLE001
+                    job.fut.set_exception(inner_exc)
+                continue
             job.fut.set_exception(exc)
 
     def _fail_pending(self, exc: BaseException) -> None:

@@ -7165,31 +7165,109 @@ def test_handle_thin_inbound_unknown_type_is_ignored():
 
 
 # --- 5b. `thin_hello` negotiation (#197) -----------------------------------
+#
+# `negotiate_thin_hello` is pure and never mutates `flow` -- mutation +
+# acking happens only in `_apply_pending_hello`, called from the render
+# loop's own tick (finding 2), never from `_handle_thin_inbound` (which only
+# stashes the raw message on `flow.pending_hello`).
 
 
 class _FakeThinWs:
-    """Stand-in for a `/ws-thin` WebSocket -- records `send_text` calls."""
+    """Stand-in for a `/ws-thin` WebSocket -- records `send_text` calls, IN
+    ORDER, alongside `send_bytes` -- so ordering assertions (ack-before-frame,
+    finding 2) can be made on ONE combined timeline, not two separate lists
+    that lose their interleaving."""
 
     def __init__(self, fail: bool = False):
         self.sent_text: list[str] = []
+        self.sent_bytes: list[bytes] = []
+        self.sent: list[tuple[str, object]] = []   # ("text"|"bytes", payload)
         self._fail = fail
 
     async def send_text(self, data: str) -> None:
         if self._fail:
             raise RuntimeError("send failed")
         self.sent_text.append(data)
+        self.sent.append(("text", data))
+
+    async def send_bytes(self, data: bytes) -> None:
+        if self._fail:
+            raise RuntimeError("send failed")
+        self.sent_bytes.append(data)
+        self.sent.append(("bytes", data))
 
 
 def _default_flow_snapshot(flow: web.ThinFlow) -> tuple:
     return (flow.format, flow.fps, flow.width, flow.height, flow.quality)
 
 
-def test_negotiate_thin_hello_clamps_fps_low_and_high():
-    flow = web.ThinFlow()
+def test_negotiate_thin_hello_clamps_fps_for_raw_format():
+    """Format-coupled fps ceiling (#197 review finding 5): raw stays at
+    today's ceiling."""
+    flow = web.ThinFlow()                     # format defaults to "raw"
     lo = web.negotiate_thin_hello({"type": "thin_hello", "fps": 0}, flow)
-    assert lo["fps"] == web.THIN_HELLO_FPS_MIN == 1
+    assert lo["fps"] == web.THIN_HELLO_FPS_MIN == 1.0
     hi = web.negotiate_thin_hello({"type": "thin_hello", "fps": 120}, flow)
-    assert hi["fps"] == web.THIN_HELLO_FPS_MAX == 60
+    assert hi["fps"] == web.THIN_HELLO_FPS_MAX_RAW == 10.0
+
+
+def test_negotiate_thin_hello_clamps_fps_for_jpeg_format():
+    flow = web.ThinFlow()
+    hi = web.negotiate_thin_hello(
+        {"type": "thin_hello", "format": "jpeg", "fps": 120}, flow)
+    assert hi["format"] == "jpeg"
+    assert hi["fps"] == web.THIN_HELLO_FPS_MAX_JPEG == 60.0
+
+
+def test_negotiate_thin_hello_fps_reclamps_when_format_switches_jpeg_to_raw():
+    """A client that negotiated jpeg@60 and later asks only for
+    `format: "raw"` (no `fps` field in that message) must have its STORED fps
+    re-clamped to the raw ceiling, not carried over illegally (#197 review
+    finding 5's explicit round-trip case)."""
+    flow = web.ThinFlow(format="jpeg", fps=60.0)
+    effective = web.negotiate_thin_hello({"type": "thin_hello", "format": "raw"}, flow)
+    assert effective["format"] == "raw"
+    assert effective["fps"] == web.THIN_HELLO_FPS_MAX_RAW == 10.0
+
+
+def test_negotiate_thin_hello_fps_clamps_low_but_preserves_fractional_values():
+    """#197 review finding 1: fps stays a FLOAT throughout -- 0.5 clamps up to
+    the floor, but a fractional value inside the range (29.97) is NOT
+    truncated. Uses jpeg (ceiling 60) so 29.97 is not itself format-clamped."""
+    flow = web.ThinFlow(format="jpeg")
+    lo = web.negotiate_thin_hello({"type": "thin_hello", "fps": 0.5}, flow)
+    assert lo["fps"] == pytest.approx(1.0)
+    frac = web.negotiate_thin_hello({"type": "thin_hello", "fps": 29.97}, flow)
+    assert frac["fps"] == pytest.approx(29.97)
+
+
+def test_negotiate_thin_hello_accepts_a_numeric_fps_string():
+    """The pre-fix `int(requested_fps)` truncation rejected `"30.5"` (raises
+    ValueError -> silently no-op) while accepting `"30"`; `float()` accepts
+    both."""
+    flow = web.ThinFlow(format="jpeg")
+    effective = web.negotiate_thin_hello({"type": "thin_hello", "fps": "30.5"}, flow)
+    assert effective["fps"] == pytest.approx(30.5)
+
+
+@pytest.mark.parametrize("bad_fps", [float("inf"), float("-inf"), float("nan")])
+def test_negotiate_thin_hello_non_finite_fps_is_a_no_op(bad_fps):
+    """#197 review finding 1: `Infinity`/`-Infinity`/`NaN` (valid JSON per
+    Python's `json` module) used to reach `int(float('inf'))` -> uncaught
+    `OverflowError`. Must be a no-op instead -- same as any other malformed
+    value -- not a raise."""
+    flow = web.ThinFlow()
+    effective = web.negotiate_thin_hello({"type": "thin_hello", "fps": bad_fps}, flow)
+    assert effective["fps"] == flow.fps
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+def test_negotiate_thin_hello_non_finite_width_height_quality_are_no_ops(bad):
+    flow = web.ThinFlow()
+    effective = web.negotiate_thin_hello(
+        {"type": "thin_hello", "width": bad, "height": bad, "quality": bad}, flow)
+    assert (effective["width"], effective["height"]) == (flow.width, flow.height)
+    assert effective["quality"] == flow.quality
 
 
 def test_negotiate_thin_hello_clamps_width_to_nearest_valid_resolution():
@@ -7235,7 +7313,7 @@ def test_negotiate_thin_hello_accepts_jpeg_when_available():
 
 
 def test_negotiate_thin_hello_unknown_fields_ignored():
-    flow = web.ThinFlow()
+    flow = web.ThinFlow(format="jpeg")
     effective = web.negotiate_thin_hello(
         {"type": "thin_hello", "fps": 30, "bogus_field": "whatever"}, flow)
     assert effective["fps"] == 30.0
@@ -7253,57 +7331,118 @@ def test_negotiate_thin_hello_malformed_values_leave_prior_values():
                          "height": 320, "quality": 60}
 
 
-def test_handle_thin_inbound_hello_applies_effective_values_to_the_flow():
+def test_negotiate_thin_hello_is_pure_and_never_mutates_the_flow():
+    """The concurrent-writer fix (finding 2) depends on this: negotiation
+    must not have any side effect on `flow` -- only `_apply_pending_hello`
+    (called exactly once, from the render loop) may mutate it."""
+    flow = web.ThinFlow()
+    before = _default_flow_snapshot(flow)
+    web.negotiate_thin_hello(
+        {"type": "thin_hello", "format": "jpeg", "fps": 30,
+         "width": 320, "height": 320, "quality": 50}, flow)
+    assert _default_flow_snapshot(flow) == before
+
+
+# --- 5b-ii. `_handle_thin_inbound` for thin_hello: stash only -------------
+
+
+def test_handle_thin_inbound_hello_only_stashes_pending_hello():
+    """`_handle_thin_inbound` must NOT apply the hello or touch a websocket
+    -- it only stores the raw dict (#197 review finding 2)."""
     state = _thin_state()
     flow = web.ThinFlow()
-    ws = _FakeThinWs()
+    before = _default_flow_snapshot(flow)
+    msg = {"type": "thin_hello", "format": "jpeg", "fps": 30,
+           "width": 320, "height": 320, "quality": 50}
+    asyncio.run(web._handle_thin_inbound(state, msg, flow))
+    assert flow.pending_hello == msg
+    assert _default_flow_snapshot(flow) == before   # UNCHANGED until applied
+
+
+def test_handle_thin_inbound_second_hello_overwrites_pending_not_queues():
+    """Only the LATEST un-applied hello matters -- same freshest-wins spirit
+    as the render pipeline elsewhere in this module."""
+    state = _thin_state()
+    flow = web.ThinFlow()
     asyncio.run(web._handle_thin_inbound(
-        state, {"type": "thin_hello", "format": "jpeg", "fps": 30,
-                "width": 320, "height": 320, "quality": 50}, flow, ws))
+        state, {"type": "thin_hello", "fps": 5}, flow))
+    asyncio.run(web._handle_thin_inbound(
+        state, {"type": "thin_hello", "fps": 9}, flow))
+    assert flow.pending_hello == {"type": "thin_hello", "fps": 9}
+
+
+# --- 5b-iii. `_apply_pending_hello`: the render loop's own application ----
+
+
+def test_apply_pending_hello_with_nothing_pending_returns_none():
+    flow = web.ThinFlow()
+    assert web._apply_pending_hello(flow) is None
+
+
+def test_apply_pending_hello_applies_effective_values_and_clears_pending():
+    flow = web.ThinFlow()
+    flow.pending_hello = {"type": "thin_hello", "format": "jpeg", "fps": 30,
+                          "width": 320, "height": 320, "quality": 50}
+    ack = web._apply_pending_hello(flow)
+    assert flow.pending_hello is None
     assert flow.format == "jpeg"
     assert flow.fps == 30.0
     assert (flow.width, flow.height) == (320, 320)
     assert flow.quality == 50
+    assert ack == {"type": "thin_hello_ack", "format": "jpeg", "fps": 30.0,
+                   "width": 320, "height": 320, "quality": 50}
 
 
-def test_handle_thin_inbound_hello_acks_the_clamped_effective_values_not_the_request():
-    state = _thin_state()
+def test_apply_pending_hello_acks_the_clamped_effective_values_not_the_request():
     flow = web.ThinFlow()
-    ws = _FakeThinWs()
-    asyncio.run(web._handle_thin_inbound(
-        state, {"type": "thin_hello", "fps": 999, "width": 640, "height": 640},
-        flow, ws))
-    assert len(ws.sent_text) == 1
-    ack = json.loads(ws.sent_text[0])
-    assert ack["type"] == "thin_hello_ack"
-    assert ack["fps"] == 60                     # clamped, not 999
+    flow.pending_hello = {"type": "thin_hello", "fps": 999, "width": 640, "height": 640}
+    ack = web._apply_pending_hello(flow)
+    assert ack["fps"] == web.THIN_HELLO_FPS_MAX_RAW == 10.0   # clamped, not 999
     assert (ack["width"], ack["height"]) == (480, 480)
 
 
-def test_handle_thin_inbound_hello_without_a_websocket_does_not_raise():
-    """Existing 3-arg callers (every other thin_* test in this file) must
-    keep working unmodified -- `websocket` is optional."""
-    state = _thin_state()
-    flow = web.ThinFlow()
-    asyncio.run(web._handle_thin_inbound(
-        state, {"type": "thin_hello", "fps": 20}, flow))
-    assert flow.fps == 20.0
-
-
-def test_handle_thin_inbound_malformed_hello_is_a_no_op():
-    state = _thin_state()
+def test_apply_pending_hello_malformed_is_a_no_op_but_still_acks():
     flow = web.ThinFlow()
     before = _default_flow_snapshot(flow)
-    ws = _FakeThinWs()
-    asyncio.run(web._handle_thin_inbound(
-        state, {"type": "thin_hello", "format": "bogus", "fps": None,
-                "width": None, "height": None}, flow, ws))
+    flow.pending_hello = {"type": "thin_hello", "format": "bogus", "fps": None,
+                          "width": None, "height": None}
+    ack = web._apply_pending_hello(flow)
     assert _default_flow_snapshot(flow) == before
-    # still acks -- with the UNCHANGED defaults, "report what happened"
-    assert len(ws.sent_text) == 1
-    ack = json.loads(ws.sent_text[0])
+    assert ack is not None
     assert (ack["format"], ack["fps"], ack["width"],
             ack["height"], ack["quality"]) == before
+
+
+def test_apply_pending_hello_with_non_finite_values_never_raises_and_still_acks():
+    """End-to-end proof of finding 1 at the layer the render loop actually
+    calls: a hello full of `Infinity`/`NaN` must not raise (which would have
+    killed the render loop's whole tick, dropping frames for every OTHER
+    field in the same message too) and must still produce an ack."""
+    flow = web.ThinFlow()
+    flow.pending_hello = {"type": "thin_hello", "fps": float("inf"),
+                          "width": float("nan"), "height": float("nan"),
+                          "quality": float("-inf")}
+    ack = web._apply_pending_hello(flow)
+    assert ack is not None
+    assert ack["type"] == "thin_hello_ack"
+    assert ack["fps"] == web.DEFAULT_THIN_FPS
+
+
+def test_apply_pending_hello_logs_degrade_once_per_flow_not_per_call(monkeypatch, caplog):
+    """#197 review finding 9: a jpeg request that degrades to raw logs ONE
+    warning for this flow, not once per hello (and never per frame)."""
+    import sys
+    monkeypatch.setitem(sys.modules, "simplejpeg", None)
+    flow = web.ThinFlow()
+    with caplog.at_level("WARNING", logger="roomscan.web"):
+        flow.pending_hello = {"type": "thin_hello", "format": "jpeg"}
+        web._apply_pending_hello(flow)
+        flow.pending_hello = {"type": "thin_hello", "format": "jpeg"}
+        web._apply_pending_hello(flow)
+    degrade_warnings = [r for r in caplog.records if "degrad" in r.message.lower()
+                        or "unavailable" in r.message.lower()]
+    assert len(degrade_warnings) == 1
+    assert flow.jpeg_degraded_logged is True
 
 
 # --- 5c. per-flow pacing (#197) ---------------------------------------------
@@ -7431,6 +7570,44 @@ def test_ws_thin_hello_negotiates_jpeg_and_reaches_the_renderer(thin_renderer):
 
     assert fake.submit_kwargs[-1] == {"pack": True, "fmt": "jpeg", "quality": 95,
                                       "out_width": 480, "out_height": 480}
+
+
+def test_thin_render_loop_sends_ack_before_any_frame_single_writer_order(thin_renderer):
+    """#197 review finding 2, direct proof: driving `_thin_render_loop`
+    itself (rather than through `TestClient`, which only lets us assert on
+    timing) lets this pin the EXACT send order -- the ack for a pending hello
+    must reach the socket before any frame rendered under the new settings,
+    because the render loop is the ONLY writer and applies-then-acks before
+    it ever renders that tick's frame."""
+    fake = thin_renderer()
+    state = _thin_state()
+    state.thin_latest_pc = (4, _THIN_PTS, _THIN_COLS)
+    flow = web.ThinFlow()
+    flow.pending_hello = {"type": "thin_hello", "format": "jpeg", "fps": 30}
+    ws = _FakeThinWs()
+
+    async def _drive():
+        task = asyncio.create_task(web._thin_render_loop(state, ws, flow))
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while len(ws.sent) < 2 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_drive())
+
+    kinds = [k for k, _ in ws.sent]
+    assert "text" in kinds and "bytes" in kinds
+    ack_index = next(i for i, (k, p) in enumerate(ws.sent)
+                     if k == "text" and json.loads(p).get("type") == "thin_hello_ack")
+    first_frame_index = next(i for i, (k, _p) in enumerate(ws.sent) if k == "bytes")
+    assert ack_index < first_frame_index
+    assert flow.format == "jpeg" and flow.fps == 30.0
+    # the frame that followed the ack was rendered with the NEGOTIATED kwargs
+    assert fake.submit_kwargs[-1]["fmt"] == "jpeg"
 
 
 def test_ws_thin_rejects_beyond_the_client_cap(thin_renderer):

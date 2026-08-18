@@ -27,7 +27,10 @@ if [ ! -x "$VENV_PY" ]; then
     fi
 fi
 
-if ! "$VENV_PY" -c "import fastapi, uvicorn, numpy, serial, roomscan" >/dev/null 2>&1; then
+# simplejpeg (#197): missing from this probe means a pre-#197 venv never
+# reinstalls, and every /ws-thin JPEG negotiation then silently degrades to
+# raw ("a new default is invisible without a migration" -- see AGENTS.md).
+if ! "$VENV_PY" -c "import fastapi, uvicorn, numpy, serial, roomscan, simplejpeg" >/dev/null 2>&1; then
     echo "[setup] Installing dependencies (first run takes a few minutes)..."
     "$VENV_PY" -m pip install --quiet --upgrade pip
     "$VENV_PY" -m pip install --quiet -e "host[web]"

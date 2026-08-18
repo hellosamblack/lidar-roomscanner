@@ -3,13 +3,15 @@
 Deliberately fake-backed: constructing a real `OffscreenRenderer` costs ~4 s and
 a GL context, and a *second* one in the same process aborts the interpreter --
 which would take the whole pytest run down. Every renderer here either has a
-failed init (open3d import poisoned) or is a plain fake object, and image scenes
-resolve inline without the render thread, so nothing in this file ever touches
-Filament.
+failed init (open3d import poisoned) or is a plain fake object. Image scenes
+are queued to the render thread like everything else (#197 review finding 3),
+but a failed-init renderer's `_drain()` still services them without ever
+touching Filament, so nothing in this file ever touches the real thing.
 """
 
 import struct
 import sys
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -741,6 +743,51 @@ def test_submit_jpeg_raises_when_simplejpeg_unavailable(broken_renderer, monkeyp
     fut = broken_renderer.submit(image_scene(_ramp(7)), ThinCamera(), fmt="jpeg")
     with pytest.raises(ImportError):
         fut.result(timeout=5.0)
+
+
+def test_submit_image_scene_pack_runs_on_the_render_thread_not_the_caller(
+        broken_renderer, monkeypatch):
+    """#197 review finding 3: an image scene's letterbox + pack/encode used
+    to run INLINE inside `submit()`, i.e. on the CALLER's thread -- which in
+    production is the asyncio event loop. Now every scene kind, including
+    `"image"`, is queued to the render thread and resolved there, so this
+    must run on `broken_renderer._thread`, never on the thread that called
+    `submit()`."""
+    idents: list[int] = []
+    orig_finish = ThinRenderer._finish
+
+    def _spy_finish(self, rgb, pack, **kw):
+        idents.append(threading.get_ident())
+        return orig_finish(self, rgb, pack, **kw)
+
+    monkeypatch.setattr(ThinRenderer, "_finish", _spy_finish)
+    caller_ident = threading.get_ident()
+
+    broken_renderer.submit(image_scene(_ramp(7)), ThinCamera()).result(timeout=5.0)
+
+    assert idents == [broken_renderer._thread.ident]
+    assert idents[0] != caller_ident
+
+
+def test_submit_image_scene_jpeg_pack_runs_on_the_render_thread(
+        broken_renderer, monkeypatch):
+    """Same proof, but with the actual JPEG encode path (the one that made
+    finding 3 a real cost rather than a theoretical one)."""
+    idents: list[int] = []
+    orig_encode = tr.encode_jpeg_frame
+
+    def _spy_encode(rgb, quality=tr.DEFAULT_JPEG_QUALITY):
+        idents.append(threading.get_ident())
+        return orig_encode(rgb, quality)
+
+    monkeypatch.setattr(tr, "encode_jpeg_frame", _spy_encode)
+    caller_ident = threading.get_ident()
+
+    broken_renderer.submit(image_scene(_ramp(7)), ThinCamera(),
+                           fmt="jpeg").result(timeout=5.0)
+
+    assert idents == [broken_renderer._thread.ident]
+    assert idents[0] != caller_ident
 
 
 def test_closed_renderer_fails_new_submissions(broken_renderer):

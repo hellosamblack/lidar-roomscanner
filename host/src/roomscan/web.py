@@ -116,7 +116,7 @@ from zeroconf import ServiceInfo, Zeroconf
 from .thin_render import (
     DEFAULT_JPEG_QUALITY, THIN_HEIGHT, THIN_MODES, THIN_WIDTH, ThinCamera,
     ThinRenderer, ThinRenderUnavailable, extract_ir_grid, image_scene,
-    jpeg_available, points_scene, unpack_mesh_scene,
+    jpeg_available, points_scene, unpack_mesh_scene, warm_jpeg_import,
 )
 from .slam.config import DetailedSlamPreset, preferred_device
 from .slam.detailed import (build_manifest, estimate_seconds, sidecar_paths,
@@ -157,7 +157,16 @@ THIN_TELEMETRY_INTERVAL = 0.5
 # a client that never sends `thin_hello` is unaffected (`ThinFlow` defaults
 # reproduce THIN_INTERVAL / THIN_WIDTH / THIN_HEIGHT exactly).
 THIN_HELLO_FPS_MIN = 1
-THIN_HELLO_FPS_MAX = 60
+# The fps ceiling is COUPLED to format (#197 review finding 5): a raw
+# RGB565 480x480 frame is 460 800 bytes, so even today's 10 fps default is
+# ~4.6 MB/s per client (see docs/thin-client.md); 60 fps raw would be
+# ~27.6 MB/s and ~160% of the SINGLE shared render thread for just one
+# client, starving the other (THIN_MAX_CLIENTS=2) even before the network is
+# considered. A JPEG frame at the default quality is roughly 15-25 KB, so
+# 60 fps JPEG (~1-1.5 MB/s) is cheaper than 10 fps raw -- raw keeps today's
+# ceiling, jpeg gets the higher one.
+THIN_HELLO_FPS_MAX_RAW = 10
+THIN_HELLO_FPS_MAX_JPEG = 60
 #: square resolutions only -- a non-square request is rejected outright and
 #: the flow's prior width/height are kept, rather than distorting the image.
 THIN_HELLO_RESOLUTIONS = (320, 480)
@@ -5272,6 +5281,15 @@ class ThinFlow:
     width: int = THIN_WIDTH
     height: int = THIN_HEIGHT
     quality: int = DEFAULT_JPEG_QUALITY
+    #: a raw `thin_hello` dict awaiting application by the render loop
+    #: (#197 review finding 2) -- the receive task only ever STASHES it here,
+    #: never applies it or sends the ack itself, so the render loop remains
+    #: the single writer on this websocket.
+    pending_hello: dict | None = None
+    #: set once a jpeg request has been silently degraded to raw for this
+    #: flow, so the one-per-flow warning (#197 review finding 9) fires only
+    #: the first time, not on every subsequent hello/frame.
+    jpeg_degraded_logged: bool = False
 
     @property
     def interval(self) -> float:
@@ -5464,15 +5482,47 @@ def _nearest(value: float, choices) -> int:
     return min(choices, key=lambda c: abs(c - value))
 
 
+def _finite_float(value) -> float | None:
+    """`float(value)` if that succeeds AND is finite, else `None`.
+
+    JSON permits the literal tokens `Infinity`/`-Infinity`/`NaN` (Python's
+    `json` module accepts them on both ends by default), and `int(float("inf"))`
+    raises an uncaught `OverflowError` -- which used to escape
+    `negotiate_thin_hello` entirely, skipping the rest of the message AND the
+    ack (#197 review finding 1). Every numeric field below is parsed through
+    here first, so a non-finite value is simply indistinguishable from a
+    missing one: left at the flow's current value, never a raise.
+    """
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return f if math.isfinite(f) else None
+
+
 def negotiate_thin_hello(msg: dict, flow: ThinFlow) -> dict:
     """Pure clamping logic for one `thin_hello` message (#197).
 
     Returns the dict of EFFECTIVE (clamped) values -- what the caller applies
     to `flow` and echoes back as `thin_hello_ack`, "report what actually
     happened, not what was requested". Never raises: a field this cannot make
-    sense of (wrong type, missing, non-square width/height) is simply left at
-    `flow`'s current value, so one bad field cannot corrupt the others in the
-    same message, and a fully malformed hello is a genuine no-op.
+    sense of (wrong type, missing, non-finite, non-square width/height) is
+    simply left at `flow`'s current value, so one bad field cannot corrupt the
+    others in the same message, and a fully malformed hello is a genuine
+    no-op -- see `_finite_float`.
+
+    `fps` stays a FLOAT throughout (`ThinFlow.fps` is a float): an earlier
+    version ran requested fps through `int()` before clamping, which both
+    truncated a fractional request (0.5 fps became 1 fps for the wrong
+    reason -- 0, then clamped up to the floor) and rejected a numeric STRING
+    like `"30.5"` while accepting `"30"` (#197 review finding 1). The fps
+    ceiling is COUPLED to `format` (finding 5) and is re-applied to the
+    EFFECTIVE fps on every call, whether or not this message requested a new
+    one -- so a client that negotiated jpeg@60 and later asks only for
+    `format: "raw"` gets its stored 60 fps re-clamped down to the raw
+    ceiling, rather than carrying an now-illegal rate forward silently.
     """
     fmt = msg.get("format", flow.format)
     if fmt not in ("raw", "jpeg"):
@@ -5481,43 +5531,70 @@ def negotiate_thin_hello(msg: dict, flow: ThinFlow) -> dict:
         # Degrade gracefully (#197 requirement 5) -- never promise a codec
         # this process cannot actually run.
         fmt = "raw"
+    fps_max = THIN_HELLO_FPS_MAX_JPEG if fmt == "jpeg" else THIN_HELLO_FPS_MAX_RAW
 
     fps = flow.fps
-    requested_fps = msg.get("fps")
+    requested_fps = _finite_float(msg.get("fps"))
     if requested_fps is not None:
-        try:
-            fps = float(max(THIN_HELLO_FPS_MIN,
-                            min(THIN_HELLO_FPS_MAX, int(requested_fps))))
-        except (TypeError, ValueError):
-            pass
+        fps = requested_fps
+    # Re-clamp unconditionally -- not only when this message requested a new
+    # fps -- because a format change alone can invalidate a stored rate.
+    fps = max(float(THIN_HELLO_FPS_MIN), min(float(fps_max), fps))
 
     width, height = flow.width, flow.height
-    rw, rh = msg.get("width"), msg.get("height")
+    rw = _finite_float(msg.get("width"))
+    rh = _finite_float(msg.get("height"))
     if rw is not None and rh is not None:
-        try:
-            rw, rh = int(rw), int(rh)
-            if rw == rh:
-                width = height = _nearest(rw, THIN_HELLO_RESOLUTIONS)
-            # else: non-square is rejected outright -- keep the prior size
-        except (TypeError, ValueError):
-            pass
+        if rw == rh:
+            width = height = _nearest(rw, THIN_HELLO_RESOLUTIONS)
+        # else: non-square is rejected outright -- keep the prior size
 
     quality = flow.quality
-    rq = msg.get("quality")
+    rq = _finite_float(msg.get("quality"))
     if rq is not None:
-        try:
-            quality = max(THIN_HELLO_QUALITY_MIN,
-                          min(THIN_HELLO_QUALITY_MAX, int(rq)))
-        except (TypeError, ValueError):
-            pass
+        quality = int(round(max(float(THIN_HELLO_QUALITY_MIN),
+                                min(float(THIN_HELLO_QUALITY_MAX), rq))))
 
     return {"format": fmt, "fps": fps, "width": width, "height": height,
             "quality": quality}
 
 
-async def _handle_thin_inbound(state, msg: dict, flow: ThinFlow,
-                               websocket=None) -> None:
-    """Apply one `/ws-thin` command. Unknown types are ignored, not fatal."""
+def _apply_pending_hello(flow: ThinFlow) -> dict | None:
+    """Pop and apply `flow.pending_hello`, if any; return the
+    `thin_hello_ack` JSON dict to send, or `None` if nothing was pending.
+
+    The ONLY caller is `_thin_render_loop`, at the top of a tick (#197 review
+    finding 2). The receive task (`_handle_thin_inbound`) only ever stashes
+    the raw message on `flow.pending_hello` -- it never applies it and never
+    writes to the websocket -- so this connection has exactly one writer, and
+    the ack is guaranteed to reach the client before any frame rendered under
+    the new settings (same tick, right after this call, using the
+    already-updated `flow`).
+    """
+    if flow.pending_hello is None:
+        return None
+    msg, flow.pending_hello = flow.pending_hello, None
+    effective = negotiate_thin_hello(msg, flow)
+    requested_jpeg = msg.get("format") == "jpeg"
+    flow.format = effective["format"]
+    flow.fps = effective["fps"]
+    flow.width = effective["width"]
+    flow.height = effective["height"]
+    flow.quality = effective["quality"]
+    if requested_jpeg and effective["format"] != "jpeg" and not flow.jpeg_degraded_logged:
+        # One line per FLOW, not per frame (#197 review finding 9) -- the
+        # observable that finding 8's venv-staleness migration was missing.
+        flow.jpeg_degraded_logged = True
+        log.warning("thin_hello requested format=jpeg but simplejpeg is "
+                    "unavailable; flow stays on format=raw")
+    return {"type": "thin_hello_ack", **effective}
+
+
+async def _handle_thin_inbound(state, msg: dict, flow: ThinFlow) -> None:
+    """Apply one `/ws-thin` command. Unknown types are ignored, not fatal.
+
+    `thin_hello` is deliberately NOT applied here -- see `_apply_pending_hello`.
+    """
     mtype = msg.get("type")
     if mtype == "thin_orbit":
         flow.camera.apply_orbit(
@@ -5527,18 +5604,7 @@ async def _handle_thin_inbound(state, msg: dict, flow: ThinFlow,
     elif mtype == "thin_mode":
         flow.camera.set_mode(msg.get("mode"))
     elif mtype == "thin_hello":
-        effective = negotiate_thin_hello(msg, flow)
-        flow.format = effective["format"]
-        flow.fps = effective["fps"]
-        flow.width = effective["width"]
-        flow.height = effective["height"]
-        flow.quality = effective["quality"]
-        if websocket is not None:
-            try:
-                await websocket.send_text(json.dumps(
-                    {"type": "thin_hello_ack", **effective}))
-            except Exception:  # noqa: BLE001 - disconnect; receive loop wins
-                pass
+        flow.pending_hello = msg
     elif mtype == "thin_record":
         ctrl = getattr(state, "controller", None)
         if ctrl is not None:
@@ -5567,6 +5633,13 @@ async def _thin_render_loop(state, websocket, flow: ThinFlow) -> None:
     """Render and push frames to one thin client, paced at the flow's own
     negotiated interval (`flow.interval`; `THIN_INTERVAL`/10 fps by default).
 
+    This task is the ONLY writer on `websocket` (#197 review finding 2): a
+    pending `thin_hello` is applied and acked here, at the top of a tick,
+    before that tick's telemetry/frame -- never from the receive task, which
+    only stashes it (`_handle_thin_inbound` -> `flow.pending_hello`). That
+    guarantees the ack reaches the client before any frame rendered under the
+    new settings, and rules out two tasks racing to write the same socket.
+
     Backpressure is freshest-frame-wins, and it is **structural** rather than a
     governor: this task awaits its own render before pacing the next tick, so
     exactly one render per client can ever be in flight, and a tick whose work
@@ -5586,6 +5659,14 @@ async def _thin_render_loop(state, websocket, flow: ThinFlow) -> None:
         if delay > 0:
             await asyncio.sleep(delay)
         now = time.monotonic()
+
+        ack = _apply_pending_hello(flow)
+        if ack is not None:
+            try:
+                await websocket.send_text(json.dumps(ack))
+            except Exception:  # noqa: BLE001 - disconnect; the receive loop wins
+                return
+
         next_tick, skipped = _thin_next_tick(flow, next_tick, now)
         if skipped:
             flow.skipped += 1
@@ -6597,6 +6678,13 @@ async def websocket_thin_endpoint(websocket: WebSocket):
         await websocket.close()
         return
 
+    # Warm the (possibly first-ever-in-this-process, dlopen-costly) `import
+    # simplejpeg` HERE, off the loop -- not inline in `thin_hello` negotiation
+    # (#197 review finding 4). Best-effort: any failure just means
+    # `jpeg_available()` keeps reporting unavailable and negotiation degrades
+    # to raw as usual; it must never affect the raw path.
+    await asyncio.to_thread(warm_jpeg_import)
+
     flow = ThinFlow()
     flows[websocket] = flow
     if not hasattr(state, "ws_client_id"):
@@ -6609,7 +6697,7 @@ async def websocket_thin_endpoint(websocket: WebSocket):
         while True:
             data = await websocket.receive_text()
             try:
-                await _handle_thin_inbound(state, json.loads(data), flow, websocket)
+                await _handle_thin_inbound(state, json.loads(data), flow)
             except Exception as exc:  # noqa: BLE001 - one bad command is not fatal
                 log.warning("bad /ws-thin message: %r (%s)", data[:200], exc)
     except WebSocketDisconnect:

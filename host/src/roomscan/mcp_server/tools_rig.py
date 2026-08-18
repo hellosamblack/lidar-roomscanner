@@ -1003,15 +1003,33 @@ async def rig_ws_probe(seconds: float = 10.0, url: str = "") -> dict:
 async def rig_thin_probe(frames: int = 5, url: str = "", out_dir: str = "",
                          orbit_yaw: float = 120.0,
                          modes: str = "point_cloud,slam,ir",
-                         record: bool = False, timeout: float = 15.0) -> dict:
+                         record: bool = False, timeout: float = 15.0,
+                         format: str = "", fps: int = 0,
+                         width: int = 0, height: int = 0,
+                         quality: int = 0) -> dict:
     """Look at what `/ws-thin` is actually drawing, as PNGs, and prove the
     commands move it.
 
     Stands in for the CrowPanel thin client we cannot put on the bench: connects
-    to the running roomscan-web's `/ws-thin`, decodes `THIN_FRAME` (u32 tag=1,
-    u16 w, u16 h, then exactly w*h*2 bytes of RGB565), writes each frame to
+    to the running roomscan-web's `/ws-thin`, decodes the binary frame it sends
+    -- tag 1 (`THIN_FRAME`: u32 tag=1, u16 w, u16 h, then exactly w*h*2 bytes of
+    RGB565) by default, or tag 2 (`THIN_FRAME_JPEG`: u32 tag=2, u16 w, u16 h,
+    u32 jpeg_len, then jpeg_len bytes of JFIF, decoded via `simplejpeg`) once a
+    `thin_hello` has negotiated `format="jpeg"` (#197) -- writes each frame to
     `results/thin_probe/<timestamp>/*.png` (served at `/results/...`), and
     round-trips the inbound commands. Read the PNGs -- that is the point of it.
+
+    `format`/`fps`/`width`/`height`/`quality` negotiate `thin_hello` before
+    anything else, when any is given (non-empty/non-zero); leaving all five at
+    their defaults sends no hello at all, so a default call still proves the
+    un-negotiated path -- today's tag-1 RGB565 480x480 @ 10 fps, byte-identical
+    to before #197. `width` alone (no `height`) is sent as a square request
+    (this protocol is square-only). The result's `hello` key reports the exact
+    request, the ACKED (clamped) effective values, and `degraded` (True only
+    when `format="jpeg"` was requested but the server acked `format="raw"` --
+    `simplejpeg` unavailable server-side). `ok` REQUIRES the ack to have
+    arrived and every collected frame's tag to match the acked format -- a
+    silently-degraded or never-acked hello no longer reports `ok: true`.
 
     THE OBSERVABLE IS PIXELS. `thin_orbit` is judged by `orbit.changed_frac`,
     the fraction of pixels that moved by more than 8 levels, measured **against
@@ -1053,4 +1071,7 @@ async def rig_thin_probe(frames: int = 5, url: str = "", out_dir: str = "",
 
     return await probe_async(frames=frames, url=url or DEFAULT_URL,
                              out_dir=out_dir or None, orbit_yaw=orbit_yaw,
-                             modes=modes, record=record, timeout=timeout)
+                             modes=modes, record=record, timeout=timeout,
+                             format=format or None, fps=fps or None,
+                             width=width or None, height=height or None,
+                             quality=quality or None)

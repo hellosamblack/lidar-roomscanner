@@ -365,7 +365,19 @@ async def _probe_hello(link: _ThinLink, report: dict, *, fmt: str | None,
                        quality: int | None, timeout: float) -> None:
     """Negotiate `thin_hello` (#197) when any of `fmt`/`fps`/`width`/`height`/
     `quality` was passed. A default run (nothing passed) sends nothing and
-    keeps today's behaviour -- tag-1 RGB565 480x480 @ 10 fps."""
+    keeps today's behaviour -- tag-1 RGB565 480x480 @ 10 fps.
+
+    `width`/`height`: the protocol is SQUARE-ONLY (`THIN_HELLO_RESOLUTIONS`),
+    and `--width` alone with no `--height` used to build a hello the server
+    silently ignores in full (it requires both, or neither -- #197 review
+    finding 7). Chosen fix: when only one of the two is given, use it for
+    BOTH, since a non-square pair is meaningless on this protocol anyway.
+    """
+    if width is not None and height is None:
+        height = width
+    elif height is not None and width is None:
+        width = height
+
     hello: dict = {"type": "thin_hello"}
     if fmt is not None:
         hello["format"] = fmt
@@ -381,7 +393,7 @@ async def _probe_hello(link: _ThinLink, report: dict, *, fmt: str | None,
         report["hello"] = None
         return
 
-    entry: dict = {"requested": hello}
+    entry: dict = {"requested": hello, "acked": None, "degraded": False}
     report["hello"] = entry
     if not await link.send(hello):
         entry["error"] = "send failed"
@@ -391,6 +403,12 @@ async def _probe_hello(link: _ThinLink, report: dict, *, fmt: str | None,
         entry["error"] = f"no thin_hello_ack within {timeout:g}s"
         return
     entry["ack"] = ack
+    entry["acked"] = {k: ack.get(k) for k in ("format", "fps", "width", "height", "quality")}
+    # requested-vs-acked DRIFT, surfaced explicitly rather than left for the
+    # reader to diff two dicts (#197 review finding 7): a clamp (e.g. fps
+    # 999 -> 60) is expected and not "degraded"; only a FORMAT downgrade
+    # (jpeg requested, raw acked -- the encoder was unavailable) counts.
+    entry["degraded"] = bool(fmt == "jpeg" and ack.get("format") == "raw")
 
 
 async def _collect_initial(link: _ThinLink, frames: int, out_dir: Path,
@@ -624,7 +642,30 @@ async def probe_async(frames: int = DEFAULT_FRAMES, url: str = DEFAULT_URL,
             report["png_paths"].append(png["path"])
     report["modes_with_frames"] = sorted(m for m, e in report["modes"].items()
                                          if e.get("frame"))
-    report["ok"] = bool(report["frames_received"] and not report["server_error"])
+
+    # `ok` used to ignore negotiation entirely -- a degraded (jpeg requested,
+    # raw acked) or never-acked hello still reported ok:true (#197 review
+    # finding 7). When a hello was actually requested, `ok` now also requires
+    # the ack to have arrived AND every collected frame's tag to match the
+    # ACKED format (frames are collected strictly after the hello round-trip
+    # above, so this can see a server that acked jpeg but kept sending tag 1).
+    hello_ok = True
+    hello_entry = report.get("hello")
+    if hello_entry is not None:
+        hello_ok = bool(hello_entry.get("ack")) and not hello_entry.get("error")
+        acked_fmt = (hello_entry.get("acked") or {}).get("format")
+        if acked_fmt is not None:
+            expected_tag = THIN_TAG_JPEG if acked_fmt == "jpeg" else THIN_TAG
+            mismatched = [f["index"] for f in report["frames"]
+                         if f.get("tag") not in (None, expected_tag)]
+            if mismatched:
+                hello_ok = False
+                report["errors"].append(
+                    f"frame(s) {mismatched} carried a tag != expected "
+                    f"{expected_tag} for the ACKED format {acked_fmt!r}")
+
+    report["ok"] = bool(report["frames_received"] and not report["server_error"]
+                        and hello_ok)
     return report
 
 
@@ -641,7 +682,8 @@ def _print(rep: dict) -> None:
             a = h["ack"]
             print(f"  hello: requested {h['requested']} -> ack format={a.get('format')} "
                   f"fps={a.get('fps')} {a.get('width')}x{a.get('height')} "
-                  f"quality={a.get('quality')}")
+                  f"quality={a.get('quality')}"
+                  + ("  DEGRADED (jpeg unavailable server-side)" if h.get("degraded") else ""))
         elif h.get("error"):
             print(f"  hello: {h['error']}")
     if rep["server_error"]:
@@ -707,9 +749,11 @@ def main(argv=None) -> int:
     ap.add_argument("--fps", type=int, default=None,
                     help="negotiate thin_hello fps (#197)")
     ap.add_argument("--width", type=int, default=None,
-                    help="negotiate thin_hello width, one of 320/480 (#197)")
+                    help="negotiate thin_hello width, one of 320/480 (#197); "
+                         "alone (no --height) sends a SQUARE request of this size")
     ap.add_argument("--height", type=int, default=None,
-                    help="negotiate thin_hello height, one of 320/480 (#197)")
+                    help="negotiate thin_hello height, one of 320/480 (#197); "
+                         "alone (no --width) sends a SQUARE request of this size")
     ap.add_argument("--quality", type=int, default=None,
                     help="negotiate thin_hello JPEG quality 40-95 (#197)")
     ap.add_argument("--json", action="store_true")
