@@ -35,8 +35,15 @@ jobs:
       - name: Install host package (dev, web, mcp extras)
         run: pip install -e "host/[dev,web,mcp]"
 
+      # shell: bash makes GitHub invoke `bash --noprofile --norc -eo pipefail
+      # {0}` instead of the default `bash -e {0}` (no pipefail) -- without it,
+      # `pytest | tee` always exits 0 (tee's status), so a red pytest run
+      # produces a GREEN job. With pipefail, a failing pytest fails the step
+      # and the script stops there, so the skip-summary lines below never
+      # print on a red run -- that's fine, the job is already failed.
       - name: Run pytest
         working-directory: host
+        shell: bash
         run: |
           python -m pytest -q --no-header 2>&1 | tee /tmp/pytest-output.log
           echo "---- skip summary ----"
@@ -79,6 +86,10 @@ jobs:
         working-directory: firmware/scanner-stream
         run: arm-none-eabi-size build/Release/*.elf
 
+      # .elf/.bin/.map are all emitted by the same link step (verified
+      # locally -- all three land together in build/Release/), so a build
+      # that produced none of them should fail the job rather than pass
+      # silently.
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -87,4 +98,4 @@ jobs:
             firmware/scanner-stream/build/Release/*.elf
             firmware/scanner-stream/build/Release/*.bin
             firmware/scanner-stream/build/Release/*.map
-          if-no-files-found: warn
+          if-no-files-found: error
