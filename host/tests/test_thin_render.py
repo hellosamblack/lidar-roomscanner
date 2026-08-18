@@ -671,3 +671,30 @@ def test_mesh_within_budget_is_untouched():
     assert scene is not None
     assert len(scene.points) == 300
     assert "decimated_from_verts" not in scene.meta
+
+
+# --- 9. extract_ir_grid tests (#199) -----------------------------------------
+
+
+def test_extract_ir_grid_none_or_empty_returns_none():
+    assert tr.extract_ir_grid(None) is None
+    assert tr.extract_ir_grid(np.zeros((0, 0))) is None
+
+
+def test_extract_ir_grid_uniform_rgb():
+    img = np.full((16, 16, 3), 128, dtype=np.uint8)
+    grid = tr.extract_ir_grid(img)
+    assert grid is not None
+    assert len(grid) == 64
+    assert all(val == 128 for val in grid)
+
+
+def test_extract_ir_grid_2d_reflectance():
+    refl = np.arange(54 * 42, dtype=np.float32).reshape(42, 54)
+    grid = tr.extract_ir_grid(refl)
+    assert grid is not None
+    assert len(grid) == 64
+    assert all(0 <= val <= 255 for val in grid)
+    # top-left block should be smaller than bottom-right block
+    assert grid[0] < grid[63]
+

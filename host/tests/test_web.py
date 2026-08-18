@@ -7034,8 +7034,9 @@ def test_thin_scene_for_slam_memoises_by_object_identity_not_equality():
 
 
 _THIN_TELEMETRY_KEYS = {"type", "fps", "point_count", "recording", "mode",
-                        "link", "roll_deg", "tilt_deg", "heading_deg",
-                        "orientation_valid", "orientation_labels"}
+                        "link", "roll_deg", "pitch_deg", "tilt_deg", "heading_deg",
+                        "yaw_rate_dps", "orientation_valid", "orientation_labels",
+                        "ir_grid"}
 
 
 def test_thin_telemetry_message_key_set_and_values():
@@ -7393,10 +7394,24 @@ def test_thin_telemetry_orientation_is_the_sensor_message_verbatim():
     msg = web.thin_telemetry_message(state, web.ThinFlow())
 
     assert msg["roll_deg"] == pytest.approx(-3.5)
+    assert msg["pitch_deg"] == pytest.approx(12.75)
     assert msg["tilt_deg"] == pytest.approx(12.75)
     assert msg["heading_deg"] == pytest.approx(117.25)
+    assert msg["yaw_rate_dps"] == pytest.approx(0.0)
     assert msg["orientation_valid"] is True
     assert msg["orientation_labels"] == ["Roll", "Tilt", "Heading"]
+
+
+def test_thin_telemetry_ir_grid_and_yaw_rate():
+    state = _thin_state()
+    # 8x8 test grid
+    ir_mock = np.arange(64, dtype=np.uint8).reshape(8, 8)
+    state.thin_latest_ir = (1, np.stack([ir_mock] * 3, axis=-1))
+    msg = web.thin_telemetry_message(state, web.ThinFlow())
+    assert msg["ir_grid"] is not None
+    assert len(msg["ir_grid"]) == 64
+    assert msg["ir_grid"][0] == 0
+    assert msg["ir_grid"][63] == 63
 
 
 def test_thin_telemetry_never_substitutes_a_euler_yaw_for_a_heading():

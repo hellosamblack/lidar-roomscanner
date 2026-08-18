@@ -52,10 +52,22 @@ Sent every 500 ms — deliberately not per-frame.
   "mode": "point_cloud",
   "link": "ok",
   "roll_deg": -3.5,
+  "pitch_deg": 12.8,
   "tilt_deg": 12.8,
   "heading_deg": 117.2,
+  "yaw_rate_dps": 0.0,
   "orientation_valid": true,
-  "orientation_labels": ["Roll", "Tilt", "Heading"]
+  "orientation_labels": ["Roll", "Tilt", "Heading"],
+  "ir_grid": [
+    12, 14, 18, 22, 25, 20, 15, 10,
+    14, 28, 45, 60, 62, 48, 24, 12,
+    18, 42, 85, 120, 115, 80, 38, 16,
+    20, 50, 110, 180, 175, 105, 45, 18,
+    22, 52, 115, 185, 180, 110, 48, 20,
+    19, 44, 88, 125, 120, 85, 40, 18,
+    15, 30, 48, 65, 64, 50, 26, 14,
+    10, 12, 16, 20, 22, 18, 14, 10
+  ]
 }
 ```
 
@@ -63,16 +75,22 @@ Sent every 500 ms — deliberately not per-frame.
 so a dropped `thin_mode`/`thin_record` self-corrects at the next tick. Any
 field may be `null` before the device has been read back.
 
-**The orientation block** (`roll_deg`, `tilt_deg`, `heading_deg`,
-`orientation_valid`, `orientation_labels`) is copied **verbatim** from the
-sensor message the broadcaster already built — the same numbers, in the same
-decomposition, that the web UI's Sensors panel displays. It is deliberately
+**The spatial orientation and heading block** (`roll_deg`, `pitch_deg`, `tilt_deg`,
+`heading_deg`, `yaw_rate_dps`, `orientation_valid`, `orientation_labels`) is copied
+**verbatim** from the sensor message the broadcaster already built — the same numbers,
+in the same decomposition, that the web UI's Sensors panel displays. `yaw_rate_dps`
+reports angular velocity around the body yaw axis (deg/s). It is deliberately
 *not* recomputed from the quaternion at this endpoint: no scalar taken off an
 attitude is the bearing of an axis, and asking for "yaw" instead of the bearing
 of the axis you actually mean is the single defect this repo has shipped most
 often (four times, twice in live code, pinned by the
 `test_no_new_yaw_twist_consumers` AST guard). Reusing the finished projection is
 what keeps this endpoint from being the fifth.
+
+`ir_grid` carries an 8x8 matrix (64 integers in 0..255, row-major) downsampled
+from the ToF reflectance array, allowing the CrowPanel sidebar to display a live
+ambient/reflectance thumbnail widget even while the main viewport is in `point_cloud`
+or `slam` mode.
 
 `orientation_valid` is `false` when the heading cannot be trusted — a bad
 magnetometer reading, the device accelerating (gravity reference degraded), or a
@@ -85,14 +103,14 @@ is deliberately no fallback to `orientation_view["yaw_deg"]`: that slot is the
 heading in the *World* decomposition, but under `zyx` (or any alternate
 decomposition the operator selects) it is a Tait-Bryan twist about a body axis
 and not a bearing at all. `null` means no bearing exists right now, and the
-client is told that rather than shown a plausible wrong number. `roll_deg` and
-`tilt_deg` remain valid in that state. `orientation_labels` carries the operator's own three axis names
+client is told that rather than shown a plausible wrong number. `roll_deg`,
+`pitch_deg` and `tilt_deg` remain valid in that state. `orientation_labels` carries the operator's own three axis names
 (default `["Roll", "Tilt", "Heading"]`).
 
 `power_mode` and `i3c_airtime_pct` were in the first draft of this contract and
 were **removed on 2026-08-18** at the owner's request — bus utilisation and
 power mode are not wanted on this panel. That freed the space the orientation
-block now occupies.
+and IR preview widgets now occupy.
 
 ### JSON in (client → server)
 

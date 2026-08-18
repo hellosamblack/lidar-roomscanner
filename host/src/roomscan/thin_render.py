@@ -103,6 +103,48 @@ def pack_thin_frame(pixels_rgb565: bytes, width: int = THIN_WIDTH,
     return THIN_HEADER.pack(THIN_TAG, width, height) + pixels_rgb565
 
 
+def extract_ir_grid(rgb_or_refl: np.ndarray | None) -> list[int] | None:
+    """Downsample a 2D reflectance or 3D RGB image into an 8x8 grid of 64 integers [0..255].
+
+    Used by `thin_telemetry` to power the CrowPanel sidebar IR thumbnail widget.
+    Returns None if `rgb_or_refl` is None or empty.
+    """
+    if rgb_or_refl is None:
+        return None
+    arr = np.asarray(rgb_or_refl)
+    if arr.size == 0:
+        return None
+    if arr.ndim == 3:
+        # RGB / RGBA to luminance
+        gray = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+    elif arr.ndim == 2:
+        gray = arr.astype(np.float64)
+        gmin = float(np.nanmin(gray))
+        gmax = float(np.nanmax(gray))
+        if gmax > gmin:
+            gray = (gray - gmin) / (gmax - gmin) * 255.0
+        else:
+            gray = np.zeros_like(gray)
+    else:
+        return None
+
+    h, w = gray.shape[:2]
+    if h == 0 or w == 0:
+        return None
+
+    row_splits = np.array_split(np.arange(h), 8)
+    col_splits = np.array_split(np.arange(w), 8)
+    grid: list[int] = []
+    for r_idx in range(8):
+        rows = row_splits[r_idx]
+        for c_idx in range(8):
+            cols = col_splits[c_idx]
+            block = gray[rows[:, None], cols]
+            val = int(np.clip(np.round(np.mean(block)), 0, 255))
+            grid.append(val)
+    return grid
+
+
 # --------------------------------------------------------------------------
 # Step 2 -- per-connection camera state
 # --------------------------------------------------------------------------

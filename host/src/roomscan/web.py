@@ -115,7 +115,8 @@ from .sources import FileSource, Recorder, SerialSource, UdpSource, get_best_sou
 from zeroconf import ServiceInfo, Zeroconf
 from .thin_render import (
     THIN_HEIGHT, THIN_MODES, THIN_WIDTH, ThinCamera, ThinRenderer,
-    ThinRenderUnavailable, image_scene, points_scene, unpack_mesh_scene,
+    ThinRenderUnavailable, extract_ir_grid, image_scene, points_scene,
+    unpack_mesh_scene,
 )
 from .slam.config import DetailedSlamPreset, preferred_device
 from .slam.detailed import (build_manifest, estimate_seconds, sidecar_paths,
@@ -5358,15 +5359,18 @@ def thin_telemetry_message(state, flow: ThinFlow) -> dict:
     # bearing of the axis you mean is the single defect this repo has shipped
     # most often (four times, two of them in live code). Reusing the finished
     # projection means this endpoint cannot be the fifth.
-    roll = tilt = heading = None
+    roll = tilt = pitch = heading = None
     orientation_valid = False
     orientation_labels = list(DEFAULT_AXIS_LABELS)
     smsg = getattr(state, "thin_latest_sensor", None)
     if smsg:
         heading = smsg.get("heading_deg")
+        if heading is None:
+            heading = smsg.get("heading")
         view = smsg.get("orientation_view") or {}
         roll = view.get("roll_deg")
         tilt = view.get("pitch_deg")
+        pitch = tilt
         # NO fallback to `orientation_view["yaw_deg"]`. In the World
         # decomposition that slot happens to be the heading, but under `zyx`
         # (or any alternate decomposition) it is a Tait-Bryan twist about a
@@ -5379,6 +5383,22 @@ def thin_telemetry_message(state, flow: ThinFlow) -> dict:
         if labels:
             orientation_labels = list(labels)
 
+    # Angular rate around body yaw axis (deg/s) from stream 11 gyro
+    yaw_rate_dps = 0.0
+    sensor_st = getattr(state, "sensor_state", None)
+    if sensor_st is not None:
+        try:
+            imu_raw = getattr(sensor_st, "latest_imu_raw", lambda: None)()
+            if imu_raw is not None and getattr(imu_raw, "gyro_dps", None) is not None and len(imu_raw.gyro_dps) > 0:
+                w = np.asarray(imu_raw.gyro_dps, dtype=np.float64)
+                gbias = getattr(imu_raw, "gbias_dps", None)
+                if gbias is not None and len(gbias) > 0:
+                    w = w - np.asarray(gbias, dtype=np.float64)
+                mean_w = np.mean(w, axis=0)
+                yaw_rate_dps = round(float(mean_w[2]), 2)
+        except Exception:  # noqa: BLE001
+            yaw_rate_dps = 0.0
+
     point_count = 0
     stash = getattr(state, "thin_latest_pc", None)
     if stash is not None and stash[1] is not None:
@@ -5387,6 +5407,15 @@ def thin_telemetry_message(state, flow: ThinFlow) -> dict:
     ctrl = getattr(state, "controller", None)
     recording = bool(getattr(ctrl, "recording", False)) if ctrl is not None else False
 
+    # Extract 8x8 IR grid (64 ints 0..255) from latest IR stash for sidebar widget
+    ir_grid = None
+    ir_stash = getattr(state, "thin_latest_ir", None)
+    if ir_stash is not None and ir_stash[1] is not None:
+        try:
+            ir_grid = extract_ir_grid(ir_stash[1])
+        except Exception:  # noqa: BLE001
+            ir_grid = None
+
     return {
         "type": "thin_telemetry",
         "fps": fps,
@@ -5394,16 +5423,16 @@ def thin_telemetry_message(state, flow: ThinFlow) -> dict:
         "recording": recording,
         "mode": flow.camera.mode,
         "link": "ok",
-        # Orientation block. `*_deg` are floats or null; `orientation_valid`
-        # says whether the heading is trustworthy right now (a bad mag reading,
-        # device acceleration, or a boresight within 10 deg of vertical, where
-        # no compass bearing exists at all -- BUG-058). A client should grey the
-        # compass rather than draw a confident wrong bearing.
-        "roll_deg": roll,
-        "tilt_deg": tilt,
+        # Spatial Orientation & Heading
         "heading_deg": heading,
+        "pitch_deg": pitch,
+        "roll_deg": roll,
+        "yaw_rate_dps": yaw_rate_dps,
+        "tilt_deg": tilt,
         "orientation_valid": orientation_valid,
         "orientation_labels": orientation_labels,
+        # IR Matrix Array (8x8 or 64-zone reflectance/amplitude values 0-255)
+        "ir_grid": ir_grid,
     }
 
 
