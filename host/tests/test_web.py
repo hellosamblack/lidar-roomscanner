@@ -7610,6 +7610,69 @@ def test_thin_render_loop_sends_ack_before_any_frame_single_writer_order(thin_re
     assert fake.submit_kwargs[-1]["fmt"] == "jpeg"
 
 
+# --- thin_orbit wiring: does a live mutation of flow.camera actually reach
+# the render loop's NEXT submitted job? (post-merge live-probe finding,
+# 2026-08-18: a real-server pixel probe found `thin_orbit` pixel-dead --
+# changed_frac indistinguishable from a no-command control on BOTH a paused
+# and a live replay.) `ThinCamera.apply_orbit`/`eye()` have their own unit
+# tests (section 3/4 above) and pass in isolation -- this is deliberately a
+# DIFFERENT test: it drives `_thin_render_loop` itself with a fake renderer
+# that RECORDS every submitted camera, so it can see whether the loop keeps
+# re-reading `flow.camera` fresh every tick or is (even accidentally)
+# holding a stale snapshot from before the mutation. This is "the path that
+# was actually broken" per the live-probe finding -- the loop wiring, not
+# the pure camera math.
+
+
+def test_thin_render_loop_submits_the_live_flow_camera_every_tick(thin_renderer):
+    """A `flow.camera.apply_orbit()` mutation made WHILE the loop is already
+    running must show up in the very next job it submits -- not the snapshot
+    the loop happened to capture on an earlier tick.
+
+    Proven by a real-Filament, three-independent-methods investigation (see
+    the session report) that CURRENT code does this correctly; this test is
+    the permanent wiring-level guard the live-probe finding asked for, since
+    the pure `apply_orbit`/`eye()` unit tests could not have caught a loop-
+    level staleness bug even if one existed (they never touch the loop)."""
+    fake = thin_renderer()
+    state = _thin_state()
+    state.thin_latest_pc = (4, _THIN_PTS, _THIN_COLS)
+    flow = web.ThinFlow()
+    ws = _FakeThinWs()
+
+    async def _drive():
+        task = asyncio.create_task(web._thin_render_loop(state, ws, flow))
+        # let at least one tick submit with the DEFAULT camera (yaw=30)
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while not fake.submits and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        assert fake.submits, "no job was ever submitted"
+        before_yaw = fake.submits[-1][1].yaw
+
+        # mutate the SAME flow.camera the loop is reading -- exactly what
+        # `_handle_thin_inbound`'s thin_orbit branch does on the receive task
+        flow.camera.apply_orbit(dyaw=120.0)
+
+        n_before = len(fake.submits)
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while len(fake.submits) <= n_before and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return before_yaw
+
+    before_yaw = asyncio.run(_drive())
+
+    assert before_yaw == pytest.approx(30.0)             # ThinCamera default
+    after_yaw = fake.submits[-1][1].yaw
+    assert after_yaw == pytest.approx(150.0)              # 30 + 120, wrapped
+    assert after_yaw != before_yaw
+
+
 def test_ws_thin_rejects_beyond_the_client_cap(thin_renderer):
     from starlette.testclient import TestClient
     thin_renderer()
