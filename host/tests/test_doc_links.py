@@ -34,6 +34,12 @@ SCAN_SUFFIXES = {".md", ".py", ".js", ".c", ".h", ".ts", ".css", ".html", ".toml
 SKIP_DIR_PARTS = {
     ".git", "node_modules", "build", "dist", "__pycache__", ".venv", "venv",
     "captures", "results", ".mypy_cache", ".pytest_cache",
+    # #195: .claude/worktrees/<branch>/ holds full in-flight worktree copies of this
+    # same repo (issue-fleet workers), each with its own docs/**. Without this, the
+    # scanner walks into them from the main checkout and a worktree's in-progress
+    # doc edits (e.g. IDs it hasn't finished wiring into the migration map yet) can
+    # fail this test on `main`, for a change that isn't even landed there.
+    ".claude",
 }
 SKIP_PATH_FRAGMENTS = ("firmware/vendor/",)
 

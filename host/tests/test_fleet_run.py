@@ -203,7 +203,12 @@ def _grants(command, allowed_tools):
     ".venv/bin/python -m pytest -q",
     # fleet-20260814-1552: absolute path -- used because a worker's cwd wasn't always the
     # venv's own worktree (e.g. probing issue-81's tools from issue-180's worktree).
-    "/home/sam/git/personal/lidar-roomscanner/host/.venv/bin/python -c \"print(1)\"",
+    # #195: anchored on fr.REPO (not a hardcoded literal) -- a literal only matches the
+    # canonical checkout, so it silently failed in a worktree or on a GitHub runner
+    # (/home/runner/work/...) even though the production allowlist rule (also anchored
+    # on fr.REPO) was correct there. Mirrors
+    # test_default_allowlist_anchors_the_absolute_venv_rules_on_this_repo below.
+    f'{fr.REPO}/host/.venv/bin/python -c "print(1)"',
     # fleet-20260814-1552: a different console script in the same directory -- a rule that
     # names `python` specifically does not cover it.
     "host/.venv/bin/pytest -q --no-header",
