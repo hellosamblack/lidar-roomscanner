@@ -5913,6 +5913,7 @@ def test_ws_flow_counters_shape():
         "mesh_ack_lag_s_max": 0.05,
         "mesh_ack_timeouts_total": 1,
         "latest_mesh_bytes": 4,
+        "thin_clients": 0,
     }
 
 
@@ -6819,3 +6820,634 @@ def test_handle_inbound_set_imu_env_rate_dispatches():
     finally:
         web._broadcast_text = orig
     assert [c[0] for c in client.calls] == ["send_imu_env_rate"]
+
+
+# ==========================================================================
+# `/ws-thin` thin-client endpoint + mDNS advertisement (#194)
+# ==========================================================================
+
+from concurrent.futures import Future as _CFuture
+
+from roomscan.thin_render import (
+    THIN_HEADER,
+    THIN_HEIGHT,
+    THIN_WIDTH,
+    ThinCamera,
+    ThinRenderUnavailable,
+    ThinRenderer,
+)
+
+
+# --- fakes ----------------------------------------------------------------
+
+
+class _FakeThinRenderer:
+    """Stand-in for the real `ThinRenderer`.
+
+    A real `OffscreenRenderer` costs ~4 s and a GL context, and constructing a
+    SECOND one in the same process aborts the interpreter -- which would take
+    the whole pytest run with it. So every endpoint test installs one of these
+    through `ThinRenderer.instance(factory=...)`.
+    """
+
+    def __init__(self, *, fail: bool = False, frame: bytes | None = None):
+        self.fail = fail
+        self.available = not fail
+        self.submits: list = []
+        self.closed = 0
+        self.ensure_calls = 0
+        self._frame = (frame if frame is not None
+                       else THIN_HEADER.pack(1, THIN_WIDTH, THIN_HEIGHT)
+                       + bytes(THIN_WIDTH * THIN_HEIGHT * 2))
+
+    def ensure_available(self, timeout: float = 30.0) -> None:
+        self.ensure_calls += 1
+        if self.fail:
+            raise ThinRenderUnavailable("no offscreen context in tests")
+
+    def submit(self, scene, camera, *, pack: bool = True) -> _CFuture:
+        self.submits.append((scene, camera))
+        fut: _CFuture = _CFuture()
+        fut.set_result(self._frame)
+        return fut
+
+    def close(self, timeout: float = 5.0) -> None:
+        self.closed += 1
+
+
+@pytest.fixture
+def thin_renderer():
+    """Install a fake renderer singleton; always drop it again afterwards so a
+    fake can never leak into another test (or, worse, so a later test builds a
+    real second renderer and aborts the process)."""
+    installed: list[_FakeThinRenderer] = []
+
+    def install(fake=None):
+        fake = fake if fake is not None else _FakeThinRenderer()
+        ThinRenderer.reset_singleton()
+        ThinRenderer.instance(factory=lambda: fake)
+        installed.append(fake)
+        return fake
+
+    try:
+        yield install
+    finally:
+        ThinRenderer.reset_singleton()
+
+
+class _FakeThinCtrl:
+    """Minimal controller for the thin-client helpers: a generation (the #101
+    barrier), a recording flag, and the record entry points."""
+
+    def __init__(self, generation=4, recording=False, captures_dir=None):
+        self.generation = generation
+        self.recording = recording
+        self.captures_dir = captures_dir
+        self.calls: list[str] = []
+        self.mode = "live"
+
+    def start_record(self):
+        self.calls.append("start_record")
+        self.recording = True
+
+    def stop_record(self):
+        self.calls.append("stop_record")
+        self.recording = False
+
+    def session_message(self, position, ts):
+        return {"type": "session", "recording": self.recording}
+
+
+def _thin_state(*, generation=4, ctrl=None, **kw):
+    ctrl = ctrl if ctrl is not None else _FakeThinCtrl(generation=generation)
+    base = dict(controller=ctrl, clients=set(), thin_clients={},
+                ranging_state=None, imu_env_state=web.ImuEnvRateState(),
+                latest_mesh=None, mesh_clients={})
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+_THIN_PTS = np.array([[0.0, 0.0, 1.0], [1.0, 0.5, 2.0], [-1.0, 0.25, 3.0]],
+                     dtype=np.float32)
+_THIN_COLS = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                      dtype=np.float32)
+_THIN_IR = np.arange(4 * 5 * 3, dtype=np.uint8).reshape(4, 5, 3)
+
+
+# --- 1. thin_scene_for: the #101 generation barrier ------------------------
+
+
+def test_thin_scene_for_point_cloud_honours_the_generation_barrier():
+    """A live->replay switch bumps `controller.generation`; a stash tagged with
+    the OLD generation must be dropped, not drawn (#101)."""
+    state = _thin_state(generation=4)
+    state.thin_latest_pc = (4, _THIN_PTS, _THIN_COLS)
+
+    scene = web.thin_scene_for(state, "point_cloud")
+    assert scene is not None and scene.kind == "points"
+    # by VALUE -- a coincidentally-truthy object must not pass this
+    np.testing.assert_allclose(scene.points, _THIN_PTS)
+    np.testing.assert_allclose(scene.colors, _THIN_COLS)
+    assert scene.generation == 4
+
+    state.controller.generation = 5          # same stash, new source
+    assert web.thin_scene_for(state, "point_cloud") is None
+
+
+def test_thin_scene_for_ir_honours_the_generation_barrier():
+    state = _thin_state(generation=4)
+    state.thin_latest_ir = (4, _THIN_IR)
+
+    scene = web.thin_scene_for(state, "ir")
+    assert scene is not None and scene.kind == "image"
+    np.testing.assert_array_equal(scene.image, _THIN_IR)
+    assert scene.generation == 4
+
+    state.controller.generation = 5
+    assert web.thin_scene_for(state, "ir") is None
+
+
+def test_thin_scene_for_missing_or_empty_stash_returns_none():
+    state = _thin_state(generation=4)
+    assert web.thin_scene_for(state, "point_cloud") is None   # no stash at all
+    assert web.thin_scene_for(state, "ir") is None
+    assert web.thin_scene_for(state, "slam") is None
+
+    state.thin_latest_pc = (4, np.zeros((0, 3), dtype=np.float32),
+                            np.zeros((0, 3), dtype=np.float32))
+    assert web.thin_scene_for(state, "point_cloud") is None   # empty points
+
+    state.thin_latest_pc = (4, None, None)
+    assert web.thin_scene_for(state, "point_cloud") is None
+
+
+# --- 2. thin_scene_for("slam"): identity memoisation ----------------------
+
+
+def _thin_mesh_packet(mesh_seq=11):
+    z3 = np.zeros((0, 3), dtype=np.float64)
+    return SimpleNamespace(
+        non_wall_verts=np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        non_wall_colors=np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+        non_wall_tris=np.array([[0, 1, 2]], dtype=np.int32),
+        wall_verts=z3, wall_colors=z3,
+        wall_tris=np.zeros((0, 3), dtype=np.int32),
+        floor_pts=z3, floor_lines=np.zeros((0, 2), dtype=np.int64),
+        mesh_seq=mesh_seq, source_vertex_count=3,
+        decimated=False, wall_mode="solid")
+
+
+def test_thin_scene_for_slam_unpacks_latest_mesh():
+    state = _thin_state(generation=4)
+    state.latest_mesh = web.pack_mesh(_thin_mesh_packet(mesh_seq=11))
+
+    scene = web.thin_scene_for(state, "slam")
+    assert scene is not None and scene.kind == "mesh"
+    np.testing.assert_allclose(
+        scene.points, [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], atol=1e-6)
+    np.testing.assert_array_equal(scene.triangles, np.array([[0, 1, 2]], np.uint32))
+    assert scene.meta["mesh_seq"] == 11
+    assert scene.generation == 4
+
+
+def test_thin_scene_for_slam_memoises_by_object_identity_not_equality():
+    """Load-bearing: `mesh_seq` resets to 0 on `_reset_slam`, so newness is
+    defined by object identity (same rule as `_cache_latest_mesh`). Equal-but-
+    distinct bytes are a NEW mesh and must be re-unpacked."""
+    state = _thin_state(generation=4)
+    packed = web.pack_mesh(_thin_mesh_packet(mesh_seq=11))
+    state.latest_mesh = packed
+
+    first = web.thin_scene_for(state, "slam")
+    second = web.thin_scene_for(state, "slam")
+    assert first is second                          # cached, not re-unpacked
+
+    equal_copy = bytes(bytearray(packed))
+    assert equal_copy == packed and equal_copy is not packed
+    state.latest_mesh = equal_copy
+    third = web.thin_scene_for(state, "slam")
+    assert third is not None
+    assert third is not first                       # identity, not equality
+
+
+# --- 3. thin_telemetry_message: the wire contract -------------------------
+
+
+_THIN_TELEMETRY_KEYS = {"type", "fps", "point_count", "recording", "mode",
+                        "link", "roll_deg", "tilt_deg", "heading_deg",
+                        "orientation_valid", "orientation_labels"}
+
+
+def test_thin_telemetry_message_key_set_and_values():
+    ctrl = _FakeThinCtrl(generation=4, recording=True)
+    rs = web.RangingState(
+        transport="udp", initialized=True,
+        applied_profile_id=int(_profiles.ProfileId.PRECISION),
+        applied_ranging_mode=int(_profiles.RangingMode.PRECISION),
+        applied_fps=30, applied_exposure_ms=4,
+        applied_power_mode=int(_profiles.PowerMode.REGULAR),
+        estimate={"i3c_bus_utilization_pct": 41.5},
+        measured_fps=27.85)
+    state = _thin_state(ctrl=ctrl, ranging_state=rs)
+    state.thin_latest_pc = (4, _THIN_PTS, _THIN_COLS)
+
+    flow = web.ThinFlow()
+    flow.camera.set_mode("ir")
+    msg = web.thin_telemetry_message(state, flow)
+
+    assert set(msg) == _THIN_TELEMETRY_KEYS
+    assert msg["type"] == "thin_telemetry"
+    assert msg["fps"] == pytest.approx(27.85)
+    assert msg["point_count"] == len(_THIN_PTS)      # the REAL stash length
+    assert msg["recording"] is True                  # straight from ctrl
+    assert msg["mode"] == "ir"                       # this flow's camera mode
+    assert msg["link"] == "ok"
+
+    ctrl.recording = False
+    assert web.thin_telemetry_message(state, flow)["recording"] is False
+
+
+def test_thin_telemetry_message_without_ranging_state_is_all_none_not_a_raise():
+    state = _thin_state(ranging_state=None)
+    msg = web.thin_telemetry_message(state, web.ThinFlow())
+    assert set(msg) == _THIN_TELEMETRY_KEYS
+    assert msg["fps"] is None
+    assert msg["point_count"] == 0
+    assert msg["mode"] == "point_cloud"
+
+
+# --- 4. _apply_record: both entry points reach the same controller --------
+
+
+def _record_state(tmp_path, recording=False):
+    ctrl = _FakeThinCtrl(generation=4, recording=recording, captures_dir=tmp_path)
+    state = _thin_state(ctrl=ctrl)
+    state.ui_state = web.UiState()
+    return state, ctrl
+
+
+@pytest.mark.parametrize("on,expected", [(True, "start_record"), (False, "stop_record")])
+def test_apply_record_reached_identically_by_browser_and_thin_paths(tmp_path, on, expected):
+    """The whole point of the `_apply_record` refactor: `/ws`'s `record` and
+    `/ws-thin`'s `thin_record` must produce the SAME controller effect. Asserts
+    the effect, not that a shared function exists."""
+    sent: list = []
+
+    async def _capture(clients, text):
+        sent.append(text)
+
+    orig = web._broadcast_text
+    web._broadcast_text = _capture
+    try:
+        browser_state, browser_ctrl = _record_state(tmp_path, recording=not on)
+        asyncio.run(web._handle_inbound(
+            browser_state, {"type": "record", "on": on}, None))
+
+        thin_state, thin_ctrl = _record_state(tmp_path, recording=not on)
+        flow = web.ThinFlow()
+        asyncio.run(web._handle_thin_inbound(
+            thin_state, {"type": "thin_record", "on": on}, flow))
+    finally:
+        web._broadcast_text = orig
+
+    assert browser_ctrl.calls == [expected]
+    assert thin_ctrl.calls == [expected]
+    assert browser_ctrl.calls == thin_ctrl.calls
+    assert browser_ctrl.recording is on and thin_ctrl.recording is on
+
+
+# --- 5. _handle_thin_inbound ---------------------------------------------
+
+
+def test_handle_thin_inbound_orbit_accumulates_onto_the_flow_camera():
+    state = _thin_state()
+    flow = web.ThinFlow()
+    before = (flow.camera.yaw, flow.camera.pitch, flow.camera.zoom)
+
+    asyncio.run(web._handle_thin_inbound(
+        state, {"type": "thin_orbit", "dyaw": 10.0, "dpitch": 5.0, "dzoom": 0.25}, flow))
+    assert flow.camera.yaw == pytest.approx((before[0] + 10.0) % 360.0)
+    assert flow.camera.pitch == pytest.approx(before[1] + 5.0)
+    assert flow.camera.zoom == pytest.approx(before[2] + 0.25)
+
+    asyncio.run(web._handle_thin_inbound(
+        state, {"type": "thin_orbit", "dyaw": 10.0}, flow))
+    assert flow.camera.yaw == pytest.approx((before[0] + 20.0) % 360.0)   # accumulates
+
+
+def test_handle_thin_inbound_mode_accepts_valid_and_ignores_junk():
+    state = _thin_state()
+    flow = web.ThinFlow()
+    asyncio.run(web._handle_thin_inbound(state, {"type": "thin_mode", "mode": "slam"}, flow))
+    assert flow.camera.mode == "slam"
+
+    for junk in ("wireframe", "", None, 7):
+        asyncio.run(web._handle_thin_inbound(
+            state, {"type": "thin_mode", "mode": junk}, flow))
+        assert flow.camera.mode == "slam"        # unchanged
+
+
+def test_handle_thin_inbound_unknown_type_is_ignored():
+    state = _thin_state()
+    flow = web.ThinFlow()
+    snapshot = (flow.camera.yaw, flow.camera.pitch, flow.camera.zoom, flow.camera.mode)
+    asyncio.run(web._handle_thin_inbound(state, {"type": "nope", "on": True}, flow))
+    asyncio.run(web._handle_thin_inbound(state, {}, flow))
+    assert (flow.camera.yaw, flow.camera.pitch,
+            flow.camera.zoom, flow.camera.mode) == snapshot
+    assert state.controller.calls == []
+
+
+# --- 6/7/8. the endpoint itself (fake renderer only) ----------------------
+
+
+def _prime_app_state_for_thin(*, generation=4, seeded=None):
+    st = web.app.state
+    st.thin_clients = dict(seeded or {})
+    st.controller = _FakeThinCtrl(generation=generation)
+    st.thin_latest_pc = (generation, _THIN_PTS, _THIN_COLS)
+    st.thin_latest_ir = None
+    st.thin_mesh_cache = None
+    st.latest_mesh = None
+    st.ranging_state = None
+    st.ws_client_id = {}
+    return st
+
+
+def test_ws_thin_sends_telemetry_and_a_well_formed_frame(thin_renderer):
+    from starlette.testclient import TestClient
+    fake = thin_renderer()
+    st = _prime_app_state_for_thin()
+    client = TestClient(web.app)
+
+    with client.websocket_connect("/ws-thin") as ws:
+        msg = ws.receive_json()
+        assert msg["type"] == "thin_telemetry"
+        assert msg["point_count"] == len(_THIN_PTS)
+
+        frame = ws.receive_bytes()
+        tag, width, height = THIN_HEADER.unpack_from(frame, 0)
+        assert (tag, width, height) == (1, 480, 480)
+        assert len(frame) == 8 + 480 * 480 * 2
+
+        assert len(st.thin_clients) == 1
+        flow = next(iter(st.thin_clients.values()))
+        assert isinstance(flow, web.ThinFlow)
+
+    assert st.thin_clients == {}          # disconnect popped the flow
+    assert fake.submits                   # the fake really did the render
+
+
+def test_ws_thin_rejects_beyond_the_client_cap(thin_renderer):
+    from starlette.testclient import TestClient
+    thin_renderer()
+    seeded = {object(): web.ThinFlow() for _ in range(web.THIN_MAX_CLIENTS)}
+    st = _prime_app_state_for_thin(seeded=seeded)
+    client = TestClient(web.app)
+
+    with client.websocket_connect("/ws-thin") as ws:
+        msg = ws.receive_json()
+        assert msg["type"] == "error"
+        assert msg["error"] == "thin_client_limit"
+    assert len(st.thin_clients) == web.THIN_MAX_CLIENTS   # did not grow
+
+
+def test_ws_thin_renderer_unavailable_closes_cleanly(thin_renderer):
+    """A host without an offscreen context must get JSON + a clean close --
+    and crucially this must not raise out of the endpoint, because `/ws` and
+    `/ws-mesh` clients are entirely unaffected by the thin renderer."""
+    from starlette.testclient import TestClient
+    fake = thin_renderer(_FakeThinRenderer(fail=True))
+    st = _prime_app_state_for_thin()
+    client = TestClient(web.app)      # raise_server_exceptions=True by default
+
+    with client.websocket_connect("/ws-thin") as ws:
+        msg = ws.receive_json()
+        assert msg["type"] == "error"
+        assert msg["error"] == "thin_render_unavailable"
+    assert st.thin_clients == {}
+    assert fake.ensure_calls == 1
+
+    # the unrelated socket still works after the failed thin connect
+    web.app.state.mesh_clients = {}
+    web.app.state.latest_mesh = _mesh_bytes(3)
+    web.app.state.latest_mesh_seq = 3
+    with client.websocket_connect("/ws-mesh") as ws:
+        assert ws.receive_bytes() == _mesh_bytes(3)
+
+
+# --- 9. mDNS advertisement ------------------------------------------------
+
+
+class _FakeZeroconf:
+    def __init__(self):
+        self.registered: list = []
+        self.unregistered: list = []
+        self.closes = 0
+
+    def register_service(self, info):
+        self.registered.append(info)
+
+    def unregister_service(self, info):
+        self.unregistered.append(info)
+
+    def close(self):
+        self.closes += 1
+
+
+def test_register_mdns_advertises_the_roomscan_service_on_the_given_port():
+    zc = _FakeZeroconf()
+    reg = web.register_mdns(8765, zeroconf_factory=lambda: zc, address="127.0.0.1")
+    assert reg is not None
+    got_zc, info = reg
+    assert got_zc is zc
+    assert len(zc.registered) == 1 and zc.registered[0] is info
+    assert info.type == "_roomscan._tcp.local." == web.MDNS_SERVICE_TYPE
+    assert info.port == 8765
+
+
+def test_unregister_mdns_unregisters_then_closes():
+    zc = _FakeZeroconf()
+    reg = web.register_mdns(8765, zeroconf_factory=lambda: zc, address="127.0.0.1")
+    web.unregister_mdns(reg)
+    assert zc.unregistered == zc.registered
+    assert zc.closes == 1
+    web.unregister_mdns(None)             # tolerates None
+
+
+def test_register_mdns_returns_none_when_the_stack_raises():
+    """mDNS is a convenience -- a host without multicast must still serve the
+    UI, so a failure can never propagate into startup."""
+    def _boom():
+        raise OSError("no multicast route")
+
+    assert web.register_mdns(8765, zeroconf_factory=_boom, address="127.0.0.1") is None
+
+
+# --- 10. the lifespan (otherwise untested startup path) -------------------
+
+
+@pytest.fixture
+def lifespan_sandbox(monkeypatch):
+    """Drive `_lifespan` without spinning the real broadcaster/probe tasks, and
+    always restore `app.state.ready` so the rest of the file is unaffected."""
+    st = web.app.state
+    saved = {k: getattr(st, k, _MISSING)
+             for k in ("ready", "port", "zeroconf_factory", "mdns",
+                       "broadcast_task", "idle_reconcile_task",
+                       "ranging_init_task", "comm_probe_task",
+                       "detailed_runner", "splat_runner")}
+
+    async def _noop(*a, **kw):
+        return None
+
+    monkeypatch.setattr(web, "_broadcaster", _noop)
+    monkeypatch.setattr(web, "_idle_reconcile_loop", _noop)
+    monkeypatch.setattr(web, "_init_ranging_state", _noop)
+    monkeypatch.setattr(web, "_comm_probe_loop", _noop)
+    st.detailed_runner = None
+    st.splat_runner = None
+    try:
+        yield st
+    finally:
+        for k, v in saved.items():
+            if v is _MISSING:
+                if hasattr(st, k):
+                    delattr(st, k)
+            else:
+                setattr(st, k, v)
+
+
+_MISSING = object()
+
+
+def test_lifespan_registers_and_unregisters_the_mdns_advertisement(
+        lifespan_sandbox, thin_renderer):
+    fake_renderer = thin_renderer()
+    zc = _FakeZeroconf()
+    st = lifespan_sandbox
+    st.ready = True
+    st.port = 1234
+    st.zeroconf_factory = lambda: zc
+
+    async def _drive():
+        async with web._lifespan(web.app):
+            assert st.mdns is not None
+            assert len(zc.registered) == 1
+            assert zc.registered[0].port == 1234
+            assert zc.registered[0].type == web.MDNS_SERVICE_TYPE
+
+    asyncio.run(_drive())
+
+    assert zc.unregistered == [zc.registered[0]]     # exit withdrew it
+    assert zc.closes == 1
+    assert st.mdns is None
+    assert fake_renderer.closed == 1                 # context torn down too
+
+
+def test_lifespan_without_ready_does_not_advertise(lifespan_sandbox, thin_renderer):
+    thin_renderer()
+    zc = _FakeZeroconf()
+    st = lifespan_sandbox
+    st.ready = False
+    st.port = 1234
+    st.zeroconf_factory = lambda: zc
+    st.mdns = None
+
+    async def _drive():
+        async with web._lifespan(web.app):
+            pass
+
+    asyncio.run(_drive())
+    assert zc.registered == []
+
+
+# --- 11. ws_flow_counters -------------------------------------------------
+
+
+def test_ws_flow_counters_reports_thin_client_count():
+    state = SimpleNamespace(clients=set(), mesh_clients={}, latest_mesh=None,
+                            thin_clients={})
+    assert web.ws_flow_counters(state)["thin_clients"] == 0
+
+    state.thin_clients = {object(): web.ThinFlow(), object(): web.ThinFlow()}
+    assert web.ws_flow_counters(state)["thin_clients"] == 2
+
+    del state.thin_clients                    # absent entirely -> 0, never a raise
+    assert web.ws_flow_counters(state)["thin_clients"] == 0
+
+
+def test_thin_telemetry_orientation_is_the_sensor_message_verbatim():
+    """Orientation/heading must be COPIED from the sensor message, never
+    re-derived. A recomputation here would be the fifth instance of this
+    repo's most-repeated defect (a scalar off an attitude mistaken for the
+    bearing of an axis), so the test pins the exact values through."""
+    state = _thin_state()
+    state.thin_latest_sensor = {
+        "heading_deg": 117.25,
+        "labels": ["Roll", "Tilt", "Heading"],
+        "orientation_view": {"roll_deg": -3.5, "pitch_deg": 12.75,
+                             "yaw_deg": 999.0,  # must LOSE to heading_deg
+                             "valid": True},
+    }
+    msg = web.thin_telemetry_message(state, web.ThinFlow())
+
+    assert msg["roll_deg"] == pytest.approx(-3.5)
+    assert msg["tilt_deg"] == pytest.approx(12.75)
+    assert msg["heading_deg"] == pytest.approx(117.25)
+    assert msg["orientation_valid"] is True
+    assert msg["orientation_labels"] == ["Roll", "Tilt", "Heading"]
+
+
+def test_thin_telemetry_never_substitutes_a_euler_yaw_for_a_heading():
+    """No bearing means no bearing. `orientation_view["yaw_deg"]` is the
+    heading only in the World decomposition; under `zyx` it is a Tait-Bryan
+    twist about a body axis. Substituting it would publish a confident wrong
+    compass reading -- the defect this repo has shipped more than any other.
+    """
+    state = _thin_state()
+    state.thin_latest_sensor = {
+        "heading_deg": None,
+        "orientation_view": {"roll_deg": 1.0, "pitch_deg": 2.0,
+                             "yaw_deg": 42.0, "valid": True},
+    }
+    msg = web.thin_telemetry_message(state, web.ThinFlow())
+    assert msg["heading_deg"] is None          # NOT 42.0
+    assert msg["orientation_valid"] is False   # and the client is told
+    # roll/tilt are still perfectly good -- only the bearing is missing.
+    assert msg["roll_deg"] == pytest.approx(1.0)
+    assert msg["tilt_deg"] == pytest.approx(2.0)
+
+
+def test_thin_telemetry_orientation_invalid_when_the_view_says_so():
+    """A present heading that the sensor layer distrusts (bad mag, device
+    accelerating, boresight within 10 deg of vertical -- BUG-058) must still
+    come through flagged, so the client greys the compass."""
+    state = _thin_state()
+    state.thin_latest_sensor = {
+        "heading_deg": 88.0,
+        "orientation_view": {"roll_deg": 1.0, "pitch_deg": 2.0, "valid": False},
+    }
+    msg = web.thin_telemetry_message(state, web.ThinFlow())
+    assert msg["heading_deg"] == pytest.approx(88.0)
+    assert msg["orientation_valid"] is False
+
+
+def test_thin_telemetry_orientation_is_none_without_a_sensor_stash():
+    state = _thin_state()
+    state.thin_latest_sensor = None
+    msg = web.thin_telemetry_message(state, web.ThinFlow())
+    assert msg["roll_deg"] is None
+    assert msg["tilt_deg"] is None
+    assert msg["heading_deg"] is None
+    assert msg["orientation_valid"] is False
+    assert msg["orientation_labels"] == list(web.DEFAULT_AXIS_LABELS)
+
+
+def test_thin_sensor_stash_is_cleared_by_the_generation_barrier():
+    """The #101 barrier must drop orientation with everything else -- a
+    live<->replay switch must not leave a stale heading on the panel."""
+    import pathlib
+    src = pathlib.Path(web.__file__).read_text()
+    barrier = src.split("state.thin_latest_pc = None", 1)[1][:400]
+    assert "state.thin_latest_sensor = None" in barrier

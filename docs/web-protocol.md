@@ -101,6 +101,20 @@ auto-acks every mesh immediately on its own best-effort `/ws-mesh` connection �
 to wait on, so it exists only to keep `binary_counts`/`streaming` accurate, never to exercise
 backpressure.
 
+## The thin-client channel — `/ws-thin` (not this protocol)
+
+A third endpoint, `GET /ws-thin`, serves **pre-rendered 480×480 RGB565 raster
+frames** to GPU-less embedded clients (the CrowPanel prop). It is a separate
+protocol, not a mode of this one: a thin client never receives
+`POINT_CLOUD`/`MESH`/`IR_IMAGE` tags or any of the JSON messages documented
+below, and nothing in this document changes because it exists. Its contract —
+`THIN_FRAME`, `thin_telemetry`, `thin_orbit`/`thin_mode`/`thin_record` — lives
+in [`thin-client.md`](thin-client.md).
+
+Two things here that it *does* touch, both additive: `thin_record` routes
+through the same `_apply_record` helper as this protocol's `record` message,
+and `ws_flow_counters` gained a `thin_clients` count.
+
 ## Outbound — server → browser
 
 ### Binary

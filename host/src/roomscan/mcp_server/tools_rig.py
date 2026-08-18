@@ -997,3 +997,60 @@ async def rig_ws_probe(seconds: float = 10.0, url: str = "") -> dict:
     from tools.ws_probe import DEFAULT_URL, probe_async
 
     return await probe_async(seconds=seconds, url=url or DEFAULT_URL)
+
+
+@mcp.tool()
+async def rig_thin_probe(frames: int = 5, url: str = "", out_dir: str = "",
+                         orbit_yaw: float = 120.0,
+                         modes: str = "point_cloud,slam,ir",
+                         record: bool = False, timeout: float = 15.0) -> dict:
+    """Look at what `/ws-thin` is actually drawing, as PNGs, and prove the
+    commands move it.
+
+    Stands in for the CrowPanel thin client we cannot put on the bench: connects
+    to the running roomscan-web's `/ws-thin`, decodes `THIN_FRAME` (u32 tag=1,
+    u16 w, u16 h, then exactly w*h*2 bytes of RGB565), writes each frame to
+    `results/thin_probe/<timestamp>/*.png` (served at `/results/...`), and
+    round-trips the inbound commands. Read the PNGs -- that is the point of it.
+
+    THE OBSERVABLE IS PIXELS. `thin_orbit` is judged by `orbit.changed_frac`,
+    the fraction of pixels that moved by more than 8 levels, measured **against
+    a control**: `orbit.control_changed_frac` is the same measure on two
+    consecutive frames with no command sent, so scene motion, replay advance and
+    render dither are subtracted by construction and a null result cannot be
+    explained away as "the scene was static". `orbit.moved_pixels` requires the
+    orbit to change >=10% of pixels AND beat that control 3x. A frame counter or
+    a read-back of the camera would prove nothing (the #106 lesson).
+
+    `thin_mode` is confirmed the same way, per mode: the tool waits for the
+    SERVER's own `thin_telemetry` to report the new mode (telemetry goes out at
+    the top of a render tick and the frame at the bottom of the same tick, so
+    the next frame is genuinely that mode) and then requires a frame.
+    `modes_with_frames` is the answer. A confirmed mode with no frame is a real
+    finding, not a failure: the render loop deliberately sends nothing when its
+    generation-tagged stash for that mode is empty or stale (#101).
+
+    `frame_stats` per frame includes `distinct_colors` -- a silently failed
+    render is a uniformly filled buffer that every mean/variance check calls a
+    picture, so check that number before believing a frame.
+
+    `record=False` by default and must be passed explicitly: `thin_record`
+    starts a REAL capture. Everything else here is read-only.
+
+    Never raises for the states you actually hit -- a server that is down, at its
+    2-client cap (`thin_client_limit`), or without an offscreen context
+    (`thin_render_unavailable`) all come back as `server_error`/`errors` in the
+    result. Never binds the device stream; each connected thin client costs the
+    server a full render, so this connects, works and disconnects.
+
+    Wraps `host/tools/thin_client_probe.py::probe_async()`.
+    """
+    import sys
+
+    if str(HOST) not in sys.path:
+        sys.path.insert(0, str(HOST))
+    from tools.thin_client_probe import DEFAULT_URL, probe_async
+
+    return await probe_async(frames=frames, url=url or DEFAULT_URL,
+                             out_dir=out_dir or None, orbit_yaw=orbit_yaw,
+                             modes=modes, record=record, timeout=timeout)

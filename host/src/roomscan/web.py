@@ -24,6 +24,7 @@ import queue
 import re
 import shlex
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -33,7 +34,7 @@ import time
 from collections import deque
 import webbrowser
 import zlib
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -111,6 +112,11 @@ from . import profiles
 from . import thumbs as thumbs_mod
 from .motion import coherence
 from .sources import FileSource, Recorder, SerialSource, UdpSource, get_best_source
+from zeroconf import ServiceInfo, Zeroconf
+from .thin_render import (
+    THIN_HEIGHT, THIN_MODES, THIN_WIDTH, ThinCamera, ThinRenderer,
+    ThinRenderUnavailable, image_scene, points_scene, unpack_mesh_scene,
+)
 from .slam.config import DetailedSlamPreset, preferred_device
 from .slam.detailed import (build_manifest, estimate_seconds, sidecar_paths,
                             sidecar_status, write_manifest_atomic)
@@ -141,6 +147,17 @@ TAG_MAGPOSE = 5            # 30 Hz magcal pose/field sample (magcal 3D feedback)
 POINT_INTERVAL = 1.0 / 30.0
 IR_INTERVAL = 1.0 / 15.0
 METRICS_INTERVAL = 1.0 / 4.0
+# `/ws-thin` render cadence (#194). Deliberately far slower than the point
+# cloud: each tick is a full server-side 3D render (~27 ms) plus a 460 KB
+# uncompressed frame, so 10 fps is ~4.6 MB/s per client on the wireless uplink.
+THIN_INTERVAL = 1.0 / 10.0
+THIN_TELEMETRY_INTERVAL = 0.5
+# Hard cap on concurrent thin clients. Connection count is a real performance
+# variable on this server (BUG-060), and a thin client costs a full render --
+# far above a deflate. All clients share the one renderer (a second
+# `OffscreenRenderer` aborts the process), so renders serialise: 2 clients x
+# 10 fps = 20 renders/s, about 54 % of the render thread.
+THIN_MAX_CLIENTS = 2
 # Sensor (streams 9/10) broadcast cadence: 15 Hz is smooth for a handheld gizmo
 # and well above the ~4 Hz sparkline need. History rides every message so a
 # late-joining tab's sparklines are instantly full (Phase-1 late-joiner rule).
@@ -4350,6 +4367,71 @@ def _replay_position(ctrl: SessionController, last_item) -> float | None:
 
 # --- FastAPI app + broadcast hub --------------------------------------------
 
+MDNS_SERVICE_TYPE = "_roomscan._tcp.local."
+MDNS_INSTANCE = "roomscan"
+
+
+def _lan_address() -> str:
+    """Best-guess LAN address to advertise. The server binds 0.0.0.0, so mDNS
+    has to name one concrete address; the outbound-route trick picks the
+    interface that actually reaches the network without sending a packet."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except Exception:  # noqa: BLE001 - no route: fall back to loopback
+        return "127.0.0.1"
+    finally:
+        sock.close()
+
+
+def register_mdns(port: int, *, zeroconf_factory=Zeroconf,
+                  address: str | None = None):
+    """Advertise this web server as `_roomscan._tcp.local.` (#194).
+
+    First time this server has ever advertised itself -- the existing
+    `zeroconf` use in `sources.py` only *browses*, to find the MCU. A thin
+    client can now find the host without a hardcoded IP.
+
+    Returns `(zeroconf, service_info)` or None. Never raises: mDNS is a
+    convenience, and a host without multicast must still serve the UI. The
+    factory is injected the same way `UdpSource` does it, so a test can
+    exercise this without touching the network.
+    """
+    try:
+        addr = address or _lan_address()
+        info = ServiceInfo(
+            MDNS_SERVICE_TYPE,
+            f"{MDNS_INSTANCE}.{MDNS_SERVICE_TYPE}",
+            addresses=[socket.inet_aton(addr)],
+            port=int(port),
+            properties={"path": "/static/index.html", "thin": "/ws-thin"},
+            server=f"{MDNS_INSTANCE}.local.",
+        )
+        zc = zeroconf_factory()
+        zc.register_service(info)
+        log.info("mDNS: advertised %s at %s:%d", MDNS_SERVICE_TYPE, addr, port)
+        return zc, info
+    except Exception as exc:  # noqa: BLE001
+        log.warning("mDNS advertisement unavailable: %s: %s",
+                    type(exc).__name__, exc)
+        return None
+
+
+def unregister_mdns(registration) -> None:
+    """Withdraw the advertisement. Tolerates None and a half-dead stack."""
+    if not registration:
+        return
+    zc, info = registration
+    try:
+        zc.unregister_service(info)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("mDNS unregister failed: %s", exc)
+    finally:
+        with suppress(Exception):
+            zc.close()
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     # Start the single broadcast task once the server begins serving. app.state
@@ -4367,6 +4449,12 @@ async def _lifespan(app: FastAPI):
         # probe loop -- decoupled from the frame broadcaster so a ping stall can
         # never touch the stream, and vice versa.
         app.state.comm_probe_task = asyncio.create_task(_comm_probe_loop(app.state))
+        # Advertise this server so a thin client (and any future one) can find
+        # it without a hardcoded IP. Off the event loop: `register_service`
+        # blocks on multicast announcement.
+        app.state.mdns = await asyncio.to_thread(
+            register_mdns, getattr(app.state, "port", 8000),
+            zeroconf_factory=getattr(app.state, "zeroconf_factory", Zeroconf))
     yield
     task = getattr(app.state, "broadcast_task", None)
     if task is not None:
@@ -4386,6 +4474,17 @@ async def _lifespan(app: FastAPI):
     splat_runner = getattr(app.state, "splat_runner", None)
     if splat_runner is not None:
         await asyncio.to_thread(splat_runner.close)
+    mdns = getattr(app.state, "mdns", None)
+    if mdns is not None:
+        await asyncio.to_thread(unregister_mdns, mdns)
+        app.state.mdns = None
+    # Destroy the offscreen context on its owning thread -- letting the
+    # interpreter collect a live one aborts the process (see thin_render).
+    # `instance_if_created`, never `instance`: a process that never served a
+    # thin client must not build a renderer just to close it.
+    thin_renderer = ThinRenderer.instance_if_created()
+    if thin_renderer is not None:
+        await asyncio.to_thread(thin_renderer.close)
 
 
 app = FastAPI(lifespan=_lifespan)
@@ -5130,7 +5229,259 @@ def ws_flow_counters(state) -> dict:
         "mesh_ack_lag_s_max": max(lags) if lags else None,
         "mesh_ack_timeouts_total": sum(f.ack_timeouts for f in flows),
         "latest_mesh_bytes": 0 if latest is None else len(latest),
+        "thin_clients": len(getattr(state, "thin_clients", None) or {}),
     }
+
+
+# --------------------------------------------------------------------------
+# `/ws-thin` -- server-rendered raster feed for GPU-less thin clients (#194)
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class ThinFlow:
+    """Per-connection `/ws-thin` state.
+
+    Camera and mode are deliberately NOT in `UiState`: that is server-held and
+    shared by every browser tab, whereas two thin clients must be able to orbit
+    independently. A disconnect drops this object and with it all the state.
+    """
+
+    camera: ThinCamera = field(default_factory=ThinCamera)
+    frames_sent: int = 0
+    #: ticks skipped because the previous render had not finished
+    skipped: int = 0
+    render_errors: int = 0
+
+
+def _thin_clients(state) -> dict:
+    """Lazily-created `{WebSocket: ThinFlow}` map, same pattern as
+    `_mesh_clients` -- hand-built `app.state` objects in tests needn't know."""
+    clients = getattr(state, "thin_clients", None)
+    if clients is None:
+        clients = state.thin_clients = {}
+    return clients
+
+
+def _thin_mesh_scene(state, generation):
+    """Renderable geometry for the SLAM mode, unpacked from the cached MESH
+    bytes and memoised **by object identity**.
+
+    Unpacking a 150 k-vertex MESH costs real numpy work; doing it per tick at
+    10 fps would dwarf the render itself. `_cache_latest_mesh` already treats
+    identity (never `mesh_seq`, which resets to 0 on `_reset_slam`) as the
+    definition of newness, so this cache uses the same test.
+    """
+    mesh_bytes = getattr(state, "latest_mesh", None)
+    if mesh_bytes is None:
+        return None
+    cached = getattr(state, "thin_mesh_cache", None)
+    if cached is not None and cached[0] is mesh_bytes:
+        return cached[1]
+    scene = unpack_mesh_scene(mesh_bytes, generation=generation)
+    state.thin_mesh_cache = (mesh_bytes, scene)
+    return scene
+
+
+def thin_scene_for(state, mode: str):
+    """The `ThinScene` to draw for `mode`, or None if there is no fresh data.
+
+    Every stash is generation-tagged and a mismatch is dropped rather than
+    drawn (#101): a live->replay switch must never show a thin client the
+    previous source's geometry.
+    """
+    ctrl = getattr(state, "controller", None)
+    cur_gen = getattr(ctrl, "generation", None)
+
+    if mode == "ir":
+        stash = getattr(state, "thin_latest_ir", None)
+        if stash is None:
+            return None
+        gen, rgb = stash
+        if gen != cur_gen or rgb is None:
+            return None
+        return image_scene(rgb, generation=gen)
+
+    if mode == "slam":
+        return _thin_mesh_scene(state, cur_gen)
+
+    stash = getattr(state, "thin_latest_pc", None)
+    if stash is None:
+        return None
+    gen, pts, colors = stash
+    if gen != cur_gen:
+        return None
+    if pts is None or len(pts) == 0:
+        return None
+    return points_scene(pts, colors, generation=gen)
+
+
+async def _apply_record(state, ctrl, on: bool) -> None:
+    """Start/stop recording and tell every browser client about it.
+
+    Shared by the browser's `record` message and `/ws-thin`'s `thin_record`, so
+    the two entry points can never drift apart -- there is exactly one place
+    that knows what recording involves.
+    """
+    if on:
+        ctrl.start_record()
+    else:
+        ctrl.stop_record()
+    await _broadcast_session(state)
+    await _broadcast_captures(state, ctrl)
+
+
+def thin_telemetry_message(state, flow: ThinFlow) -> dict:
+    """The curated 2 Hz `thin_telemetry` projection.
+
+    A strict subset of numbers the existing `ranging`/`sensor`/`metrics`
+    builders already compute -- no new telemetry math. `mode` and `recording`
+    are authoritative: `/ws-thin` has no ack protocol, so a dropped
+    `thin_mode`/`thin_record` self-corrects at the next tick.
+    """
+    fps = None
+    if getattr(state, "ranging_state", None) is not None:
+        try:
+            ranging = _ranging_message(state)
+        except Exception:  # noqa: BLE001 - telemetry must never kill the feed
+            ranging = {}
+        fps = ranging.get("measured_fps")
+        if fps is None:
+            fps = (ranging.get("applied") or {}).get("fps")
+
+    # Orientation + heading (owner ask, 2026-08-18). Taken VERBATIM from the
+    # sensor message the broadcaster already built -- the same numbers, in the
+    # same decomposition, that the web UI's Sensors panel displays.
+    #
+    # Deliberately not recomputed from the quaternion here. No scalar taken off
+    # an attitude is the bearing of an axis; asking for "yaw" instead of the
+    # bearing of the axis you mean is the single defect this repo has shipped
+    # most often (four times, two of them in live code). Reusing the finished
+    # projection means this endpoint cannot be the fifth.
+    roll = tilt = heading = None
+    orientation_valid = False
+    orientation_labels = list(DEFAULT_AXIS_LABELS)
+    smsg = getattr(state, "thin_latest_sensor", None)
+    if smsg:
+        heading = smsg.get("heading_deg")
+        view = smsg.get("orientation_view") or {}
+        roll = view.get("roll_deg")
+        tilt = view.get("pitch_deg")
+        # NO fallback to `orientation_view["yaw_deg"]`. In the World
+        # decomposition that slot happens to be the heading, but under `zyx`
+        # (or any alternate decomposition) it is a Tait-Bryan twist about a
+        # body axis -- not a bearing at all. Publishing it as `heading_deg`
+        # would be this repo's most-repeated defect for the fifth time. If
+        # `heading_deg` is absent there is no bearing, and the client is told
+        # so rather than shown a plausible wrong number.
+        orientation_valid = bool(view.get("valid", False)) and heading is not None
+        labels = smsg.get("labels")
+        if labels:
+            orientation_labels = list(labels)
+
+    point_count = 0
+    stash = getattr(state, "thin_latest_pc", None)
+    if stash is not None and stash[1] is not None:
+        point_count = int(len(stash[1]))
+
+    ctrl = getattr(state, "controller", None)
+    recording = bool(getattr(ctrl, "recording", False)) if ctrl is not None else False
+
+    return {
+        "type": "thin_telemetry",
+        "fps": fps,
+        "point_count": point_count,
+        "recording": recording,
+        "mode": flow.camera.mode,
+        "link": "ok",
+        # Orientation block. `*_deg` are floats or null; `orientation_valid`
+        # says whether the heading is trustworthy right now (a bad mag reading,
+        # device acceleration, or a boresight within 10 deg of vertical, where
+        # no compass bearing exists at all -- BUG-058). A client should grey the
+        # compass rather than draw a confident wrong bearing.
+        "roll_deg": roll,
+        "tilt_deg": tilt,
+        "heading_deg": heading,
+        "orientation_valid": orientation_valid,
+        "orientation_labels": orientation_labels,
+    }
+
+
+async def _handle_thin_inbound(state, msg: dict, flow: ThinFlow) -> None:
+    """Apply one `/ws-thin` command. Unknown types are ignored, not fatal."""
+    mtype = msg.get("type")
+    if mtype == "thin_orbit":
+        flow.camera.apply_orbit(
+            float(msg.get("dyaw", 0.0) or 0.0),
+            float(msg.get("dpitch", 0.0) or 0.0),
+            float(msg.get("dzoom", 0.0) or 0.0))
+    elif mtype == "thin_mode":
+        flow.camera.set_mode(msg.get("mode"))
+    elif mtype == "thin_record":
+        ctrl = getattr(state, "controller", None)
+        if ctrl is not None:
+            await _apply_record(state, ctrl, bool(msg.get("on")))
+    else:
+        log.warning("unknown /ws-thin message type %r", mtype)
+
+
+async def _thin_render_loop(state, websocket, flow: ThinFlow) -> None:
+    """Render and push frames to one thin client at `THIN_INTERVAL`.
+
+    Backpressure is freshest-frame-wins, and it is **structural** rather than a
+    governor: this task awaits its own render before pacing the next tick, so
+    exactly one render per client can ever be in flight, and a tick whose work
+    overran the interval resyncs instead of burst-catching-up. That is the
+    single-slot guard. It is deliberately not built on the send side -- on this
+    stack `send_bytes` never blocks and queues unboundedly (BUG-061), so a
+    send-derived signal would measure nothing. A slow render costs this client
+    frames (counted in `flow.skipped`) and never the other clients.
+    """
+    renderer = ThinRenderer.instance()
+    loop = asyncio.get_running_loop()
+    next_tick = time.monotonic()
+    next_telemetry = 0.0
+
+    while True:
+        delay = next_tick - time.monotonic()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        now = time.monotonic()
+        next_tick += THIN_INTERVAL
+        if next_tick <= now:  # this tick's work overran: resync, don't burst
+            flow.skipped += 1
+            next_tick = now + THIN_INTERVAL
+
+        if now >= next_telemetry:
+            next_telemetry = now + THIN_TELEMETRY_INTERVAL
+            try:
+                await websocket.send_text(
+                    json.dumps(thin_telemetry_message(state, flow)))
+            except Exception:  # noqa: BLE001 - disconnect; the receive loop wins
+                return
+
+        scene = thin_scene_for(state, flow.camera.mode)
+        if scene is None:  # no fresh data for this mode yet -- send nothing
+            continue
+
+        # Snapshot the camera: an orbit command arriving mid-render must not
+        # mutate the state the render thread is reading.
+        try:
+            frame = await asyncio.wrap_future(
+                renderer.submit(scene, replace(flow.camera)), loop=loop)
+        except ThinRenderUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one bad frame is not fatal
+            flow.render_errors += 1
+            if flow.render_errors <= 3:
+                log.warning("thin render failed: %s: %s", type(exc).__name__, exc)
+            continue
+
+        try:
+            await websocket.send_bytes(frame)
+        except Exception:  # noqa: BLE001 - disconnect; the receive loop wins
+            return
+        flow.frames_sent += 1
 
 
 async def _broadcast_session(state) -> None:
@@ -5618,6 +5969,11 @@ async def _broadcaster() -> None:
             elevation.reset()
             ui.ir_freeze_range = None
             state.latest_mesh = None
+            # A live<->replay switch must never leave a thin client looking at
+            # the previous source's geometry (#101 barrier).
+            state.thin_latest_pc = None
+            state.thin_latest_ir = None
+            state.thin_latest_sensor = None
             if cur_gen is not None:
                 await _broadcast_mesh_reset(state, cur_gen)
         ready = ui.source != "view" or _view_ready(ui, ctrl)
@@ -5701,13 +6057,22 @@ async def _broadcaster() -> None:
                             outputs, state.deproj, ui.color_mode,
                             ui.view_colormap, ui.surface_mode,
                             ui.surface_threshold_pct)
+                        rot = rotate_points(pg, view_rot)
                         last_pc_bytes = pack_surface_cloud(
-                            rotate_points(pg, view_rot), cg, val, tris, cov)
+                            rot, cg, val, tris, cov)
+                        # `/ws-thin` renders the *gravity-corrected* grid so
+                        # its own orbit camera is the only thing moving.
+                        state.thin_latest_pc = (cur_gen, rot, cg)
                     else:
                         pts, colors, fell_back = select_colors(
                             outputs, state.deproj, ui.color_mode, ui.view_colormap)
-                        last_pc_bytes = pack_point_cloud(
-                            rotate_points(pts, view_rot), colors)
+                        rot = rotate_points(pts, view_rot)
+                        last_pc_bytes = pack_point_cloud(rot, colors)
+                        # Stash for `/ws-thin` (#194): a generation-tagged
+                        # reference to the arrays this tick already built --
+                        # one assignment, no copy, no recomputation. The thin
+                        # loop drops a stash whose generation no longer matches.
+                        state.thin_latest_pc = (cur_gen, rot, colors)
                     if fell_back:
                         _log_debounced(state, bus, f"color-miss:{ui.color_mode}",
                                        f"color mode {ui.color_mode!r} unavailable this frame, showing depth")
@@ -5755,6 +6120,9 @@ async def _broadcaster() -> None:
                     steps = ir_gravity_rot(grav_quat) if grav_quat is not None else 0
                     if steps:
                         rgb = np.rot90(rgb, steps)
+                    # Stash the colorized frame for `/ws-thin` (#194) --
+                    # already rotated and colormapped, nothing to recompute.
+                    state.thin_latest_ir = (cur_gen, rgb)
                     await _broadcast_bytes(_engaged_clients(state, now), pack_ir_image(rgb))
                 else:
                     _log_debounced(state, bus, "ir-miss",
@@ -5820,6 +6188,12 @@ async def _broadcaster() -> None:
                                              altitude_smoother=elevation,
                                              tof_meta=state.tof_meta)
                 if smsg is not None:
+                    # Stash for `/ws-thin` (#194, owner ask 2026-08-18):
+                    # orientation and heading come from this message verbatim.
+                    # Never re-derive them -- no scalar off an attitude is the
+                    # bearing of an axis, and four shipped defects were exactly
+                    # that mistake.
+                    state.thin_latest_sensor = smsg
                     await _broadcast_text(clients, json.dumps(smsg))
 
         # Magnetometer sweep (owner ask, 2026-07-29). Feed at the full loop
@@ -6043,6 +6417,72 @@ async def websocket_mesh_endpoint(websocket: WebSocket):
         state.ws_client_id.pop(websocket, None)
 
 
+@app.websocket("/ws-thin")
+async def websocket_thin_endpoint(websocket: WebSocket):
+    """Server-rendered raster feed for a GPU-less thin client (#194).
+
+    Deliberately its own endpoint rather than a filter on `/ws`: a thin client
+    never parses POINT_CLOUD/MESH/IR_IMAGE or the full JSON surface, and this
+    way the browser protocol keeps zero knowledge of it. See
+    `docs/thin-client.md`.
+
+    A renderer that cannot start is reported as JSON and closed cleanly --
+    `/ws` and `/ws-mesh` clients must be entirely unaffected by it.
+    """
+    await websocket.accept()
+    state = app.state
+    flows = _thin_clients(state)
+
+    if len(flows) >= THIN_MAX_CLIENTS:
+        await websocket.send_text(json.dumps({
+            "type": "error",
+            "error": "thin_client_limit",
+            "message": (f"at most {THIN_MAX_CLIENTS} thin clients "
+                        f"are supported; {len(flows)} connected"),
+        }))
+        await websocket.close()
+        return
+
+    try:
+        # Context creation is ~4 s the first time and blocking, so it goes to a
+        # thread; every later connection gets the cached answer immediately.
+        await asyncio.to_thread(ThinRenderer.instance().ensure_available)
+    except ThinRenderUnavailable as exc:
+        await websocket.send_text(json.dumps({
+            "type": "error",
+            "error": "thin_render_unavailable",
+            "message": str(exc),
+        }))
+        await websocket.close()
+        return
+
+    flow = ThinFlow()
+    flows[websocket] = flow
+    if not hasattr(state, "ws_client_id"):
+        state.ws_client_id = {}
+    state.ws_client_id[websocket] = _resolve_client_id(websocket)
+
+    render_task = asyncio.create_task(
+        _thin_render_loop(state, websocket, flow))
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                await _handle_thin_inbound(state, json.loads(data), flow)
+            except Exception as exc:  # noqa: BLE001 - one bad command is not fatal
+                log.warning("bad /ws-thin message: %r (%s)", data[:200], exc)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ws-thin receive loop error: %r", exc)
+    finally:
+        render_task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await render_task
+        flows.pop(websocket, None)
+        state.ws_client_id.pop(websocket, None)
+
+
 async def _start_slam_auto_record(state, ctrl) -> bool:
     """Start Live SLAM's automatic recording, if it is enabled and possible.
 
@@ -6104,12 +6544,7 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
         state.dispatcher.dispatch(code, param, label)   # result lands on the bus -> broadcast
 
     elif mtype == "record" and ctrl is not None:
-        if bool(msg.get("on")):
-            ctrl.start_record()
-        else:
-            ctrl.stop_record()
-        await _broadcast_session(state)
-        await _broadcast_captures(state, ctrl)
+        await _apply_record(state, ctrl, bool(msg.get("on")))
 
     elif mtype == "list_captures" and ctrl is not None:
         await _broadcast_captures(state, ctrl)
@@ -6982,6 +7417,14 @@ def main(argv=None) -> int:
     app.state.mesh_clients = {}
     app.state.latest_mesh = None
     app.state.latest_mesh_seq = 0
+    # `/ws-thin` server-rendered raster feed (#194): the per-connection flow map
+    # and the generation-tagged stashes the render loop draws from -- see
+    # `_thin_clients` / `thin_scene_for`.
+    app.state.thin_clients = {}
+    app.state.thin_latest_pc = None
+    app.state.thin_latest_ir = None
+    app.state.thin_latest_sensor = None
+    app.state.thin_mesh_cache = None
     app.state.command_labels = set()
     app.state.debounce = {}
     # Ranging profiles & manual sensor control (Task 10). Populated for real by
@@ -7018,6 +7461,8 @@ def main(argv=None) -> int:
         _dispatch_standby(app.state, int(StandbyLevel.ACTIVE), "startup-wake")
 
     port = 8000
+    # `_lifespan` advertises this over mDNS and cannot see a local.
+    app.state.port = port
     url = f"http://localhost:{port}/static/index.html"
     print("\n=== roomscan web viewer ===")
     print(f"Starting server on {url}")

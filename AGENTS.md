@@ -185,6 +185,14 @@ in the repo. The evidence for every one is in `docs/roadmap-history.md`.
   set `scene.opacity` on every move and the uniform was never even declared. An `#ifndef` default
   (surprise ON) and an opt-in default (surprise OFF) are the same mistake. Read the vendor's own
   default; never infer it from your call site looking correct.
+- **Some failures abort the process instead of raising — you cannot handle those, only make
+  them unreachable.** Open3D/Filament's `OffscreenRenderer` kills the interpreter outright
+  (`utils::PreconditionPanic`, `terminate called`) on a *second* instance in one process, and
+  on any call from a thread other than the one that created it; a live one collected at
+  interpreter exit ends the run with `pure virtual method called`. No `try/except` reaches any
+  of these. When a native library documents a precondition, the design — a singleton, an
+  owning thread, an explicit teardown on that thread — *is* the error handling. Spike the
+  failure modes before building on a native handle, not just the happy path (#194).
 - **An invariant-preserving check verifies nothing.** |B| is preserved by all 48 signed axis
   permutations, so a magnetometer check "passed" for three weeks while every heading was 180° out
   (BUG-059). Ask which wrong answers a check can actually see before trusting it.

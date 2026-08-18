@@ -10,6 +10,7 @@ Agent guidance lives one level up in [`AGENTS.md`](../AGENTS.md) (`CLAUDE.md` is
 *   [**`engineering-practices.md`**](engineering-practices.md) - The constitution for contributing. Defines repo rules, commit structures, C/Python coding standards, and firmware loop practices.
 *   [**`protocol.md`**](protocol.md) - The binary wire protocol specification defining the transport layer between the MCU and Host PC.
 *   [**`web-protocol.md`**](web-protocol.md) - The WebSocket JSON/Binary protocol for the `roomscan-web` frontend.
+*   [**`thin-client.md`**](thin-client.md) - The `/ws-thin` server-rendered raster feed for GPU-less thin clients (CrowPanel), its protocol contract, renderer backend and client-cap/backpressure policy.
 *   [**`mcp-server.md`**](mcp-server.md) - API and structural documentation for the `roomscan-mcp` agentic tool server.
 *   [**`coordinate-frames.md`**](coordinate-frames.md) - **Binding**: the sensor/body/world frame definitions and the rotation conventions every orientation claim is expressed in.
 
@@ -31,6 +32,7 @@ Agent guidance lives one level up in [`AGENTS.md`](../AGENTS.md) (`CLAUDE.md` is
 *   [**`deprojector-validation.md`**](deprojector-validation.md) - How depth-to-point-cloud deprojection was validated.
 *   [**`phase6-slam-validation.md`**](phase6-slam-validation.md) - The offline SLAM validation record (accuracy gates and measured outcomes).
 *   [**`imu-mag-appnote-review-2026-07-29.md`**](imu-mag-appnote-review-2026-07-29.md) - Review of ST's IMU/magnetometer application notes against our implementation.
+*   [**`an6522-appnote-review-2026-08-17.md`**](an6522-appnote-review-2026-08-17.md) - Second-pass review of ST's ranging-profile tuning app note (AN6522) against the current presets: what's already applied, and two unresolved gaps (ULP-for-I3C power recommendation, indoor exposure ceiling).
 *   [**`odr-triggered-sync-costing-2026-07-30.md`**](odr-triggered-sync-costing-2026-07-30.md) - Costing study for ODR-triggered ToF/IMU synchronization (note the amended §2.3 premise).
 *   [**`connect-transient-forensics.md`**](connect-transient-forensics.md) - Forensics on the USB CDC connect-time CRC transient.
 

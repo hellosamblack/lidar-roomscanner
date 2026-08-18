@@ -50,6 +50,7 @@ EXPOSED: dict[str, tuple[str, ...]] = {
     "splat_vram_sweep.py": ("splat_vram_sweep",),
     "splat_sfm_probe.py": ("splat_sfm_probe",),
     "splat_render.py": ("splat_render",),
+    "thin_client_probe.py": ("rig_thin_probe",),
     "ws_probe.py": ("rig_ws_probe",),
     "web_ui_shot.py": ("ui_screenshot", "ui_eval", "ui_wait_for", "ui_reset"),
 }
