@@ -28,7 +28,7 @@ sockets.
 
 ### Binary frame (server → client): `THIN_FRAME`
 
-Fixed 480×480 in v1 — no resolution negotiation.
+480×480 @ 10 fps by default; negotiable via `thin_hello` (below).
 
 ```
 u32 tag        = 1
@@ -38,6 +38,64 @@ u8  pixels[width * height * 2]   // RGB565, little-endian, row-major
 ```
 
 460 808 bytes per frame at ~10 fps ≈ **4.6 MB/s per connected client**.
+
+### Binary frame (server → client): `THIN_FRAME_JPEG` (tag 2)
+
+Sent instead of tag 1 once a client has negotiated `format: "jpeg"` via
+`thin_hello`.
+
+```
+u32 tag        = 2
+u16 width
+u16 height
+u32 jpeg_len
+u8  jpeg[jpeg_len]   // JFIF bytes, simplejpeg-encoded RGB
+```
+
+Encoding happens on the render thread, never the asyncio loop. If
+`simplejpeg` is not importable on this host, `thin_hello_ack` reports
+`format: "raw"` regardless of what was requested and the flow stays on
+tag 1 — report what actually happened, not what was asked for — and the
+server logs one warning line per connected flow (not per hello, never per
+frame) so the degrade is visible in its own journal.
+
+### JSON in: `thin_hello` / JSON out: `thin_hello_ack`
+
+```json
+{"type": "thin_hello", "format": "jpeg", "fps": 30, "width": 320, "height": 320, "quality": 80}
+{"type": "thin_hello_ack", "format": "jpeg", "fps": 30.0, "width": 320, "height": 320, "quality": 80}
+```
+
+All fields optional; a field omitted keeps its current value. Clamped
+server-side, and the ack echoes the CLAMPED effective values, never the
+raw request: `width`/`height` to the nearest of {320, 480} (square only —
+a non-square request is rejected outright and the prior width/height are
+kept), `quality` to [40, 95]. A malformed or non-finite value for one
+field (wrong type, `Infinity`/`NaN`, non-square pair) is a no-op for that
+field only; the rest of the same message still applies, and the ack is
+always sent.
+
+`fps` stays fractional (a float) and its ceiling is COUPLED to `format`:
+raw clamps to [1, 10] because a raw RGB565 480×480 frame is 460 808 bytes
+(~4.6 MB/s per client at 10 fps already); jpeg clamps to [1, 60] since a
+JPEG frame at the default quality is roughly 15–25 KB. The clamp is
+re-applied to the STORED fps on every `thin_hello`, even one that does not
+mention `fps` — a client that negotiated `jpeg@60` and later sends
+`{"format": "raw"}` alone gets its rate re-clamped down to 10, not carried
+over illegally.
+
+The render loop is the single writer on the socket: a `thin_hello` is
+applied at the top of a render tick and its `thin_hello_ack` is sent
+before the first frame rendered under the new state, so a client never
+receives a frame in the new format or size ahead of the ack.
+
+A client that never sends `thin_hello` is unaffected — tag 1, RGB565,
+480×480, 10 fps, byte-identical to before this feature.
+
+Pacing is per-connection: each flow renders/sends at its own negotiated
+interval (default `THIN_INTERVAL`, 100 ms) rather than a shared module
+constant. The existing single-slot backpressure/stale-frame-resync
+behavior is unchanged.
 
 ### JSON out: `thin_telemetry`
 
@@ -275,9 +333,9 @@ See [`mcp-server.md`](mcp-server.md).
 
 ## Deferred
 
-- **JPEG encoding** (~5–10× smaller) once the CrowPanel's unused hardware JPEG
-  block is wired up. v1 is raw RGB565.
-- **Resolution/rate negotiation** (`thin_hello`). v1 hardcodes 480×480 @ 10 fps
-  on both sides.
 - **Device parameter control** (`set_profile` / `set_manual_params`) stays
   reachable only from the browser `/ws` protocol.
+
+*(JPEG encoding and `thin_hello` resolution/rate negotiation shipped in #197 —
+see the protocol sections above. The CrowPanel side — hardware JPEG decode of
+tag-2 frames — lives in the `CrowPanelProp` companion repo.)*

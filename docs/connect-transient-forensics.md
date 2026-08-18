@@ -126,6 +126,23 @@ Phase 2 Task 7 / Phase 2.5 Task 5 stall/recover experiments deliberately trigger
 pausing the host's reader for 5 s — and it reproduced there with the identical
 signature (one CRC failure from the mid-frame abort, one `FLAG_DROPPED` on recovery).
 
+> **#198 update (2026-08-18):** `rs_cdc_send()`'s stall bound is now two independent
+> deadlines. A **no-progress deadline** (`RS_CDC_STALL_MS` = 2 ms) resets every time
+> `tud_cdc_write()` accepts bytes and fast-aborts a genuinely dead reader (FIFO full,
+> host not draining at all) in ~2 ms instead of the old ~100 ms. Because that alone
+> does not bound a reader that keeps trickling FIFO space free without ever fully
+> draining (on Linux `cdc_acm` the kernel drains the device FIFO into the tty buffer
+> at line rate, so a host application reading that buffer slowly makes IN polling
+> resume in small bursts, each resetting the no-progress deadline), a second,
+> independent **total-send timer** (`RS_CDC_TOTAL_MS` = 100 ms — the exact pre-#198
+> bound) caps that slow-but-alive case at the same worst case the link had before.
+> Net: dead reader ~2 ms/call (~6 ms/frame), slow-but-alive reader ~100 ms/call
+> (~300 ms/frame, unchanged), healthy reader trips neither. The abort path and the
+> observable described in this document are unchanged either way: a tripped deadline
+> returns `false`, driving the same `pending_dropped` → `RS_FLAG_DROPPED` self-heal
+> on the next frame. (A per-abort CDC drop counter distinguishing the two cases in
+> telemetry/EVENT was explicitly deferred out of #198 as a protocol change.)
+
 The connect-time transient is **the same mechanism, firing once, for free** — not from
 an artificial pause, but from ordinary host-side startup latency:
 

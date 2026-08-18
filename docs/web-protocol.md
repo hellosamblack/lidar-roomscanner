@@ -103,12 +103,14 @@ backpressure.
 
 ## The thin-client channel — `/ws-thin` (not this protocol)
 
-A third endpoint, `GET /ws-thin`, serves **pre-rendered 480×480 RGB565 raster
-frames** to GPU-less embedded clients (the CrowPanel prop). It is a separate
+A third endpoint, `GET /ws-thin`, serves **pre-rendered raster frames** (raw
+RGB565 by default; JPEG and fps/resolution negotiable via `thin_hello`, #197)
+to GPU-less embedded clients (the CrowPanel prop). It is a separate
 protocol, not a mode of this one: a thin client never receives
 `POINT_CLOUD`/`MESH`/`IR_IMAGE` tags or any of the JSON messages documented
 below, and nothing in this document changes because it exists. Its contract —
-`THIN_FRAME`, `thin_telemetry`, `thin_orbit`/`thin_mode`/`thin_record` — lives
+`THIN_FRAME`/`THIN_FRAME_JPEG`, `thin_hello`/`thin_hello_ack`,
+`thin_telemetry`, `thin_orbit`/`thin_mode`/`thin_record` — lives
 in [`thin-client.md`](thin-client.md).
 
 Two things here that it *does* touch, both additive: `thin_record` routes
