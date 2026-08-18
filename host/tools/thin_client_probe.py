@@ -58,9 +58,25 @@ DEFAULT_MODES = ("point_cloud", "slam", "ir")
 DEFAULT_ORBIT_YAW = 120.0
 #: per-message wait; the feed is 10 fps and telemetry 2 Hz, so this is generous
 DEFAULT_TIMEOUT = 15.0
-#: frames discarded after `thin_orbit` so the "after" frame cannot be one that
-#: was already rendered when the command landed (one can be in flight; two is slack)
-ORBIT_SETTLE_FRAMES = 2
+#: The orbit "after" frame used to be found by discarding a FIXED number of
+#: frames post-command. That silently broke at high negotiated fps (#197
+#: review, live finding 2026-08-18): the probe (decode + PNG-write per
+#: frame) is a slower consumer than the server is a producer, so several
+#: PRE-command frames can already be queued in the receive buffer by the
+#: time the command is sent -- "discard the next 2" can still land on a
+#: stale one when the backlog is deeper than 2. It is now TIME-ANCHORED
+#: instead (`_ThinLink.drain`/`next_frame_after`): "after" must have been
+#: RECEIVED at least one full negotiated interval past the send, however
+#: many frames that takes to reach -- `orbit["frames_discarded"]` in the
+#: report is the real count for a given run.
+#: default un-negotiated cadence (matches `roomscan.web.THIN_INTERVAL`) --
+#: used to size the time-anchor window when no `thin_hello` was negotiated.
+DEFAULT_THIN_INTERVAL_S = 1.0 / 10.0
+#: per-read timeout for `_ThinLink.drain()`: long enough that an ALREADY
+#: buffered message (no real wait) reliably resolves first, short enough
+#: that it can never itself be mistaken for "waiting for a new frame" --
+#: safely below even the fastest negotiated interval (1/60 s = 16.7 ms).
+DRAIN_POLL_TIMEOUT = 0.01
 
 # Wire contract, mirrored from `roomscan.thin_render` (see docs/thin-client.md).
 # Imported when the package is importable, so a contract change breaks loudly
@@ -284,6 +300,10 @@ class _ThinLink:
         self.telemetry_seen = 0
         self.frames_received = 0
         self.closed_error: str | None = None
+        #: `time.monotonic()` at which the MOST RECENT message was actually
+        #: received off the socket -- set by `next_message`, read by
+        #: `next_frame_after` to time-anchor a capture against a send.
+        self.last_recv_time: float = 0.0
 
     async def send(self, msg: dict) -> bool:
         try:
@@ -304,6 +324,7 @@ class _ThinLink:
         except Exception as exc:  # noqa: BLE001 - server went away mid-probe
             self.closed_error = repr(exc)
             return "closed", repr(exc)
+        self.last_recv_time = time.monotonic()
         if isinstance(msg, (bytes, bytearray)):
             info = decode_thin_frame(bytes(msg))
             self.frames_received += 1
@@ -334,6 +355,56 @@ class _ThinLink:
             if self.report.get("server_error"):
                 return None
         return None
+
+    async def drain(self, timeout: float = DRAIN_POLL_TIMEOUT) -> int:
+        """Discard whatever is ALREADY sitting in the receive queue, without
+        waiting for anything new. Returns how many messages were discarded.
+
+        `websockets` keeps filling its receive queue in the background
+        regardless of whether this probe reads promptly, and at a high
+        negotiated fps the probe (decode + PNG-write per frame) is a SLOWER
+        CONSUMER than the server is a producer -- so a burst of already-
+        queued, pre-command frames can sit ahead of anything sent from here
+        on out (#197 review, live finding 2026-08-18). A short per-read
+        timeout is what makes this non-blocking rather than another fixed
+        sleep: a message already in the queue resolves near-instantly, well
+        under `timeout`; an empty queue means `recv()` has to actually wait
+        for the network, so it hits `timeout` instead -- which is this
+        method's stopping condition.
+        """
+        drained = 0
+        while True:
+            kind, _payload = await self.next_message(timeout)
+            if kind in ("timeout", "closed"):
+                return drained
+            drained += 1
+
+    async def next_frame_after(self, deadline_recv_time: float, timeout: float):
+        """The next decoded frame RECEIVED at or after `deadline_recv_time`
+        (a `time.monotonic()` value); returns `(frame_or_None, discarded)`.
+
+        Preferred over counting a fixed number of "settle frames" (#197
+        review): at a high negotiated fps the receive-buffer backlog is not
+        bounded by frame count, so "discard the next N" can still resolve
+        entirely within a pre-command backlog when N is smaller than that
+        backlog's depth. Time-anchoring asks the one question that actually
+        matters -- was this frame produced after the command had landed --
+        and keeps discarding, however many that takes, until it is.
+        """
+        discarded = 0
+        deadline = time.monotonic() + timeout
+        while (remain := deadline - time.monotonic()) > 0:
+            kind, payload = await self.next_message(remain)
+            if kind in ("timeout", "closed"):
+                return None, discarded
+            if self.report.get("server_error"):
+                return None, discarded
+            if kind != "frame" or not payload.get("ok"):
+                continue
+            if self.last_recv_time >= deadline_recv_time:
+                return payload, discarded
+            discarded += 1
+        return None, discarded
 
     async def wait_telemetry(self, predicate, timeout: float) -> dict | None:
         """Next telemetry satisfying `predicate` -- the server's own confirmation."""
@@ -441,19 +512,35 @@ async def _collect_initial(link: _ThinLink, frames: int, out_dir: Path,
 
 
 async def _probe_orbit(link: _ThinLink, out_dir: Path, report: dict,
-                       dyaw: float, timeout: float) -> None:
-    """Does `thin_orbit` move the PICTURE? Measured against a no-command control."""
-    orbit: dict = {"dyaw": dyaw, "settle_frames": ORBIT_SETTLE_FRAMES}
+                       dyaw: float, timeout: float,
+                       interval_s: float = DEFAULT_THIN_INTERVAL_S) -> None:
+    """Does `thin_orbit` move the PICTURE? Measured against a no-command control.
+
+    Both halves drain the receive buffer immediately before reading, and the
+    post-command frame is additionally TIME-ANCHORED rather than frame-
+    counted -- see `_ThinLink.drain`/`next_frame_after`. `interval_s` should
+    be the flow's actual negotiated cadence (1/fps from a `thin_hello` ack,
+    or the server default) so the anchor window is "one real tick", not a
+    guess.
+    """
+    orbit: dict = {"dyaw": dyaw, "interval_s": interval_s,
+                  "settle_method": "time-anchored"}
     report["orbit"] = orbit
 
+    # The control: two consecutive frames, no command in between. Draining
+    # before EACH capture keeps it symmetric with how "after" is captured
+    # below -- both are "freshest available at read time", never a frame
+    # that had been sitting in a backlog since before this phase even
+    # started (#197 review, live finding 2026-08-18).
+    await link.drain()
     a = await link.next_frame(timeout)
+    await link.drain()
     b = await link.next_frame(timeout)
     if a is None or b is None:
         orbit["error"] = "no frame pair for the control measurement"
         return
-    # The control: two consecutive frames, no command in between. Whatever the
-    # scene does on its own -- replay advancing, live geometry, render dither --
-    # shows up here, and the orbit has to beat it.
+    # Whatever the scene does on its own -- replay advancing, live geometry,
+    # render dither -- shows up here, and the orbit has to beat it.
     orbit["control_changed_frac"] = changed_frac(a["rgb"], b["rgb"])
     orbit["before"] = save_png(b["rgb"], out_dir / "orbit_before.png")
     orbit["before"].update(frame_stats(b["rgb"]))
@@ -461,12 +548,15 @@ async def _probe_orbit(link: _ThinLink, out_dir: Path, report: dict,
     if not await link.send({"type": "thin_orbit", "dyaw": dyaw}):
         orbit["error"] = "thin_orbit send failed"
         return
-    dropped = 0
-    for _ in range(ORBIT_SETTLE_FRAMES):
-        if await link.next_frame(timeout) is not None:
-            dropped += 1
-    orbit["settle_frames_dropped"] = dropped
-    c = await link.next_frame(timeout)
+    send_completed_at = time.monotonic()
+
+    # 'after' must have been RECEIVED at least one full negotiated interval
+    # past the send -- discarding anything received before that, however
+    # many frames that takes, rather than trusting a fixed settle count that
+    # a receive-buffer backlog can exhaust before the orbit ever landed.
+    deadline_recv_time = send_completed_at + max(interval_s, 0.0)
+    c, discarded = await link.next_frame_after(deadline_recv_time, timeout)
+    orbit["frames_discarded"] = discarded
     if c is None:
         orbit["error"] = "no frame after thin_orbit"
         return
@@ -612,7 +702,15 @@ async def probe_async(frames: int = DEFAULT_FRAMES, url: str = DEFAULT_URL,
                 "no THIN_FRAME arrived -- the render loop sends nothing when it has "
                 "no fresh data for the current mode; is a source streaming?")
         else:
-            await _probe_orbit(link, out, report, orbit_yaw, timeout)
+            # The negotiated cadence, if any -- sizes the orbit phase's
+            # time-anchor window to "one real tick" rather than a guess.
+            interval_s = DEFAULT_THIN_INTERVAL_S
+            hello_ack = (report.get("hello") or {}).get("ack") or {}
+            acked_fps = hello_ack.get("fps")
+            if acked_fps:
+                interval_s = 1.0 / float(acked_fps)
+            await _probe_orbit(link, out, report, orbit_yaw, timeout,
+                               interval_s=interval_s)
         await _probe_modes(link, modes, out, report, timeout)
         if record:
             await _probe_record(link, report, timeout)
