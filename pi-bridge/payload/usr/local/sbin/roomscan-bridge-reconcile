@@ -95,6 +95,11 @@ probe_fallback_scanner() {
         answered="yes"
     fi
     ip addr del "${PROBE_ALIAS}" dev eth0 2>/dev/null || true
+    # Touching eth0 with iproute2 is what flips NM into "connected
+    # (externally)", after which our static address never (re)applies. Every
+    # such path re-asserts it. Emits nothing on stdout, so the echo below is
+    # still the only thing this function prints.
+    roomscan_ensure_eth0_address
     echo "${answered}"
 }
 
@@ -133,6 +138,7 @@ handle_scanner_absent() {
     sleep 1
     ip link set eth0 up
     log "eth0 bounced"
+    roomscan_ensure_eth0_address
 }
 
 # ---------------------------------------------------------------------------

@@ -118,5 +118,60 @@ roomscan_stream_is_live() {
     fi
 }
 
+# Make sure eth0 actually carries its static address, re-activating the
+# NetworkManager profile if it does not.
+#
+# Why this is needed at all (issue #191). On the real Pi, eth0 came up with NO
+# IPv4 address whatsoever, so dnsmasq had nothing to serve DHCP from and the
+# scanner necessarily missed its 3000 ms window and self-assigned. NM reported:
+#
+#   eth0:ethernet:connected (externally):eth0
+#
+# "connected (externally)" means NM has decided the device was configured by
+# something outside NM, so it will not autoconnect a profile onto it -- our
+# roomscan-eth0 profile sat at autoconnect=yes, priority 100, bound to nothing.
+# The something outside NM is US: the fallback probe adds and deletes a
+# temporary alias with `ip addr add`, and the recovery path bounces the link
+# with `ip link set eth0 down/up`. Poking a NM-managed device with iproute2 is
+# what puts it into that state, and the state then blocks the address we need.
+#
+# So every path that touches eth0 directly calls this afterwards, and it is
+# also called once at install time so a freshly provisioned box converges
+# without waiting for a reconcile tick.
+roomscan_ensure_eth0_address() {
+    # Built from the same ETH_ADDR this library already defines, not a second
+    # copy of the address -- two constants for one value drift apart.
+    local want="${ETH_ADDR}/${ETH_PREFIX:-24}"
+    if ip -4 -o addr show eth0 2>/dev/null | grep -qF "${want}"; then
+        return 0
+    fi
+    if ! command -v nmcli >/dev/null 2>&1; then
+        # No NM: assert the address directly rather than leave eth0 unusable.
+        ip addr add "${want}" dev eth0 2>/dev/null || true
+        return 0
+    fi
+    # `--wait 10`, never the default: `nmcli con up` blocks for up to NINETY
+    # seconds, and this is reached from reconcile, which systemd fires every
+    # 10 s.
+    #
+    # It does NOT stack concurrent nmcli processes -- systemd will not run two
+    # instances of one service at once, so a slow call just makes reconcile
+    # tick every ~90 s instead of every 10 s. (That pile-up was a stated
+    # hypothesis for the unexplained 2026-08-18 post-reboot outage; it is
+    # wrong, and the outage remains unexplained because the volatile journal
+    # took the evidence with it. See the journald drop-in.)
+    #
+    # The real cost is the one that matters here: reconcile is the thing that
+    # notices a scanner stuck in fallback mode, and a 90 s stall inside it is
+    # 90 s of not noticing, on a 10 s duty cycle.
+    nmcli --wait 10 con up roomscan-eth0 >/dev/null 2>&1 || true
+    # Verify rather than assume -- `nmcli con up` can report success while the
+    # device stays externally-managed.
+    if ip -4 -o addr show eth0 2>/dev/null | grep -qF "${want}"; then
+        return 0
+    fi
+    ip addr add "${want}" dev eth0 2>/dev/null || true
+}
+
 # Harmless no-op if this file is executed directly instead of sourced.
 return 0 2>/dev/null || exit 0

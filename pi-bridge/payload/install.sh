@@ -722,6 +722,19 @@ main() {
     install_authorized_key
     harden_admin_access
 
+    # Converge eth0's static address now rather than waiting for a reconcile
+    # tick. On the real Pi eth0 came up with no IPv4 at all -- NM had it
+    # "connected (externally)" and so never applied our profile -- which means
+    # dnsmasq has nothing to serve DHCP from and the scanner ALWAYS misses its
+    # 3000 ms window. See roomscan_ensure_eth0_address (issue #191).
+    if command -v roomscan_ensure_eth0_address >/dev/null 2>&1 || \
+       declare -f roomscan_ensure_eth0_address >/dev/null 2>&1; then
+        log "ensuring eth0 carries its static address"
+        roomscan_ensure_eth0_address || log "WARNING: could not assert eth0's static address"
+    else
+        log "WARNING: roomscan_ensure_eth0_address not available (old common.sh?); eth0's address is not being asserted"
+    fi
+
     # Note for a future editor: do NOT add a step here that chowns the tee's
     # ring directory to `tcpdump`. It looks like the fix for the tee's
     # Permission denied failure and it is not -- systemd's StateDirectory=

@@ -727,6 +727,70 @@ def test_install_sh_checks_units_are_still_alive_not_just_that_start_returned():
         "`activating` is also what a crash-looping unit looks like mid-backoff"
 
 
+def test_the_journal_survives_the_reboot_that_needs_explaining():
+    """Raspberry Pi OS ships `Storage=volatile`: the journal lives only in
+    /run/log/journal and is destroyed on every boot. (/var/log/journal exists on
+    the stock image but is unused, which makes this easy to misread as already
+    persistent.)
+
+    The bridge's signature failure is "it stopped being reachable", and the only
+    evidence is the journal of the boot that failed. On 2026-08-18 a
+    `systemctl reboot` left the Pi off the network entirely; recovering it took a
+    power cycle, which destroyed the sole copy of the log that could have
+    explained it. That failure is still unexplained (issue #191)."""
+    conf = (PAYLOAD / "etc" / "systemd" / "journald.conf.d"
+            / "roomscan-bridge.conf").read_text()
+    flat = conf.replace(" ", "")
+    assert "Storage=persistent" in flat
+    # Bounded, or the SD card becomes the next problem.
+    assert "SystemMaxUse=" in flat
+
+
+def test_nmcli_is_never_called_without_a_bounded_wait():
+    """`nmcli con up` blocks up to 90 s by default, and it is reached from
+    reconcile, which runs on a 10 s timer. systemd serialises the service so
+    this does not stack processes -- but reconcile is what notices a scanner
+    stuck in fallback mode, and a 90 s stall is 90 s of not noticing."""
+    for path in ("usr/local/sbin/roomscan-bridge-common.sh",
+                 "usr/local/sbin/roomscan-bridge-reconcile"):
+        text = (PAYLOAD / path).read_text()
+        for ln in text.splitlines():
+            s = ln.strip()
+            if s.startswith("#") or "nmcli" not in s:
+                continue
+            if " con up" in s or " connection up" in s:
+                assert "--wait" in s or "-w " in s, \
+                    f"unbounded nmcli activation in {path}: {s}"
+
+
+def test_every_path_that_pokes_eth0_reasserts_its_static_address():
+    """On the real Pi, eth0 came up with NO IPv4 address at all, so dnsmasq had
+    nothing to serve DHCP from and the scanner ALWAYS missed its 3000 ms window
+    and self-assigned. NetworkManager had the device `connected (externally)`,
+    which stops it autoconnecting our profile -- and the thing that puts it in
+    that state is us: reconcile adds a probe alias with `ip addr add` and
+    bounces the link with `ip link set eth0 down/up`. Poking a NM-managed device
+    with iproute2 costs you the address NM was supposed to provide (issue #191).
+
+    So every path that touches eth0 directly must re-assert it afterwards."""
+    common = (PAYLOAD / "usr" / "local" / "sbin" / "roomscan-bridge-common.sh").read_text()
+    assert "roomscan_ensure_eth0_address()" in common
+
+    rec = (PAYLOAD / "usr" / "local" / "sbin" / "roomscan-bridge-reconcile").read_text()
+    live = [ln for ln in rec.splitlines() if not ln.strip().startswith("#")]
+    pokes = [i for i, ln in enumerate(live)
+             if ("ip addr add" in ln or "ip addr del" in ln or "ip link set eth0" in ln)]
+    assert pokes, "expected reconcile to manipulate eth0 directly"
+    reasserts = [i for i, ln in enumerate(live) if "roomscan_ensure_eth0_address" in ln]
+    assert reasserts, "reconcile pokes eth0 but never re-asserts its address"
+    # Every poke must be followed by a re-assert somewhere after it.
+    assert max(reasserts) > max(pokes), \
+        "the last eth0 manipulation is not followed by a re-assert"
+
+    # And a freshly provisioned box must converge without waiting for a tick.
+    assert "roomscan_ensure_eth0_address" in (PAYLOAD / "install.sh").read_text()
+
+
 def test_the_live_stream_guard_tests_a_rate_not_any_increase():
     """The guard that stops reconcile bouncing eth0 mid-capture latched forever
     on the real rig. It tested `after > before`, so a single byte counted as a
