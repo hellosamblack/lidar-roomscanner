@@ -327,6 +327,16 @@ fake thin client, decode frames back to PNG, and round-trip the commands. The
 orbit check reports **how many pixels actually changed** — a frame counter or a
 read-back of the camera state would prove nothing (the #106 lesson).
 
+At a high negotiated fps, the probe's own receive buffer can hold several
+frames the server already produced before a command was sent — the probe
+(decode + PNG-write per frame) is a slower consumer than the server is a
+producer. The orbit check accounts for this (#197): it drains the receive
+buffer immediately before each control capture, and time-anchors the
+post-command capture (the `after` frame must have been *received* at least one
+full negotiated interval past the send, discarding anything earlier however
+many frames that takes) rather than trusting a fixed count of frames to have
+moved past the command.
+
 See [`mcp-server.md`](mcp-server.md).
 
 ---
