@@ -75,20 +75,43 @@ roomscan_set_dnat_target() {
 }
 
 # Samples the DNAT rule's byte counter twice, ${1:-1} seconds apart.
-# Echoes "yes" if bytes increased (stream is live) or "no" otherwise --
-# which also covers "couldn't read a counter at all" (e.g. table not
-# loaded yet), so callers gating a destructive action on "no traffic seen"
-# should keep in mind that "no" here means "no evidence of traffic", not
-# a hardware-verified idle state.
+# Echoes "yes" if the counter grew FAST ENOUGH to be an actual scanner
+# stream, "no" otherwise -- which also covers "couldn't read a counter at
+# all" (e.g. table not loaded yet), so callers gating a destructive action
+# on "no traffic seen" should keep in mind that "no" here means "no
+# evidence of a stream", not a hardware-verified idle state.
+#
+# Why a RATE and not "did it increase at all" (issue #191):
+#
+#   The original test was `after > before`, i.e. any single byte counted as
+#   a live capture. On the real rig that guard latched permanently: the
+#   host's roomscan-web broadcasts a 1-byte discovery beacon to
+#   255.255.255.255:5000 once a second, the DNAT rule matches it, and the
+#   counter therefore ticks up ~25 B/s forever with no scanner traffic at
+#   all. reconcile read that as "capture in progress" on every pass and so
+#   NEVER bounced eth0 -- which is the one action that recovers a scanner
+#   stuck in its self-assigned fallback mode. The bridge could see the
+#   problem, knew the fix, and declined to apply it, indefinitely.
+#
+#   The real stream is ~466 KB/s (30 fps of ToF frames). The stray beacon is
+#   ~25 B/s. Four orders of magnitude apart, so the threshold does not need
+#   to be delicate: anything above a few KB/s is a stream and anything below
+#   is noise. 20 KB/s is ~4% of the real rate -- low enough that even a
+#   badly degraded capture still counts as live and is protected, high
+#   enough that beacons, ARP, mDNS and probe traffic never trip it.
+: "${STREAM_LIVE_MIN_BYTES_PER_SEC:=20480}"
+
 roomscan_stream_is_live() {
     local sample_secs="${1:-1}"
-    local before after
+    local before after delta threshold
     before="$(roomscan_dnat_counter_bytes)"
     [ -n "${before}" ] || before=0
     sleep "${sample_secs}"
     after="$(roomscan_dnat_counter_bytes)"
     [ -n "${after}" ] || after=0
-    if [ "${after}" -gt "${before}" ]; then
+    delta=$(( after - before ))
+    threshold=$(( STREAM_LIVE_MIN_BYTES_PER_SEC * sample_secs ))
+    if [ "${delta}" -ge "${threshold}" ]; then
         echo "yes"
     else
         echo "no"

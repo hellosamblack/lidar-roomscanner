@@ -25,6 +25,7 @@
 #include "netif/etharp.h"
 #include "lwip/netifapi.h"
 #include "ethernetif.h"
+#include "ethernet_transport.h"   /* ETH_MAC_ADDR0..5 -- the board's real MAC */
 #include "lan8742.h"
 #include <string.h>
 
@@ -156,7 +157,24 @@ static void low_level_init(struct netif *netif)
 {
 
   HAL_StatusTypeDef hal_eth_init_status = HAL_OK;
-  uint8_t macaddress[6]= {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
+  /* The board's MAC comes from ethernet_transport.h, NOT from CubeMX's default.
+   *
+   * This line used to read {0x02, 0x00, 0x00, 0x00, 0x00, 0x00} -- the generated
+   * placeholder -- while ETH_MAC_ADDR0..5 (00:80:E1:00:00:00, an ST OUI) sat in
+   * ethernet_transport.h being read by nothing at all. The header constants were
+   * dead code, and everything downstream that "matched" them matched a value the
+   * hardware had never used: the bridge Pi's dnsmasq static lease is pinned to
+   * 00:80:E1:00:00:00, so on the real rig the scanner missed its reservation,
+   * landed in the dynamic range at .22 instead of .20, and every fixed-address
+   * assumption in the bridge (DNAT target, reconcile probe, status) broke
+   * (issue #191).
+   *
+   * The host-side test that was supposed to catch this compared the bridge
+   * config against these header defines -- two values that agreed with each
+   * other while both disagreed with the wire. It now asserts against THIS array,
+   * the value actually loaded into the MAC filter. */
+  uint8_t macaddress[6] = {ETH_MAC_ADDR0, ETH_MAC_ADDR1, ETH_MAC_ADDR2,
+                           ETH_MAC_ADDR3, ETH_MAC_ADDR4, ETH_MAC_ADDR5};
 
   EthHandle.Instance = ETH;
   EthHandle.Init.MACAddr = macaddress;

@@ -92,12 +92,23 @@ else
     NFT_CHAIN="prerouting"
     DNAT_COMMENT="roomscan-dnat-to-scanner"
     roomscan_dnat_counter_bytes() { nft list chain ${NFT_TABLE} ${NFT_CHAIN} 2>/dev/null | grep -F "${DNAT_COMMENT}" | grep -oP 'bytes \K[0-9]+' || true; }
+    # Keep this in lockstep with roomscan-bridge-common.sh's copy: a RATE
+    # test, not "did the counter move". Any-increase latches permanently on
+    # the real rig, because the host's roomscan-web broadcasts a 1-byte
+    # discovery beacon to 255.255.255.255:5000 every second and the DNAT rule
+    # counts it (~25 B/s against a real stream's ~466 KB/s) -- see the long
+    # note in roomscan-bridge-common.sh (issue #191).
+    : "${STREAM_LIVE_MIN_BYTES_PER_SEC:=20480}"
     roomscan_stream_is_live() {
         local sample_secs="${1:-1}" before after
         before="$(roomscan_dnat_counter_bytes)"; [ -n "${before}" ] || before=0
         sleep "${sample_secs}"
         after="$(roomscan_dnat_counter_bytes)"; [ -n "${after}" ] || after=0
-        if [ "${after}" -gt "${before}" ]; then echo "yes"; else echo "no"; fi
+        if [ $(( after - before )) -ge $(( STREAM_LIVE_MIN_BYTES_PER_SEC * sample_secs )) ]; then
+            echo "yes"
+        else
+            echo "no"
+        fi
     }
 fi
 

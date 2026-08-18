@@ -122,10 +122,39 @@ nft_get
 # --- tee ring ---------------------------------------------------------
 TEE_ACTIVE="$(systemctl is-active roomscan-tee.service 2>/dev/null || true)"
 RING_DIR="/var/lib/roomscan-bridge/tee"
-RING_FILES_COUNT="$(ls "${RING_DIR}"/ring.pcap* 2>/dev/null | wc -l | tr -d ' ')"
-RING_BYTES="$(du -cb "${RING_DIR}"/ring.pcap* 2>/dev/null | tail -1 | awk '{print $1}')"
-RING_NEWEST="$(ls -t "${RING_DIR}"/ring.pcap* 2>/dev/null | head -1)"
-RING_OLDEST="$(ls -t "${RING_DIR}"/ring.pcap* 2>/dev/null | tail -1)"
+
+# The ring directory is owned by `tcpdump` and mode 0750 -- roomscan-tee runs
+# as that user so systemd's StateDirectory= maintains it correctly (see
+# roomscan-tee.service). The consequence is that THIS script, running over ssh
+# as the unprivileged bridge account, cannot list it: `ls` fails, and the old
+# unguarded `ls | wc -l` turned that into a confident `0 files, 0 MB` for a ring
+# holding 33 MB of captured stream. A reading of zero here is the operator's
+# signal that frames are unrecoverable, so inventing one is worse than
+# admitting ignorance (issue #191).
+#
+# So: read it with sudo when not root (same as the nft probe), and if that is
+# not possible, report null rather than zero.
+TEE_READABLE="no"
+RING_FILES_COUNT=""
+RING_BYTES=""
+RING_NEWEST=""
+RING_OLDEST=""
+# `sudo -n` only when we are not already root; `ls -t <dir>` exits nonzero if
+# the directory cannot be read, which is exactly the signal we need.
+as_root() {
+    if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo -n "$@"; fi
+}
+if ring_names="$(as_root ls -t "${RING_DIR}" 2>/dev/null)"; then
+    TEE_READABLE="yes"
+    files="$(printf '%s\n' "${ring_names}" | grep '^ring\.pcap' || true)"
+    RING_FILES_COUNT="$(printf '%s' "${files}" | grep -c . || true)"
+    RING_BYTES=0
+    if [ -n "${files}" ]; then
+        RING_NEWEST="$(printf '%s\n' "${files}" | head -1)"
+        RING_OLDEST="$(printf '%s\n' "${files}" | tail -1)"
+        RING_BYTES="$(as_root du -sb "${RING_DIR}" 2>/dev/null | awk '{print $1}')"
+    fi
+fi
 
 # --- units --------------------------------------------------------------
 UNITS_LIST="dnsmasq.service avahi-daemon.service nftables.service roomscan-tee.service roomscan-bridge-reconcile.timer"
@@ -159,11 +188,11 @@ import sys
     wlan0_ssid, wlan0_rssi, wlan0_bitrate, wlan0_powersave, wlan0_ipv4, wlan0_connected,
     eth0_carrier, eth0_ipv4, eth0_neigh, leases_raw,
     nft_raw, nft_ok,
-    tee_active, ring_files_count, ring_bytes, ring_newest, ring_oldest,
+    tee_active, ring_files_count, ring_bytes, ring_newest, ring_oldest, tee_readable,
     units_raw,
     temp_c, throttled, ntp_synced,
     scanner_ip, stream_port,
-) = sys.argv[1:27]
+) = sys.argv[1:28]
 
 
 def s(v):
@@ -275,10 +304,14 @@ out = {
         "rules": nft_rules if yesno(nft_ok) else None,
         "dnat_target": dnat_target,
     },
+    # ring_files/ring_bytes are null -- not 0 -- when the ring could not be
+    # read at all. A zero here tells the operator frames are unrecoverable, so
+    # it must never be manufactured from a permission error.
     "tee": {
         "active": s(tee_active) == "active",
-        "ring_files": ring_files,
-        "ring_bytes": i(ring_bytes),
+        "readable": yesno(tee_readable),
+        "ring_files": ring_files if yesno(tee_readable) else None,
+        "ring_bytes": i(ring_bytes) if yesno(tee_readable) else None,
         "newest": s(ring_newest),
         "oldest": s(ring_oldest),
     },
@@ -296,7 +329,7 @@ print()
     "${WLAN0_SSID}" "${WLAN0_RSSI}" "${WLAN0_BITRATE}" "${WLAN0_POWERSAVE}" "${WLAN0_IPV4}" "${WLAN0_CONNECTED}" \
     "${ETH0_CARRIER}" "${ETH0_IPV4}" "${ETH0_NEIGH}" "${LEASES_RAW}" \
     "${NFT_RAW}" "${NFT_OK}" \
-    "${TEE_ACTIVE}" "${RING_FILES_COUNT}" "${RING_BYTES}" "${RING_NEWEST}" "${RING_OLDEST}" \
+    "${TEE_ACTIVE}" "${RING_FILES_COUNT}" "${RING_BYTES}" "${RING_NEWEST}" "${RING_OLDEST}" "${TEE_READABLE}" \
     "${UNITS_RAW}" \
     "${TEMP_C}" "${THROTTLED}" "${NTP_SYNCED}" \
     "${SCANNER_IP}" "${STREAM_PORT}"

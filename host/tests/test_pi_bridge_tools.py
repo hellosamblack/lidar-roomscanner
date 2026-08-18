@@ -219,6 +219,18 @@ def test_a_unit_that_is_genuinely_starting_is_not_slandered():
     assert pb._status_warnings(d) == []
 
 
+def test_an_unreadable_pcap_ring_is_not_reported_as_an_empty_one():
+    """Making roomscan-tee run as `User=tcpdump` (the fix for its Permission
+    denied crash-loop) left the ring directory 0750 tcpdump:tcpdump, which the
+    unprivileged status account cannot list. The unguarded `ls | wc -l` turned
+    that into `0 files, 0 MB` for a ring holding 33 MB of captured stream --
+    and a zero here is exactly the reading that tells an operator their dropped
+    frames are unrecoverable (issue #191)."""
+    d = {**HEALTHY, "tee": {"active": True, "readable": False,
+                            "ring_files": None, "ring_bytes": None}}
+    assert any("UNKNOWN" in w for w in pb._status_warnings(d))
+
+
 def test_an_unreadable_ruleset_is_reported_as_unknown_not_as_absent():
     """`nft` needs root and lives in /usr/sbin. When the probe cannot run, the
     answer is 'unknown' -- reporting an empty ruleset would look exactly like

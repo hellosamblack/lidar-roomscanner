@@ -226,6 +226,9 @@ def _status_warnings(d: dict) -> list[str]:
         warn.append("no DHCP lease for the scanner; it may have fallen back to its "
                     "self-assigned 172.31.253.1 server mode (reconcile handles this)")
     tee = d.get("tee") or {}
+    if tee.get("readable") is False:
+        warn.append("could not read the pcap ring directory (it is owned by the "
+                    "tcpdump user) -- its fill level is UNKNOWN here, not zero")
     if tee.get("active") is False:
         warn.append("the pcap tee is not running -- frames lost over Wi-Fi will not "
                     "be recoverable for captures taken now")

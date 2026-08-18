@@ -332,7 +332,19 @@ def test_a_missing_travel_profile_still_renders():
 def test_scanner_identity_matches_the_firmware_constants():
     """`00:80:E1:00:00:00` and the 172.31.253.1 fallback are compile-time
     constants in `firmware/scanner-stream` -- the dnsmasq static lease and the
-    reconcile probe are only correct because they match."""
+    reconcile probe are only correct because they match.
+
+    This test used to compare the bridge config against the ETH_MAC_ADDR*
+    defines ALONE, and passed for as long as it existed while being blind to the
+    actual defect: nothing in the firmware read those defines. `ethernetif.c`
+    hardcoded CubeMX's `{0x02,0,0,0,0,0}` placeholder, so the header and the
+    bridge agreed with each other and both disagreed with the wire. On the real
+    rig the scanner presented 02:00:00:00:00:00, missed its pinned reservation,
+    and took a dynamic-range address, breaking every fixed-address assumption in
+    the bridge (issue #191).
+
+    So the header is no longer trusted on its own: the assertion is against the
+    array that is actually loaded into the MAC filter."""
     hdr = (REPO / "firmware" / "scanner-stream" / "Inc" / "ethernet_transport.h").read_text()
     octets = []
     for i in range(6):
@@ -343,6 +355,21 @@ def test_scanner_identity_matches_the_firmware_constants():
     assert len(octets) == 6
     mac = ":".join(f"{o:02X}" for o in octets)
     assert mac == bi.DEFAULT_NETWORK["SCANNER_MAC"].upper()
+
+    # The defines must actually reach the hardware. `low_level_init()` is where
+    # the MAC array is handed to HAL_ETH_Init via EthHandle.Init.MACAddr; if that
+    # array is a literal again, the constants above are decoration.
+    eif = (REPO / "firmware" / "scanner-stream" / "Src" / "ethernetif.c").read_text()
+    # Read the whole STATEMENT, not one line: the initialiser wraps, and a
+    # line-scoped match happily saw ETH_MAC_ADDR0..2 and missed 3..5.
+    at = eif.find("macaddress[6]")
+    assert at != -1, "could not find the MAC array in ethernetif.c"
+    decl_text = eif[at:eif.index(";", at)]
+    for i in range(6):
+        assert f"ETH_MAC_ADDR{i}" in decl_text, (
+            f"ethernetif.c's MAC array does not use ETH_MAC_ADDR{i} -- the header "
+            f"constants are dead code and the board will present something else: "
+            f"{' '.join(decl_text.split())}")
 
     src = (REPO / "firmware" / "scanner-stream" / "Src" / "ethernet_transport.c").read_text()
     assert "172.31.253.1" in bi.DEFAULT_NETWORK["SCANNER_FALLBACK_IP"]
@@ -698,6 +725,28 @@ def test_install_sh_checks_units_are_still_alive_not_just_that_start_returned():
     verify_body = text.split("verify_unit_active()", 1)[1].split("\n}", 1)[0]
     assert '"activating"' not in verify_body.replace("'", '"').split("return 0")[0], \
         "`activating` is also what a crash-looping unit looks like mid-backoff"
+
+
+def test_the_live_stream_guard_tests_a_rate_not_any_increase():
+    """The guard that stops reconcile bouncing eth0 mid-capture latched forever
+    on the real rig. It tested `after > before`, so a single byte counted as a
+    live capture -- and the host's roomscan-web broadcasts a 1-byte discovery
+    beacon to 255.255.255.255:5000 once a second, which the DNAT rule matches.
+    The counter ticked ~25 B/s with no scanner traffic at all, reconcile read
+    "capture in progress" on every pass, and so never performed the one action
+    that recovers a scanner stuck in fallback mode (issue #191).
+
+    A real stream is ~466 KB/s, four orders of magnitude above the beacon, so
+    any sane threshold separates them."""
+    for path in ("usr/local/sbin/roomscan-bridge-common.sh", "install.sh"):
+        text = (PAYLOAD / path).read_text()
+        assert "STREAM_LIVE_MIN_BYTES_PER_SEC" in text, path
+        live = [ln for ln in text.splitlines() if not ln.strip().startswith("#")]
+        # The any-increase comparison must be gone from both copies -- they are
+        # mirrored implementations and a fix to one is not a fix to the other.
+        assert not [ln for ln in live
+                    if '"${after}" -gt "${before}"' in ln], \
+            f"{path} still treats any counter increase as a live stream"
 
 
 def test_install_sh_clears_a_latched_start_limit_before_restarting():
