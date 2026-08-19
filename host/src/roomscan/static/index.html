@@ -1191,8 +1191,22 @@
         /* The seek bar is the dominant flexible element (plan §2); it grows
            to fill whatever width the transport/right groups don't need, and
            is the first group allowed to wrap to its own row on narrow
-           windows since it carries the widest single control. */
-        .playback-panel__group--seek { flex: 1 1 180px; min-width: 140px; }
+           windows since it carries the widest single control.
+
+           Basis is `auto` (issue #123 second follow-up), not a px value: the
+           panel's `width: fit-content` (d936fea) uses each group's flex
+           BASIS as its intrinsic-sizing contribution, so a declared basis
+           smaller than the group's real content (this was `180px` against a
+           seek-bar + pos-status pair that needs ~280px+) undercounted this
+           group and left the panel narrower than its own children needed --
+           #pos-status then looked "too big" for the room it was given and
+           took the min-width: 0 shrink path for no reason, even with
+           hundreds of idle px elsewhere in the panel. `auto` makes the
+           basis the group's actual content size, so fit-content sizing is
+           no longer lying to itself; `min-width: 140px` still gives the
+           narrow-viewport (<1100px, wrapped) layout the same shrink floor
+           as before. */
+        .playback-panel__group--seek { flex: 1 1 auto; min-width: 140px; }
         .playback-panel__group--seek #seek { flex: 1 1 auto; min-width: 60px; }
         /* #pos-status used to be `flex: none` (a fixed, unshrinkable natural
            width) inside a group whose OWN `min-width: 140px` is smaller than

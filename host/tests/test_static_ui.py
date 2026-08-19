@@ -1313,6 +1313,37 @@ def test_playback_panel_sizes_to_its_content_not_a_fixed_width():
     )
 
 
+def test_playback_panel_group_flex_basis_does_not_undercut_its_content():
+    """Regression guard (#123 third follow-up, browser-measured): a
+    `width: fit-content` panel (d936fea) sizes itself off each flex child's
+    BASIS, not its actual rendered content -- so `.playback-panel__group--seek`
+    declaring `flex: 1 1 180px` undercounted itself (seek bar + pos-status
+    need ~280px+) and left the whole panel narrower than its own children,
+    which is what made #pos-status look "too big" for its box and take the
+    min-width: 0 shrink path even with hundreds of idle px elsewhere in the
+    panel. Every `.playback-panel__group*` rule's basis must be `auto` (or
+    absent, which is `auto` via `flex: none`'s `0 0 auto`) so fit-content
+    sizing reflects real content, not a guessed px value.
+    """
+    css = _style_css()
+    group_rules = re.findall(r"\.playback-panel__group[\w-]*\s*\{([^}]*)\}", css)
+    assert group_rules, "no .playback-panel__group* rules found"
+    offenders = []
+    for body in group_rules:
+        m = re.search(r"flex:\s*([^;]+);", body)
+        if m is None:
+            continue
+        parts = m.group(1).split()
+        # `flex: <grow> <shrink> <basis>` -- a basis token that isn't `auto`
+        # (a bare number, or a px/%/em length) undercuts real content sizing.
+        if len(parts) == 3 and parts[2] != "auto":
+            offenders.append(m.group(0))
+    assert not offenders, (
+        f"a .playback-panel__group* rule declares a non-auto flex-basis, "
+        f"which undercuts fit-content sizing against real content: {offenders}"
+    )
+
+
 def test_pos_status_can_shrink_instead_of_overflowing_into_the_speed_group():
     """Regression guard (#123 follow-up, browser-measured at 1600x1000):
     `#pos-status` used to be `flex: none` inside `.playback-panel__group--seek`,
