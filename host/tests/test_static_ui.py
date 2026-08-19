@@ -1277,6 +1277,41 @@ def test_playback_panel_floats_fixed_and_anchors_off_dock_bottom():
     assert "--dock-bottom" in body
 
 
+def test_pos_status_can_shrink_instead_of_overflowing_into_the_speed_group():
+    """Regression guard (#123 follow-up, browser-measured at 1600x1000):
+    `#pos-status` used to be `flex: none` inside `.playback-panel__group--seek`,
+    a group whose own `min-width: 140px` is smaller than "#seek's min-width +
+    gap + pos-status's natural content width" can ever be. Once the group's
+    box was squeezed toward that floor in the single-row (>=1100px) layout,
+    the unshrinkable pos-status painted past its own group's right edge and
+    into the 18px inter-group gap, overlapping the Speed group's
+    `.field-label` by a few px ("...4103 / 4103SPEED").
+
+    The fix is `min-width: 0` (an item can only ever overflow its container
+    if its min-width floor exceeds the space it is given) plus
+    `overflow: hidden; text-overflow: ellipsis` so a genuinely too-small
+    width truncates instead of visually overflowing. `flex: none` is
+    EXACTLY the pre-fix binding (flex-shrink: 0 -- the item that could never
+    give ground), so this fails against the pre-change markup.
+    """
+    css = _style_css()
+    rule = re.search(r"\.playback-panel #pos-status\s*\{([^}]*)\}", css)
+    assert rule is not None, "no `.playback-panel #pos-status` rule found"
+    body = rule.group(1)
+    assert "min-width: 0" in body, (
+        "#pos-status must set min-width: 0 so it can shrink to fit whatever "
+        "space its (also-shrinkable) parent group is actually given"
+    )
+    assert re.search(r"flex:\s*none\b", body) is None, (
+        "#pos-status must not be flex: none (flex-shrink: 0) -- that is the "
+        "exact pre-fix binding that let it overflow past its shrunk parent"
+    )
+    assert "overflow: hidden" in body and "text-overflow: ellipsis" in body, (
+        "#pos-status must truncate rather than visually overflow when its "
+        "available width is genuinely too small"
+    )
+
+
 def test_the_old_transport_card_id_is_gone():
     """`#transport-card` / `data-card-id="transport"` must not linger as dead
     markup once Playback has moved into the floating panel, and the

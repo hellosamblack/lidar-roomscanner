@@ -1180,8 +1180,28 @@
            is the first group allowed to wrap to its own row on narrow
            windows since it carries the widest single control. */
         .playback-panel__group--seek { flex: 1 1 180px; min-width: 140px; }
-        .playback-panel__group--seek #seek { flex: 1 1 auto; min-width: 90px; }
-        .playback-panel #pos-status { white-space: nowrap; flex: none; }
+        .playback-panel__group--seek #seek { flex: 1 1 auto; min-width: 60px; }
+        /* #pos-status used to be `flex: none` (a fixed, unshrinkable natural
+           width) inside a group whose OWN `min-width: 140px` is smaller than
+           "#seek's min-width + gap + pos-status's natural width" can ever be
+           -- so once the group's box was squeezed toward that floor,
+           pos-status (unable to shrink) painted past the group's own right
+           edge and into the 18px inter-group gap, overlapping the next
+           group's "Speed" label by a few px at some in-between widths (e.g.
+           1600px, single-row layout; #123 follow-up). Making it a real
+           shrinkable/ellipsizable flex item -- `min-width: 0` is the actual
+           fix, `flex: none` is what let it ignore the box it was in --
+           guarantees it always fits inside whatever width its parent group
+           is actually given, at every panel width >= the 1100px two-row
+           breakpoint. */
+        .playback-panel #pos-status {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            flex: 0 1 auto;
+            min-width: 0;
+            max-width: 190px;
+        }
         .playback-panel .toggle--sm { white-space: nowrap; }
 
         /* ---- component: toggle / checkbox ---- */
