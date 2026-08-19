@@ -197,3 +197,22 @@ def operator_page(out: str = "", repo: str = "") -> dict:
     from tools.operator_page import DEFAULT_OUT, build_page
     from tools.operator_queue import REPO
     return build_page(repo=repo or REPO, out=out or DEFAULT_OUT)
+
+
+@mcp.tool()
+def tracker_lint(repo: str = "") -> dict:
+    """Lint GitHub issue labels against mechanical invariants.
+
+    Reports violations of label rules that must hold for the tracker to stay coherent:
+    1. `needs/operator` requires a needs/* subtype AND a status hold
+    2. every open issue has exactly one priority/now|next|later
+    3. exactly one of bug/work-item/data-collection per issue
+    4. (advisory) area/* should be present
+
+    Returns `violations` (a list of violation dicts), `summary` (counts per rule),
+    and `ok` (True if no violations found). Violations are identified by rule name
+    and a human-readable message for manual triage.
+    """
+    from tools.tracker_lint import lint_issues, fetch_issues, REPO as DEFAULT_REPO
+    issues = fetch_issues(repo=repo or DEFAULT_REPO)
+    return lint_issues(issues)

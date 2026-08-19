@@ -51,6 +51,7 @@ EXPOSED: dict[str, tuple[str, ...]] = {
     "splat_sfm_probe.py": ("splat_sfm_probe",),
     "splat_render.py": ("splat_render",),
     "thin_client_probe.py": ("rig_thin_probe",),
+    "tracker_lint.py": ("tracker_lint",),
     "ws_probe.py": ("rig_ws_probe",),
     "web_ui_shot.py": ("ui_screenshot", "ui_eval", "ui_wait_for", "ui_reset"),
 }
