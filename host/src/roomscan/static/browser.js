@@ -23,6 +23,11 @@
 // caching, per-image cancellation and parallelism for free, and keeps ~34 PNGs
 // from interleaving with the 30 Hz POINT_CLOUD. See web.py's `get_thumb`.
 //
+// View-focus policy (issue #121): the FIRST Live->View `state` transition
+// (edge-triggered off the previous `source`, never on a later re-broadcast)
+// makes this card the focal one and collapses its sidebar-mates, via
+// layout.js's `window.__focusSidebarCard` -- see `focusOnEnteringView` below.
+//
 // Hub events:  subscribes "captures", "session", "state", "deleted";
 //              sends list_captures / load_capture / set_browser /
 //              rename_capture / delete_captures / generate_detailed /
@@ -249,6 +254,20 @@ export function createBrowser(hub, capture, scene) {
             try { localStorage.setItem('roomscan.card.browser.collapsed', '1'); } catch (err) {}
         }
         window.__relayout?.();
+    }
+
+    // #121: the first action in View is picking a capture, so entering View
+    // should put the Captures browser front and center and get every other
+    // sidebar card out of the way. Edge-triggered on `prevSource` (passed by
+    // the `state` handler below, exactly like `collapseForMapDisplay` above)
+    // so this fires ONCE on the Live->View transition, never on every later
+    // `state` re-broadcast within View -- a user who re-expands a card after
+    // arriving is never fought. The actual collapse/expand mechanism lives in
+    // layout.js (`window.__focusSidebarCard`), which is the single place that
+    // knows the sidebar card set and the collapse-persistence key format.
+    function focusOnEnteringView(prevSource) {
+        if (source !== 'view' || prevSource === 'view') return;
+        window.__focusSidebarCard?.('browser');
     }
 
     function renderPreview() {
@@ -527,6 +546,7 @@ export function createBrowser(hub, capture, scene) {
         display = msg.display || 'point_cloud';
         viewMode = msg.view_mode || 'world';
         collapseForMapDisplay(prevSource, prevDisplay);
+        focusOnEnteringView(prevSource);
         if (msg.browser_sort) prefs.sort = msg.browser_sort;
         if (msg.browser_view) prefs.view = msg.browser_view;
         if (typeof msg.browser_thumbs === 'boolean') prefs.thumbs = msg.browser_thumbs;

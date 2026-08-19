@@ -399,6 +399,7 @@ def test_camera_views_cover_every_display_and_slam_uses_the_shared_scanner_model
 SLAM_JS = STATIC / "slam.js"
 SCENE_JS = STATIC / "scene.js"
 WS_JS = STATIC / "ws.js"
+BROWSER_JS = STATIC / "browser.js"
 
 
 def test_ws_js_opens_a_dedicated_mesh_socket():
@@ -1158,3 +1159,91 @@ def test_wasd_nav_wired_into_the_render_loop():
     assert re.search(
         r"applyManualFlight\(dt\);\s*\n\s*controls\.update\(dt\);", js
     ), "applyManualFlight must be called immediately before controls.update(dt) in animate()"
+
+
+# ---------------------------------------------------------------------------
+# #121 -- View mode is capture-focused: entering View makes the Captures
+# browser the focal (expanded) sidebar card and collapses its neighbours.
+# ---------------------------------------------------------------------------
+
+
+def test_layout_js_defines_the_sidebar_focus_mechanism():
+    """layout.js owns the reusable mechanism (it is the single place that
+    knows the sidebar card set and the collapse-persistence key format), and
+    exposes it on `window` so a module-scoped file like browser.js -- which
+    cannot import a classic script -- can call it."""
+    js = LAYOUT_JS.read_text(encoding="utf-8")
+    assert "function focusSidebarCard" in js
+    assert "window.__focusSidebarCard" in js
+    # It must reuse the SAME localStorage key format a manual header click
+    # uses (`getCardKey`), not a second, drifting persistence scheme.
+    assert "getCardKey(id)" in js
+
+
+def test_browser_js_drives_the_focus_policy_off_the_state_echo_not_a_click():
+    """The policy must be wired through the `state` handler (one-way flow,
+    §5), not a local click handler -- `state` is the only authority on which
+    page ("source") the client is on."""
+    js = BROWSER_JS.read_text(encoding="utf-8")
+    assert "focusOnEnteringView" in js
+    assert "window.__focusSidebarCard" in js
+
+    # The call must live textually inside the `hub.on('state', ...)` handler,
+    # not off some other event (a click, a `captures`/`session` echo).
+    m = re.search(r"hub\.on\('state',\s*\(msg\)\s*=>\s*\{(.*?)\n    \}\);", js, re.DOTALL)
+    assert m is not None, "could not find browser.js's hub.on('state', ...) handler"
+    state_handler_body = m.group(1)
+    assert "focusOnEnteringView" in state_handler_body, (
+        "focusOnEnteringView must be invoked from the state handler, not "
+        "wired to a click or a different hub event"
+    )
+
+
+def test_focus_on_entering_view_is_edge_triggered_not_reasserted_every_echo():
+    """`state` re-broadcasts on every unrelated setting change (BUG-060's
+    class of bug lives right here). The policy must gate on an actual
+    Live->View TRANSITION -- comparing the new source against a REMEMBERED
+    previous one -- never fire unconditionally just because `source ===
+    'view'` is currently true, or it would refight a user who re-expanded a
+    card a moment after arriving."""
+    js = BROWSER_JS.read_text(encoding="utf-8")
+
+    m = re.search(r"function focusOnEnteringView\(([^)]*)\)\s*\{(.*?)\n    \}", js, re.DOTALL)
+    assert m is not None, "focusOnEnteringView() not found in browser.js"
+    params, body = m.group(1), m.group(2)
+
+    # It must take the previous source as an argument (the caller -- the
+    # state handler -- is the one place that still has the OLD value before
+    # overwriting its `source` variable).
+    assert "prevSource" in params, (
+        "focusOnEnteringView must accept the previous source, not read a "
+        "module-level variable that has already been overwritten by the "
+        "time it runs"
+    )
+    # And it must actually gate on that argument, not just have it in scope.
+    assert "prevSource" in body
+    assert "'view'" in body
+
+
+def test_focus_policy_scopes_to_the_two_sidebars_not_the_bottom_console():
+    """The event-log console (`#log-console`, `data-card-id="log"`) is a
+    bottom console outside `#primary-bar`/`#secondary-bar`, not a sidebar
+    card competing for the same attention as the Captures browser -- the
+    mechanism must not reach for it."""
+    js = LAYOUT_JS.read_text(encoding="utf-8")
+    m = re.search(r"function sidebarCardIds\(\)\s*\{(.*?)\n    \}", js, re.DOTALL)
+    assert m is not None, "sidebarCardIds() not found in layout.js"
+    body = m.group(1)
+    assert "primary-bar" in body and "secondary-bar" in body
+    assert "log-console" not in body
+
+
+def test_captures_browser_data_card_id_still_matches_the_focus_target():
+    """The mechanism focuses the card literally named 'browser' -- pin that
+    id against the real markup so a future rename of the Captures browser's
+    `data-card-id` (it is not `#capture-card` any more, see #118) is caught
+    here rather than silently focusing nothing."""
+    assert 'data-card-id="browser"' in _index()
+    js = BROWSER_JS.read_text(encoding="utf-8")
+    assert "focusOnEnteringView" in js
+    assert "'browser'" in js

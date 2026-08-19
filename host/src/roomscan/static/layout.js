@@ -325,6 +325,63 @@
     }
 
     /* ------------------------------------------------------------------ *
+     * View-focus policy (issue #121)                                     *
+     *                                                                     *
+     * Entering View makes the Captures browser the focal card: picking a *
+     * capture is the first action there, so it should be the thing in    *
+     * front of you, and every other sidebar card should get out of the   *
+     * way. This is a pure card-COLLAPSE decision -- it never touches the *
+     * hidden/visible class each card's own owning module already drives  *
+     * off `state` (that stays exactly as it was).                        *
+     *                                                                     *
+     * The transition-EDGE part (only fire once, on Live->View, never on  *
+     * every `state` re-broadcast, never fight a user who re-expands a    *
+     * card afterward) lives in the caller (browser.js's `state` handler,  *
+     * which already tracks the previous `source` for `collapseFor-        *
+     * MapDisplay`). This function is just the mechanism: collapse every  *
+     * OTHER card living in the two sidebars, expand the focal one, using *
+     * the SAME localStorage-backed collapse persistence a manual header  *
+     * click uses (`saveCardState`'s key format) so it behaves exactly    *
+     * like the user had clicked each header themselves.                  *
+     * ------------------------------------------------------------------ */
+    function sidebarCardIds() {
+        var out = [];
+        var bars = [$('primary-bar'), $('secondary-bar')].filter(Boolean);
+        for (var b = 0; b < bars.length; b++) {
+            var cards = bars[b].querySelectorAll('[data-card-id]');
+            for (var i = 0; i < cards.length; i++) {
+                var id = cards[i].getAttribute('data-card-id');
+                if (id) out.push(id);
+            }
+        }
+        return out;
+    }
+
+    function setCardCollapsed(id, collapsed) {
+        var card = document.querySelector('[data-card-id="' + id + '"]');
+        if (!card) return;
+        card.classList.toggle('collapsed', collapsed);
+        try { localStorage.setItem(getCardKey(id), collapsed ? '1' : '0'); } catch (e) {}
+    }
+
+    // Collapses every other sidebar card and expands `focusId`. Calling this
+    // IS the whole policy -- it does not itself gate on any transition, so a
+    // caller that invoked it on every `state` echo would refight a user who
+    // re-expanded a card a moment later. See browser.js's `state` handler.
+    function focusSidebarCard(focusId) {
+        var ids = sidebarCardIds();
+        for (var i = 0; i < ids.length; i++) {
+            if (ids[i] === focusId) continue;
+            setCardCollapsed(ids[i], true);
+        }
+        setCardCollapsed(focusId, false);
+        updateSquircles();
+        schedule();
+    }
+
+    window.__focusSidebarCard = focusSidebarCard;
+
+    /* ------------------------------------------------------------------ *
      * Measurement                                                        *
      * ------------------------------------------------------------------ */
     function shownChildren(dock) {
