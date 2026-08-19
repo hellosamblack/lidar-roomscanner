@@ -1,4 +1,6 @@
-// capture.js — the Record card + the Playback card (Web Phase 3, split §11).
+// capture.js — the Record top-bar control + the Playback card (Web Phase 3,
+// split §11; Record moved out of its own sidebar card into the top bar in
+// issue #118, 2026-08-19).
 //
 // Record a live session and drive playback transport (pause/resume, speed,
 // loop, seek). Like controls.js, this turns DOM events into hub.send(...) and
@@ -33,7 +35,7 @@ export function createCapture(hub) {
 
     const btnRecord = $('btn-record');
     const recStatus = $('record-status');
-    const captureCard = $('capture-card');
+    const recordControls = $('topbar-record');
     const transportCard = $('transport-card');
     const btnGoLive = $('btn-golive');
     const btnPlayPause = $('btn-playpause');
@@ -173,11 +175,12 @@ export function createCapture(hub) {
 
     // ---- inbound: render from server state ----
     // Record is a LIVE-page control; the server's `state.source` is the only
-    // authority on which page we are on (one-way flow), so the card's presence
-    // rides that echo rather than being inferred from `session`.
+    // authority on which page we are on (one-way flow), so the top-bar
+    // control's presence rides that echo rather than being inferred from
+    // `session`.
     hub.on('state', (msg) => {
         source = msg.source || 'live';
-        captureCard?.classList.toggle('hidden', source !== 'live');
+        recordControls?.classList.toggle('hidden', source !== 'live');
         window.__relayout && window.__relayout();
     });
     hub.on('session', (msg) => {

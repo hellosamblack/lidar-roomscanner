@@ -268,6 +268,12 @@
             background: rgba(255, 255, 255, 0.05);
         }
 
+        /* Record (issue #118): a top-bar control group, not a `.topbar-admin`
+           chip -- it uses the default `button` styling so it stays visually
+           primary next to the deliberately muted maintenance buttons. */
+        #topbar-record { display: flex; align-items: center; gap: 8px; }
+        #topbar-record .cap-status { white-space: nowrap; }
+
         .status-indicator {
             display: flex; align-items: center; gap: 8px;
             font-size: 0.85rem; font-weight: 500; color: var(--text-muted);
@@ -1401,6 +1407,17 @@
             <button id="btn-restart" class="topbar-btn"
                     title="Relaunch the roomscan-web server process">Restart Server</button>
         </div>
+        <!-- Record (§11, relocated from a standalone sidebar card into the top
+             bar -- issue #118, 2026-08-19): one prominent, always-visible
+             control instead of a card that had to be opened to find. Deliberately
+             plain `button` styling, not `.topbar-btn` (that class is reserved for
+             low-contrast maintenance chrome, see the comment above). Shown only
+             when state.source === "live"; active state comes from the server's
+             `session` echo (one-way flow), never from the local click. -->
+        <div id="topbar-record">
+            <button id="btn-record" title="Start or stop recording the live stream to a capture file">&#9679; Record</button>
+            <div class="cap-status" id="record-status"></div>
+        </div>
         <!-- Comm-status: server->rig link health, one chip per hop (populated by
              the /ws `comm` message; hud.js renders it). ST-Link is informational
              and reads neutral when absent, which is normal on the Ethernet rig. -->
@@ -1976,20 +1993,9 @@
              × button now collapses it into the squircle rail, which is also how
              it comes back -- so the "Show IR card" checkbox is not needed either. -->
 
-        <!-- Record (§11, owner ask 2026-07-31). Was "Capture & Playback", which
-             did three jobs: record, browse, and drive playback transport. The
-             browsing moved to the View page's file browser (browser.js) and the
-             transport to its own "Playback" card below, leaving this one control
-             that only means anything on the Live page. Shown only when
-             state.source === "live"; active state comes from the server's
-             `session` echo (one-way flow), never from the local click. -->
-        <div class="control-group card" id="capture-card" data-card-id="capture">
-            <button class="control-group__header"><span>Record</span><span class="chevron">&#9662;</span></button>
-            <div class="control-group__body">
-                <button id="btn-record" title="Start or stop recording the live stream to a capture file">&#9679; Record</button>
-                <div class="cap-status" id="record-status"></div>
-            </div>
-        </div>
+        <!-- Record used to live here as its own sidebar card ("Capture &
+             Playback"). Relocated into the top bar (issue #118, 2026-08-19) as
+             one prominent, always-visible control -- see #topbar-record. -->
 
         <!-- Playback (§11). Transport is *replay* state, exactly as Record is
              *live* state; one card that was half-hidden in each mode is now two

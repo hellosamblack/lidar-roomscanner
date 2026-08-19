@@ -11,6 +11,7 @@ whitespace change. Each check parses for a specific attribute on a specific tag.
 """
 
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -932,3 +933,113 @@ def test_profile_blurbs_carry_no_hardcoded_consequence_numbers():
     m = re.search(r"PROFILE_BLURBS\s*=\s*\{(.*?)\n\s*\};", js, re.DOTALL)
     assert m is not None
     assert not re.search(r"\d", m.group(1)), "PROFILE_BLURBS contains a digit (stale-prone)"
+
+
+# ---------------------------------------------------------------------------
+# Record control relocation (issue #118) -- moved out of its own sidebar card
+# ("#capture-card") into the top bar, as one prominent, always-visible
+# control. A plain substring check ("id=\"btn-record\"" appears somewhere in
+# the file) cannot tell a top-bar button from a sidebar one -- both would
+# contain that exact string -- so this actually parses the document into a
+# tag stack and asks what ELEMENT the button's id attribute opened inside.
+# ---------------------------------------------------------------------------
+
+_VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+}
+
+
+class _AncestryParser(HTMLParser):
+    """Records, for each `id=` seen, the full open-tag stack (root -> self)
+    at the moment that element was opened, plus how many times each id
+    occurred at all -- so both "exactly once" and "who is its parent" can be
+    asked from one real parse instead of independent regexes."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack = []            # [(tag, {attr: value}), ...], root first
+        self.first_stack = {}      # id -> stack snapshot (incl. itself) at first sight
+        self.id_counts = {}        # id -> number of elements carrying it
+
+    def _seen(self, tag, attrs_dict):
+        eid = attrs_dict.get("id")
+        if eid:
+            self.id_counts[eid] = self.id_counts.get(eid, 0) + 1
+            self.first_stack.setdefault(eid, list(self.stack) + [(tag, attrs_dict)])
+
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs)
+        self._seen(tag, attrs_dict)
+        if tag not in _VOID_TAGS:
+            self.stack.append((tag, attrs_dict))
+
+    def handle_startendtag(self, tag, attrs):
+        # Self-closed (`<path ... />`) elements never have children, so there
+        # is nothing to push -- just record it if it carries an id.
+        self._seen(tag, dict(attrs))
+
+    def handle_endtag(self, tag):
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i][0] == tag:
+                del self.stack[i:]
+                return
+        # Unmatched close tag (stray markup) -- ignore rather than raise; the
+        # other structural tests in this file already guard well-formedness
+        # of the parts they care about.
+
+
+def _parsed_index() -> _AncestryParser:
+    parser = _AncestryParser()
+    parser.feed(_index())
+    return parser
+
+
+def test_record_control_relocated_out_of_the_capture_card_into_the_top_bar():
+    """#btn-record must exist exactly once, must NOT be nested inside any
+    `[data-card-id]` card (that was the old, now-removed `#capture-card`
+    sidebar section), and must be nested inside the top bar (`#topbar`)."""
+    parser = _parsed_index()
+
+    assert parser.id_counts.get("btn-record") == 1, (
+        f"expected exactly one #btn-record, found "
+        f"{parser.id_counts.get('btn-record', 0)}"
+    )
+
+    stack = parser.first_stack["btn-record"]
+    ancestors = stack[:-1]  # exclude the button itself
+
+    card_ancestors = [tag for tag, attrs in ancestors if "data-card-id" in attrs]
+    assert not card_ancestors, (
+        "#btn-record is still nested inside a [data-card-id] card "
+        f"({card_ancestors}); it must live in the top bar, not a sidebar card"
+    )
+
+    topbar_ancestor_ids = [attrs.get("id") for _tag, attrs in ancestors]
+    assert "topbar" in topbar_ancestor_ids, (
+        "#btn-record is not nested inside #topbar; ancestor ids were "
+        f"{topbar_ancestor_ids}"
+    )
+
+
+def test_record_status_is_also_relocated_alongside_the_button():
+    """#record-status (elapsed time / bytes readout) must move with the
+    button, not linger behind in a stale sidebar card."""
+    parser = _parsed_index()
+
+    assert parser.id_counts.get("record-status") == 1
+    stack = parser.first_stack["record-status"]
+    ancestors = stack[:-1]
+
+    assert not any("data-card-id" in attrs for _tag, attrs in ancestors), (
+        "#record-status is still nested inside a [data-card-id] card"
+    )
+    assert "topbar" in [attrs.get("id") for _tag, attrs in ancestors]
+
+
+def test_the_old_capture_card_id_is_gone():
+    """`#capture-card` / `data-card-id="capture"` must not linger as dead
+    markup once the Record control has moved out of it."""
+    html = _index()
+    assert 'id="capture-card"' not in html
+    assert 'data-card-id="capture"' not in html

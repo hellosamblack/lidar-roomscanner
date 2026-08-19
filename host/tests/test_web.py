@@ -3987,7 +3987,8 @@ def test_rail_cards_data_attributes_and_default_collapsed_states():
         "ir-view": True,     # Collapsed
         "device": True,      # Collapsed
         "view": False,       # Expanded
-        "capture": False,    # Expanded (§11: one Record button, Live page only)
+        # "capture" removed (issue #118, 2026-08-19): Record moved out of its own
+        # rail card into the always-visible top bar (#topbar-record).
         "transport": False,  # Expanded (§11: Playback, rendered only in replay)
         "slam-ctrl": True,   # Collapsed
         "log": True,         # Collapsed
