@@ -585,6 +585,7 @@
             color: var(--text-main);
             font-family: var(--font-ui);
             font-size: 0.80rem; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700;
+            opacity: 1;
             cursor: pointer;
             border-bottom: 1px solid rgba(245, 158, 11, 0.22);
             transition: background 0.15s ease, color 0.15s ease;
@@ -606,11 +607,26 @@
         }
         .control-group.collapsed .control-group__body { display: none; }
 
-        /* Subsections & field labels carry distinct subordinate weight */
-        .field-label { font-size: 0.66rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
-        .field-label--sub { padding-left: 4px; opacity: 0.8; font-weight: 500; }
+        /* Sidepane hierarchy (BUG-093/#104): three levels must read as three
+           distinct levels, not two -- .control-group__header (card, the
+           strongest: size/weight/bg/border, unchanged above) sits over
+           .control-subgroup>summary (subgroup, second-strongest) which sits
+           over .field-label (leaf field label, subordinate). The subgroup
+           summary used to be WEAKER than the field label it contains (0.68rem
+           /600/opacity .9 vs 0.66rem/600/opacity 1 implicit) -- a parent
+           reading lighter than its own child is exactly the "grandchildren ==
+           parent's direct children" complaint, just inverted. Now strictly
+           graded: header 0.80rem/700 > subgroup-summary 0.74rem/700,
+           brightened to --text-main > field-label 0.64rem/500, dimmed to
+           opacity .72 > field-label--sub (nested one level deeper still,
+           e.g. Distance/Height/Rotation under "Camera") 0.60rem/400/opacity
+           .55 with extra indent. Same palette throughout -- var(--text-main)/
+           var(--text-muted) -- only size/weight/letter-spacing/opacity/indent
+           change. */
+        .field-label { font-size: 0.64rem; color: var(--text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 2px; opacity: 0.72; }
+        .field-label--sub { padding-left: 8px; opacity: 0.55; font-weight: 400; font-size: 0.60rem; }
 
-        /* ---- component: debug-section & subgroups (subordinate weight) ---- */
+        /* ---- component: debug-section & subgroups (second-tier weight, stronger than a field-label) ---- */
         .control-subgroup, .debug-section {
             border-top: 1px dashed rgba(255, 255, 255, 0.12);
             padding-top: 6px; margin-top: 4px;
@@ -619,10 +635,10 @@
         .control-subgroup:first-child { border-top: none; padding-top: 0; margin-top: 0; }
         .control-subgroup > summary, .debug-section > summary {
             cursor: pointer; list-style: none;
-            font-family: var(--font-ui); font-size: 0.68rem; text-transform: uppercase;
-            letter-spacing: 0.04em; font-weight: 600; color: var(--text-muted);
+            font-family: var(--font-ui); font-size: 0.74rem; text-transform: uppercase;
+            letter-spacing: 0.05em; font-weight: 700; color: var(--text-main);
             display: flex; align-items: center; justify-content: space-between;
-            user-select: none; padding: 2px 0; opacity: 0.9;
+            user-select: none; padding: 2px 0; opacity: 0.82;
         }
         .control-subgroup > summary:hover, .debug-section > summary:hover { color: var(--text-main); opacity: 1; }
         .control-subgroup > summary::-webkit-details-marker, .debug-section > summary::-webkit-details-marker { display: none; }

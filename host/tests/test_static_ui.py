@@ -146,6 +146,137 @@ def test_readonly_text_sinks_opt_back_into_selection(selector):
     )
 
 
+# ---------------------------------------------------------------------------
+# Sidepane hierarchy weight (BUG-093 / #104): a card header, a subgroup
+# summary and a leaf field label must read as three visually DISTINCT levels,
+# not two. The pre-fix CSS had the subgroup summary (the parent) reading
+# *lighter* than the field label it directly contains (the child) --
+# 0.68rem/600/opacity .9 vs 0.66rem/600/opacity 1 implicit -- which is the
+# hierarchy inverted, not merely flattened.
+# ---------------------------------------------------------------------------
+
+_HEADER_SEL = ".control-group__header"
+_SUBGROUP_SEL = ".control-subgroup > summary, .debug-section > summary"
+_FIELD_SEL = ".field-label"
+_SUBFIELD_SEL = ".field-label--sub"
+
+
+def _rule_decl(css: str, selector: str, prop: str) -> str:
+    """The declared value of `prop` inside the rule whose selector text is
+    exactly `selector` (as authored, including any comma-joined group).
+
+    Anchored to the start of a line (past leading whitespace): an unanchored
+    search for `.control-group__header` also matches inside the unrelated,
+    earlier `.hud-card .control-group__header { pointer-events: ... }` rule
+    (it is a literal substring of that descendant selector) and reads that
+    rule's declarations instead of the real one.
+    """
+    m = re.search(r"(?m)^[ \t]*" + re.escape(selector) + r"\s*\{([^}]*)\}", css)
+    assert m is not None, f"no CSS rule found for selector {selector!r}"
+    pm = re.search(r"(?<![-\w])" + re.escape(prop) + r":\s*([^;]+);", m.group(1))
+    assert pm is not None, f"`{prop}` not declared in rule {selector!r}"
+    return pm.group(1).strip()
+
+
+def test_sidepane_three_levels_are_defined_by_distinct_css_rules():
+    """`.control-group__header`, the subgroup `> summary` and `.field-label`
+    must each be their own rule in the stylesheet -- the acceptance criterion
+    from the issue body, checked structurally rather than just by effect."""
+    css = _style_css()
+    for selector in (_HEADER_SEL, _SUBGROUP_SEL, _FIELD_SEL, _SUBFIELD_SEL):
+        assert re.search(re.escape(selector) + r"\s*\{", css), (
+            f"expected a dedicated CSS rule for {selector!r}"
+        )
+
+
+def test_sidepane_hierarchy_font_size_strictly_decreases_by_level():
+    """Card header > subgroup summary > field label > nested sub-field label,
+    strictly, in font-size -- the most immediately scannable cue."""
+    css = _style_css()
+    sizes = {
+        sel: float(_rule_decl(css, sel, "font-size").removesuffix("rem"))
+        for sel in (_HEADER_SEL, _SUBGROUP_SEL, _FIELD_SEL, _SUBFIELD_SEL)
+    }
+    assert sizes[_HEADER_SEL] > sizes[_SUBGROUP_SEL] > sizes[_FIELD_SEL] > sizes[_SUBFIELD_SEL], (
+        f"sidepane level font-sizes are not strictly decreasing: {sizes}"
+    )
+
+
+def test_sidepane_subgroup_summary_outweighs_the_field_label_it_contains():
+    """Regression guard for the actual reported defect: a subgroup summary
+    (a DIRECT child of the card, e.g. "Camera & Pose") must carry more
+    font-weight than a `.field-label` nested inside it (a GRANDCHILD of the
+    card, e.g. "View Mode") -- not the same or less.
+
+    Reintroducing the pre-fix values (both declared `font-weight: 600`) makes
+    this fail: `header_weight >= subgroup_weight > field_weight` requires a
+    strict `>` on the second comparison, which two equal 600s cannot satisfy.
+    """
+    css = _style_css()
+    header_weight = int(_rule_decl(css, _HEADER_SEL, "font-weight"))
+    subgroup_weight = int(_rule_decl(css, _SUBGROUP_SEL, "font-weight"))
+    field_weight = int(_rule_decl(css, _FIELD_SEL, "font-weight"))
+    sub_field_weight = int(_rule_decl(css, _SUBFIELD_SEL, "font-weight"))
+    assert header_weight >= subgroup_weight > field_weight > sub_field_weight, (
+        f"font-weight must strictly separate levels below the header: "
+        f"header={header_weight} subgroup={subgroup_weight} "
+        f"field={field_weight} sub-field={sub_field_weight}"
+    )
+
+    # And opacity must not invert the hierarchy either: the subgroup summary
+    # (parent) must be at least as opaque/prominent as the field label
+    # (child) it contains, and a field-label--sub (grandchild-of-subgroup)
+    # must be dimmer still than its own field-label parent.
+    subgroup_opacity = float(_rule_decl(css, _SUBGROUP_SEL, "opacity"))
+    field_opacity = float(_rule_decl(css, _FIELD_SEL, "opacity"))
+    sub_field_opacity = float(_rule_decl(css, _SUBFIELD_SEL, "opacity"))
+    assert subgroup_opacity > field_opacity > sub_field_opacity, (
+        f"opacity must strictly separate levels: subgroup={subgroup_opacity} "
+        f"field={field_opacity} sub-field={sub_field_opacity}"
+    )
+
+
+@pytest.mark.parametrize("label", ["Distance", "Height", "Rotation", "Orbit Speed"])
+def test_camera_pose_nested_labels_carry_the_subordinate_sub_class(label):
+    """Inside the View card's "Camera & Pose" subgroup, Distance/Height/
+    Rotation/Orbit Speed nest one level deeper than their own group label
+    ("Camera") -- they must carry `field-label--sub` in addition to
+    `field-label`, or they read at the same weight as "Camera", "View Mode"
+    and "See-Through" (the BUG-093 complaint, restated one level down)."""
+    html = _index()
+    view_camera = re.search(
+        r'data-subgroup-id="view-camera".*?</details>', html, re.DOTALL)
+    assert view_camera is not None, "could not locate the Camera & Pose subgroup"
+    body = view_camera.group(0)
+    m = re.search(r'<div class="([^"]*)">' + re.escape(label), body)
+    assert m is not None, f"{label!r} field-label not found in Camera & Pose"
+    classes = m.group(1).split()
+    assert "field-label" in classes and "field-label--sub" in classes, (
+        f"{label!r} must carry both `field-label` and `field-label--sub`, got {classes}"
+    )
+
+
+def test_camera_pose_group_labels_do_not_carry_the_sub_class():
+    """The direct children of the subgroup ("View Mode", "Camera",
+    "See-Through") are one level UP from Distance/Height/Rotation and must
+    stay at the plain `.field-label` weight -- otherwise every label in the
+    section collapses back to one indistinguishable level."""
+    html = _index()
+    view_camera = re.search(
+        r'data-subgroup-id="view-camera".*?</details>', html, re.DOTALL)
+    assert view_camera is not None
+    body = view_camera.group(0)
+    for label in ("View Mode", "See-Through"):
+        m = re.search(r'<div class="([^"]*)">' + re.escape(label), body)
+        assert m is not None, f"{label!r} field-label not found in Camera & Pose"
+        classes = m.group(1).split()
+        assert "field-label" in classes
+        assert "field-label--sub" not in classes, (
+            f"{label!r} is a direct child of the subgroup, not a nested "
+            f"sub-field -- it must not carry field-label--sub"
+        )
+
+
 def test_every_card_id_has_a_squircle_icon_and_title():
     """Every `data-card-id` in index.html must appear in BOTH `CARD_ICONS` and
     `CARD_TITLES` in layout.js.
