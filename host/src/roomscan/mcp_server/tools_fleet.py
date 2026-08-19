@@ -210,8 +210,9 @@ def tracker_lint(repo: str = "") -> dict:
     4. (advisory) area/* should be present
 
     Returns `violations` (a list of violation dicts), `summary` (counts per rule),
-    and `ok` (True if no violations found). Violations are identified by rule name
-    and a human-readable message for manual triage.
+    `ok` (True when no hard violations; advisory rule-4 violations are reported in
+    `advisory_count` but do not fail ok), and per-rule violation counts. Violations
+    are identified by rule name and a human-readable message for manual triage.
     """
     from tools.tracker_lint import lint_issues, fetch_issues, REPO as DEFAULT_REPO
     issues = fetch_issues(repo=repo or DEFAULT_REPO)
