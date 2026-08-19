@@ -1,0 +1,67 @@
+# roomscan-eth-debug.nmconnection.tmpl
+#
+# Catch-all profile for any wired interface that is NOT eth0 -- i.e. a USB
+# Ethernet/RJ45 adapter plugged in for bench debugging (direct SSH, no radio
+# needed). Without this profile, NetworkManager auto-creates a bare "Wired
+# connection 1" the moment such an adapter gets a link, with NM's stock
+# ethernet defaults: route-metric 100 vs wlan0's 600, and no never-default
+# flag. Lower metric wins, so that auto-profile silently grabs the default
+# route -- and, because a USB adapter typically DHCPs onto the same office
+# subnet as wlan0, its route-metric edge also wins the on-link route to that
+# whole subnet, not just the 0.0.0.0/0 default. That is a routing decision,
+# not just a default-route flag: even reply traffic to a peer that only
+# arrived via wlan0 could egress out the debug adapter. Observed live
+# 2026-08-19: an overnight bench debug session on issue #200 quietly rode
+# the default route for ~16 hours before anyone noticed the scanner stream
+# was not (as intended) WiFi-exclusive.
+#
+# This profile still autoconnects (so plugging in a debug adapter keeps
+# working for direct SSH) but sets both never-default AND an explicit
+# route-metric worse than wlan0's, so it can never outrank wlan0 for any
+# destination reachable via both -- the debug link stays usable without
+# ever contending with WiFi for anything. eth0 is excluded via `match`
+# since it already has its own named profile (see
+# roomscan-eth0.nmconnection.tmpl) and must remain the scanner-only link.
+#
+# Placeholders substituted by the image builder:
+#   {{ETH_DEBUG_UUID}}  -- fixed UUID for this connection profile, stable
+#                          across rebuilds (see roomscan-eth0.nmconnection.tmpl)
+#
+# The builder renders this file to roomscan-eth-debug.nmconnection before
+# packaging; install.sh only installs already-rendered *.nmconnection files.
+
+[connection]
+id=roomscan-eth-debug
+uuid={{ETH_DEBUG_UUID}}
+type=ethernet
+autoconnect=true
+# Lower than either wifi profile's priority (autoconnect-priority only
+# orders candidates competing for the SAME device, and wifi never competes
+# with an ethernet profile for eth1/eth-whatever) but must still beat NM's
+# synthesized "Wired connection 1" fallback, whose unset priority defaults
+# to 0 -- autoconnect picks the HIGHEST priority among compatible
+# candidates for a device, so a negative number here would lose that race
+# and never actually get selected. 10 clears that bar with room to spare.
+autoconnect-priority=10
+
+[match]
+interface-name=!eth0
+
+[ethernet]
+
+[ipv4]
+method=auto
+never-default=true
+# Worse (higher) than wifi's default metric of 600, and worse than eth0's
+# (which never advertises a default route at all, but keeps NM's stock
+# ethernet metric of 100 for its point-to-point subnet). This is the field
+# that actually matters: it beats even the on-link subnet route, not just
+# 0.0.0.0/0.
+route-metric=900
+
+[ipv6]
+method=auto
+never-default=true
+route-metric=900
+
+[proxy]

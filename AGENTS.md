@@ -191,7 +191,14 @@ in the repo. The evidence for every one is in `docs/roadmap-history.md`.
   `/etc/systemd/system.conf`, the file a human checks, shows the setting **commented out**, reading
   as "off"; the drop-in overrides it silently. A config file's own silence proves nothing about a
   package-shipped default living somewhere else — check `/usr/lib/*.conf.d/` and `dpkg -S` before
-  trusting it.
+  trusting it. Same trap a third time, same box (#204): NetworkManager's per-device-type
+  `route-metric` default is 100 for ethernet vs. 600 for wifi, unstated anywhere in any config file
+  — so the moment a USB debug NIC DHCPs onto the same subnet as `wlan0`, it silently outranks WiFi
+  for the default route *and* the on-link subnet route (not just `0.0.0.0/0`), meaning even reply
+  traffic for a socket bound to the WiFi address could leave over the debug cable. The stream
+  looked healthy throughout, because inbound traffic is destination-IP-pinned by ARP; only the
+  reply path was ever at risk. Fixed with an explicit `route-metric` + `never-default` profile
+  rather than trusting NM to leave WiFi as primary.
 - **Some failures abort the process instead of raising — you cannot handle those, only make
   them unreachable.** Open3D/Filament's `OffscreenRenderer` kills the interpreter outright
   (`utils::PreconditionPanic`, `terminate called`) on a *second* instance in one process, and

@@ -248,10 +248,12 @@ def secret_tokens(secrets: dict, ssh_pubkey: str) -> dict[str, str]:
         "WIFI_COUNTRY": str(secrets["wifi_country"]).upper(),
         "SSH_PUBKEY": ssh_pubkey.strip(),
         "UUID_ETH0": str(uuid.uuid5(_NM_NS, f"{host}/eth0")),
+        "UUID_ETH_DEBUG": str(uuid.uuid5(_NM_NS, f"{host}/eth-debug")),
     })
     # Alias spelling used by the payload templates. Both names resolve so a
     # template can be written either way without a silent unresolved token.
     tokens["ETH0_UUID"] = tokens["UUID_ETH0"]
+    tokens["ETH_DEBUG_UUID"] = tokens["UUID_ETH_DEBUG"]
     for name in ("home", "travel"):
         prof = secrets.get("wifi", {}).get(name)
         up = name.upper()
