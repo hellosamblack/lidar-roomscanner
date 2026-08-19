@@ -111,7 +111,7 @@ class _FakeDispatcher:
 
 def _make_state(*, enabled=True, level="soft", has_live=True, mode="live",
                 clients=(), delay=0.02, recording=False, activity_timeout=60.0,
-                ws_client_id=None, client_active=None):
+                ws_client_id=None, client_active=None, thin_clients=None):
     return types.SimpleNamespace(
         ui_state=web.UiState(idle_enabled=enabled, idle_level=level),
         controller=types.SimpleNamespace(
@@ -120,6 +120,7 @@ def _make_state(*, enabled=True, level="soft", has_live=True, mode="live",
         dispatcher=_FakeDispatcher(),
         command_labels=set(),
         clients=set(clients),
+        thin_clients=dict(thin_clients) if thin_clients else {},
         sensor_idled=False,
         idle_timer=None,
         idle_delay_s=delay,
@@ -247,6 +248,27 @@ def test_active_viewer_count_ignores_stale_but_counts_untracked_and_fresh():
 def test_active_viewer_count_recording_overrides_engagement():
     st = _make_state(clients=(), recording=True)
     assert web._active_viewer_count(st) == 1   # a live take is never interrupted
+
+
+def test_active_viewer_count_counts_a_live_thin_client_and_ignores_a_stale_one():
+    """A `/ws-thin` connection is a viewer too -- it must not be invisible to
+    the auto-idle machinery just because it lives in `thin_clients` rather
+    than `state.clients` (the reported bug: a connected thin client alone
+    used to let the sensor idle out from under it)."""
+    ws_thin_fresh = object()
+    ws_thin_stale = object()
+    st = _make_state(
+        clients=(),
+        thin_clients={ws_thin_fresh: object(), ws_thin_stale: object()},
+        ws_client_id={ws_thin_fresh: "thin-fresh", ws_thin_stale: "thin-stale"},
+        client_active={"thin-stale": 0.0},   # aged out (e.g. its render task died)
+        activity_timeout=60.0,
+    )
+    web._touch_client_active(st, "thin-fresh")
+    assert web._active_viewer_count(st) == 1
+
+    web._mark_client_inactive(st, "thin-fresh")
+    assert web._active_viewer_count(st) == 0
 
 
 def test_engaged_clients_excludes_only_stale_tracked_sockets():

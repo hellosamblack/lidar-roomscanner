@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import itertools
 import json
 import logging
 import math
@@ -4836,9 +4837,13 @@ async def get_capture_video(name: str) -> Response:
 # tracked per `client_id` (query param on `/ws`/`/ws-mesh`, `_resolve_client_id`)
 # so both sockets of one tab share one activity clock. A brand-new connection is
 # active for one full `sensor_idle_activity_timeout_s` window by construction
-# (nothing needs a separate grace constant). A live recording always counts as
-# active regardless of viewer engagement -- a take must never be interrupted
-# mid-scan (same reasoning as Live SLAM's auto-record, see `_start_slam_auto_record`).
+# (nothing needs a separate grace constant). A `/ws-thin` connection (#194) is a
+# live viewer exactly like a `/ws` tab -- it self-touches every render tick
+# rather than waiting on an inbound message, since a v1 thin client never sends
+# one after its initial hello (see `websocket_thin_endpoint`/
+# `_thin_render_loop`). A live recording always counts as active regardless of
+# viewer engagement -- a take must never be interrupted mid-scan (same
+# reasoning as Live SLAM's auto-record, see `_start_slam_auto_record`).
 
 
 def _resolve_client_id(websocket: WebSocket) -> str:
@@ -4847,7 +4852,8 @@ def _resolve_client_id(websocket: WebSocket) -> str:
     a raw MCP probe, an old cached client -- still gets tracked, just under its
     own unshared identity, so it ages out on its own exactly like today's
     per-socket behavior."""
-    cid = websocket.query_params.get("client_id")
+    params = getattr(websocket, "query_params", None)
+    cid = params.get("client_id") if params is not None else None
     return cid if cid else f"anon-{id(websocket)}"
 
 
@@ -4874,20 +4880,24 @@ def _client_is_active(state, client_id: str, now: float | None = None) -> bool:
 
 
 def _active_viewer_count(state) -> int:
-    """Number of `/ws` connections that count as an actively-engaged viewer
-    for auto-idle purposes -- see the module comment above for why this is
-    not simply `len(state.clients)`. A connection with no resolved
-    `client_id` (mid-handshake in the real endpoint, or a hand-built test
-    `state.clients` entry that never goes through it) counts as active by
-    default -- the same fail-open rule `_engaged_clients` uses -- so only a
-    connection that has actually been tracked and gone stale is excluded."""
+    """Number of `/ws` + `/ws-thin` connections that count as an
+    actively-engaged viewer for auto-idle purposes -- see the module comment
+    above for why this is not simply `len(state.clients)`. A connection with
+    no resolved `client_id` (mid-handshake in the real endpoint, or a
+    hand-built test `state.clients` entry that never goes through it) counts
+    as active by default -- the same fail-open rule `_engaged_clients` uses --
+    so only a connection that has actually been tracked and gone stale is
+    excluded. A `/ws-thin` client is a viewer too (a CrowPanel or other
+    thin-client screen someone is looking at) -- its render loop touches its
+    own activity every tick, so a connected thin client never goes stale on
+    its own; see `websocket_thin_endpoint`/`_thin_render_loop`."""
     ctrl = getattr(state, "controller", None)
     if ctrl is not None and getattr(getattr(ctrl, "recorder", None), "active", False):
         return 1
     now = time.monotonic()
     ids = getattr(state, "ws_client_id", {})
     count = 0
-    for ws in state.clients:
+    for ws in itertools.chain(state.clients, _thin_clients(state)):
         cid = ids.get(ws)
         if cid is None or _client_is_active(state, cid, now):
             count += 1
@@ -5867,12 +5877,18 @@ async def _thin_render_loop(state, websocket, flow: ThinFlow) -> None:
     loop = asyncio.get_running_loop()
     next_tick = time.monotonic()
     next_telemetry = 0.0
+    client_id = _resolve_client_id(websocket)
 
     while True:
         delay = next_tick - time.monotonic()
         if delay > 0:
             await asyncio.sleep(delay)
         now = time.monotonic()
+        # Self-touch every tick (not just on inbound messages): a v1 thin
+        # client never sends anything after its initial hello, so waiting on
+        # `_handle_thin_inbound` would let a perfectly live connection age out
+        # past `sensor_idle_activity_timeout_s` and idle the sensor under it.
+        _touch_client_active(state, client_id)
 
         ack = _apply_pending_hello(flow)
         if ack is not None:
@@ -6918,7 +6934,14 @@ async def websocket_thin_endpoint(websocket: WebSocket):
     flows[websocket] = flow
     if not hasattr(state, "ws_client_id"):
         state.ws_client_id = {}
-    state.ws_client_id[websocket] = _resolve_client_id(websocket)
+    client_id = _resolve_client_id(websocket)
+    state.ws_client_id[websocket] = client_id
+    # A connected thin client is a live viewer exactly like a `/ws` tab --
+    # cancel any pending idle and wake the sensor if it was already idled.
+    # `_thin_render_loop` re-touches this every tick so the connection never
+    # ages out on its own (a v1 client never sends anything after its hello).
+    _touch_client_active(state, client_id)
+    await _viewer_arrived(state)
 
     render_task = asyncio.create_task(
         _thin_render_loop(state, websocket, flow))
@@ -6938,7 +6961,10 @@ async def websocket_thin_endpoint(websocket: WebSocket):
         with suppress(asyncio.CancelledError, Exception):
             await render_task
         flows.pop(websocket, None)
-        state.ws_client_id.pop(websocket, None)
+        cid = state.ws_client_id.pop(websocket, None)
+        if cid is not None:
+            getattr(state, "client_active", {}).pop(cid, None)
+        await _viewer_left(state)   # arm the debounced sensor idle if that was the last active viewer
 
 
 async def _start_slam_auto_record(state, ctrl) -> bool:

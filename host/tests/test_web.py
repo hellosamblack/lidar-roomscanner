@@ -7530,6 +7530,27 @@ def test_ws_thin_sends_telemetry_and_a_well_formed_frame(thin_renderer):
     assert fake.submits                   # the fake really did the render
 
 
+def test_ws_thin_connect_touches_activity_and_disconnect_clears_it(thin_renderer):
+    """A `/ws-thin` connection must register in the same `client_active` /
+    `ws_client_id` bookkeeping `/ws` uses, and clear it on disconnect -- this
+    is what makes a connected thin client visible to `_active_viewer_count`
+    (unit-tested directly in test_sensor_idle.py) so it counts as a live
+    viewer for auto-idle rather than only `state.clients` sockets."""
+    from starlette.testclient import TestClient
+    thin_renderer()
+    st = _prime_app_state_for_thin()
+    client = TestClient(web.app)
+
+    with client.websocket_connect("/ws-thin?client_id=thin-1") as ws:
+        ws.receive_json()   # telemetry
+        ws.receive_bytes()  # first frame -- proves the render loop ticked
+        assert "thin-1" in st.client_active
+        assert st.ws_client_id[next(iter(st.thin_clients))] == "thin-1"
+
+    assert st.thin_clients == {}
+    assert "thin-1" not in st.client_active
+
+
 def test_ws_thin_un_negotiated_client_gets_todays_tag1_frame_unchanged(thin_renderer):
     """The backward-compat contract: a client that never sends `thin_hello`
     gets exactly the pre-#197 wire format -- tag 1, RGB565, 480x480."""

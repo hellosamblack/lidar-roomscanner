@@ -341,6 +341,25 @@ context is destroyed on its owning thread, from `_lifespan` shutdown and an
 
 ---
 
+## Auto-idle interaction
+
+A connected `/ws-thin` client is a live viewer exactly like a `/ws` browser tab
+([#205](https://github.com/hellosamblack/lidar-roomscanner/issues/205)): it
+participates in the same `client_active`/`_active_viewer_count` bookkeeping the
+sensor auto-idle machinery (`web.py`, above `_resolve_client_id`) uses to
+decide when to `SET_STANDBY` the laser. Connecting wakes an idled sensor and
+cancels any pending idle timer; disconnecting arms the debounced idle timer
+only if no `/ws` tab or other `/ws-thin` client remains active.
+
+Because a v1 thin client never sends anything after its initial `thin_hello`
+(no periodic heartbeat like the browser's `idle_state`), `_thin_render_loop`
+self-touches its own activity every render tick rather than waiting on an
+inbound message — otherwise a perfectly live connection would silently age
+out past `sensor_idle_activity_timeout_s` and let the sensor idle out from
+under it.
+
+---
+
 ## Client cap and backpressure
 
 **`THIN_MAX_CLIENTS = 2`.** Connection count is a real performance variable on
