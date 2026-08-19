@@ -184,7 +184,14 @@ in the repo. The evidence for every one is in `docs/roadmap-history.md`.
   a constructor option `enableOptionalEffects` that defaults to **`false`**, so the See-Through slider
   set `scene.opacity` on every move and the uniform was never even declared. An `#ifndef` default
   (surprise ON) and an opt-in default (surprise OFF) are the same mistake. Read the vendor's own
-  default; never infer it from your call site looking correct.
+  default; never infer it from your call site looking correct. Not code-only either: the Pi bridge's
+  silent full-network drops (#200) trace to `raspberrypi-sys-mods` shipping
+  `/usr/lib/systemd/system.conf.d/40-rpi-enable-watchdog.conf` (`RuntimeWatchdogSec=1m`) — a 1-minute
+  hardware watchdog that hard-resets the SoC with zero chance to log if PID 1 stalls that long.
+  `/etc/systemd/system.conf`, the file a human checks, shows the setting **commented out**, reading
+  as "off"; the drop-in overrides it silently. A config file's own silence proves nothing about a
+  package-shipped default living somewhere else — check `/usr/lib/*.conf.d/` and `dpkg -S` before
+  trusting it.
 - **Some failures abort the process instead of raising — you cannot handle those, only make
   them unreachable.** Open3D/Filament's `OffscreenRenderer` kills the interpreter outright
   (`utils::PreconditionPanic`, `terminate called`) on a *second* instance in one process, and

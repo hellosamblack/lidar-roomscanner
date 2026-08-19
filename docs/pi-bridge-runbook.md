@@ -291,11 +291,48 @@ minutes** of coverage at the measured ~466 KB/s stream rate. Don't expect
 to recover a capture from last week — fetch what you need soon after the
 session, before the ring wraps around it.
 
+## 7.5. Diagnosing a silent full-board hang (issue #200)
+
+Twice now the Pi has gone completely off the network — no ARP, no mDNS, `ssh` refused — with
+**zero preceding error anywhere in the logs**. `journalctl -b -1` across both dead boots shows
+`roomscan-bridge-reconcile` succeeding every 10s right up to an instant stop; no kernel fault, no
+OOM, no driver message, no `wlan0`-specific disconnect. The cause of that *silence* is a vendor
+default: `raspberrypi-sys-mods` ships
+`/usr/lib/systemd/system.conf.d/40-rpi-enable-watchdog.conf` (`RuntimeWatchdogSec=1m`) —
+`/etc/systemd/system.conf` shows the setting commented out, which reads as "not configured", but
+the drop-in overrides it. Confirm it live with:
+
+```sh
+systemctl show -p RuntimeWatchdogUSec
+dmesg | grep -i watchdog   # "Watchdog running with a hardware timeout of 1min"
+```
+
+If PID 1 is starved for over 60 seconds by anything — a wedged mount, a kernel-level stall, a stuck
+driver — the hardware watchdog resets the SoC with **zero chance to log**. It is doing its job
+(recovering an otherwise-permanent hang); it also erases the evidence of what caused it.
+
+**After a recurrence, read the vitals trail rather than re-deriving this from scratch:**
+
+```sh
+bridge_logs("roomscan-bridge-healthlog")     # or: journalctl -t roomscan-bridge-healthlog
+```
+
+`roomscan-bridge-healthlog.timer` samples uptime, load, free memory, SoC temperature,
+`vcgencmd get_throttled`, and `wlan0`'s own RSSI/tx-rate every 15s into
+`/var/lib/roomscan-bridge/healthlog/health.jsonl` (bounded ring, ~12h cap). Persisted journald
+(`Storage=persistent`, installed during #191's bring-up) means the log from the *dead* boot
+survives the reset and is readable after recovery — always check `journalctl --list-boots` first
+and read boot `-1`, not the current one. The wired USB-Ethernet debug NIC (added 2026-08-18,
+independent of `wlan0`) is also worth checking on the *next* occurrence: if it survives while
+`wlan0` disappears, that points at the wireless stack specifically; if it goes dark too, that
+confirms a true whole-board freeze.
+
 ## 8. Failure playbook
 
 | Symptom | Check | Fix |
 |---|---|---|
 | Pi not discoverable via MCP/CLI | `avahi-browse -r _roomscan-bridge._tcp` from a laptop on the same Wi-Fi; `$ROOMSCAN_BRIDGE_HOST` set to something stale | Set `$ROOMSCAN_BRIDGE_HOST` explicitly to a known-good IP as a workaround; confirm the Pi actually associated (needs HDMI or the FileHub cold-spare path, §9, if wireless is fully down) |
+| Pi **fully** off the network (no ARP, no mDNS anywhere, `ssh` says no route to host) — not an auth/config failure, it's genuinely gone | `ip neigh show \| grep <ip>` for `FAILED`; a full-subnet ping sweep; `avahi-browse -a -t -r \| grep roomscan-bridge` from another host on the segment finds nothing | See §7.5 — this is very likely the 1-minute hardware watchdog silently resetting the SoC after a hang (issue #200, unexplained root cause, recurring). Needs a physical power-cycle; there is no remote recovery. After it's back, read `roomscan-bridge-healthlog` and boot `-1`'s journal for a trail. |
 | Scanner has no lease / `eth0.scanner_lease` is null | `bridge_status()` → `eth0.carrier` (is it plugged in?), `eth0.scanner_neigh` | The scanner missed dnsmasq's 3000 ms DHCP window and self-assigned `172.31.253.1`. `roomscan-bridge-reconcile` (runs every 10s) detects this via a temporary probe alias, retargets the nftables DNAT rule to the fallback address so the stream keeps working immediately, then bounces `eth0` to push the scanner's DHCP client back to `INIT` and re-request a real lease — **but only when the nftables DNAT counters show no live stream traffic**; it will not bounce the link mid-capture. Check `bridge_logs("roomscan-bridge-reconcile")` for what it decided. |
 | Scanner *never* gets a lease, on every boot | `ssh` in and run `dnsmasq --test -7 /etc/dnsmasq.d`, and `grep CONFIG_DIR /etc/default/dnsmasq` | Our DHCP config lives in `/etc/dnsmasq.d/roomscan-bridge.conf`, and Debian reads that directory through **`CONFIG_DIR` in `/etc/default/dnsmasq`** plus the packaged systemd-helper's `-7` flag — *not* through `/etc/dnsmasq.conf`, where every `conf-dir=` line ships commented out. If `CONFIG_DIR` is gone, dnsmasq starts clean, every unit reports `active`, and the scanner simply never gets an answer. `install.sh::ensure_dnsmasq_reads_dropins` checks this on every run and appends a `conf-dir=` line if neither mechanism is in place, so re-running `bridge_update()` repairs it. |
 | Wi-Fi associated but lossy | `bridge_status()` → `wlan0.power_save` (should read `off`; `on`/anything else means `brcmfmac` power-save is adding burst latency and dropping frames), `wlan0.rssi_dbm` (below ~-70 dBm expect loss) | If `power_save` drifted back on, `bridge_update()` reapplies the payload's `wifi.powersave=2`→off NetworkManager config; a weak RSSI is a physical/placement problem, not a config one — move the Pi or the AP |

@@ -157,7 +157,7 @@ if ring_names="$(as_root ls -t "${RING_DIR}" 2>/dev/null)"; then
 fi
 
 # --- units --------------------------------------------------------------
-UNITS_LIST="dnsmasq.service avahi-daemon.service nftables.service roomscan-tee.service roomscan-bridge-reconcile.timer"
+UNITS_LIST="dnsmasq.service avahi-daemon.service nftables.service roomscan-tee.service roomscan-bridge-reconcile.timer roomscan-bridge-healthlog.timer"
 UNITS_RAW=""
 for u in ${UNITS_LIST}; do
     state="$(systemctl is-active "${u}" 2>/dev/null || true)"

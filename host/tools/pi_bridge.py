@@ -58,7 +58,7 @@ TEE_DIR = "/var/lib/roomscan-bridge/tee"
 #: Units the bridge needs up. `bridge_status` and `bridge_update` both report
 #: on exactly this list so the two never drift into disagreeing.
 REQUIRED_UNITS = ("dnsmasq", "avahi-daemon", "nftables", "roomscan-tee",
-                  "roomscan-bridge-reconcile.timer")
+                  "roomscan-bridge-reconcile.timer", "roomscan-bridge-healthlog.timer")
 
 
 # ---------------------------------------------------------------------------

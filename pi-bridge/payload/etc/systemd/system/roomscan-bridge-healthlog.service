@@ -1,0 +1,17 @@
+[Unit]
+Description=roomscan bridge -- append one line of system vitals to the bounded health ring (issue #200)
+# Triggered on a cadence by roomscan-bridge-healthlog.timer. Not meant to be
+# enabled directly (no [Install] WantedBy) -- the timer owns activation, the
+# same shape as roomscan-bridge-reconcile.service.
+#
+# Exists because the Pi has twice gone fully off the network with no
+# preceding error anywhere in the existing logs. The cause of the SILENCE is
+# raspberrypi-sys-mods' vendor-default 1-minute systemd hardware watchdog
+# (/usr/lib/systemd/system.conf.d/40-rpi-enable-watchdog.conf) -- it resets
+# the SoC the instant PID 1 is starved for 60s, with zero chance to log.
+# This unit's only job is to leave a trail the watchdog can't erase.
+# Structurally fail-open, like roomscan-tee: nothing depends on it.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/roomscan-bridge-healthlog

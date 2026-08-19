@@ -132,6 +132,7 @@ NET_RESTART_UNITS=(
 OPTIONAL_UNITS=(
     "roomscan-tee.service"
     "roomscan-bridge-reconcile.timer"
+    "roomscan-bridge-healthlog.timer"
 )
 
 # Set by activate_units(); read by main() after it returns.

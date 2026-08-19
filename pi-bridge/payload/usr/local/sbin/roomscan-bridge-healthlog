@@ -1,0 +1,65 @@
+#!/bin/bash
+# roomscan-bridge-healthlog -- append one line of system vitals to a bounded
+# local ring log, on a ~15s cadence via roomscan-bridge-healthlog.timer.
+#
+# Exists because of issue #200: the Pi has twice gone completely off the
+# network with NO preceding error of any kind in the existing logs -- not a
+# kernel fault, not an OOM, not a driver message, nothing. journalctl across
+# the whole dead boot showed roomscan-bridge-reconcile succeeding every 10s
+# right up to an instant stop. The reason turned out to be a vendor default:
+# raspberrypi-sys-mods ships
+# /usr/lib/systemd/system.conf.d/40-rpi-enable-watchdog.conf
+# (RuntimeWatchdogSec=1m) -- /etc/systemd/system.conf shows the setting
+# commented out, which reads as "not configured", but the drop-in overrides
+# it. If PID 1 is starved for over 60 seconds by anything -- a wedged mount,
+# a kernel-level stall, a stuck driver -- the hardware watchdog resets the
+# SoC with zero chance to log. The watchdog is doing its job (recovering an
+# otherwise-permanent hang); it also erases the only evidence of what caused
+# it. This script exists to leave a trail the watchdog can't erase, since it
+# is written to disk continuously rather than reconstructed after the fact.
+#
+# Deliberately NOT in REQUIRED_UNITS (install.sh) -- like roomscan-tee, this
+# is a passive observer nothing depends on; a failure here must never fail
+# the install or count against bridge health.
+set -euo pipefail
+
+RING_DIR="/var/lib/roomscan-bridge/healthlog"
+RING_FILE="${RING_DIR}/health.jsonl"
+MAX_LINES=2880   # ~12 hours at 15s cadence
+KEEP_LINES=1440  # truncate back to ~6 hours when the cap is hit
+
+mkdir -p "${RING_DIR}"
+
+# Each field is read defensively -- a missing tool or a transient read
+# failure produces "null" in the JSON, never aborts the whole sample. Same
+# "a probe that cannot run must not answer" rule as roomscan-bridge-status:
+# a blank/failed reading must never look like a healthy one.
+now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+uptime_s="$(cut -d. -f1 /proc/uptime 2>/dev/null || echo null)"
+load1="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo null)"
+mem_avail_kb="$(awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null || echo null)"
+temp_c="$(vcgencmd measure_temp 2>/dev/null | grep -oE '[0-9.]+' || echo null)"
+throttled="$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2 || echo null)"
+
+# wlan0's own view of its link -- RSSI/bitrate straight from the kernel,
+# independent of whether NetworkManager has noticed a problem yet.
+wlan_link="$(iw dev wlan0 link 2>/dev/null || echo "")"
+wlan_rssi="$(printf '%s' "${wlan_link}" | awk '/signal:/{print $2}')"
+[ -n "${wlan_rssi}" ] || wlan_rssi=null
+wlan_bitrate="$(printf '%s' "${wlan_link}" | awk '/tx bitrate:/{print $3}')"
+[ -n "${wlan_bitrate}" ] || wlan_bitrate=null
+
+json_str() { [ "$1" = null ] && printf 'null' || printf '"%s"' "$1"; }
+json_num() { [ "$1" = null ] && printf 'null' || printf '%s' "$1"; }
+
+printf '{"t":%s,"uptime_s":%s,"load1":%s,"mem_avail_kb":%s,"temp_c":%s,"throttled":%s,"wlan0_rssi_dbm":%s,"wlan0_tx_mbps":%s}\n' \
+    "$(json_str "${now}")" "$(json_num "${uptime_s}")" "$(json_num "${load1}")" \
+    "$(json_num "${mem_avail_kb}")" "$(json_num "${temp_c}")" "$(json_str "${throttled}")" \
+    "$(json_num "${wlan_rssi}")" "$(json_num "${wlan_bitrate}")" >> "${RING_FILE}"
+
+# Self-truncating ring -- cheaper than logrotate for one small file, and
+# avoids a second unit. Only rewrites when the cap is actually hit.
+if [ "$(wc -l < "${RING_FILE}")" -gt "${MAX_LINES}" ]; then
+    tail -n "${KEEP_LINES}" "${RING_FILE}" > "${RING_FILE}.tmp"
+    mv "${RING_FILE}.tmp" "${RING_FILE}"
+fi
