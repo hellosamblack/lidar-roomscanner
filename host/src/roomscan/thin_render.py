@@ -51,6 +51,7 @@ class _RenderJob(NamedTuple):
     quality: int
     out_width: int | None
     out_height: int | None
+    seq: int
 
 # --- wire contract (duplicated verbatim in the CrowPanelProp companion spec) ---
 THIN_TAG = 1
@@ -58,11 +59,16 @@ THIN_WIDTH = 480
 THIN_HEIGHT = 480
 THIN_HEADER = struct.Struct("<IHH")  # u32 tag, u16 width, u16 height
 
-#: THIN_FRAME_JPEG (tag 2, #197): u32 tag=2, u16 width, u16 height,
-#: u32 jpeg_len, followed by exactly jpeg_len bytes of JFIF. Negotiated via
-#: `thin_hello`; a client that never sends one only ever sees tag 1.
+#: THIN_FRAME_JPEG (tag 2, #197/#202): u32 tag=2, u16 width, u16 height,
+#: u32 seq, u32 payload_len, followed by exactly payload_len bytes of baseline
+#: JFIF (YCbCr 4:2:0). Negotiated via `thin_hello`; a client that never sends
+#: one only ever sees tag 1. `seq` is monotonic per connection and is what a
+#: v2 client echoes back in `thin_ready` to grant the server send credit --
+#: the 16-byte layout is fixed by the CrowPanel companion spec
+#: (2026-08-18-lidar-thin-frame-bandwidth-protocol.md), which superseded the
+#: 12-byte seq-less header #197 first shipped.
 THIN_TAG_JPEG = 2
-THIN_HEADER_JPEG = struct.Struct("<IHHI")  # u32 tag, u16 width, u16 height, u32 jpeg_len
+THIN_HEADER_JPEG = struct.Struct("<IHHII")  # u32 tag, u16 w, u16 h, u32 seq, u32 payload_len
 DEFAULT_JPEG_QUALITY = 75
 
 THIN_MODES = ("point_cloud", "slam", "ir")
@@ -125,10 +131,12 @@ def pack_thin_frame(pixels_rgb565: bytes, width: int = THIN_WIDTH,
     return THIN_HEADER.pack(THIN_TAG, width, height) + pixels_rgb565
 
 
-def pack_thin_jpeg(jpeg_bytes: bytes, width: int, height: int) -> bytes:
+def pack_thin_jpeg(jpeg_bytes: bytes, width: int, height: int,
+                   seq: int = 0) -> bytes:
     """THIN_FRAME_JPEG binary (tag 2): u32 tag=2 - u16 width - u16 height -
-    u32 jpeg_len - u8[jpeg_len] JFIF bytes, all little-endian."""
-    return THIN_HEADER_JPEG.pack(THIN_TAG_JPEG, width, height, len(jpeg_bytes)) + jpeg_bytes
+    u32 seq - u32 payload_len - u8[payload_len] JFIF bytes, all little-endian."""
+    return THIN_HEADER_JPEG.pack(THIN_TAG_JPEG, width, height, seq & 0xFFFFFFFF,
+                                 len(jpeg_bytes)) + jpeg_bytes
 
 
 def jpeg_available() -> bool:
@@ -166,6 +174,10 @@ def warm_jpeg_import() -> bool:
 def encode_jpeg_frame(rgb: np.ndarray, quality: int = DEFAULT_JPEG_QUALITY) -> bytes:
     """JFIF-encode an (H, W, 3) uint8 RGB image via `simplejpeg`.
 
+    Baseline JPEG, YCbCr 4:2:0 -- the exact encoding the CrowPanel spec pins,
+    because the P4's `esp_driver_jpeg` hardware decoder consumes it directly.
+    (simplejpeg's own default is 4:4:4; never assume a vendor default.)
+
     Deferred import (like `open3d` in `ThinRenderer._run`) so a missing or
     test-poisoned `simplejpeg` raises `ImportError` here rather than at module
     load, which would take `/ws-thin`'s raw path down with it. Runs on the
@@ -173,7 +185,7 @@ def encode_jpeg_frame(rgb: np.ndarray, quality: int = DEFAULT_JPEG_QUALITY) -> b
     """
     import simplejpeg  # noqa: PLC0415 - deferred, see docstring
     return simplejpeg.encode_jpeg(np.ascontiguousarray(rgb), quality=quality,
-                                  colorspace="rgb")
+                                  colorspace="rgb", colorsubsampling="420")
 
 
 def resize_nearest(rgb: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -563,7 +575,8 @@ class ThinRenderer:
                pack: bool = True, fmt: str = "raw",
                quality: int = DEFAULT_JPEG_QUALITY,
                out_width: int | None = None,
-               out_height: int | None = None) -> Future:
+               out_height: int | None = None,
+               seq: int = 0) -> Future:
         """Queue a render. The future resolves to packed `THIN_FRAME`
         (`fmt="raw"`) or `THIN_FRAME_JPEG` (`fmt="jpeg"`) bytes when
         `pack=True`, or an (H, W, 3) uint8 array when `pack=False`.
@@ -589,22 +602,23 @@ class ThinRenderer:
             fut.set_exception(ThinRenderUnavailable("renderer is closed"))
             return fut
         self._jobs.put(_RenderJob(scene, camera, pack, fut, fmt, quality,
-                                  out_width, out_height))
+                                  out_width, out_height, seq))
         return fut
 
     def render(self, scene: ThinScene, camera: ThinCamera, *,
                pack: bool = True, fmt: str = "raw",
                quality: int = DEFAULT_JPEG_QUALITY,
                out_width: int | None = None, out_height: int | None = None,
-               timeout: float = 30.0):
+               seq: int = 0, timeout: float = 30.0):
         """Synchronous convenience wrapper. Do not call from the event loop."""
         return self.submit(scene, camera, pack=pack, fmt=fmt, quality=quality,
                            out_width=out_width,
-                           out_height=out_height).result(timeout)
+                           out_height=out_height, seq=seq).result(timeout)
 
     def _finish(self, rgb: np.ndarray, pack: bool, *, fmt: str = "raw",
                quality: int = DEFAULT_JPEG_QUALITY,
-               out_width: int | None = None, out_height: int | None = None):
+               out_width: int | None = None, out_height: int | None = None,
+               seq: int = 0):
         if not pack:
             return rgb
         out_width = out_width or self.width
@@ -613,7 +627,7 @@ class ThinRenderer:
             rgb = resize_nearest(rgb, out_width, out_height)
         if fmt == "jpeg":
             return pack_thin_jpeg(encode_jpeg_frame(rgb, quality),
-                                  out_width, out_height)
+                                  out_width, out_height, seq)
         return pack_thin_frame(rgb_to_bytes(rgb), out_width, out_height)
 
     # -- the owning thread -------------------------------------------------
@@ -661,7 +675,8 @@ class ThinRenderer:
                     rgb = np.asarray(renderer.render_to_image())
                 job.fut.set_result(self._finish(
                     rgb, job.pack, fmt=job.fmt, quality=job.quality,
-                    out_width=job.out_width, out_height=job.out_height))
+                    out_width=job.out_width, out_height=job.out_height,
+                    seq=job.seq))
             except BaseException as exc:  # noqa: BLE001 - reported to the caller
                 current_key = None
                 job.fut.set_exception(exc)
@@ -689,7 +704,8 @@ class ThinRenderer:
                     rgb = _letterbox(job.scene.image, self.width, self.height)
                     job.fut.set_result(self._finish(
                         rgb, job.pack, fmt=job.fmt, quality=job.quality,
-                        out_width=job.out_width, out_height=job.out_height))
+                        out_width=job.out_width, out_height=job.out_height,
+                        seq=job.seq))
                 except BaseException as inner_exc:  # noqa: BLE001
                     job.fut.set_exception(inner_exc)
                 continue

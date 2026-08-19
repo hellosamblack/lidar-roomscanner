@@ -1006,18 +1006,27 @@ async def rig_thin_probe(frames: int = 5, url: str = "", out_dir: str = "",
                          record: bool = False, timeout: float = 15.0,
                          format: str = "", fps: int = 0,
                          width: int = 0, height: int = 0,
-                         quality: int = 0) -> dict:
+                         quality: int = 0, v2: bool = False,
+                         credits: int = 0, max_frame_bytes: int = 0) -> dict:
     """Look at what `/ws-thin` is actually drawing, as PNGs, and prove the
     commands move it.
 
     Stands in for the CrowPanel thin client we cannot put on the bench: connects
     to the running roomscan-web's `/ws-thin`, decodes the binary frame it sends
     -- tag 1 (`THIN_FRAME`: u32 tag=1, u16 w, u16 h, then exactly w*h*2 bytes of
-    RGB565) by default, or tag 2 (`THIN_FRAME_JPEG`: u32 tag=2, u16 w, u16 h,
-    u32 jpeg_len, then jpeg_len bytes of JFIF, decoded via `simplejpeg`) once a
-    `thin_hello` has negotiated `format="jpeg"` (#197) -- writes each frame to
+    RGB565) by default, or tag 2 (`THIN_FRAME_JPEG`, #202 v2 layout: u32 tag=2,
+    u16 w, u16 h, u32 seq, u32 payload_len, then payload_len bytes of baseline
+    4:2:0 JFIF, decoded via `simplejpeg`) once a `thin_hello` has negotiated
+    jpeg (#197/#202) -- writes each frame to
     `results/thin_probe/<timestamp>/*.png` (served at `/results/...`), and
     round-trips the inbound commands. Read the PNGs -- that is the point of it.
+
+    `v2=True` sends the CrowPanel spec's proto-2 hello (#202): an `accept`
+    preference list plus optional `credits` (1-8) and `max_frame_bytes`, and
+    the probe then grants a `thin_ready` per consumed frame -- exercising the
+    server's credit-based flow control (frames are DROPPED, never queued, when
+    the client is slow; watch `telemetry.tx_fps` / `tx_bytes_per_s` /
+    `dropped` for the per-client truth vs the rig-internal `fps`).
 
     `format`/`fps`/`width`/`height`/`quality` negotiate `thin_hello` before
     anything else, when any is given (non-empty/non-zero); leaving all five at
@@ -1074,4 +1083,6 @@ async def rig_thin_probe(frames: int = 5, url: str = "", out_dir: str = "",
                              modes=modes, record=record, timeout=timeout,
                              format=format or None, fps=fps or None,
                              width=width or None, height=height or None,
-                             quality=quality or None)
+                             quality=quality or None,
+                             proto=2 if v2 else None, credits=credits or None,
+                             max_frame_bytes=max_frame_bytes or None)

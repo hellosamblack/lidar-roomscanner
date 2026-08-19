@@ -6867,11 +6867,12 @@ class _FakeThinRenderer:
             raise ThinRenderUnavailable("no offscreen context in tests")
 
     def submit(self, scene, camera, *, pack: bool = True, fmt: str = "raw",
-              quality: int = 75, out_width=None, out_height=None) -> _CFuture:
+              quality: int = 75, out_width=None, out_height=None,
+              seq: int = 0) -> _CFuture:
         self.submits.append((scene, camera))
         self.submit_kwargs.append(
             {"pack": pack, "fmt": fmt, "quality": quality,
-             "out_width": out_width, "out_height": out_height})
+             "out_width": out_width, "out_height": out_height, "seq": seq})
         fut: _CFuture = _CFuture()
         fut.set_result(self._frame)
         return fut
@@ -7041,7 +7042,10 @@ def test_thin_scene_for_slam_memoises_by_object_identity_not_equality():
 _THIN_TELEMETRY_KEYS = {"type", "fps", "point_count", "recording", "mode",
                         "link", "roll_deg", "pitch_deg", "tilt_deg", "heading_deg",
                         "yaw_rate_dps", "orientation_valid", "orientation_labels",
-                        "ir_grid"}
+                        "ir_grid",
+                        # per-client link truth (#202): the rig-internal `fps`
+                        # is NOT this client's rate -- these are.
+                        "tx_fps", "tx_bytes_per_s", "dropped"}
 
 
 def test_thin_telemetry_message_key_set_and_values():
@@ -7328,7 +7332,9 @@ def test_negotiate_thin_hello_malformed_values_leave_prior_values():
         {"type": "thin_hello", "fps": "not-a-number",
          "width": "nope", "height": "nope", "quality": [1, 2]}, flow)
     assert effective == {"format": "jpeg", "fps": 15.0, "width": 320,
-                         "height": 320, "quality": 60}
+                         "height": 320, "quality": 60,
+                         "proto": 1, "credits": web.THIN_CREDITS_DEFAULT,
+                         "max_frame_bytes": None}
 
 
 def test_negotiate_thin_hello_is_pure_and_never_mutates_the_flow():
@@ -7390,7 +7396,8 @@ def test_apply_pending_hello_applies_effective_values_and_clears_pending():
     assert (flow.width, flow.height) == (320, 320)
     assert flow.quality == 50
     assert ack == {"type": "thin_hello_ack", "format": "jpeg", "fps": 30.0,
-                   "width": 320, "height": 320, "quality": 50}
+                   "width": 320, "height": 320, "quality": 50,
+                   "proto": 1, "encoding": "jpeg"}   # v2 fields (#202)
 
 
 def test_apply_pending_hello_acks_the_clamped_effective_values_not_the_request():
@@ -7534,7 +7541,8 @@ def test_ws_thin_un_negotiated_client_gets_todays_tag1_frame_unchanged(thin_rend
     assert frame == fake._frame           # byte-identical to the fake's tag-1 frame
     assert frame[:8] == struct.pack("<IHH", 1, 480, 480)
     assert fake.submit_kwargs[0] == {"pack": True, "fmt": "raw", "quality": 75,
-                                     "out_width": 480, "out_height": 480}
+                                     "out_width": 480, "out_height": 480,
+                                     "seq": 1}
 
 
 def test_ws_thin_hello_negotiates_jpeg_and_reaches_the_renderer(thin_renderer):
@@ -7559,7 +7567,10 @@ def test_ws_thin_hello_negotiates_jpeg_and_reaches_the_renderer(thin_renderer):
                     break
         assert ack == {"type": "thin_hello_ack", "format": "jpeg", "fps": 30.0,
                        "width": 480, "height": 480,          # 640 clamped to 480
-                       "quality": 95}                        # 999 clamped to 95
+                       "quality": 95,                        # 999 clamped to 95
+                       # a #197-shape hello (no `proto`) stays v1 free-running;
+                       # `encoding` is the spec's name for `format` (#202)
+                       "proto": 1, "encoding": "jpeg"}
 
         # drain messages until the render loop submits at least once more
         # AFTER the negotiation landed
@@ -7568,8 +7579,11 @@ def test_ws_thin_hello_negotiates_jpeg_and_reaches_the_renderer(thin_renderer):
             if data.get("bytes") and fake.submit_kwargs:
                 break
 
-    assert fake.submit_kwargs[-1] == {"pack": True, "fmt": "jpeg", "quality": 95,
-                                      "out_width": 480, "out_height": 480}
+    last = dict(fake.submit_kwargs[-1])
+    seq = last.pop("seq")   # per-frame counter; exact value depends on how
+    assert seq >= 1         # many frames the loop got through before this one
+    assert last == {"pack": True, "fmt": "jpeg", "quality": 95,
+                    "out_width": 480, "out_height": 480}
 
 
 def test_thin_render_loop_sends_ack_before_any_frame_single_writer_order(thin_renderer):
@@ -7671,6 +7685,218 @@ def test_thin_render_loop_submits_the_live_flow_camera_every_tick(thin_renderer)
     after_yaw = fake.submits[-1][1].yaw
     assert after_yaw == pytest.approx(150.0)              # 30 + 120, wrapped
     assert after_yaw != before_yaw
+
+
+# --- 5c. `/ws-thin` v2: credit flow control + seq'd frames (#202) ----------
+#
+# The CrowPanel bandwidth spec (2026-08-18): the panel's 1-bit-SDIO wifi link
+# delivers ~1.5 Mbit/s, so the server must never have more than the granted
+# credits outstanding and must DROP (never queue) at zero credit -- otherwise
+# TCP buffers absorb the excess until pings hit seconds and the client flaps.
+
+
+def test_negotiate_thin_hello_v2_spec_shape_accept_prefers_jpeg():
+    flow = web.ThinFlow()
+    eff = web.negotiate_thin_hello(
+        {"type": "thin_hello", "proto": 2, "client": "crowpanel-p4",
+         "accept": ["jpeg", "rgb565"], "width": 480, "height": 480,
+         "credits": 2, "max_frame_bytes": 262144}, flow)
+    assert eff["proto"] == 2
+    assert eff["format"] == "jpeg"
+    assert eff["credits"] == 2
+    assert eff["max_frame_bytes"] == 262144
+    assert (eff["width"], eff["height"]) == (480, 480)
+
+
+def test_negotiate_thin_hello_v2_accept_rgb565_maps_to_raw():
+    flow = web.ThinFlow()
+    eff = web.negotiate_thin_hello(
+        {"type": "thin_hello", "proto": 2, "accept": ["rgb565"]}, flow)
+    assert eff["format"] == "raw"
+
+
+def test_negotiate_thin_hello_v2_accept_degrades_past_unavailable_jpeg(monkeypatch):
+    monkeypatch.setattr(web, "jpeg_available", lambda: False)
+    flow = web.ThinFlow()
+    eff = web.negotiate_thin_hello(
+        {"type": "thin_hello", "proto": 2, "accept": ["jpeg", "rgb565"]}, flow)
+    assert eff["format"] == "raw"
+
+
+def test_negotiate_thin_hello_proto_ratchets_up_never_down():
+    flow = web.ThinFlow()
+    assert web.negotiate_thin_hello({"type": "thin_hello", "fps": 5},
+                                    flow)["proto"] == 1
+    flow.proto = 2
+    # a later hello without `proto`, or even claiming proto 1, cannot demote
+    # the flow back to free-running -- credits already govern its queue bound
+    assert web.negotiate_thin_hello({"type": "thin_hello", "fps": 5},
+                                    flow)["proto"] == 2
+    assert web.negotiate_thin_hello({"type": "thin_hello", "proto": 1},
+                                    flow)["proto"] == 2
+
+
+def test_negotiate_thin_hello_clamps_credits_and_max_frame_bytes():
+    flow = web.ThinFlow()
+    lo = web.negotiate_thin_hello(
+        {"type": "thin_hello", "credits": 0, "max_frame_bytes": 10}, flow)
+    assert lo["credits"] == web.THIN_CREDITS_MIN
+    assert lo["max_frame_bytes"] == web.THIN_MAX_FRAME_BYTES_MIN
+    hi = web.negotiate_thin_hello({"type": "thin_hello", "credits": 99}, flow)
+    assert hi["credits"] == web.THIN_CREDITS_MAX
+
+
+def test_apply_pending_hello_v2_ack_shape_and_initial_grant():
+    flow = web.ThinFlow()
+    flow.pending_hello = {"type": "thin_hello", "proto": 2,
+                          "client": "crowpanel-p4",
+                          "accept": ["jpeg", "rgb565"], "width": 480,
+                          "height": 480, "credits": 2,
+                          "max_frame_bytes": 262144}
+    ack = web._apply_pending_hello(flow)
+    assert ack["type"] == "thin_hello_ack"
+    assert ack["proto"] == 2
+    assert ack["encoding"] == "jpeg"
+    assert ack["credits"] == 2
+    # the handshake itself is the initial grant
+    assert flow.proto == 2
+    assert flow.credits == 2 and flow.credits_max == 2
+    assert flow.max_frame_bytes == 262144
+
+
+def test_apply_pending_hello_renegotiation_shrinks_credit_but_never_grants():
+    flow = web.ThinFlow()
+    flow.pending_hello = {"type": "thin_hello", "proto": 2,
+                          "accept": ["rgb565"], "credits": 4}
+    web._apply_pending_hello(flow)
+    assert flow.credits == 4
+    # client spent everything, then re-negotiates a bigger depth: outstanding
+    # credit is the client's to restore via thin_ready, never a free grant
+    flow.credits = 0
+    flow.pending_hello = {"type": "thin_hello", "proto": 2, "credits": 8}
+    web._apply_pending_hello(flow)
+    assert flow.credits_max == 8 and flow.credits == 0
+    # shrinking the depth clips credit already held above the new ceiling
+    flow.credits = 8
+    flow.pending_hello = {"type": "thin_hello", "proto": 2, "credits": 2}
+    web._apply_pending_hello(flow)
+    assert flow.credits_max == 2 and flow.credits == 2
+
+
+def test_thin_ready_restores_credit_up_to_the_cap():
+    import types
+
+    flow = web.ThinFlow(proto=2, credits=0, credits_max=2)
+    state = types.SimpleNamespace()
+    for _ in range(5):   # over-granting must saturate at credits_max
+        asyncio.run(web._handle_thin_inbound(
+            state, {"type": "thin_ready", "seq": 3}, flow))
+    assert flow.credits == 2
+
+
+def test_thin_tick_may_send_v1_free_runs_v2_gates_and_counts():
+    v1 = web.ThinFlow()
+    assert web.thin_tick_may_send(v1) is True
+    assert v1.dropped == 0
+
+    v2 = web.ThinFlow(proto=2, credits=0, credits_max=2)
+    assert web.thin_tick_may_send(v2) is False
+    assert web.thin_tick_may_send(v2) is False
+    assert v2.dropped == 2          # spec: growing `dropped` is flow control WORKING
+    v2.credits = 1
+    assert web.thin_tick_may_send(v2) is True
+    assert v2.credits == 1          # the gate never spends the credit; the send does
+
+
+def test_thin_frame_fits_drops_and_counts_oversize():
+    flow = web.ThinFlow()
+    assert web.thin_frame_fits(flow, 500_000) is True      # no ceiling advertised
+    flow.max_frame_bytes = 1000
+    assert web.thin_frame_fits(flow, 1000) is True
+    assert web.thin_frame_fits(flow, 1001) is False
+    assert flow.dropped == 1
+    assert flow.oversize_logged is True
+
+
+def test_thin_tx_stats_trims_the_window_and_reports_rates():
+    flow = web.ThinFlow()
+    flow.connected_at = 0.0
+    flow.tx_log.extend([(90.0, 100), (96.0, 200), (99.0, 300)])
+    tx_fps, tx_bps = web.thin_tx_stats(flow, now=100.0)
+    assert list(flow.tx_log) == [(96.0, 200), (99.0, 300)]  # 90.0 aged out
+    assert tx_fps == pytest.approx(2 / web.THIN_TX_WINDOW_S)
+    assert tx_bps == int(500 / web.THIN_TX_WINDOW_S)
+
+
+def test_thin_tx_stats_young_connection_divides_by_elapsed_not_window():
+    """Two frames one second into a connection is ~2 fps, not 2/5 fps."""
+    flow = web.ThinFlow()
+    flow.connected_at = 99.0
+    flow.tx_log.extend([(99.4, 100), (99.9, 100)])
+    tx_fps, tx_bps = web.thin_tx_stats(flow, now=100.0)
+    assert tx_fps == pytest.approx(2.0)
+    assert tx_bps == 200
+
+
+def test_thin_telemetry_reports_the_flow_counters():
+    state = _thin_state()
+    flow = web.ThinFlow(dropped=7)
+    flow.connected_at = time.monotonic() - 10.0
+    flow.tx_log.append((time.monotonic(), 1000))
+    msg = web.thin_telemetry_message(state, flow)
+    assert msg["dropped"] == 7
+    assert msg["tx_fps"] == pytest.approx(1 / web.THIN_TX_WINDOW_S, rel=0.2)
+    assert msg["tx_bytes_per_s"] == pytest.approx(1000 / web.THIN_TX_WINDOW_S,
+                                                  rel=0.2)
+
+
+def test_thin_render_loop_v2_sends_only_granted_credits_then_drops(thin_renderer):
+    """End-to-end credit cycle against the real render loop: a v2 flow with
+    credits=2 gets exactly two frames, then only drops (never queues, never
+    sends) until a `thin_ready` grant releases exactly one more."""
+    thin_renderer()
+    state = _thin_state()
+    state.thin_latest_pc = (4, _THIN_PTS, _THIN_COLS)
+    flow = web.ThinFlow()
+    flow.pending_hello = {"type": "thin_hello", "proto": 2,
+                          "accept": ["rgb565"], "credits": 2, "fps": 30}
+    ws = _FakeThinWs()
+
+    def _frames_sent():
+        return sum(1 for k, _ in ws.sent if k == "bytes")
+
+    async def _drive():
+        task = asyncio.create_task(web._thin_render_loop(state, ws, flow))
+        loop = asyncio.get_event_loop()
+
+        # burn through the handshake grant, then observe several dropped ticks
+        deadline = loop.time() + 2.0
+        while flow.dropped < 3 and loop.time() < deadline:
+            await asyncio.sleep(0.01)
+        frames_after_grant = _frames_sent()
+
+        # one thin_ready -> exactly one more frame
+        await web._handle_thin_inbound(
+            state, {"type": "thin_ready", "seq": flow.seq}, flow)
+        deadline = loop.time() + 2.0
+        while _frames_sent() <= frames_after_grant and loop.time() < deadline:
+            await asyncio.sleep(0.01)
+        # give it a few more ticks to prove nothing beyond the grant leaks out
+        await asyncio.sleep(0.2)
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return frames_after_grant
+
+    frames_after_grant = asyncio.run(_drive())
+    assert frames_after_grant == 2          # the handshake's credits, no more
+    assert _frames_sent() == 3              # + exactly the one granted frame
+    assert flow.dropped >= 3
+    assert flow.seq == 3                    # seq counts SENT frames only
+    assert flow.credits == 0
 
 
 def test_ws_thin_rejects_beyond_the_client_cap(thin_renderer):

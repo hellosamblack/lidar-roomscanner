@@ -173,6 +173,21 @@ THIN_HELLO_RESOLUTIONS = (320, 480)
 THIN_HELLO_QUALITY_MIN = 40
 THIN_HELLO_QUALITY_MAX = 95
 DEFAULT_THIN_FPS = 1.0 / THIN_INTERVAL   # 10.0, matches today's cadence exactly
+# `/ws-thin` v2 flow control (#202, CrowPanel bandwidth spec 2026-08-18). The
+# server never has more than the granted credits outstanding to a v2 client and
+# DROPS (never queues) at zero credit -- on the CrowPanel's ~1.5 Mbit/s link,
+# pushing faster than the client drains only fills TCP buffers until pings hit
+# seconds and the client's staleness timeout flaps the session. Depth 2 = one
+# frame on the wire while the client works on the previous one; deeper just
+# recreates the queue this exists to remove, so the clamp ceiling stays small.
+THIN_CREDITS_DEFAULT = 2
+THIN_CREDITS_MIN = 1
+THIN_CREDITS_MAX = 8
+#: floor for a client-advertised `max_frame_bytes` -- below this even a
+#: quality-40 320x320 JPEG cannot reliably fit, so the request is nonsense.
+THIN_MAX_FRAME_BYTES_MIN = 4096
+#: window for the per-client `tx_fps` / `tx_bytes_per_s` telemetry figures.
+THIN_TX_WINDOW_S = 5.0
 # Hard cap on concurrent thin clients. Connection count is a real performance
 # variable on this server (BUG-060), and a thin client costs a full render --
 # far above a deflate. All clients share the one renderer (a second
@@ -5290,6 +5305,30 @@ class ThinFlow:
     #: flow, so the one-per-flow warning (#197 review finding 9) fires only
     #: the first time, not on every subsequent hello/frame.
     jpeg_degraded_logged: bool = False
+    #: protocol generation (#202): 1 until a `thin_hello` with `proto >= 2`
+    #: arrives, then 2. Credit accounting applies only at proto 2 -- a v1
+    #: client (or the pre-spec #197 hello shape) keeps free-running frames.
+    proto: int = 1
+    #: send credits currently held (proto 2 only). Each sent frame consumes
+    #: one; each `thin_ready` restores one, up to `credits_max`. At zero the
+    #: tick's frame is DISCARDED (counted in `dropped`), never queued.
+    credits: int = 0
+    credits_max: int = THIN_CREDITS_DEFAULT
+    #: last frame sequence number SENT (tag-2 `seq` field); 0 = none yet.
+    seq: int = 0
+    #: frames discarded for this client since connect -- zero-credit ticks
+    #: plus oversize-frame drops. Growing `dropped` with a healthy `tx_fps`
+    #: means flow control is working, not failing.
+    dropped: int = 0
+    #: client-advertised RX buffer ceiling for one whole frame message, or
+    #: None if never advertised. A packed frame larger than this is dropped
+    #: for this client (it could not buffer it anyway) and counted.
+    max_frame_bytes: int | None = None
+    #: (monotonic_time, frame_bytes) per sent frame, trimmed to the last
+    #: THIN_TX_WINDOW_S by the telemetry builder -- feeds tx_fps/tx_bytes_per_s.
+    tx_log: deque = field(default_factory=deque)
+    connected_at: float = field(default_factory=time.monotonic)
+    oversize_logged: bool = False
 
     @property
     def interval(self) -> float:
@@ -5458,9 +5497,16 @@ def thin_telemetry_message(state, flow: ThinFlow) -> dict:
         except Exception:  # noqa: BLE001
             ir_grid = None
 
+    tx_fps, tx_bytes_per_s = thin_tx_stats(flow)
+
     return {
         "type": "thin_telemetry",
+        # `fps` is the RIG's internal render rate, NOT this client's frame
+        # rate -- the tx_* fields below are the per-client truth (#202).
         "fps": fps,
+        "tx_fps": tx_fps,
+        "tx_bytes_per_s": tx_bytes_per_s,
+        "dropped": flow.dropped,
         "point_count": point_count,
         "recording": recording,
         "mode": flow.camera.mode,
@@ -5476,6 +5522,28 @@ def thin_telemetry_message(state, flow: ThinFlow) -> dict:
         # IR Matrix Array (8x8 or 64-zone reflectance/amplitude values 0-255)
         "ir_grid": ir_grid,
     }
+
+
+def thin_tx_stats(flow: ThinFlow, now: float | None = None) -> tuple[float, int]:
+    """Per-client `(tx_fps, tx_bytes_per_s)` over the last THIN_TX_WINDOW_S.
+
+    Trims `flow.tx_log` in place. The divisor is the real observation window
+    (capped by time-since-connect, floored at 0.5 s) so a connection two
+    seconds old reports its true rate rather than a fifth of it. These are
+    the spec's per-client truth (#202): the rig-internal `fps` reads ~30
+    while a throttled CrowPanel receives ~0.4, and displaying the former as
+    the latter was "the single most misleading number in the whole system".
+    """
+    if now is None:
+        now = time.monotonic()
+    cutoff = now - THIN_TX_WINDOW_S
+    tx_log = flow.tx_log
+    while tx_log and tx_log[0][0] < cutoff:
+        tx_log.popleft()
+    window = max(0.5, min(THIN_TX_WINDOW_S, now - flow.connected_at))
+    tx_fps = round(len(tx_log) / window, 2)
+    tx_bytes_per_s = int(sum(nbytes for _, nbytes in tx_log) / window)
+    return tx_fps, tx_bytes_per_s
 
 
 def _nearest(value: float, choices) -> int:
@@ -5523,14 +5591,49 @@ def negotiate_thin_hello(msg: dict, flow: ThinFlow) -> dict:
     one -- so a client that negotiated jpeg@60 and later asks only for
     `format: "raw"` gets its stored 60 fps re-clamped down to the raw
     ceiling, rather than carrying an now-illegal rate forward silently.
+
+    v2 (#202, CrowPanel spec 2026-08-18) adds `proto`, `accept` (a preference
+    list of "jpeg"/"rgb565" -- the spec's spelling of the format field),
+    `credits` and `max_frame_bytes`. `accept` and `format` are two spellings
+    of the same choice; an explicit `format` wins when both appear. `proto`
+    only ever ratchets UP to 2 -- a later hello without it does not demote
+    the flow back to free-running.
     """
-    fmt = msg.get("format", flow.format)
-    if fmt not in ("raw", "jpeg"):
-        fmt = flow.format
+    proto = flow.proto
+    requested_proto = _finite_float(msg.get("proto"))
+    if requested_proto is not None and requested_proto >= 2:
+        proto = 2
+
+    fmt = flow.format
+    accept = msg.get("accept")
+    if isinstance(accept, (list, tuple)):
+        # Preference order is the client's: first entry this server can
+        # actually serve wins ("rgb565" is the spec's name for tag-1 raw).
+        for choice in accept:
+            if choice == "jpeg" and jpeg_available():
+                fmt = "jpeg"
+                break
+            if choice in ("rgb565", "raw"):
+                fmt = "raw"
+                break
+    requested_fmt = msg.get("format")
+    if requested_fmt in ("raw", "jpeg"):
+        fmt = requested_fmt
     if fmt == "jpeg" and not jpeg_available():
         # Degrade gracefully (#197 requirement 5) -- never promise a codec
         # this process cannot actually run.
         fmt = "raw"
+
+    credits = flow.credits_max
+    requested_credits = _finite_float(msg.get("credits"))
+    if requested_credits is not None:
+        credits = int(round(max(float(THIN_CREDITS_MIN),
+                                min(float(THIN_CREDITS_MAX), requested_credits))))
+
+    max_frame_bytes = flow.max_frame_bytes
+    requested_mfb = _finite_float(msg.get("max_frame_bytes"))
+    if requested_mfb is not None:
+        max_frame_bytes = max(THIN_MAX_FRAME_BYTES_MIN, int(requested_mfb))
     fps_max = THIN_HELLO_FPS_MAX_JPEG if fmt == "jpeg" else THIN_HELLO_FPS_MAX_RAW
 
     fps = flow.fps
@@ -5556,7 +5659,8 @@ def negotiate_thin_hello(msg: dict, flow: ThinFlow) -> dict:
                                 min(float(THIN_HELLO_QUALITY_MAX), rq))))
 
     return {"format": fmt, "fps": fps, "width": width, "height": height,
-            "quality": quality}
+            "quality": quality, "proto": proto, "credits": credits,
+            "max_frame_bytes": max_frame_bytes}
 
 
 def _apply_pending_hello(flow: ThinFlow) -> dict | None:
@@ -5575,19 +5679,44 @@ def _apply_pending_hello(flow: ThinFlow) -> dict | None:
         return None
     msg, flow.pending_hello = flow.pending_hello, None
     effective = negotiate_thin_hello(msg, flow)
-    requested_jpeg = msg.get("format") == "jpeg"
+    requested_jpeg = (msg.get("format") == "jpeg"
+                      or (isinstance(msg.get("accept"), (list, tuple))
+                          and "jpeg" in msg["accept"]))
+    was_proto = flow.proto
     flow.format = effective["format"]
     flow.fps = effective["fps"]
     flow.width = effective["width"]
     flow.height = effective["height"]
     flow.quality = effective["quality"]
+    flow.proto = effective["proto"]
+    flow.credits_max = effective["credits"]
+    flow.max_frame_bytes = effective["max_frame_bytes"]
+    if flow.proto >= 2:
+        if was_proto < 2:
+            # The handshake itself is the initial grant (spec: "server starts
+            # each connection with the credit count from the handshake").
+            flow.credits = flow.credits_max
+        else:
+            # Re-negotiation never grants free frames -- only shrink to a
+            # lowered ceiling; outstanding credit is the client's to restore.
+            flow.credits = min(flow.credits, flow.credits_max)
     if requested_jpeg and effective["format"] != "jpeg" and not flow.jpeg_degraded_logged:
         # One line per FLOW, not per frame (#197 review finding 9) -- the
         # observable that finding 8's venv-staleness migration was missing.
         flow.jpeg_degraded_logged = True
         log.warning("thin_hello requested format=jpeg but simplejpeg is "
                     "unavailable; flow stays on format=raw")
-    return {"type": "thin_hello_ack", **effective}
+    # The ack is authoritative and reports the CLAMPED effective values. The
+    # spec's field is `encoding` ("jpeg"/"rgb565"); `format`/`fps` ride along
+    # for the pre-spec #197 hello shape so both client generations read the
+    # same message.
+    ack = {"type": "thin_hello_ack", "proto": flow.proto,
+           "encoding": "jpeg" if flow.format == "jpeg" else "rgb565",
+           **{k: effective[k] for k in
+              ("format", "fps", "width", "height", "quality")}}
+    if flow.proto >= 2:
+        ack["credits"] = flow.credits_max
+    return ack
 
 
 async def _handle_thin_inbound(state, msg: dict, flow: ThinFlow) -> None:
@@ -5605,12 +5734,58 @@ async def _handle_thin_inbound(state, msg: dict, flow: ThinFlow) -> None:
         flow.camera.set_mode(msg.get("mode"))
     elif mtype == "thin_hello":
         flow.pending_hello = msg
+    elif mtype == "thin_ready":
+        # One credit back, capped at the negotiated depth (#202). The echoed
+        # `seq` is informational -- the grant itself is the accounting event,
+        # so a raw-format v2 flow (tag 1 carries no seq) still flow-controls.
+        # Harmless before a v2 hello: `credits` only gates sends at proto 2.
+        if flow.credits < flow.credits_max:
+            flow.credits += 1
     elif mtype == "thin_record":
         ctrl = getattr(state, "controller", None)
         if ctrl is not None:
             await _apply_record(state, ctrl, bool(msg.get("on")))
     else:
         log.warning("unknown /ws-thin message type %r", mtype)
+
+
+def thin_tick_may_send(flow: ThinFlow) -> bool:
+    """Credit gate for one render tick (#202). Pure decision + counting.
+
+    A v1 flow (no spec-shaped hello) always sends -- free-running is exactly
+    v1's contract. A v2 flow at zero credit has this tick's frame DISCARDED
+    (counted in `flow.dropped`) before it is even rendered: the spec's "drop
+    on render completion" is satisfied one step earlier, which also spares
+    the single shared render thread work no one can receive. Nothing is ever
+    queued, so when a `thin_ready` restores credit the next tick renders a
+    genuinely fresh frame -- "the newest frame it has" by construction.
+    """
+    if flow.proto < 2:
+        return True
+    if flow.credits <= 0:
+        flow.dropped += 1
+        return False
+    return True
+
+
+def thin_frame_fits(flow: ThinFlow, frame_len: int) -> bool:
+    """False if a packed frame exceeds the client's advertised RX buffer.
+
+    The CrowPanel sizes its receive buffer to `max_frame_bytes`; a bigger
+    message could never be reassembled there, so it is dropped for this
+    client (counted, logged once per flow) rather than sent to certain
+    failure. No ceiling advertised = nothing to enforce.
+    """
+    if flow.max_frame_bytes is None or frame_len <= flow.max_frame_bytes:
+        return True
+    flow.dropped += 1
+    if not flow.oversize_logged:
+        flow.oversize_logged = True
+        log.warning(
+            "thin frame of %d B exceeds the client's max_frame_bytes=%d; "
+            "dropping (lower quality/resolution via thin_hello)",
+            frame_len, flow.max_frame_bytes)
+    return False
 
 
 def _thin_next_tick(flow: ThinFlow, next_tick: float, now: float) -> tuple[float, bool]:
@@ -5683,13 +5858,21 @@ async def _thin_render_loop(state, websocket, flow: ThinFlow) -> None:
         if scene is None:  # no fresh data for this mode yet -- send nothing
             continue
 
+        # Credit gate (#202): a v2 flow with no credit has this tick's frame
+        # dropped -- never queued -- so a slow client bounds its own queue at
+        # `credits_max` frames outstanding, and slowness is not a fault (there
+        # is deliberately no timeout-based eviction on this endpoint).
+        if not thin_tick_may_send(flow):
+            continue
+
         # Snapshot the camera: an orbit command arriving mid-render must not
         # mutate the state the render thread is reading.
         try:
             frame = await asyncio.wrap_future(
                 renderer.submit(scene, replace(flow.camera),
                                fmt=flow.format, quality=flow.quality,
-                               out_width=flow.width, out_height=flow.height),
+                               out_width=flow.width, out_height=flow.height,
+                               seq=flow.seq + 1),
                 loop=loop)
         except ThinRenderUnavailable:
             raise
@@ -5699,11 +5882,18 @@ async def _thin_render_loop(state, websocket, flow: ThinFlow) -> None:
                 log.warning("thin render failed: %s: %s", type(exc).__name__, exc)
             continue
 
+        if not thin_frame_fits(flow, len(frame)):
+            continue
+
         try:
             await websocket.send_bytes(frame)
         except Exception:  # noqa: BLE001 - disconnect; the receive loop wins
             return
         flow.frames_sent += 1
+        flow.seq += 1
+        if flow.proto >= 2:
+            flow.credits -= 1
+        flow.tx_log.append((time.monotonic(), len(frame)))
 
 
 async def _broadcast_session(state) -> None:

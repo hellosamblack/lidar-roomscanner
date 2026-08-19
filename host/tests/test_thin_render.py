@@ -157,40 +157,49 @@ def test_rgb565_feeds_pack_thin_frame_exactly():
 
 
 # --------------------------------------------------------------------------
-# 2b -- pack_thin_jpeg (THIN_FRAME_JPEG, tag 2, #197)
+# 2b -- pack_thin_jpeg (THIN_FRAME_JPEG, tag 2, #197; v2 seq'd layout #202)
 # --------------------------------------------------------------------------
 
 
 def test_pack_thin_jpeg_header_bytes_are_hand_computed():
     payload = b"\xff\xd8\xff\xd9"   # fake JFIF: SOI + EOI markers
-    frame = tr.pack_thin_jpeg(payload, 320, 240)
+    frame = tr.pack_thin_jpeg(payload, 320, 240, seq=0x0102)
     assert frame[0:4] == b"\x02\x00\x00\x00"     # u32 tag = 2, LE
     assert frame[4:6] == b"\x40\x01"             # u16 width = 320 (0x0140), LE
     assert frame[6:8] == b"\xf0\x00"             # u16 height = 240 (0x00F0), LE
-    assert frame[8:12] == b"\x04\x00\x00\x00"    # u32 jpeg_len = 4, LE
-    assert frame[12:] == payload
-    assert len(frame) == 12 + len(payload)
+    assert frame[8:12] == b"\x02\x01\x00\x00"    # u32 seq = 0x0102, LE
+    assert frame[12:16] == b"\x04\x00\x00\x00"   # u32 payload_len = 4, LE
+    assert frame[16:] == payload
+    assert len(frame) == 16 + len(payload)
 
 
 def test_thin_tag_jpeg_and_header_constants():
+    # 16-byte v2 layout with `seq` (#202, CrowPanel bandwidth spec) -- `seq`
+    # is what a v2 client echoes in `thin_ready` to grant send credit.
     assert tr.THIN_TAG_JPEG == 2
-    assert tr.THIN_HEADER_JPEG.size == 12
-    assert tr.THIN_HEADER_JPEG.format == "<IHHI"
+    assert tr.THIN_HEADER_JPEG.size == 16
+    assert tr.THIN_HEADER_JPEG.format == "<IHHII"
 
 
 def test_pack_thin_jpeg_header_parses_back():
     payload = b"\x01\x02\x03"
-    frame = tr.pack_thin_jpeg(payload, 480, 480)
-    tag, w, h, jlen = tr.THIN_HEADER_JPEG.unpack(frame[:12])
-    assert (tag, w, h, jlen) == (2, 480, 480, 3)
-    assert frame[12:] == payload
+    frame = tr.pack_thin_jpeg(payload, 480, 480, seq=7)
+    tag, w, h, seq, plen = tr.THIN_HEADER_JPEG.unpack(frame[:16])
+    assert (tag, w, h, seq, plen) == (2, 480, 480, 7, 3)
+    assert frame[16:] == payload
 
 
 def test_pack_thin_jpeg_empty_payload_is_a_valid_zero_length_frame():
     frame = tr.pack_thin_jpeg(b"", 4, 4)
-    assert len(frame) == 12
-    tag, w, h, jlen = tr.THIN_HEADER_JPEG.unpack(frame)
-    assert (tag, w, h, jlen) == (2, 4, 4, 0)
+    assert len(frame) == 16
+    tag, w, h, seq, plen = tr.THIN_HEADER_JPEG.unpack(frame)
+    assert (tag, w, h, seq, plen) == (2, 4, 4, 0, 0)
+
+
+def test_pack_thin_jpeg_seq_wraps_at_32_bits_instead_of_raising():
+    frame = tr.pack_thin_jpeg(b"", 4, 4, seq=0x1_0000_0001)
+    _tag, _w, _h, seq, _plen = tr.THIN_HEADER_JPEG.unpack(frame)
+    assert seq == 1
 
 
 # --------------------------------------------------------------------------
@@ -250,6 +259,24 @@ def test_encode_jpeg_frame_round_trips_within_a_quantitative_error_bound():
 
 def test_encode_jpeg_frame_default_quality_is_75():
     assert tr.DEFAULT_JPEG_QUALITY == 75
+
+
+def test_encode_jpeg_frame_is_baseline_420_for_the_p4_hardware_decoder():
+    """The CrowPanel spec pins baseline JPEG, YCbCr 4:2:0 -- that is what the
+    ESP32-P4's `esp_driver_jpeg` block consumes. Asserted on the actual JFIF
+    bytes: SOF0 (baseline, 0xFFC0) present with the luma component's sampling
+    factor 0x22 (2x2 = 4:2:0), and no SOF2 (progressive) marker. simplejpeg's
+    own default is 4:4:4 (0x11), so this catches the argument being dropped.
+    """
+    encoded = tr.encode_jpeg_frame(_gradient(64), quality=75)
+    assert b"\xff\xc2" not in encoded            # no progressive SOF2
+    sof0 = encoded.find(b"\xff\xc0")
+    assert sof0 != -1                            # baseline SOF0 present
+    # SOF0 payload: len(2) precision(1) height(2) width(2) ncomp(1), then per
+    # component: id(1) sampling(1) qtable(1). Luma sampling 0x22 = 4:2:0.
+    ncomp = encoded[sof0 + 9]
+    assert ncomp == 3
+    assert encoded[sof0 + 11] == 0x22
 
 
 # --------------------------------------------------------------------------
@@ -698,11 +725,13 @@ def test_image_scene_unpacked_returns_the_array(broken_renderer):
 
 def test_submit_jpeg_format_produces_a_tag2_frame(broken_renderer):
     frame = broken_renderer.submit(image_scene(_ramp(7)), ThinCamera(),
-                                   fmt="jpeg", quality=80).result(timeout=5.0)
-    tag, w, h, jlen = tr.THIN_HEADER_JPEG.unpack_from(frame, 0)
+                                   fmt="jpeg", quality=80,
+                                   seq=42).result(timeout=5.0)
+    tag, w, h, seq, plen = tr.THIN_HEADER_JPEG.unpack_from(frame, 0)
     assert tag == tr.THIN_TAG_JPEG
     assert (w, h) == (480, 480)
-    assert jlen == len(frame) - tr.THIN_HEADER_JPEG.size
+    assert seq == 42
+    assert plen == len(frame) - tr.THIN_HEADER_JPEG.size
     import simplejpeg
     decoded = simplejpeg.decode_jpeg(
         frame[tr.THIN_HEADER_JPEG.size:], colorspace="rgb")
@@ -730,9 +759,9 @@ def test_submit_negotiated_resolution_also_applies_to_jpeg(broken_renderer):
     frame = broken_renderer.submit(image_scene(_ramp(7)), ThinCamera(),
                                    fmt="jpeg", out_width=320,
                                    out_height=320).result(timeout=5.0)
-    tag, w, h, jlen = tr.THIN_HEADER_JPEG.unpack_from(frame, 0)
+    tag, w, h, _seq, plen = tr.THIN_HEADER_JPEG.unpack_from(frame, 0)
     assert (w, h) == (320, 320)
-    assert jlen == len(frame) - tr.THIN_HEADER_JPEG.size
+    assert plen == len(frame) - tr.THIN_HEADER_JPEG.size
 
 
 def test_submit_jpeg_raises_when_simplejpeg_unavailable(broken_renderer, monkeypatch):

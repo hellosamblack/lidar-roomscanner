@@ -41,30 +41,64 @@ u8  pixels[width * height * 2]   // RGB565, little-endian, row-major
 
 ### Binary frame (server → client): `THIN_FRAME_JPEG` (tag 2)
 
-Sent instead of tag 1 once a client has negotiated `format: "jpeg"` via
-`thin_hello`.
+Sent instead of tag 1 once a client has negotiated jpeg via `thin_hello`.
 
 ```
-u32 tag        = 2
+u32 tag         = 2
 u16 width
 u16 height
-u32 jpeg_len
-u8  jpeg[jpeg_len]   // JFIF bytes, simplejpeg-encoded RGB
+u32 seq              // monotonic per connection; echoed in thin_ready
+u32 payload_len      // bytes of JPEG data following
+u8  jpeg[payload_len]   // baseline JPEG, YCbCr 4:2:0
 ```
+
+Header is 16 bytes (tag 1's is 8). This is the **v2 layout** from the
+CrowPanel bandwidth spec
+(`CrowPanelProp/docs/superpowers/specs/2026-08-18-lidar-thin-frame-bandwidth-protocol.md`,
+issue #202); `seq` is what makes credit accounting unambiguous, and
+baseline 4:2:0 is what the ESP32-P4's `esp_driver_jpeg` hardware block
+decodes. (#197 briefly shipped a 12-byte seq-less header; no deployed
+client ever spoke it.) A frame is always **one unfragmented WebSocket
+message** (FIN=1, no continuation frames) — the embedded client reassembles
+across `WEBSOCKET_EVENT_DATA` callbacks and WS-level fragmentation restarts
+that accounting. TCP segmentation is fine and expected.
 
 Encoding happens on the render thread, never the asyncio loop. If
 `simplejpeg` is not importable on this host, `thin_hello_ack` reports
-`format: "raw"` regardless of what was requested and the flow stays on
-tag 1 — report what actually happened, not what was asked for — and the
-server logs one warning line per connected flow (not per hello, never per
-frame) so the degrade is visible in its own journal.
+`format: "raw"` / `encoding: "rgb565"` regardless of what was requested and
+the flow stays on tag 1 — report what actually happened, not what was asked
+for — and the server logs one warning line per connected flow (not per
+hello, never per frame) so the degrade is visible in its own journal.
 
 ### JSON in: `thin_hello` / JSON out: `thin_hello_ack`
 
+The spec-shaped v2 handshake (client speaks first, immediately after the
+WS upgrade):
+
 ```json
-{"type": "thin_hello", "format": "jpeg", "fps": 30, "width": 320, "height": 320, "quality": 80}
-{"type": "thin_hello_ack", "format": "jpeg", "fps": 30.0, "width": 320, "height": 320, "quality": 80}
+{"type": "thin_hello", "proto": 2, "client": "crowpanel-p4",
+ "accept": ["jpeg", "rgb565"], "width": 480, "height": 480,
+ "credits": 2, "max_frame_bytes": 262144}
+{"type": "thin_hello_ack", "proto": 2, "encoding": "jpeg",
+ "format": "jpeg", "fps": 10.0, "width": 480, "height": 480,
+ "quality": 75, "credits": 2}
 ```
+
+- `proto: 2` opts the flow into **credit-based flow control** (below). It
+  ratchets up only — a later hello cannot demote a v2 flow to free-running.
+- `accept` is a preference list; the first entry this server can serve wins
+  (`"rgb565"` is the spec's name for tag-1 raw; `format` is the #197 name
+  for the same choice and wins when both appear). The ack's `encoding` is
+  authoritative; the client drops tags it did not negotiate.
+- `credits` is clamped to [1, 8] (default 2 — one frame on the wire while
+  the client works on the previous one; deeper just recreates the queue).
+- `max_frame_bytes` (floor 4096) advertises the client's RX buffer for one
+  whole frame message; a packed frame larger than this is dropped for this
+  client (counted in `dropped`, logged once) rather than sent to certain
+  reassembly failure.
+- The pre-spec #197 shape (`format`/`fps`/`quality`, no `proto`) still
+  works and stays free-running; the ack carries both `encoding` and
+  `format` so either client generation can read it.
 
 All fields optional; a field omitted keeps its current value. Clamped
 server-side, and the ack echoes the CLAMPED effective values, never the
@@ -97,6 +131,35 @@ interval (default `THIN_INTERVAL`, 100 ms) rather than a shared module
 constant. The existing single-slot backpressure/stale-frame-resync
 behavior is unchanged.
 
+### Credit-based flow control (`proto: 2`, #202)
+
+Why: the CrowPanel's P4 reaches its C6 radio over 1-bit SDIO, delivering
+~1–2 Mbit/s — a raw 3.69 Mbit `THIN_FRAME` caps that client at 0.3–0.5 fps
+no matter what the server does. Pushing 10 fps into that pipe raises
+nothing; it only fills TCP buffers (measured: ping avg 892 ms, max 4.7 s
+while streaming vs 24 ms idle) until frames arrive late enough to trip the
+client's staleness timeout and flap the session. **Flow control fixes the
+stability; JPEG fixes the frame rate. Both are needed** (20 KB × 10 fps is
+still ~1.6 Mbit/s — the same queue, growing more slowly).
+
+- The server starts the flow with the handshake's `credits` and never has
+  more than that many frames outstanding. Each sent frame consumes one
+  credit; the client grants one back with
+  `{"type": "thin_ready", "seq": <last seq it finished with>}` once it has
+  **consumed** the frame (after canvas retarget, not on receipt). The
+  echoed `seq` is informational — the grant is the accounting event, so a
+  raw-encoding v2 flow (tag 1 carries no seq) flow-controls identically.
+- At zero credit the tick's frame is **dropped, never queued** (counted in
+  `dropped`; the render itself is skipped, sparing the shared render
+  thread). When credit returns, the next tick renders a genuinely fresh
+  frame — the newest the server has, by construction, never a backlog
+  entry.
+- There is deliberately **no timeout-based eviction for slowness**: with
+  credits, a 0.4 fps client is healthy on its link and can no longer cause
+  buffer growth, so slowness is not a fault.
+- Re-negotiation adjusts `credits_max` but never grants free credit;
+  credit already held above a lowered ceiling is clipped.
+
 ### JSON out: `thin_telemetry`
 
 Sent every 500 ms — deliberately not per-frame.
@@ -105,6 +168,9 @@ Sent every 500 ms — deliberately not per-frame.
 {
   "type": "thin_telemetry",
   "fps": 9.8,
+  "tx_fps": 0.4,
+  "tx_bytes_per_s": 184320,
+  "dropped": 1287,
   "point_count": 2268,
   "recording": false,
   "mode": "point_cloud",
@@ -132,6 +198,16 @@ Sent every 500 ms — deliberately not per-frame.
 `mode` and `recording` are **authoritative** — this endpoint has no ack/retry,
 so a dropped `thin_mode`/`thin_record` self-corrects at the next tick. Any
 field may be `null` before the device has been read back.
+
+`fps` is the **rig's internal render rate**, not this client's frame rate —
+on a throttled link it reads ~30 while the panel receives ~0.4, and the
+panel once displayed it as its own rate ("the single most misleading number
+in the whole system", per the #202 spec). The per-client truth rides
+alongside it: `tx_fps` (frames actually sent to *this* client over the last
+~5 s), `tx_bytes_per_s` (wire bytes to this client — watch it against the
+CrowPanel's ~1.5 Mbit/s budget), and `dropped` (frames skipped for this
+client since connect). A large and growing `dropped` with a healthy
+`tx_fps` means flow control is working, not failing.
 
 **The spatial orientation and heading block** (`roll_deg`, `pitch_deg`, `tilt_deg`,
 `heading_deg`, `yaw_rate_dps`, `orientation_valid`, `orientation_labels`) is copied
@@ -176,6 +252,7 @@ and IR preview widgets now occupy.
 {"type": "thin_orbit", "dyaw": 3.5, "dpitch": -1.0, "dzoom": 0.0}
 {"type": "thin_mode", "mode": "point_cloud" | "slam" | "ir"}
 {"type": "thin_record", "on": true}
+{"type": "thin_ready", "seq": 1287}
 ```
 
 Deltas are relative and cumulative. Pitch clamps to ±89°, zoom to [0.25, 8.0],
@@ -326,6 +403,9 @@ fault.
 fake thin client, decode frames back to PNG, and round-trip the commands. The
 orbit check reports **how many pixels actually changed** — a frame counter or a
 read-back of the camera state would prove nothing (the #106 lesson).
+`--v2` (CLI) / `v2=True` (MCP) sends the proto-2 hello and grants a
+`thin_ready` per consumed frame, exercising the credit machinery end to end;
+without the auto-grant the server correctly stalls after `credits` frames.
 
 At a high negotiated fps, the probe's own receive buffer can hold several
 frames the server already produced before a command was sent — the probe
@@ -346,6 +426,9 @@ See [`mcp-server.md`](mcp-server.md).
 - **Device parameter control** (`set_profile` / `set_manual_params`) stays
   reachable only from the browser `/ws` protocol.
 
-*(JPEG encoding and `thin_hello` resolution/rate negotiation shipped in #197 —
-see the protocol sections above. The CrowPanel side — hardware JPEG decode of
-tag-2 frames — lives in the `CrowPanelProp` companion repo.)*
+*(JPEG encoding and `thin_hello` resolution/rate negotiation shipped in #197;
+the v2 seq'd tag-2 layout, credit-based flow control and per-client
+`tx_fps`/`tx_bytes_per_s`/`dropped` telemetry shipped in #202 — see the
+protocol sections above. The CrowPanel side — the proto-2 hello,
+`thin_ready` grants and hardware JPEG decode of tag-2 frames — lives in the
+`CrowPanelProp` companion repo, gated on this server side having landed.)*

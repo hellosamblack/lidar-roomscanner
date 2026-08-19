@@ -84,7 +84,8 @@ DRAIN_POLL_TIMEOUT = 0.01
 THIN_TAG = 1
 THIN_HEADER = struct.Struct("<IHH")  # u32 tag, u16 width, u16 height
 THIN_TAG_JPEG = 2
-THIN_HEADER_JPEG = struct.Struct("<IHHI")  # u32 tag, u16 width, u16 height, u32 jpeg_len
+# u32 tag, u16 w, u16 h, u32 seq, u32 payload_len (#202, CrowPanel v2 spec)
+THIN_HEADER_JPEG = struct.Struct("<IHHII")
 
 #: a per-channel difference this small is dithering/compression, not a moved camera
 PIXEL_DIFF_THRESHOLD = 8
@@ -180,15 +181,15 @@ def decode_thin_frame(buf: bytes) -> dict:
     if tag == THIN_TAG_JPEG:
         if len(buf) < THIN_HEADER_JPEG.size:
             return {"ok": False, "error": f"runt JPEG frame: {len(buf)} bytes"}
-        _tag, width, height, jpeg_len = THIN_HEADER_JPEG.unpack_from(buf, 0)
+        _tag, width, height, seq, payload_len = THIN_HEADER_JPEG.unpack_from(buf, 0)
         payload = buf[THIN_HEADER_JPEG.size:]
         info = {"tag": int(tag), "width": int(width), "height": int(height),
-                "jpeg_len": int(jpeg_len), "payload_bytes": len(payload),
-                "total_bytes": len(buf)}
-        if len(payload) != jpeg_len:
+                "seq": int(seq), "payload_len": int(payload_len),
+                "payload_bytes": len(payload), "total_bytes": len(buf)}
+        if len(payload) != payload_len:
             info["ok"] = False
             info["error"] = (f"payload is {len(payload)} bytes, expected "
-                             f"{jpeg_len} jpeg_len")
+                             f"{payload_len} payload_len")
             return info
         info.update(decode_thin_jpeg(payload, int(width), int(height)))
         return info
@@ -300,6 +301,12 @@ class _ThinLink:
         self.telemetry_seen = 0
         self.frames_received = 0
         self.closed_error: str | None = None
+        #: v2 flow control (#202): once a proto-2 hello is acked, every frame
+        #: this probe consumes is acknowledged with a `thin_ready` grant --
+        #: without it the server (correctly) stops after `credits` frames.
+        self.auto_ready = False
+        self.ready_sent = 0
+        self.last_seq = 0
         #: `time.monotonic()` at which the MOST RECENT message was actually
         #: received off the socket -- set by `next_message`, read by
         #: `next_frame_after` to time-anchor a capture against a send.
@@ -330,6 +337,17 @@ class _ThinLink:
             self.frames_received += 1
             if not info.get("ok"):
                 self.report["decode_errors"].append(info.get("error"))
+            if "seq" in info:
+                self.last_seq = info["seq"]
+            if self.auto_ready:
+                # Consumption ack, echoing the last seq seen (tag-1 frames
+                # carry none; the grant itself is what the server counts).
+                try:
+                    await self.ws.send(json.dumps(
+                        {"type": "thin_ready", "seq": self.last_seq}))
+                    self.ready_sent += 1
+                except Exception as exc:  # noqa: BLE001
+                    self.report["errors"].append(f"thin_ready send: {exc!r}")
             return "frame", info
         try:
             data = json.loads(msg)
@@ -433,10 +451,17 @@ class _ThinLink:
 
 async def _probe_hello(link: _ThinLink, report: dict, *, fmt: str | None,
                        fps: int | None, width: int | None, height: int | None,
-                       quality: int | None, timeout: float) -> None:
+                       quality: int | None, timeout: float,
+                       proto: int | None = None, credits: int | None = None,
+                       max_frame_bytes: int | None = None) -> None:
     """Negotiate `thin_hello` (#197) when any of `fmt`/`fps`/`width`/`height`/
     `quality` was passed. A default run (nothing passed) sends nothing and
     keeps today's behaviour -- tag-1 RGB565 480x480 @ 10 fps.
+
+    `proto=2` sends the spec-shaped v2 hello (#202): `accept` preference list
+    derived from `fmt` (default jpeg-first), plus `credits`/`max_frame_bytes`
+    when given. A proto-2 ack turns on `link.auto_ready`, without which the
+    server correctly stalls the stream after `credits` frames.
 
     `width`/`height`: the protocol is SQUARE-ONLY (`THIN_HELLO_RESOLUTIONS`),
     and `--width` alone with no `--height` used to build a hello the server
@@ -450,6 +475,15 @@ async def _probe_hello(link: _ThinLink, report: dict, *, fmt: str | None,
         width = height
 
     hello: dict = {"type": "thin_hello"}
+    if proto is not None and proto >= 2:
+        hello["proto"] = 2
+        hello["client"] = "thin_client_probe"
+        hello["accept"] = (["jpeg", "rgb565"] if fmt in (None, "jpeg")
+                           else ["rgb565"])
+        if credits is not None:
+            hello["credits"] = credits
+        if max_frame_bytes is not None:
+            hello["max_frame_bytes"] = max_frame_bytes
     if fmt is not None:
         hello["format"] = fmt
     if fps is not None:
@@ -474,7 +508,11 @@ async def _probe_hello(link: _ThinLink, report: dict, *, fmt: str | None,
         entry["error"] = f"no thin_hello_ack within {timeout:g}s"
         return
     entry["ack"] = ack
-    entry["acked"] = {k: ack.get(k) for k in ("format", "fps", "width", "height", "quality")}
+    entry["acked"] = {k: ack.get(k) for k in
+                      ("format", "fps", "width", "height", "quality",
+                       "proto", "encoding", "credits")}
+    if int(ack.get("proto") or 1) >= 2:
+        link.auto_ready = True
     # requested-vs-acked DRIFT, surfaced explicitly rather than left for the
     # reader to diff two dicts (#197 review finding 7): a clamp (e.g. fps
     # 999 -> 60) is expected and not "degraded"; only a FORMAT downgrade
@@ -637,7 +675,9 @@ async def probe_async(frames: int = DEFAULT_FRAMES, url: str = DEFAULT_URL,
                       timeout: float = DEFAULT_TIMEOUT,
                       format: str | None = None, fps: int | None = None,
                       width: int | None = None, height: int | None = None,
-                      quality: int | None = None) -> dict:
+                      quality: int | None = None, proto: int | None = None,
+                      credits: int | None = None,
+                      max_frame_bytes: int | None = None) -> dict:
     """Connect to `/ws-thin`, decode frames to PNG, round-trip the commands.
 
     The real implementation; `probe()` is the sync front end and
@@ -684,7 +724,9 @@ async def probe_async(frames: int = DEFAULT_FRAMES, url: str = DEFAULT_URL,
     link = _ThinLink(conn, report)
     try:
         await _probe_hello(link, report, fmt=format, fps=fps, width=width,
-                           height=height, quality=quality, timeout=timeout)
+                           height=height, quality=quality, timeout=timeout,
+                           proto=proto, credits=credits,
+                           max_frame_bytes=max_frame_bytes)
         await _collect_initial(link, max(int(frames), 0), out, report, timeout)
 
         # A refusal (`thin_client_limit`, `thin_render_unavailable`) is JSON
@@ -722,6 +764,7 @@ async def probe_async(frames: int = DEFAULT_FRAMES, url: str = DEFAULT_URL,
         report["telemetry"] = link.telemetry
         report["telemetry_seen"] = link.telemetry_seen
         report["frames_total_seen"] = link.frames_received
+        report["thin_ready_sent"] = link.ready_sent
         if link.closed_error:
             report["errors"].append(f"connection error: {link.closed_error}")
         try:
@@ -814,6 +857,11 @@ def _print(rep: dict) -> None:
         t = rep["telemetry"]
         print(f"  telemetry: fps={t.get('fps')} mode={t.get('mode')} "
               f"points={t.get('point_count')} recording={t.get('recording')}")
+        # per-CLIENT truth vs the rig-internal fps above (#202)
+        print(f"  link: tx_fps={t.get('tx_fps')} "
+              f"tx_bytes_per_s={t.get('tx_bytes_per_s')} "
+              f"dropped={t.get('dropped')} "
+              f"thin_ready_sent={rep.get('thin_ready_sent')}")
         # `null` heading is a real state, not a gap: it means no compass
         # bearing exists right now (see docs/thin-client.md).
         print(f"  orientation: roll={t.get('roll_deg')} tilt={t.get('tilt_deg')} "
@@ -854,13 +902,23 @@ def main(argv=None) -> int:
                          "alone (no --width) sends a SQUARE request of this size")
     ap.add_argument("--quality", type=int, default=None,
                     help="negotiate thin_hello JPEG quality 40-95 (#197)")
+    ap.add_argument("--v2", action="store_true",
+                    help="send the spec-shaped proto-2 hello (#202): accept "
+                         "list + credit-based flow control (auto thin_ready)")
+    ap.add_argument("--credits", type=int, default=None,
+                    help="v2 credit depth to request (server clamps 1-8)")
+    ap.add_argument("--max-frame-bytes", type=int, default=None,
+                    help="v2 advertised RX buffer; larger frames are dropped "
+                         "server-side for this client")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
     rep = probe(frames=args.frames, url=args.url, out_dir=args.out_dir,
                 orbit_yaw=args.orbit_yaw, modes=args.modes, record=args.record,
                 timeout=args.timeout, format=args.format, fps=args.fps,
-                width=args.width, height=args.height, quality=args.quality)
+                width=args.width, height=args.height, quality=args.quality,
+                proto=2 if args.v2 else None, credits=args.credits,
+                max_frame_bytes=args.max_frame_bytes)
     if args.json:
         print(json.dumps(rep, indent=2, default=str))
     else:
