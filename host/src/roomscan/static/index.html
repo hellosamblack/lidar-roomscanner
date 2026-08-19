@@ -1222,27 +1222,37 @@
            narrow-viewport (<1100px, wrapped) layout the same shrink floor
            as before. */
         .playback-panel__group--seek { flex: 1 1 auto; min-width: 140px; }
-        .playback-panel__group--seek #seek { flex: 1 1 auto; min-width: 60px; }
-        /* #pos-status used to be `flex: none` (a fixed, unshrinkable natural
-           width) inside a group whose OWN `min-width: 140px` is smaller than
-           "#seek's min-width + gap + pos-status's natural width" can ever be
-           -- so once the group's box was squeezed toward that floor,
-           pos-status (unable to shrink) painted past the group's own right
-           edge and into the 18px inter-group gap, overlapping the next
-           group's "Speed" label by a few px at some in-between widths (e.g.
-           1600px, single-row layout; #123 follow-up). Making it a real
-           shrinkable/ellipsizable flex item -- `min-width: 0` is the actual
-           fix, `flex: none` is what let it ignore the box it was in --
-           guarantees it always fits inside whatever width its parent group
-           is actually given, at every panel width >= the 1100px two-row
-           breakpoint. */
-        .playback-panel #pos-status {
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            flex: 0 1 auto;
-            min-width: 0;
-        }
+        /* #seek carries a GLOBAL `#seek { width: 100%; ... }` rule (used by
+           every other, block-layout host of this control). Inside this
+           panel's flex row that made the range input's effective flex-basis
+           unbounded, so under `flex: 1 1 auto` the seek group always
+           computed as wanting to overflow its line -- and proportional
+           shrink then ate into #pos-status's basis regardless of any panel-
+           or group-level ceiling (#123 follow-ups 2/3 each chased that
+           shrink to a different cause and each only reduced it, because the
+           real driver was untouched). This is also why the ORIGINAL
+           `flex: 1 1 180px` group basis existed at all: it was silently
+           compensating for the 100% input by capping the group's basis
+           below what #seek's width:100% would otherwise claim.
+
+           The fix overrides `width` back to `auto` and gives the slider an
+           honest small basis of its own -- it is the ONLY elastic element
+           in this row (`flex: 1 1 60px`, `min-width: 60px`), and absorbs
+           ALL slack in both directions: it stretches into any leftover
+           panel width and compresses first (down to 60px) before anything
+           else in the row gives ground. #pos-status (below) is therefore
+           deliberately non-shrinking -- it never has to. */
+        .playback-panel__group--seek #seek { flex: 1 1 60px; width: auto; min-width: 60px; }
+        /* #pos-status's shrink path (min-width: 0, added in an earlier
+           follow-up) was papering over #seek's unbounded width:100% basis
+           stealing space from this element regardless of ceiling fixes
+           upstream -- the true fix was #seek's own basis/width override,
+           above. With that fixed, #pos-status has no reason to ever give up
+           space: `flex: 0 0 auto` (non-shrinking, non-growing, natural
+           content width) means it always renders its full text
+           ("2:18 / 2:18 · frame 4103 / 4103"), and #seek -- the row's only
+           elastic element -- is what stretches or compresses around it. */
+        .playback-panel #pos-status { white-space: nowrap; flex: 0 0 auto; }
         .playback-panel .toggle--sm { white-space: nowrap; }
 
         /* ---- component: toggle / checkbox ---- */

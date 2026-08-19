@@ -1399,49 +1399,90 @@ def test_playback_panel_group_flex_basis_does_not_undercut_its_content():
     )
 
 
-def test_pos_status_can_shrink_instead_of_overflowing_into_the_speed_group():
-    """Regression guard (#123 follow-up, browser-measured at 1600x1000):
-    `#pos-status` used to be `flex: none` inside `.playback-panel__group--seek`,
-    a group whose own `min-width: 140px` is smaller than "#seek's min-width +
-    gap + pos-status's natural content width" can ever be. Once the group's
-    box was squeezed toward that floor in the single-row (>=1100px) layout,
-    the unshrinkable pos-status painted past its own group's right edge and
-    into the 18px inter-group gap, overlapping the Speed group's
-    `.field-label` by a few px ("...4103 / 4103SPEED").
+def test_pos_status_is_non_shrinking_and_always_shows_its_full_text():
+    """Regression guard (#123, four follow-ups deep -- the definitive fix,
+    browser-measured): every earlier attempt (min-width: 0 + ellipsis,
+    dropping a max-width cap, an auto flex-basis on the group, dropping a
+    literal px ceiling from the panel's max-width) reduced but never
+    eliminated truncation, because none of them touched the actual driver:
+    `#seek` carries a GLOBAL `#seek { width: 100%; }` rule used by every
+    other, block-layout host of this control. Inside THIS panel's flex row
+    that made the range input's effective flex-basis unbounded, so under
+    `flex: 1 1 auto` the seek group always computed as wanting to overflow
+    its line, and proportional shrink ate into #pos-status's basis
+    regardless of any panel- or group-level ceiling.
 
-    The fix is `min-width: 0` (an item can only ever overflow its container
-    if its min-width floor exceeds the space it is given) plus
-    `overflow: hidden; text-overflow: ellipsis` so a genuinely too-small
-    width truncates instead of visually overflowing. `flex: none` is
-    EXACTLY the pre-fix binding (flex-shrink: 0 -- the item that could never
-    give ground), so this fails against the pre-change markup.
+    The real fix (`.playback-panel__group--seek #seek`, checked by the
+    companion test below) overrides that width back to `auto` and gives the
+    slider its own small, honest basis -- making it the row's ONLY elastic
+    element. With that fixed, #pos-status has no reason to ever give up
+    space: it is `flex: 0 0 auto` (non-growing AND non-shrinking, natural
+    content width), so it always renders its full text
+    ("2:18 / 2:18 · frame 4103 / 4103"). `flex: none` (the historical
+    binding this reintroduces, `0 0 auto` written a different way) is
+    therefore now CORRECT -- the opposite of the very first #123 follow-up's
+    conclusion, because the group it sits in no longer overflows in the
+    first place.
     """
     css = _style_css()
     rule = re.search(r"\.playback-panel #pos-status\s*\{([^}]*)\}", css)
     assert rule is not None, "no `.playback-panel #pos-status` rule found"
     body = rule.group(1)
-    assert "min-width: 0" in body, (
-        "#pos-status must set min-width: 0 so it can shrink to fit whatever "
-        "space its (also-shrinkable) parent group is actually given"
+    flex_decl = re.search(r"flex:\s*([^;]+);", body)
+    assert flex_decl is not None, "no `flex:` declaration on `.playback-panel #pos-status`"
+    parts = flex_decl.group(1).split()
+    assert parts == ["0", "0", "auto"] or flex_decl.group(1).strip() == "none", (
+        f"#pos-status must be non-shrinking (`flex: 0 0 auto` / `none`) so it "
+        f"always shows its full text and the seek bar is the row's only "
+        f"elastic element; got `flex: {flex_decl.group(1).strip()}`"
     )
-    assert re.search(r"flex:\s*none\b", body) is None, (
-        "#pos-status must not be flex: none (flex-shrink: 0) -- that is the "
-        "exact pre-fix binding that let it overflow past its shrunk parent"
+    assert "white-space: nowrap" in body, (
+        "#pos-status must keep white-space: nowrap so its full text renders "
+        "on one line rather than wrapping inside its own box"
     )
-    assert "overflow: hidden" in body and "text-overflow: ellipsis" in body, (
-        "#pos-status must truncate rather than visually overflow when its "
-        "available width is genuinely too small"
+
+
+def test_seek_input_overrides_the_global_width_100pct_inside_the_panel():
+    """Regression guard (#123, definitive fix): `#seek { width: 100%; }` is a
+    global rule (every other host of this control is a block-layout sidebar
+    card, where width: 100% is exactly right). Inside `.playback-panel`'s
+    flex row, an un-overridden width: 100% makes the range input's effective
+    flex-basis unbounded, which is the actual mechanism behind every #123
+    truncation report so far -- no panel-, group-, or pos-status-level fix
+    could ever fully solve it while this was still in effect, because the
+    seek group's own computed size (not #pos-status's) was the thing
+    overflowing.
+
+    `.playback-panel__group--seek #seek` must set `width: auto` (specificity
+    (1,1,0), beating the plain `#seek` rule's (1,0,0) regardless of source
+    order) and give the slider a small, honest basis + min-width of its own
+    -- it is the row's only elastic element (`flex-grow` and `flex-shrink`
+    both nonzero), and everything else in the row (`.playback-panel__group`
+    default, `#pos-status`) is `flex: none` / `0 0 auto`.
+    """
+    css = _style_css()
+    rule = re.search(r"\.playback-panel__group--seek #seek\s*\{([^}]*)\}", css)
+    assert rule is not None, (
+        "no `.playback-panel__group--seek #seek` rule found -- #seek's global "
+        "width: 100% is unoverridden inside the playback panel"
     )
-    # #123 second follow-up: a `max-width: 190px` cap here defeated the panel's
-    # `fit-content` sizing (d936fea) -- it capped pos-status below its own
-    # ~214px scrollWidth, so it stayed ellipsized ("2:18 / 2:18 · fr...") no
-    # matter how much free space the panel actually had. min-width: 0 is the
-    # correct narrow-viewport shrink path; a max-width here is not needed and
-    # actively wrong, since it shrinks the element even when space is ample.
-    assert "max-width" not in body, (
-        "#pos-status must not carry its own max-width -- that caps it below "
-        "its natural content width even when the panel has room to spare, "
-        "defeating fit-content sizing; only min-width: 0 should gate its size"
+    body = rule.group(1)
+    assert re.search(r"\bwidth:\s*auto\b", body), (
+        "`.playback-panel__group--seek #seek` must set width: auto to "
+        "override the global `#seek { width: 100%; }` rule -- an unbounded "
+        "flex-basis on the ONLY unconstrained-width child in this row is "
+        "the actual mechanism behind every #123 truncation report"
+    )
+    flex_decl = re.search(r"flex:\s*([^;]+);", body)
+    assert flex_decl is not None, "no `flex:` declaration on the seek input inside the panel"
+    grow, shrink, basis = flex_decl.group(1).split()
+    assert float(grow) > 0 and float(shrink) > 0, (
+        "the seek input must be the row's elastic element (nonzero grow AND "
+        f"shrink) so it -- not #pos-status -- absorbs slack; got flex: {flex_decl.group(1).strip()}"
+    )
+    assert basis != "auto", (
+        "the seek input needs an explicit small basis (not auto, which would "
+        f"re-derive from the overridden width) so it starts honest; got flex: {flex_decl.group(1).strip()}"
     )
 
 
