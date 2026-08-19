@@ -1043,3 +1043,118 @@ def test_the_old_capture_card_id_is_gone():
     html = _index()
     assert 'id="capture-card"' not in html
     assert 'data-card-id="capture"' not in html
+# Issue #122 -- WASD free-camera navigation.
+# ---------------------------------------------------------------------------
+
+
+def _scene_js() -> str:
+    return SCENE_JS.read_text(encoding="utf-8")
+
+
+def test_scene_js_registers_keydown_keyup_and_blur_handlers():
+    """WASD nav needs a keydown/keyup pair, plus a `blur` handler so a key
+    held during a focus loss (alt-tab, DevTools) can't stick -- the matching
+    keyup never arrives in that case."""
+    js = _scene_js()
+    assert re.search(r"addEventListener\(\s*['\"]keydown['\"]", js), (
+        "scene.js must register a keydown listener for WASD nav"
+    )
+    assert re.search(r"addEventListener\(\s*['\"]keyup['\"]", js), (
+        "scene.js must register a keyup listener for WASD nav"
+    )
+    assert re.search(r"addEventListener\(\s*['\"]blur['\"]", js), (
+        "scene.js must clear held nav keys on window blur"
+    )
+
+
+def test_wasd_nav_guards_against_typing_context():
+    """A WASD keypress must not fire while the user is typing in a text
+    field -- the same event fires whether the input has focus or not, so the
+    handler has to check the target itself."""
+    js = _scene_js()
+    assert re.search(r"INPUT['\"]?\s*\|\|.*TEXTAREA", js) or (
+        "'INPUT'" in js and "'TEXTAREA'" in js and "'SELECT'" in js
+    ), "no INPUT/TEXTAREA/SELECT guard found for the nav key handler"
+    assert "isContentEditable" in js, (
+        "no isContentEditable guard found for the nav key handler "
+        "(a contenteditable region is also a typing context)"
+    )
+
+
+def test_wasd_nav_guards_against_modifier_keys():
+    """Ctrl/Alt/Meta held means the keystroke belongs to the browser or OS
+    (Ctrl+W closes the tab, Alt+D jumps to the address bar, etc.) -- the nav
+    handler must back off rather than eating it."""
+    js = _scene_js()
+    assert re.search(r"e\.ctrlKey\s*\|\|\s*e\.altKey\s*\|\|\s*e\.metaKey", js), (
+        "no ctrlKey/altKey/metaKey guard found before the nav keys are read"
+    )
+
+
+def test_wasd_nav_derives_movement_from_the_camera_world_matrix():
+    """KNOWN TRAP (issue #107, verified live): three.js sign conventions are
+    NOT what static reading suggests -- a positive `autoRotateSpeed`
+    DECREASES azimuth. Movement vectors here must come from the camera's own
+    world matrix (`extractBasis`/`matrixWorld`), never from an angle assumed
+    by inspection."""
+    js = _scene_js()
+    assert "matrixWorld" in js and "extractBasis" in js, (
+        "WASD movement must be derived from camera.matrixWorld.extractBasis, "
+        "not an assumed angle convention (issue #107's known trap)"
+    )
+    # Regression guard: no camera-relative-angle helper (getAzimuthalAngle is
+    # OrbitControls' own API, fine for oscillate; it must not also be reused
+    # to derive WASD's forward/right, which is a different, camera-space
+    # question extractBasis answers directly).
+    nav_block = js[js.index("WASD free-camera"):js.index("--- real-time view mode")]
+    assert "getAzimuthalAngle" not in nav_block
+
+
+def test_wasd_movement_is_scaled_by_dt_and_shift_boosts_speed():
+    """Frame-rate independence: movement must be multiplied by `dt`, not a
+    fixed per-frame constant (this box renders nearer 13 fps than 60 -- see
+    the `frameDelta` comment above `animate`). Shift is the idiomatic "move
+    faster" modifier."""
+    js = _scene_js()
+    assert re.search(r"navStep\.copy\(navMove\)\.multiplyScalar\(speed\s*\*\s*dt\)", js), (
+        "WASD movement must be multiplied by dt for frame-rate independence"
+    )
+    assert re.search(r"shiftDown\s*\?\s*MOVE_SPEED_FAST_MULT", js), (
+        "held Shift must boost the base fly speed"
+    )
+
+
+def test_wasd_nav_coexists_with_world_follow_by_gating_trackTarget():
+    """WASD must take the camera away from World+Follow's `trackTarget`
+    (called every SLAM pose) rather than fighting it every frame -- the least
+    surprising pairing is for a keypress to suspend the follow-pan and for
+    releasing every key to hand it straight back on the next pose."""
+    js = _scene_js()
+    m = re.search(r"function trackTarget\(pos\)\s*\{\s*\n(?:.*\n)*?\s*if\s*\(([^)]*)\)\s*return;",
+                  js)
+    assert m is not None, "could not find trackTarget's early-return guard"
+    assert "manualFlightActive" in m.group(1), (
+        "trackTarget must gate on manualFlightActive so a WASD keypress "
+        f"takes the camera; guard was: {m.group(1)!r}"
+    )
+
+
+def test_wasd_nav_restricted_to_world_view_mode():
+    """FPV/Mirror are locked, scanner-relative views with no orbit to fly
+    around (see `applyViewMode`) -- WASD must not fight that lock."""
+    js = _scene_js()
+    assert re.search(
+        r"function applyManualFlight\(dt\)\s*\{\s*\n\s*if\s*\(\s*viewMode\s*!==\s*'world'",
+        js,
+    ), "applyManualFlight must early-return outside World view mode"
+
+
+def test_wasd_nav_wired_into_the_render_loop():
+    """The handler computing movement each frame must actually be called from
+    `animate()`'s World branch, ahead of `controls.update`, so OrbitControls
+    picks up the new camera+target pair in the same tick (see the
+    `trackTarget`-style comment on `applyManualFlight`)."""
+    js = _scene_js()
+    assert re.search(
+        r"applyManualFlight\(dt\);\s*\n\s*controls\.update\(dt\);", js
+    ), "applyManualFlight must be called immediately before controls.update(dt) in animate()"

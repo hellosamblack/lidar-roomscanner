@@ -33,6 +33,11 @@
 // group to the same scene and to drive the follow camera (which must coordinate
 // with OrbitControls — only one may own the camera per frame).
 // Hub events:  subscribes "point_cloud", "reset_camera";  emits "view_fps" (~1/s)
+//
+// WASD FREE-CAMERA NAV (issue #122). World mode only: W/A/S/D pan
+// camera+target together in the camera's own ground-plane frame, Space/C fly
+// vertically, Shift doubles speed. See the "WASD free-camera navigation"
+// block below `trackTarget` for the coexistence decision with World+Follow.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -373,7 +378,10 @@ export function createScene(hub) {
     const trackTargetVec = new THREE.Vector3();
     const trackTargetDelta = new THREE.Vector3();
     function trackTarget(pos) {
-        if (viewMode !== 'world') return;
+        // `manualFlightActive` (WASD nav, issue #122, defined below) takes the
+        // camera the instant the user starts flying, so SLAM's every-pose
+        // calls here go quiet instead of fighting the fly with a snap-back.
+        if (viewMode !== 'world' || manualFlightActive) return;
         trackTargetVec.set(pos[0], pos[1], pos[2]);
         // Same velocity-adaptive lerp shape as the FPV/Mirror follow above:
         // steady when the scanner is nearly stationary, snappier under motion.
@@ -382,6 +390,131 @@ export function createScene(hub) {
         trackTargetDelta.copy(trackTargetVec).sub(controls.target).multiplyScalar(alpha);
         controls.target.add(trackTargetDelta);
         camera.position.add(trackTargetDelta);
+    }
+
+    // --- WASD free-camera navigation (issue #122) --------------------------
+    // World mode only -- FPV/Mirror are locked, scanner-relative views (see
+    // `applyViewMode` below) with no orbit to fly around. W/A/S/D pan the
+    // camera+target together in the camera's OWN ground-plane frame; Space/C
+    // fly straight up/down the world vertical axis (+Y is DOWN here, same
+    // `CAM_UP` convention as the rest of this file); held Shift doubles speed.
+    // Movement is scaled by `dt` (see `frameDelta`/`animate` below), so it
+    // holds a constant real-world speed regardless of frame rate.
+    //
+    // Ground-plane frame, MEASURED off the camera's own world matrix, never
+    // assumed: issue #107 measured that a POSITIVE `autoRotateSpeed` DECREASES
+    // azimuth, i.e. static reading of a three.js sign convention is not
+    // trustworthy here. `Matrix4.extractBasis` returns the camera's local
+    // axes in world space directly, sidestepping any angle-sign question.
+    //
+    // Coexistence with World+Follow's `trackTarget` above (owner-choice,
+    // decided here since the issue only says "must coexist"): a WASD keypress
+    // takes the camera. `manualFlightActive` is true for as long as any nav
+    // key is held, and `trackTarget`'s own early-return (just above) checks
+    // it -- so SLAM's every-pose `trackTarget` calls go quiet the instant the
+    // user starts flying instead of fighting the fly with a follow snap-back.
+    // Releasing every key hands the camera straight back to `trackTarget` on
+    // the very next SLAM pose; no separate "re-enable follow" gesture is
+    // needed, which is the least surprising pairing -- follow resumes from
+    // wherever the user flew to, the same way it would resume from wherever
+    // an orbit drag left the camera.
+    const MOVE_SPEED_M_S = 1.6;              // base fly speed
+    const MOVE_SPEED_FAST_MULT = 3.0;        // held Shift
+    const NAV_KEYS_H = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD']);
+    // Ascend/descend are Space/C, NOT the bare Control key -- see the modifier
+    // guard in `onKeyDown` just below for why the issue's "Ctrl" became C.
+    const NAV_KEYS_V = new Set(['Space', 'KeyC']);
+    const NAV_KEYS = new Set([...NAV_KEYS_H, ...NAV_KEYS_V]);
+    const keysDown = new Set();
+    let shiftDown = false;
+    let manualFlightActive = false;
+
+    function isTypingTarget(el) {
+        if (!el) return false;
+        const tag = el.tagName;
+        return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!el.isContentEditable;
+    }
+
+    // Ctrl/Alt/Meta held means the browser (or the OS) owns this keystroke --
+    // Ctrl+W closes the tab, Alt+D jumps to the address bar, Cmd+... is macOS
+    // chrome, etc. The issue text lists "Ctrl" as the descent key, but binding
+    // the bare Control key itself would make every one of those combos start
+    // firing descent (Control's own keydown arrives before the second key,
+    // with e.ctrlKey already true) -- so descent is C, Ctrl is left alone
+    // entirely, and this comment is the record of that substitution.
+    function onKeyDown(e) {
+        if (isTypingTarget(e.target)) return;
+        if (e.ctrlKey || e.altKey || e.metaKey) return;
+        if (!NAV_KEYS.has(e.code)) return;
+        keysDown.add(e.code);
+        shiftDown = e.shiftKey;
+        manualFlightActive = true;
+        e.preventDefault();              // Space must not scroll the page
+    }
+
+    function onKeyUp(e) {
+        if (!NAV_KEYS.has(e.code)) return;
+        keysDown.delete(e.code);
+        shiftDown = e.shiftKey;
+        if (keysDown.size === 0) manualFlightActive = false;
+    }
+
+    // A held key must not stick when focus leaves the window (alt-tab,
+    // DevTools, an iframe grabbing focus) -- the matching keyup never arrives
+    // in that case. Cleared on `blur` rather than waiting for a keyup that
+    // may never come.
+    function releaseAllNavKeys() {
+        keysDown.clear();
+        shiftDown = false;
+        manualFlightActive = false;
+    }
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', releaseAllNavKeys);
+
+    const navForward = new THREE.Vector3();
+    const navRight = new THREE.Vector3();
+    const navUpAxis = new THREE.Vector3();
+    const navMove = new THREE.Vector3();
+    const navStep = new THREE.Vector3();
+
+    // `extractBasis` hands back the camera's local axes in world space
+    // directly -- no angle math, no sign assumption. three.js cameras look
+    // down their local -Z, so forward is the NEGATED z-axis column. Both
+    // axes are then flattened to the ground plane (world Y is the vertical
+    // axis here) and renormalized independently -- the standard FPS-style
+    // ground-nav construction; exact orthogonality after flattening doesn't
+    // matter for a per-axis on/off key.
+    function computeGroundFrame() {
+        camera.updateMatrixWorld(true);
+        camera.matrixWorld.extractBasis(navRight, navUpAxis, navForward);
+        navForward.multiplyScalar(-1);
+        navForward.y = 0;
+        if (navForward.lengthSq() > 1e-8) navForward.normalize(); else navForward.set(0, 0, 0);
+        navRight.y = 0;
+        if (navRight.lengthSq() > 1e-8) navRight.normalize(); else navRight.set(0, 0, 0);
+    }
+
+    // Same trick as `trackTarget` above: translate `camera.position` AND
+    // `controls.target` by the identical delta, so the zoom distance/orbit
+    // angle survive and the next `controls.update()` recomputes OrbitControls'
+    // internal spherical state from the same radius/angles it already had.
+    function applyManualFlight(dt) {
+        if (viewMode !== 'world' || keysDown.size === 0) return;
+        computeGroundFrame();
+        navMove.set(0, 0, 0);
+        if (keysDown.has('KeyW')) navMove.add(navForward);
+        if (keysDown.has('KeyS')) navMove.sub(navForward);
+        if (keysDown.has('KeyD')) navMove.add(navRight);
+        if (keysDown.has('KeyA')) navMove.sub(navRight);
+        if (keysDown.has('Space')) navMove.y -= 1;    // ascend: world +Y is DOWN (CAM_UP)
+        if (keysDown.has('KeyC')) navMove.y += 1;     // descend
+        if (navMove.lengthSq() < 1e-8) return;
+        navMove.normalize();                           // diagonal keys must not move faster
+        const speed = MOVE_SPEED_M_S * (shiftDown ? MOVE_SPEED_FAST_MULT : 1);
+        navStep.copy(navMove).multiplyScalar(speed * dt);
+        camera.position.add(navStep);
+        controls.target.add(navStep);
     }
 
     // --- real-time view mode (owner ask, 2026-07-29) ------------------------
@@ -772,7 +905,7 @@ export function createScene(hub) {
         requestAnimationFrame(animate);
         const dt = frameDelta();
         if (!renderActive) {
-            if (viewMode === 'world') { updateOscillate(); controls.update(dt); }
+            if (viewMode === 'world') { updateOscillate(); applyManualFlight(dt); controls.update(dt); }
             return;
         }
         // The eye/center lerp below is the FPV/Mirror follow camera only.
@@ -797,6 +930,9 @@ export function createScene(hub) {
             // state even while `enabled` is false, which would drift the pose.
         } else {
             updateOscillate();   // may flip autoRotateSpeed's sign before this update
+            // WASD nav (issue #122): must run before controls.update() picks up
+            // the new camera+target pair this tick.
+            applyManualFlight(dt);
             controls.update(dt);
         }
         renderer.render(scene, camera);
