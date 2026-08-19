@@ -155,6 +155,47 @@ handle_scanner_present() {
 }
 
 # ---------------------------------------------------------------------------
+# wlan0 health (issue #200)
+# ---------------------------------------------------------------------------
+
+# NetworkManager can reach a permanent wlan0 dead-end that nothing else here
+# (or in systemd) ever retries: a WPA 4-way-handshake IE mismatch --
+# `wpa_supplicant`'s own log reads "IE in 3/4 msg does not match with IE in
+# Beacon/ProbeResp", an AP-side race, not a config or driver fault -- makes
+# wpa_supplicant locally abort the handshake (reason=17, locally_generated=1).
+# NetworkManager's recovery for "disconnected during association" is to ask
+# for NEW secrets rather than retry the ones it already has, and on this
+# headless box there is no secrets agent to answer that request -- activation
+# fails with "no secrets: No agents were available for this request" and
+# wlan0 is left `disconnected` indefinitely. This looked identical to the Pi
+# being fully hung (issue #200, 2026-08-19) even though the box itself, eth0,
+# and the tee were all healthy the entire time; `nmcli connection up
+# roomscan-wifi-home` reconnected INSTANTLY on the already-stored credentials
+# once someone happened to SSH in over the wired debug NIC and try it -- the
+# "no secrets" state was never actually true, it is a NetworkManager
+# state-machine dead end, not a missing password. This closes that gap
+# without needing a human to notice.
+ensure_wlan0_connected() {
+    local state
+    state="$(nmcli -t -f DEVICE,STATE device status 2>/dev/null | awk -F: '$1=="wlan0"{print $2}')"
+    case "${state}" in
+        disconnected|failed)
+            log "wlan0 is ${state}, asking NetworkManager to reconnect"
+            # --wait 10: unbounded nmcli activation can block up to 90s, and
+            # this runs from reconcile's serialised 10s timer -- a hung call
+            # here must not also stall the scanner-DHCP and unit-health
+            # checks that follow it for the next several ticks (same reason
+            # roomscan-bridge-common.sh's own `nmcli con up` is bounded).
+            if nmcli --wait 10 device connect wlan0 >/dev/null 2>&1; then
+                log "wlan0 reconnect requested successfully"
+            else
+                log "ERROR: nmcli device connect wlan0 failed"
+            fi
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # Unit health
 # ---------------------------------------------------------------------------
 
@@ -181,6 +222,7 @@ main() {
         handle_scanner_absent
     fi
     restart_dead_units
+    ensure_wlan0_connected
 }
 
 main "$@"

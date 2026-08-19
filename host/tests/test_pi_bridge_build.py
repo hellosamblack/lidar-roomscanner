@@ -747,20 +747,40 @@ def test_the_journal_survives_the_reboot_that_needs_explaining():
 
 
 def test_nmcli_is_never_called_without_a_bounded_wait():
-    """`nmcli con up` blocks up to 90 s by default, and it is reached from
-    reconcile, which runs on a 10 s timer. systemd serialises the service so
-    this does not stack processes -- but reconcile is what notices a scanner
-    stuck in fallback mode, and a 90 s stall is 90 s of not noticing."""
+    """`nmcli con up`/`nmcli device connect` block up to 90 s by default, and
+    both are reached from reconcile, which runs on a 10 s timer. systemd
+    serialises the service so this does not stack processes -- but reconcile
+    is what notices a scanner stuck in fallback mode (and, since issue #200,
+    a wlan0 stuck in NetworkManager's "no secrets" dead end), and a 90 s
+    stall is 90 s of not noticing either."""
     for path in ("usr/local/sbin/roomscan-bridge-common.sh",
                  "usr/local/sbin/roomscan-bridge-reconcile"):
         text = (PAYLOAD / path).read_text()
         for ln in text.splitlines():
             s = ln.strip()
-            if s.startswith("#") or "nmcli" not in s:
+            if s.startswith("#") or s.startswith("log ") or "nmcli" not in s:
                 continue
-            if " con up" in s or " connection up" in s:
+            if " con up" in s or " connection up" in s or " device connect" in s:
                 assert "--wait" in s or "-w " in s, \
                     f"unbounded nmcli activation in {path}: {s}"
+
+
+def test_reconcile_self_heals_a_disconnected_wlan0():
+    """Issue #200: NetworkManager can reach a permanent wlan0 dead-end (a WPA
+    handshake IE mismatch makes it ask for secrets it already has, on a
+    headless box with no agent to answer, so activation fails with
+    "no secrets" and wlan0 sits `disconnected` forever). Confirmed live that
+    `nmcli device connect wlan0` recovers it instantly on the stored
+    credentials -- nothing else in this stack ever retries it, so reconcile
+    must, on every 10 s pass."""
+    rec = (PAYLOAD / "usr" / "local" / "sbin" / "roomscan-bridge-reconcile").read_text()
+    assert "ensure_wlan0_connected()" in rec, \
+        "reconcile has no wlan0 self-heal function"
+    assert "nmcli" in rec and "device connect wlan0" in rec
+    # And main() must actually call it, not just define it.
+    main_body = rec.split("main() {", 1)[1].split("\n}", 1)[0]
+    assert "ensure_wlan0_connected" in main_body, \
+        "ensure_wlan0_connected is defined but never called from main()"
 
 
 def test_every_path_that_pokes_eth0_reasserts_its_static_address():
