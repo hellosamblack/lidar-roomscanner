@@ -1152,14 +1152,29 @@
            min-width: 0 fix above) kicked in and ellipsized it for no reason
            ("2:18 / 2:18 · fr...") with ~800px of dead space beside it.
            `fit-content` sizes the row to its content instead, so nothing
-           shrinks until the available room genuinely runs out. `max-width`
-           keeps the SAME clamp expression as before as a ceiling -- a
-           media-player bar wider than that would look silly on an
-           ultrawide window, and the `100vw - 700px` term keeps a clear gap
-           to both 320px sidebars (each sidebar + its 16px margin + a
-           working gap is ~356px per side) even at a narrow 1100px window;
-           `min-width` keeps the same 320px floor so a mostly-empty panel
-           never collapses to an unreadable sliver. */
+           shrinks until the available room genuinely runs out.
+
+           `max-width` has NO literal 760px term (issue #123 third follow-up):
+           that was a leftover media-player-width "ceiling" from the old
+           fixed-width design, and against a `fit-content` panel it is just a
+           second, tighter cap that clips real content the same way the
+           760px `width` used to -- at 1600px the single-row content is
+           ~1030px wide, so a 760px ceiling still forced wrapping and still
+           squeezed #pos-status through its shrink path for no reason, this
+           time to 155/214px instead of 119/214px. `calc(100vw - 700px)` is
+           the real ceiling: it keeps a clear gap to both 320px sidebars
+           (each sidebar's own box is 320px + 16px left/right margin = 336px
+           per side, 672px total; 700px reserves 28px more than that, ~14px
+           of breathing room per side) at any viewport width, so there is
+           nothing left for an arbitrary px cap to protect against.
+           `calc(100vw - 32px)` is a defensive floor matching the same
+           pattern `.sidebar` itself uses, for widths so narrow `min-width:
+           320px` would otherwise force an overflow; it never binds here
+           in practice (700 > 32, so `calc(100vw - 700px)` is always the
+           smaller/controlling term at any width both terms are positive),
+           kept only for parity with that convention. `min-width` keeps the
+           same 320px floor so a mostly-empty panel never collapses to an
+           unreadable sliver. */
         .playback-panel {
             position: fixed;
             left: 50%;
@@ -1173,7 +1188,7 @@
             gap: 8px 18px;
             width: fit-content;
             min-width: 320px;
-            max-width: min(calc(100vw - 700px), 760px, calc(100vw - 32px));
+            max-width: min(calc(100vw - 700px), calc(100vw - 32px));
             padding: 10px 18px;
             background-color: var(--panel-bg);
             background-image: var(--grain);

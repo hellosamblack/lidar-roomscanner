@@ -1313,6 +1313,61 @@ def test_playback_panel_sizes_to_its_content_not_a_fixed_width():
     )
 
 
+def _top_level_comma_split(s: str) -> list:
+    """Split on commas that are not nested inside parens, e.g. the two
+    `calc(...)` arguments of a `min(a, b)` -- a naive `s.split(',')` would
+    also (harmlessly, here) split inside a `calc()`'s own comma-free syntax,
+    but this is the general-purpose-correct way to walk a CSS function's
+    argument list without assuming its contents never nest."""
+    parts, depth, start = [], 0, 0
+    for i, ch in enumerate(s):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(s[start:i])
+            start = i + 1
+    parts.append(s[start:])
+    return [p.strip() for p in parts]
+
+
+def test_playback_panel_max_width_has_no_literal_px_ceiling():
+    """Regression guard (#123 third follow-up, browser-measured): the
+    `fit-content` panel's `max-width: min(...)` carried a literal `760px`
+    term left over from the old fixed-width design. Against a fit-content
+    panel that is not a "ceiling for an ultrawide window" (the job
+    `calc(100vw - 700px)` already does, viewport-relative) -- it is just a
+    SECOND, TIGHTER, viewport-independent cap that clips real content the
+    same way the old fixed `width: 760px` did: at 1600px the single-row
+    content is ~1030px wide, so 760px still forced wrapping and still
+    squeezed #pos-status through its shrink path for no reason.
+
+    Every term inside the `max-width` `min(...)` must be viewport-relative
+    (a `calc(100vw ...)` expression), not a bare px/em/% literal -- a literal
+    length term is, by construction, a fixed ceiling no viewport-relative
+    term can ever be allowed to exceed, which is exactly the bug.
+    """
+    css = _style_css()
+    rule = re.search(r"\.playback-panel\s*\{([^}]*)\}", css)
+    assert rule is not None, "no .playback-panel rule found"
+    body = rule.group(1)
+    max_width_decl = re.search(r"max-width:\s*([^;]+);", body)
+    assert max_width_decl is not None, "no `max-width:` declaration in .playback-panel"
+    expr = max_width_decl.group(1).strip()
+    m = re.match(r"min\((.*)\)$", expr)
+    assert m is not None, f"expected .playback-panel max-width to be a min(...) expression, got {expr!r}"
+    terms = _top_level_comma_split(m.group(1))
+    assert terms, "min(...) parsed with no terms -- test is broken"
+    literal_px_terms = [t for t in terms if not t.startswith("calc(")]
+    assert not literal_px_terms, (
+        f"`.playback-panel`'s max-width min(...) has a literal (non-calc, "
+        f"viewport-independent) term -- a fixed ceiling like the old 760px "
+        f"clips real single-row content (~1030px at 1600px) the same way "
+        f"the old fixed `width: 760px` did: {literal_px_terms}"
+    )
+
+
 def test_playback_panel_group_flex_basis_does_not_undercut_its_content():
     """Regression guard (#123 third follow-up, browser-measured): a
     `width: fit-content` panel (d936fea) sizes itself off each flex child's
