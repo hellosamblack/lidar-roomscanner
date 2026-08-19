@@ -956,3 +956,47 @@ def test_extract_ir_grid_2d_reflectance():
     # top-left block should be smaller than bottom-right block
     assert grid[0] < grid[63]
 
+
+# --- 9b. extract_ir_full tests (#202 follow-on) -------------------------------
+
+
+def test_extract_ir_full_none_or_empty_returns_none():
+    assert tr.extract_ir_full(None, 4096) is None
+    assert tr.extract_ir_full(np.zeros((0, 0)), 4096) is None
+
+
+def test_extract_ir_full_keeps_the_native_zone_grid():
+    """The whole point: 54x42 in, 54x42 out -- no 8x8 block-mean in sight."""
+    img = np.full((42, 54, 3), 128, dtype=np.uint8)
+    got = tr.extract_ir_full(img, 4096)
+    assert got is not None
+    w, h, cells = got
+    assert (w, h) == (54, 42)
+    assert len(cells) == 54 * 42
+    assert set(cells) == {128}
+
+
+def test_extract_ir_full_reports_the_rotated_shape_not_a_fixed_one():
+    """`ir_gravity_rot` transposes the pane, so w/h are read per frame."""
+    img = np.full((54, 42, 3), 7, dtype=np.uint8)   # already rot90'd
+    w, h, cells = tr.extract_ir_full(img, 4096)
+    assert (w, h) == (42, 54)
+    assert len(cells) == 42 * 54
+
+
+def test_extract_ir_full_row_major_matches_the_source():
+    refl = np.arange(6 * 4, dtype=np.float32).reshape(4, 6)   # 0..23 -> 0..255
+    w, h, cells = tr.extract_ir_full(refl, 4096)
+    assert (w, h) == (6, 4)
+    vals = list(cells)
+    assert vals[0] == 0 and vals[-1] == 255       # normalised endpoints
+    assert vals == sorted(vals)                    # row-major, monotonic source
+
+
+def test_extract_ir_full_refuses_rather_than_resamples_when_over_budget():
+    """A client that asked for 64 cells gets None here and falls back to the 8x8 --
+    it must never be handed a third resolution it never negotiated."""
+    img = np.full((42, 54, 3), 128, dtype=np.uint8)
+    assert tr.extract_ir_full(img, 64) is None
+    assert tr.extract_ir_full(img, 54 * 42) is not None      # exactly fits
+

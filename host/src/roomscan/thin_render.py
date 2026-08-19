@@ -207,11 +207,12 @@ def resize_nearest(rgb: np.ndarray, width: int, height: int) -> np.ndarray:
     return rgb[ys][:, xs]
 
 
-def extract_ir_grid(rgb_or_refl: np.ndarray | None) -> list[int] | None:
-    """Downsample a 2D reflectance or 3D RGB image into an 8x8 grid of 64 integers [0..255].
+def _ir_gray(rgb_or_refl: np.ndarray | None) -> np.ndarray | None:
+    """Normalise an IR stash to a (H, W) float array scaled 0..255, or None.
 
-    Used by `thin_telemetry` to power the CrowPanel sidebar IR thumbnail widget.
-    Returns None if `rgb_or_refl` is None or empty.
+    Shared by `extract_ir_grid` and `extract_ir_full` so the two can never disagree
+    about what a pixel means -- the only difference between them is how many cells
+    come out the other end.
     """
     if rgb_or_refl is None:
         return None
@@ -231,10 +232,27 @@ def extract_ir_grid(rgb_or_refl: np.ndarray | None) -> list[int] | None:
             gray = np.zeros_like(gray)
     else:
         return None
-
     h, w = gray.shape[:2]
     if h == 0 or w == 0:
         return None
+    return gray
+
+
+def extract_ir_grid(rgb_or_refl: np.ndarray | None) -> list[int] | None:
+    """Downsample a 2D reflectance or 3D RGB image into an 8x8 grid of 64 integers [0..255].
+
+    The `thin_telemetry` IR thumbnail for a client that has NOT advertised an
+    `ir_cells` budget -- i.e. the original v1 shape, kept exactly as it was.
+    Returns None if `rgb_or_refl` is None or empty.
+
+    Note how lossy this is against the source: the 3DMD sensor's native
+    reflectance grid is 54x42 = 2268 zones (`native.py` `_OUT_WIDTH`/`_OUT_HEIGHT`),
+    so an 8x8 throws away ~97% of it. That is why `extract_ir_full` exists.
+    """
+    gray = _ir_gray(rgb_or_refl)
+    if gray is None:
+        return None
+    h, w = gray.shape[:2]
 
     row_splits = np.array_split(np.arange(h), 8)
     col_splits = np.array_split(np.arange(w), 8)
@@ -247,6 +265,32 @@ def extract_ir_grid(rgb_or_refl: np.ndarray | None) -> list[int] | None:
             val = int(np.clip(np.round(np.mean(block)), 0, 255))
             grid.append(val)
     return grid
+
+
+def extract_ir_full(rgb_or_refl: np.ndarray | None,
+                    max_cells: int) -> tuple[int, int, bytes] | None:
+    """The IR image at its NATIVE zone resolution as `(width, height, bytes)`.
+
+    One uint8 per zone, row-major -- the caller base64s it into `thin_telemetry`
+    rather than spelling out an integer array, because 2268 zones as JSON numbers
+    is ~9 KB per message where the same data base64'd is ~3 KB.
+
+    Returns None when there is no image, or when the native grid exceeds the
+    client's advertised `max_cells` budget. Deliberately does NOT downsample to
+    fit in that case: a client that asked for a specific budget and cannot take
+    this sensor should fall back to the 8x8, not silently be handed a third
+    resolution it never negotiated. Note `width`/`height` are read off the array
+    every time and are NOT constant -- `ir_gravity_rot` may have rotated the pane
+    by 90 degrees, which transposes them.
+    """
+    gray = _ir_gray(rgb_or_refl)
+    if gray is None:
+        return None
+    h, w = gray.shape[:2]
+    if w * h > max_cells:
+        return None
+    cells = np.clip(np.round(gray), 0, 255).astype(np.uint8)
+    return int(w), int(h), np.ascontiguousarray(cells).tobytes()
 
 
 # --------------------------------------------------------------------------

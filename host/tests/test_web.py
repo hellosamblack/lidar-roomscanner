@@ -11,6 +11,7 @@ broadcast task feeding every client, no frame-stealing).
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import math
 import socket
@@ -7042,7 +7043,10 @@ def test_thin_scene_for_slam_memoises_by_object_identity_not_equality():
 _THIN_TELEMETRY_KEYS = {"type", "fps", "point_count", "recording", "mode",
                         "link", "roll_deg", "pitch_deg", "tilt_deg", "heading_deg",
                         "yaw_rate_dps", "orientation_valid", "orientation_labels",
-                        "ir_grid",
+                        # IR thumbnail: the v1 8x8 list, plus the full-resolution
+                        # alternative a client unlocks with `ir_cells`. Exactly one
+                        # of `ir_grid` / `ir_grid_b64` is ever populated.
+                        "ir_grid", "ir_grid_b64", "ir_grid_w", "ir_grid_h",
                         # per-client link truth (#202): the rig-internal `fps`
                         # is NOT this client's rate -- these are.
                         "tx_fps", "tx_bytes_per_s", "dropped"}
@@ -7334,7 +7338,7 @@ def test_negotiate_thin_hello_malformed_values_leave_prior_values():
     assert effective == {"format": "jpeg", "fps": 15.0, "width": 320,
                          "height": 320, "quality": 60,
                          "proto": 1, "credits": web.THIN_CREDITS_DEFAULT,
-                         "max_frame_bytes": None}
+                         "max_frame_bytes": None, "ir_cells": None}
 
 
 def test_negotiate_thin_hello_is_pure_and_never_mutates_the_flow():
@@ -8112,6 +8116,45 @@ def test_thin_telemetry_ir_grid_and_yaw_rate():
     assert len(msg["ir_grid"]) == 64
     assert msg["ir_grid"][0] == 0
     assert msg["ir_grid"][63] == 63
+
+
+def test_thin_telemetry_full_ir_grid_when_the_client_negotiated_ir_cells():
+    state = _thin_state()
+    state.thin_latest_ir = (1, np.full((42, 54, 3), 200, dtype=np.uint8))
+    flow = web.ThinFlow(ir_cells=4096)
+    msg = web.thin_telemetry_message(state, flow)
+    assert msg["ir_grid"] is None            # the 8x8 is not sent as well
+    assert (msg["ir_grid_w"], msg["ir_grid_h"]) == (54, 42)
+    cells = base64.b64decode(msg["ir_grid_b64"])
+    assert len(cells) == 54 * 42
+    assert set(cells) == {200}
+
+
+def test_thin_telemetry_keeps_the_8x8_for_a_client_that_did_not_ask():
+    """v1 compatibility: no `ir_cells` in the hello, no change to the message."""
+    state = _thin_state()
+    state.thin_latest_ir = (1, np.full((42, 54, 3), 200, dtype=np.uint8))
+    msg = web.thin_telemetry_message(state, web.ThinFlow())
+    assert msg["ir_grid"] is not None and len(msg["ir_grid"]) == 64
+    assert msg["ir_grid_b64"] is None
+
+
+def test_thin_telemetry_falls_back_to_8x8_when_ir_cells_is_too_small():
+    state = _thin_state()
+    state.thin_latest_ir = (1, np.full((42, 54, 3), 200, dtype=np.uint8))
+    msg = web.thin_telemetry_message(state, web.ThinFlow(ir_cells=64))
+    assert msg["ir_grid"] is not None and len(msg["ir_grid"]) == 64
+    assert msg["ir_grid_b64"] is None
+
+
+def test_negotiate_thin_hello_clamps_ir_cells():
+    flow = web.ThinFlow()
+    assert web.negotiate_thin_hello({"ir_cells": 2268}, flow)["ir_cells"] == 2268
+    assert web.negotiate_thin_hello({"ir_cells": 1}, flow)["ir_cells"] == web.THIN_IR_CELLS_MIN
+    assert web.negotiate_thin_hello({"ir_cells": 10 ** 9}, flow)["ir_cells"] == web.THIN_IR_CELLS_MAX
+    # absent -> untouched, like every other negotiated field
+    assert web.negotiate_thin_hello({}, web.ThinFlow(ir_cells=512))["ir_cells"] == 512
+    assert web.negotiate_thin_hello({}, flow)["ir_cells"] is None
 
 
 def test_thin_telemetry_never_substitutes_a_euler_yaw_for_a_heading():

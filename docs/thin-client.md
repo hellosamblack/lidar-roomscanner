@@ -78,10 +78,10 @@ WS upgrade):
 ```json
 {"type": "thin_hello", "proto": 2, "client": "crowpanel-p4",
  "accept": ["jpeg", "rgb565"], "width": 480, "height": 480,
- "credits": 2, "max_frame_bytes": 262144}
+ "credits": 2, "max_frame_bytes": 262144, "ir_cells": 4096}
 {"type": "thin_hello_ack", "proto": 2, "encoding": "jpeg",
  "format": "jpeg", "fps": 10.0, "width": 480, "height": 480,
- "quality": 75, "credits": 2}
+ "quality": 75, "credits": 2, "ir_cells": 4096}
 ```
 
 - `proto: 2` opts the flow into **credit-based flow control** (below). It
@@ -96,6 +96,11 @@ WS upgrade):
   whole frame message; a packed frame larger than this is dropped for this
   client (counted in `dropped`, logged once) rather than sent to certain
   reassembly failure.
+- `ir_cells` (clamped to [64, 4096]) advertises how many IR **zones** the
+  client can render. Send it and `thin_telemetry` upgrades from the 8x8
+  `ir_grid` to `ir_grid_b64` at the sensor's native resolution (54x42 =
+  2268 zones on the 3DMD), provided the native grid fits the budget. Omit
+  it — or ask for less than the sensor needs — and the 8x8 is unchanged.
 - The pre-spec #197 shape (`format`/`fps`/`quality`, no `proto`) still
   works and stays free-running; the ack carries both `encoding` and
   `format` so either client generation can read it.
@@ -221,10 +226,25 @@ often (four times, twice in live code, pinned by the
 `test_no_new_yaw_twist_consumers` AST guard). Reusing the finished projection is
 what keeps this endpoint from being the fifth.
 
-`ir_grid` carries an 8x8 matrix (64 integers in 0..255, row-major) downsampled
-from the ToF reflectance array, allowing the CrowPanel sidebar to display a live
-ambient/reflectance thumbnail widget even while the main viewport is in `point_cloud`
-or `slam` mode.
+**The IR thumbnail** lets a client show a live ambient/reflectance view in its
+sidebar even while the main viewport is in `point_cloud` or `slam` mode. It comes
+in one of two shapes, and **exactly one of them is ever non-null**:
+
+- `ir_grid` — the original 8x8 matrix (64 integers 0..255, row-major), block-mean
+  downsampled from the ToF reflectance array. Sent to any client that did not
+  negotiate `ir_cells`. Note how lossy it is: the reflectance array is 54x42 =
+  2268 zones (`native.py` `_OUT_WIDTH`/`_OUT_HEIGHT`), so an 8x8 discards ~97% of it.
+- `ir_grid_b64` + `ir_grid_w` + `ir_grid_h` — the array at its **native zone
+  resolution**: `ir_grid_w * ir_grid_h` uint8 zones, row-major, base64'd. Sent
+  when the client advertised an `ir_cells` budget the native grid fits inside.
+  Base64 rather than a JSON integer array because 2268 numbers spelled out is
+  ~9 KB per message where the same bytes base64'd are ~3 KB.
+
+`ir_grid_w`/`ir_grid_h` are sent with every message and are **not constant**: the
+IR pane is rotated to the nearest 90° so its "down" is physical down
+(`ir_gravity_rot`), which transposes them. Read them per message; do not cache a
+shape. A client whose budget is too small for this sensor gets the 8x8 rather
+than a third, un-negotiated resolution.
 
 `orientation_valid` is `false` when the heading cannot be trusted — a bad
 magnetometer reading, the device accelerating (gravity reference degraded), or a

@@ -16,6 +16,7 @@ module level so the protocol/coloring logic is unit-testable without a server.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import math
@@ -115,7 +116,7 @@ from .sources import FileSource, Recorder, SerialSource, UdpSource, get_best_sou
 from zeroconf import ServiceInfo, Zeroconf
 from .thin_render import (
     DEFAULT_JPEG_QUALITY, THIN_HEIGHT, THIN_MODES, THIN_WIDTH, ThinCamera,
-    ThinRenderer, ThinRenderUnavailable, extract_ir_grid, image_scene,
+    ThinRenderer, ThinRenderUnavailable, extract_ir_full, extract_ir_grid, image_scene,
     jpeg_available, points_scene, unpack_mesh_scene, warm_jpeg_import,
 )
 from .slam.config import DetailedSlamPreset, preferred_device
@@ -186,6 +187,13 @@ THIN_CREDITS_MAX = 8
 #: floor for a client-advertised `max_frame_bytes` -- below this even a
 #: quality-40 320x320 JPEG cannot reliably fit, so the request is nonsense.
 THIN_MAX_FRAME_BYTES_MIN = 4096
+# `ir_cells`: how many IR zones a client says it can render. The 8x8 thumbnail the
+# CrowPanel shipped with is a ~97% throwaway of a 54x42 = 2268-zone sensor, so a client
+# that can hold the real thing asks for it here. Floor is the old 64 (asking for less
+# than the v1 shape buys nothing); ceiling is generous headroom over 2268 for a future
+# sensor, bounded so one client cannot ask the telemetry message to become enormous.
+THIN_IR_CELLS_MIN = 64
+THIN_IR_CELLS_MAX = 4096
 #: window for the per-client `tx_fps` / `tx_bytes_per_s` telemetry figures.
 THIN_TX_WINDOW_S = 5.0
 # Hard cap on concurrent thin clients. Connection count is a real performance
@@ -5324,6 +5332,10 @@ class ThinFlow:
     #: None if never advertised. A packed frame larger than this is dropped
     #: for this client (it could not buffer it anyway) and counted.
     max_frame_bytes: int | None = None
+    #: client-advertised IR zone budget. None (never advertised) keeps the v1
+    #: 8x8 `ir_grid`; a value >= the sensor's native zone count upgrades this
+    #: flow to the full-resolution `ir_grid_b64` instead.
+    ir_cells: int | None = None
     #: (monotonic_time, frame_bytes) per sent frame, trimmed to the last
     #: THIN_TX_WINDOW_S by the telemetry builder -- feeds tx_fps/tx_bytes_per_s.
     tx_log: deque = field(default_factory=deque)
@@ -5488,14 +5500,25 @@ def thin_telemetry_message(state, flow: ThinFlow) -> dict:
     ctrl = getattr(state, "controller", None)
     recording = bool(getattr(ctrl, "recording", False)) if ctrl is not None else False
 
-    # Extract 8x8 IR grid (64 ints 0..255) from latest IR stash for sidebar widget
+    # IR thumbnail for the sidebar widget. A client that advertised an `ir_cells`
+    # budget big enough for the sensor's native zone grid (54x42 on the 3DMD) gets
+    # that, base64'd, plus its shape -- the 8x8 below discards ~97% of it and was
+    # only ever a bandwidth compromise. Everyone else keeps the exact v1 8x8 array.
     ir_grid = None
+    ir_grid_b64 = None
+    ir_grid_w = ir_grid_h = None
     ir_stash = getattr(state, "thin_latest_ir", None)
     if ir_stash is not None and ir_stash[1] is not None:
         try:
-            ir_grid = extract_ir_grid(ir_stash[1])
+            full = (extract_ir_full(ir_stash[1], flow.ir_cells)
+                    if flow.ir_cells is not None else None)
+            if full is not None:
+                ir_grid_w, ir_grid_h, cells = full
+                ir_grid_b64 = base64.b64encode(cells).decode("ascii")
+            else:
+                ir_grid = extract_ir_grid(ir_stash[1])
         except Exception:  # noqa: BLE001
-            ir_grid = None
+            ir_grid = ir_grid_b64 = None
 
     tx_fps, tx_bytes_per_s = thin_tx_stats(flow)
 
@@ -5519,8 +5542,15 @@ def thin_telemetry_message(state, flow: ThinFlow) -> dict:
         "tilt_deg": tilt,
         "orientation_valid": orientation_valid,
         "orientation_labels": orientation_labels,
-        # IR Matrix Array (8x8 or 64-zone reflectance/amplitude values 0-255)
+        # IR Matrix Array. Exactly one of these is populated: `ir_grid` is the v1
+        # 8x8 list of ints; `ir_grid_b64` is `ir_grid_w * ir_grid_h` uint8 zones,
+        # row-major, base64'd, for a client that negotiated `ir_cells`. The shape
+        # is sent every time and is NOT constant -- the pane rotates with gravity,
+        # which transposes it.
         "ir_grid": ir_grid,
+        "ir_grid_b64": ir_grid_b64,
+        "ir_grid_w": ir_grid_w,
+        "ir_grid_h": ir_grid_h,
     }
 
 
@@ -5634,6 +5664,12 @@ def negotiate_thin_hello(msg: dict, flow: ThinFlow) -> dict:
     requested_mfb = _finite_float(msg.get("max_frame_bytes"))
     if requested_mfb is not None:
         max_frame_bytes = max(THIN_MAX_FRAME_BYTES_MIN, int(requested_mfb))
+
+    ir_cells = flow.ir_cells
+    requested_ir = _finite_float(msg.get("ir_cells"))
+    if requested_ir is not None:
+        ir_cells = int(round(max(float(THIN_IR_CELLS_MIN),
+                                 min(float(THIN_IR_CELLS_MAX), requested_ir))))
     fps_max = THIN_HELLO_FPS_MAX_JPEG if fmt == "jpeg" else THIN_HELLO_FPS_MAX_RAW
 
     fps = flow.fps
@@ -5660,7 +5696,7 @@ def negotiate_thin_hello(msg: dict, flow: ThinFlow) -> dict:
 
     return {"format": fmt, "fps": fps, "width": width, "height": height,
             "quality": quality, "proto": proto, "credits": credits,
-            "max_frame_bytes": max_frame_bytes}
+            "max_frame_bytes": max_frame_bytes, "ir_cells": ir_cells}
 
 
 def _apply_pending_hello(flow: ThinFlow) -> dict | None:
@@ -5691,6 +5727,7 @@ def _apply_pending_hello(flow: ThinFlow) -> dict | None:
     flow.proto = effective["proto"]
     flow.credits_max = effective["credits"]
     flow.max_frame_bytes = effective["max_frame_bytes"]
+    flow.ir_cells = effective["ir_cells"]
     if flow.proto >= 2:
         if was_proto < 2:
             # The handshake itself is the initial grant (spec: "server starts
@@ -5716,6 +5753,8 @@ def _apply_pending_hello(flow: ThinFlow) -> dict | None:
               ("format", "fps", "width", "height", "quality")}}
     if flow.proto >= 2:
         ack["credits"] = flow.credits_max
+    if flow.ir_cells is not None:
+        ack["ir_cells"] = flow.ir_cells
     return ack
 
 
