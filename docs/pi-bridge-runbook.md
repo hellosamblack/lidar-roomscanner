@@ -326,7 +326,20 @@ permanently and nothing retries it. Proven the secrets were never actually missi
 `roomscan-bridge-reconcile` now checks `wlan0`'s device state every pass and runs
 `nmcli --wait 10 device connect wlan0` whenever it's `disconnected`/`failed` — verified live by
 deliberately disconnecting `wlan0` on the real Pi and watching it self-heal within one 10s tick.
-No manual action should be needed for this failure mode anymore.
+
+That alone wasn't the whole fix, though: NetworkManager's own autoconnect had already permanently
+given up before reconcile mattered much, because neither Wi-Fi profile set
+`autoconnect-retries` — both inherited NM's global default (4 tries, then silence forever until
+poked). Both profiles now set `autoconnect-retries=0` (NM's own documented meaning: retry
+forever). `install.sh` also now runs `nmcli connection reload` after every `etc/` push, not just
+the Wi-Fi-override path — a profile change previously landed on disk but kept running under the
+old in-memory config until the next reboot. No manual action should be needed for this failure
+mode anymore; the two fixes are independent layers (NM's own mechanism, and reconcile's faster
+10s check).
+
+The AP-side trigger itself (the IE mismatch) is not something fixable from the Pi — see the issue
+#200 comment thread for what commonly causes it on the AP side if it's worth chasing at the
+source.
 
 ### The watchdog hard-reset (still unexplained)
 
