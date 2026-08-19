@@ -1277,6 +1277,42 @@ def test_playback_panel_floats_fixed_and_anchors_off_dock_bottom():
     assert "--dock-bottom" in body
 
 
+def test_playback_panel_sizes_to_its_content_not_a_fixed_width():
+    """Regression guard (#123 follow-up, browser-measured at 1600x1000): the
+    panel's `width` used to be a `clamp(320px, calc(100vw - 700px), 760px)`
+    that settled at a fixed 760px even when the actual content (restart /
+    play-pause / seek / pos-status / speed / loop / go-live) only needed
+    ~214px -- forcing #pos-status's min-width: 0 shrink path to kick in and
+    ellipsize it ("2:18 / 2:18 · fr...") with ~800px of dead space beside it,
+    for no reason. `width: fit-content` sizes the row to its content instead,
+    so nothing shrinks until the available room genuinely runs out; the old
+    clamp's ceiling/floor move to `max-width`/`min-width` so an ultrawide
+    window still caps the bar and a mostly-empty panel still can't collapse
+    to a sliver.
+
+    This fails against the pre-fix `width: clamp(...)` binding (verified by
+    reintroducing it locally), which is the point: a `width` alone, clamped
+    or not, always forces the row to fill it -- `fit-content` is the only
+    value here that lets content stay unshrunk when there is genuinely
+    enough room.
+    """
+    css = _style_css()
+    rule = re.search(r"\.playback-panel\s*\{([^}]*)\}", css)
+    assert rule is not None, "no .playback-panel rule found"
+    body = rule.group(1)
+    width_decl = re.search(r"(?<!max-)(?<!min-)width:\s*([^;]+);", body)
+    assert width_decl is not None, "no `width:` declaration in .playback-panel"
+    assert width_decl.group(1).strip() == "fit-content", (
+        f"`.playback-panel`'s width must be `fit-content` so it sizes to its "
+        f"content rather than forcing a fixed/clamped px width to fill; got "
+        f"{width_decl.group(1).strip()!r}"
+    )
+    assert re.search(r"max-width:\s*[^;]+;", body) is not None, (
+        "fit-content still needs a max-width ceiling so an ultrawide window "
+        "doesn't stretch the panel arbitrarily wide"
+    )
+
+
 def test_pos_status_can_shrink_instead_of_overflowing_into_the_speed_group():
     """Regression guard (#123 follow-up, browser-measured at 1600x1000):
     `#pos-status` used to be `flex: none` inside `.playback-panel__group--seek`,
