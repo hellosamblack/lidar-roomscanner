@@ -923,16 +923,30 @@ async def rig_view(source: str = "", display: str = "", regenerate: bool = False
         msg = {"type": "set_display", "display": display}
         await rig.send(msg)
         sent.append(msg)
+    detailed = None
     if regenerate:
         msg = {"type": "regenerate_detailed"}
-        await rig.send(msg)
+        # The server broadcasts `DetailedRunner.start()`'s own result -- await
+        # it the same way `rig_save` awaits `saved`, rather than firing the
+        # request and reading whatever `state` happens to have on hand, which
+        # for a Detailed rebuild is the state from *before* the rebuild ran.
+        detailed = await rig.request(msg, expect="detailed", timeout=timeout)
         sent.append(msg)
     if not sent:
         return {"ok": False, "error": "pass source, display, or regenerate"}
     expected = {k: v for k, v in (("source", source), ("display", display)) if v}
     state = await _await_state(expected, timeout)
-    return {"ok": state is not None and all(state.get(k) == v for k, v in expected.items()),
-            "sent": sent, "state": state}
+    ok = state is not None and all(state.get(k) == v for k, v in expected.items())
+    out = {"ok": ok, "sent": sent, "state": state}
+    if regenerate:
+        out["detailed"] = detailed
+        if detailed is None:
+            out["ok"] = False
+            out["error"] = f"no detailed rebuild confirmation within {timeout}s"
+        elif not detailed.get("started"):
+            out["ok"] = False
+            out["error"] = detailed.get("reason", "detailed rebuild did not start")
+    return out
 
 
 @mcp.tool()

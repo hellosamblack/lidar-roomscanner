@@ -762,6 +762,10 @@ class _FakeRig:
             return msg
         return None
 
+    async def request(self, message, expect, timeout=5.0):
+        await self.send(message)
+        return await self.wait_for(expect, timeout=timeout)
+
 
 def _imu_env(rate_hz=0, *, pending=False, error=None, warning=None, initialized=True):
     return {"initialized": initialized, "applied_rate_hz": rate_hz,
@@ -815,6 +819,67 @@ def _run_rate(monkeypatch, script, latest=None, **kwargs):
     monkeypatch.setattr(tools_rig, "rig", fake)
     kwargs.setdefault("timeout", 2.0)
     return asyncio.run(tools_rig.rig_imu_env_rate(**kwargs)), fake
+
+
+def _run_view(monkeypatch, script, latest=None, **kwargs):
+    import asyncio
+
+    from roomscan.mcp_server import tools_rig
+
+    fake = _FakeRig(script, latest=latest)
+    monkeypatch.setattr(tools_rig, "rig", fake)
+    kwargs.setdefault("timeout", 2.0)
+    return asyncio.run(tools_rig.rig_view(**kwargs)), fake
+
+
+def _view_state(**extra):
+    # roomscan-web always follows `detailed`/`regenerate_detailed`'s reply with
+    # a `_broadcast_state`, whether the rebuild started or was refused.
+    return {"type": "state", "source": "view", "display": "detailed", **extra}
+
+
+def test_rig_view_regenerate_reports_a_started_rebuild(monkeypatch):
+    r, fake = _run_view(monkeypatch, [
+        {"type": "detailed", "started": True, "capture": "room.rec", "phase": "frames",
+         "processed": 0, "total": 900, "fraction": 0.0, "done": False},
+        _view_state(),
+    ], regenerate=True)
+    assert r["detailed"]["started"] is True
+    assert r["detailed"]["processed"] == 0
+    assert r["detailed"]["total"] == 900
+    assert r["ok"] is True
+    assert {"type": "regenerate_detailed"} in fake.sent
+
+
+def test_rig_view_regenerate_reports_a_refused_rebuild_with_its_reason(monkeypatch):
+    r, fake = _run_view(monkeypatch, [
+        {"type": "detailed", "started": False, "reason": "another Detailed build is running"},
+        _view_state(),
+    ], regenerate=True)
+    assert r["detailed"]["started"] is False
+    assert r["detailed"]["reason"] == "another Detailed build is running"
+    assert r["ok"] is False
+    assert "another Detailed build is running" in r["error"]
+
+
+def test_rig_view_regenerate_two_calls_in_a_row_are_not_identical(monkeypatch):
+    from roomscan.mcp_server import tools_rig
+    import asyncio
+
+    fake = _FakeRig([
+        {"type": "detailed", "started": True, "capture": "room.rec", "phase": "frames",
+         "processed": 0, "total": 900, "fraction": 0.0, "done": False},
+        _view_state(),
+    ])
+    monkeypatch.setattr(tools_rig, "rig", fake)
+    first = asyncio.run(tools_rig.rig_view(regenerate=True, timeout=2.0))
+    fake.script.append({"type": "detailed", "started": False,
+                        "reason": "another Detailed build is running"})
+    fake.script.append(_view_state())
+    second = asyncio.run(tools_rig.rig_view(regenerate=True, timeout=2.0))
+    assert first["detailed"] != second["detailed"]
+    assert first["ok"] is True
+    assert second["ok"] is False
 
 
 def test_rig_profile_confirms_an_exact_device_readback(monkeypatch):
