@@ -29,6 +29,15 @@ type=wifi
 interface-name=wlan0
 autoconnect=true
 autoconnect-priority={{TRAVEL_PRIORITY}}
+# 0 = retry forever (NetworkManager's own documented meaning; -1/unset means
+# "use the global default", which is 4 tries then give up permanently until
+# something else pokes the device). Unset here is what let wlan0 sit
+# `disconnected` for 30+ minutes after a transient AP-side handshake glitch
+# on 2026-08-19 (issue #200) -- NM had already exhausted its retry budget
+# and stopped trying long before anyone noticed. roomscan-bridge-reconcile's
+# own wlan0 self-heal (10s poll) is a second, faster layer on top of this,
+# not a substitute for it -- this fixes why NM's own mechanism gave up.
+autoconnect-retries=0
 
 [wifi]
 mode=infrastructure

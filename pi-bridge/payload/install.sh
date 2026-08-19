@@ -306,6 +306,19 @@ copy_etc_tree() {
         log "tightening permissions on NetworkManager system-connections/"
         chown root:root /etc/NetworkManager/system-connections/*.nmconnection 2>/dev/null || true
         chmod 0600 /etc/NetworkManager/system-connections/*.nmconnection 2>/dev/null || true
+        # NetworkManager caches parsed connection profiles in memory; writing
+        # a new .nmconnection file to disk (this loop, above) does NOT by
+        # itself pick up a changed setting -- only a reload, an nmcli-driven
+        # edit, or a full restart does. Without this, a payload update that
+        # changes e.g. autoconnect-retries lands on disk and silently keeps
+        # running under the OLD in-memory settings until the next reboot.
+        # This was previously only done for the wifi-override path
+        # (install_wifi_override, below); doing it for every push here closes
+        # that gap generally rather than one file at a time as it's found.
+        if command -v nmcli >/dev/null 2>&1; then
+            log "reloading NetworkManager connections to pick up any changed profiles"
+            nmcli connection reload || log "WARNING: nmcli connection reload failed"
+        fi
     fi
 }
 
