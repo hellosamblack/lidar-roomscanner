@@ -3989,7 +3989,9 @@ def test_rail_cards_data_attributes_and_default_collapsed_states():
         "view": False,       # Expanded
         # "capture" removed (issue #118, 2026-08-19): Record moved out of its own
         # rail card into the always-visible top bar (#topbar-record).
-        "transport": False,  # Expanded (§11: Playback, rendered only in replay)
+        # "transport" removed (issue #123, 2026-08-19): Playback moved out of its
+        # own rail card into a floating panel docked at the bottom of the 3D
+        # viewport (#playback-panel), rendered only in replay.
         "slam-ctrl": True,   # Collapsed
         "log": True,         # Collapsed
         "splat": False,      # Splat-source picker (hidden until source == splat, not collapsed)

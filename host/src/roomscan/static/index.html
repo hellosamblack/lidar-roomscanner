@@ -1131,8 +1131,58 @@
         .cap-row.active { border-color: var(--accent); background: rgba(59,130,246,0.14); }
         .cap-row__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .cap-row__meta { color: var(--text-muted); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; flex: none; }
-        .transport { display: flex; flex-direction: column; gap: 10px; padding-top: 4px; border-top: 1px solid var(--panel-border); }
         #seek { width: 100%; accent-color: var(--accent); cursor: pointer; }
+
+        /* ---- Playback panel (issue #123): floating, video-player-style
+           transport docked at the bottom of the 3D viewport during replay.
+           Replaces the old `#transport-card` sidebar section -- this is
+           transient viewport chrome, not a persistent/collapsible sidebar
+           card, so it carries no `data-card-id` and is positioned outside
+           both `.sidebar`s entirely. Anchored off `--dock-bottom` (the same
+           convention #toast-layer uses), so the Event Log console can never
+           slide underneath/over it -- expanding the console only grows
+           `--dock-bottom` (see layout.js), which pushes this panel up with
+           it. The width clamps between a floor (still usable narrow) and a
+           ceiling (a media-player bar this wide would look silly on an
+           ultrawide window); the ceiling term (`100vw - 700px`) keeps a
+           clear gap to both 320px sidebars (each sidebar + its 16px margin
+           + a working gap is ~356px per side) even at a narrow 1100px
+           window. */
+        .playback-panel {
+            position: fixed;
+            left: 50%;
+            bottom: calc(var(--dock-bottom) + 16px);
+            transform: translateX(-50%);
+            z-index: 18;
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 8px 18px;
+            width: clamp(320px, calc(100vw - 700px), 760px);
+            max-width: calc(100vw - 32px);
+            padding: 10px 18px;
+            background-color: var(--panel-bg);
+            background-image: var(--grain);
+            background-blend-mode: soft-light;
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--panel-border);
+            border-radius: 14px;
+            box-shadow: 0 24px 48px -16px rgba(4, 6, 12, 0.60),
+                        0 2px 8px rgba(4, 6, 12, 0.40),
+                        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+            pointer-events: auto;
+        }
+        .playback-panel__group { display: flex; align-items: center; gap: 8px; flex: none; }
+        /* The seek bar is the dominant flexible element (plan §2); it grows
+           to fill whatever width the transport/right groups don't need, and
+           is the first group allowed to wrap to its own row on narrow
+           windows since it carries the widest single control. */
+        .playback-panel__group--seek { flex: 1 1 180px; min-width: 140px; }
+        .playback-panel__group--seek #seek { flex: 1 1 auto; min-width: 90px; }
+        .playback-panel #pos-status { white-space: nowrap; flex: none; }
+        .playback-panel .toggle--sm { white-space: nowrap; }
 
         /* ---- component: toggle / checkbox ---- */
         .toggle { display: flex; align-items: center; gap: 8px; font-size: 0.76rem; color: var(--text-muted); cursor: pointer; }
@@ -2013,35 +2063,12 @@
              Playback"). Relocated into the top bar (issue #118, 2026-08-19) as
              one prominent, always-visible control -- see #topbar-record. -->
 
-        <!-- Playback (§11). Transport is *replay* state, exactly as Record is
-             *live* state; one card that was half-hidden in each mode is now two
-             cards that are simply shown or hidden. Markup moved verbatim from
-             the old Capture card -- including `btn-transport-restart`, whose id
-             was `btn-restart` until BUG-047 (it collided with the top bar's
-             Restart Server, so this button was dead and its handler fired the
-             server restart instead). Shown only when session.playback.is_replay. -->
-        <div class="control-group card hidden" id="transport-card" data-card-id="transport">
-            <button class="control-group__header"><span>Playback</span><span class="chevron">&#9662;</span></button>
-            <div class="control-group__body">
-                <div class="transport" id="transport">
-                    <button class="primary" id="btn-golive" title="Stop playback and return to the live device stream">&#9679; Go Live</button>
-                    <div class="btn-row">
-                        <button id="btn-playpause" title="Pause or resume capture playback">Pause</button>
-                        <button id="btn-transport-restart" title="Jump back to the start of the capture">&#8676; Restart</button>
-                    </div>
-                    <div class="field-label">Speed</div>
-                    <div class="segmented segmented--sm" id="seg-speed">
-                        <button data-fps="15" title="Half-speed playback">0.5&times;</button>
-                        <button data-fps="30" title="Real-time playback">1&times;</button>
-                        <button data-fps="60" title="Double-speed playback">2&times;</button>
-                        <button data-fps="0" title="Play as fast as possible (no delay)">Max</button>
-                    </div>
-                    <label class="toggle toggle--sm" title="Automatically restart playback when the capture ends"><input type="checkbox" id="chk-loop"><span>Loop at end</span></label>
-                    <input type="range" id="seek" min="0" max="1000" value="0" title="Scrub to a position in the capture">
-                    <div class="cap-status" id="pos-status">&mdash;</div>
-                </div>
-            </div>
-        </div>
+        <!-- Playback used to live here as its own sidebar card ("§11
+             Playback"). Relocated into a floating panel docked at the bottom
+             of the 3D viewport (issue #123, 2026-08-19) -- replay is
+             *transient viewport chrome*, not a sidebar section, so hiding or
+             resizing this sidebar must no longer hide it. See
+             #playback-panel, below #secondary-bar. -->
 
         <!-- SLAM (web Phase 4): mesh display options + save. Shown only in SLAM
              mode; all state driven from the server `state`/`saved` echo. -->
@@ -2063,6 +2090,46 @@
             </div>
         </div>
     </aside>
+
+    <!-- Playback (§11, floating panel -- issue #123). Transport is *replay*
+         state, exactly as Record is *live* state, but unlike Record (moved
+         into the top bar, issue #118) this is transient viewport chrome
+         layered over the 3D scene rather than always-visible bar chrome --
+         so it floats, and it deliberately carries no `data-card-id`: it is
+         not part of the sidebar/squircle-rail card system at all, and must
+         not be affected by sidebar hide/resize/collapse or the
+         `roomscan.card.*.collapsed` persistence layout.js drives for real
+         cards. Markup moved verbatim from the old `#transport-card` sidebar
+         card -- including every control id (`btn-transport-restart`, whose
+         id was `btn-restart` until BUG-047; it collided with the top bar's
+         Restart Server, so this button was dead and its handler fired the
+         server restart instead) -- so capture.js's wiring needed only its
+         card-level show/hide target retargeted. Reorganized horizontally
+         like a media player (plan §1): restart+play/pause on the left, seek
+         + position status in the center (the dominant flexible element),
+         speed+loop+Go Live on the right. Shown only when
+         session.playback.is_replay. -->
+    <div class="playback-panel hidden" id="playback-panel">
+        <div class="playback-panel__group playback-panel__group--transport">
+            <button id="btn-transport-restart" title="Jump back to the start of the capture">&#8676;</button>
+            <button id="btn-playpause" title="Pause or resume capture playback">Pause</button>
+        </div>
+        <div class="playback-panel__group playback-panel__group--seek">
+            <input type="range" id="seek" min="0" max="1000" value="0" title="Scrub to a position in the capture">
+            <div class="cap-status" id="pos-status">&mdash;</div>
+        </div>
+        <div class="playback-panel__group playback-panel__group--right">
+            <div class="field-label">Speed</div>
+            <div class="segmented segmented--sm" id="seg-speed">
+                <button data-fps="15" title="Half-speed playback">0.5&times;</button>
+                <button data-fps="30" title="Real-time playback">1&times;</button>
+                <button data-fps="60" title="Double-speed playback">2&times;</button>
+                <button data-fps="0" title="Play as fast as possible (no delay)">Max</button>
+            </div>
+            <label class="toggle toggle--sm" title="Automatically restart playback when the capture ends"><input type="checkbox" id="chk-loop"><span>Loop</span></label>
+            <button class="primary" id="btn-golive" title="Stop playback and return to the live device stream">&#9679; Go Live</button>
+        </div>
+    </div>
 
     <!-- Bottom (§7.1): collapsible full-width event-log console. -->
     <div id="log-console" class="card collapsed" data-card-id="log">

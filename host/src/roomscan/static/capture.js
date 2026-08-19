@@ -1,6 +1,8 @@
-// capture.js — the Record top-bar control + the Playback card (Web Phase 3,
-// split §11; Record moved out of its own sidebar card into the top bar in
-// issue #118, 2026-08-19).
+// capture.js — the Record top-bar control + the Playback floating panel (Web
+// Phase 3, split §11; Record moved out of its own sidebar card into the top
+// bar in issue #118, 2026-08-19; Playback moved out of its own sidebar card
+// into a floating panel docked at the bottom of the 3D viewport in issue
+// #123, 2026-08-19).
 //
 // Record a live session and drive playback transport (pause/resume, speed,
 // loop, seek). Like controls.js, this turns DOM events into hub.send(...) and
@@ -36,7 +38,7 @@ export function createCapture(hub) {
     const btnRecord = $('btn-record');
     const recStatus = $('record-status');
     const recordControls = $('topbar-record');
-    const transportCard = $('transport-card');
+    const playbackPanel = $('playback-panel');
     const btnGoLive = $('btn-golive');
     const btnPlayPause = $('btn-playpause');
     // NOT `btn-restart` -- that id was shared with the top bar's "Restart Server"
@@ -226,8 +228,8 @@ export function createCapture(hub) {
                 : '';
         }
 
-        // Playback card visibility + transport state.
-        if (transportCard) transportCard.classList.toggle('hidden', !isReplay);
+        // Playback panel visibility + transport state.
+        if (playbackPanel) playbackPanel.classList.toggle('hidden', !isReplay);
         if (isReplay) {
             const pb = session.playback;
             if (btnGoLive) btnGoLive.disabled = !session.has_live;

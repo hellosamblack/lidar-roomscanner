@@ -1175,6 +1175,126 @@ def test_the_old_capture_card_id_is_gone():
     html = _index()
     assert 'id="capture-card"' not in html
     assert 'data-card-id="capture"' not in html
+
+
+# ---------------------------------------------------------------------------
+# Playback panel relocation (issue #123) -- moved out of its own sidebar card
+# ("#transport-card") into a floating panel docked at the bottom of the 3D
+# viewport. Same rationale as the #118 checks above: a plain substring check
+# cannot tell a floating panel's button from a sidebar one, so this parses
+# the tag stack and asks what ELEMENT each control's id attribute opened
+# inside.
+# ---------------------------------------------------------------------------
+
+_TRANSPORT_CONTROL_IDS = (
+    "btn-golive", "btn-playpause", "btn-transport-restart",
+    "seg-speed", "chk-loop", "seek", "pos-status",
+)
+
+
+def test_transport_controls_appear_exactly_once():
+    """Sanity companion to `test_no_duplicate_element_ids`: the move must not
+    have left a stale second copy of any transport control id behind."""
+    parser = _parsed_index()
+    dupes = {i: parser.id_counts.get(i, 0) for i in _TRANSPORT_CONTROL_IDS
+              if parser.id_counts.get(i, 0) != 1}
+    assert not dupes, f"transport control ids not appearing exactly once: {dupes}"
+
+
+def test_transport_controls_are_not_nested_in_a_sidebar_or_card():
+    """None of the preserved transport control ids may be nested inside a
+    `[data-card-id]` card (the old `#transport-card`) or inside either
+    `.sidebar` (`#primary-bar`/`#secondary-bar`) -- that was exactly the
+    coupling this issue removes (sidebar hide/resize/collapse must no longer
+    affect playback)."""
+    parser = _parsed_index()
+    bad = {}
+    for element_id in _TRANSPORT_CONTROL_IDS:
+        stack = parser.first_stack[element_id]
+        ancestors = stack[:-1]
+        card_ancestors = [tag for tag, attrs in ancestors if "data-card-id" in attrs]
+        sidebar_ids = [attrs.get("id") for _tag, attrs in ancestors
+                       if attrs.get("id") in ("primary-bar", "secondary-bar")]
+        if card_ancestors or sidebar_ids:
+            bad[element_id] = {"card_ancestors": card_ancestors, "sidebar_ids": sidebar_ids}
+    assert not bad, f"transport controls still coupled to sidebar/card chrome: {bad}"
+
+
+def test_transport_controls_are_all_inside_the_new_playback_panel():
+    """The successor container is `#playback-panel`: every preserved control
+    id must resolve inside it, and the panel itself must be a floating
+    element (not inside any sidebar, and outside the viewport render target
+    `#canvas-container` -- it overlays it via CSS, not DOM nesting, same as
+    `#toast-layer`/`#detailed-build-status`)."""
+    parser = _parsed_index()
+
+    assert parser.id_counts.get("playback-panel") == 1, (
+        f"expected exactly one #playback-panel, found "
+        f"{parser.id_counts.get('playback-panel', 0)}"
+    )
+    panel_ancestors = parser.first_stack["playback-panel"][:-1]
+    panel_ancestor_tags = [tag for tag, _attrs in panel_ancestors]
+    assert "aside" not in panel_ancestor_tags, (
+        "#playback-panel is nested inside an <aside> sidebar; it must float "
+        f"outside both bars, ancestor tags were {panel_ancestor_tags}"
+    )
+    assert not any("data-card-id" in attrs for _tag, attrs in panel_ancestors), (
+        "#playback-panel is nested inside a [data-card-id] card"
+    )
+
+    for element_id in _TRANSPORT_CONTROL_IDS:
+        stack = parser.first_stack[element_id]
+        ancestor_ids = [attrs.get("id") for _tag, attrs in stack[:-1]]
+        assert "playback-panel" in ancestor_ids, (
+            f"#{element_id} is not nested inside #playback-panel; ancestor "
+            f"ids were {ancestor_ids}"
+        )
+
+
+def test_playback_panel_has_no_data_card_id():
+    """The panel is transient replay chrome, not a sidebar/squircle-rail
+    card -- it must not carry `data-card-id`, or layout.js's collapse/
+    persistence bookkeeping (`roomscan.card.<id>.collapsed`) would apply to
+    it, and it would need a CARD_ICONS/CARD_TITLES entry it has no use for
+    (`test_every_card_id_has_a_squircle_icon_and_title` would otherwise
+    demand one)."""
+    html = _index()
+    m = re.search(r'<div\b[^>]*\bid="playback-panel"[^>]*>', html)
+    assert m is not None, "#playback-panel not found"
+    assert "data-card-id" not in m.group(0)
+
+
+def test_playback_panel_floats_fixed_and_anchors_off_dock_bottom():
+    """The panel must be positioned `fixed` (so it floats over the 3D scene
+    rather than taking up flow layout) and anchored using `--dock-bottom`
+    (the same variable the Event Log console height feeds into), so
+    expanding the console can never slide it underneath/behind the panel."""
+    css = _style_css()
+    rule = re.search(r"\.playback-panel\s*\{([^}]*)\}", css)
+    assert rule is not None, "no .playback-panel rule found"
+    body = rule.group(1)
+    assert "position: fixed" in body
+    assert "--dock-bottom" in body
+
+
+def test_the_old_transport_card_id_is_gone():
+    """`#transport-card` / `data-card-id="transport"` must not linger as dead
+    markup once Playback has moved into the floating panel, and the
+    'transport' CARD_ICONS/CARD_TITLES entries in layout.js (which existed
+    only to give the old sidebar card a squircle button) must be gone too --
+    the panel is not part of that system at all."""
+    html = _index()
+    assert 'id="transport-card"' not in html
+    assert 'data-card-id="transport"' not in html
+
+    js = LAYOUT_JS.read_text(encoding="utf-8")
+    icon_keys = _js_object_keys(js, "CARD_ICONS")
+    title_keys = _js_object_keys(js, "CARD_TITLES")
+    assert "transport" not in icon_keys
+    assert "transport" not in title_keys
+
+
+# ---------------------------------------------------------------------------
 # Issue #122 -- WASD free-camera navigation.
 # ---------------------------------------------------------------------------
 
