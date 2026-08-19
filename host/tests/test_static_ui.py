@@ -1346,6 +1346,17 @@ def test_pos_status_can_shrink_instead_of_overflowing_into_the_speed_group():
         "#pos-status must truncate rather than visually overflow when its "
         "available width is genuinely too small"
     )
+    # #123 second follow-up: a `max-width: 190px` cap here defeated the panel's
+    # `fit-content` sizing (d936fea) -- it capped pos-status below its own
+    # ~214px scrollWidth, so it stayed ellipsized ("2:18 / 2:18 · fr...") no
+    # matter how much free space the panel actually had. min-width: 0 is the
+    # correct narrow-viewport shrink path; a max-width here is not needed and
+    # actively wrong, since it shrinks the element even when space is ample.
+    assert "max-width" not in body, (
+        "#pos-status must not carry its own max-width -- that caps it below "
+        "its natural content width even when the panel has room to spare, "
+        "defeating fit-content sizing; only min-width: 0 should gate its size"
+    )
 
 
 def test_the_old_transport_card_id_is_gone():
