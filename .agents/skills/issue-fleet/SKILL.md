@@ -546,7 +546,24 @@ other sessions are using, and both destroy the per-commit `Refs #NNN` attributio
 Re-verify before each merge: another session can land two commits mid-wave, so what was a
 fast-forward when you planned it may have diverged.
 
+**Gate on the tally line, never the pipeline's exit code.** `pytest ... | tail` exits with
+*tail's* status, and a `grep tally && merge` chain merges whenever grep *finds* the line, red or
+green. Verified the expensive way on 2026-08-19 (fleet-20260819-2147): one red branch was nearly
+merged on a "clean" exit and a second (a genuinely flaky async test) **was** merged before the
+`1 failed` in the tally was read. Parse the tally (`N failed`), decide, then merge as a separate
+Bash call — and re-run an isolated failure on merged main before accepting "flaky" as the verdict.
+
 ## Step 8.5 — The verifications only you can run
+
+**For layout/CSS work, run the pixel measurements BEFORE `merge --ff-only`, not after.** Static
+tests structurally cannot see flex resolution, intrinsic sizing, or stacking: on 2026-08-19 a
+floating-panel issue (#123) took **five** landed, suite-green follow-up commits, each refuted by
+one rendered-geometry measurement, before the root cause (a global `#seek { width: 100% }`
+poisoning flex-basis) surfaced — visible only in computed style, never in any diff. Post-merge
+gating turned one worker round-trip into five full-suite cycles. The main server serves *main's*
+static files, so pre-merge means either a worktree-local server (`docs/web-ui-testing.md`) or, at
+minimum, measuring immediately after the first merge and holding the remaining wave until the
+geometry passes.
 
 Workers call no MCP tools and drive no browser, so every issue that needs the rig, the GPU or the
 one shared browser arrives with that row in `blocked_on`. Run those yourself after the merge — and
