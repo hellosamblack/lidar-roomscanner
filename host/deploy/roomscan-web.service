@@ -1,0 +1,36 @@
+# roomscan-web supervised server — systemd USER unit (#207)
+#
+# Keeps roomscan-web up on the headless dev box: auto-restart on crash, start at
+# boot, survive logout. See docs/headless-host-setup.md → "Keeping the server up".
+#
+# Install (one-time):
+#   mkdir -p ~/.config/systemd/user
+#   cp host/deploy/roomscan-web.service ~/.config/systemd/user/
+#   loginctl enable-linger "$USER"          # start at boot / survive logout (needs sudo)
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now roomscan-web
+#
+# The absolute paths below are this box's checkout. Adjust if the repo moves.
+
+[Unit]
+Description=roomscan-web instrument (3D room scanner UI + device stream owner)
+After=network-online.target
+Wants=network-online.target
+# Never give up restarting: no rate-limit window.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/sam/git/personal/lidar-roomscanner
+Environment=ROOMSCAN_NO_BROWSER=1
+# Marks the process as supervised so /api/restart delegates the relaunch to
+# systemd instead of spawning its own child (which would race Restart=always for
+# port 8000 + the device stream -- a double-bind crash-loop, #207). The value is
+# the unit name so the agent tools know which unit to systemctl.
+Environment=ROOMSCAN_MANAGED=roomscan-web.service
+ExecStart=/home/sam/git/personal/lidar-roomscanner/host/.venv/bin/python -m roomscan.web
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

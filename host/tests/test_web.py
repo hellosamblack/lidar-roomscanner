@@ -3408,6 +3408,18 @@ def test_bridge_mode_times_out_without_hanging(tmp_path):
     assert "did not finish" in res["error"]
 
 
+def test_managed_unit_reflects_env(monkeypatch):
+    """Under the systemd unit, ROOMSCAN_MANAGED names the supervising unit and
+    /api/restart delegates the relaunch to systemd rather than spawning a child
+    that would race Restart=always for port 8000 (#207). Unset -> unsupervised."""
+    monkeypatch.delenv("ROOMSCAN_MANAGED", raising=False)
+    assert web.managed_unit() is None
+    monkeypatch.setenv("ROOMSCAN_MANAGED", "")        # empty string is not managed
+    assert web.managed_unit() is None
+    monkeypatch.setenv("ROOMSCAN_MANAGED", "roomscan-web.service")
+    assert web.managed_unit() == "roomscan-web.service"
+
+
 def test_restart_argv_uses_module_form_not_argv0():
     import sys
     """Under `python -m roomscan.web`, sys.argv[0] is the expanded path to

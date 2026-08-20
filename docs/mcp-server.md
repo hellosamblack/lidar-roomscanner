@@ -73,8 +73,8 @@ in-process call meanwhile.
 | tool | notes |
 |---|---|
 | `rig_status()` | start here: server up?, source, fps, playback frame, streams |
-| `rig_up(replay?, replay_fps?)` | starts the server detached; `replay` for deterministic checks |
-| `rig_down()` | terminates it and drops the `/ws` connection |
+| `rig_up(replay?, replay_fps?)` | starts the server; `replay` for deterministic checks. On a systemd-supervised box (#207) a no-replay call `systemctl --user start`s the managed live server; `replay` first stops the unit so the replay can bind :8000 + the device, then `rig_up()` (no args) restores live. Unsupervised → bare `python -m roomscan.web` as before |
+| `rig_down()` | stops the server and drops the `/ws` connection. When the unit manages it, `systemctl --user stop` holds it down (a bare `terminate()` is undone by `Restart=always` within `RestartSec`); still reaps a stray replay process (#207) |
 | `rig_command(name, param?, timeout?)` | device COMMAND/ACK, matched to the command sent; `ok=false` when the ACK is an error. `timeout` defaults to 5 s, except `standby` at 20 s — it powers the ToF laser down/up and does not ACK inside 5 s (#171) |
 | `rig_idle(auto_idle?, level?, wake?)` | wake the ToF laser and/or control the laser-wear auto-idle; disable `auto_idle` before recording a static scene (else the laser parks mid-capture and only IMU is recorded), restore it after |
 | `rig_record(on)` | records via the server, returning the capture path |

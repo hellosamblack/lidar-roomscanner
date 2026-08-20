@@ -63,6 +63,48 @@ fires even when a module import fails silently. The trace pinpoints the layer:
 The first panel line (`protocol=… host=…`) tells you *where the browser actually
 is* — the most useful clue when the viewing browser isn't on the host itself.
 
+## Keeping the server up — the supervised systemd service (#207)
+
+On the dev box the server runs as an **always-on systemd *user* service** so a
+session ending (or a crash) never leaves the host with no server. Linger is
+enabled for the user, so it starts at boot and survives logout.
+
+```sh
+systemctl --user status roomscan-web        # is it up? how many restarts?
+journalctl --user -u roomscan-web -f        # live logs
+systemctl --user restart roomscan-web       # reload after a code change
+systemctl --user stop roomscan-web          # free :8000 + the device stream
+systemctl --user disable --now roomscan-web # turn the supervisor off entirely
+```
+
+Unit: `~/.config/systemd/user/roomscan-web.service`, tracked in the repo at
+`host/deploy/roomscan-web.service` (with its one-time install steps in the header)
+— runs `host/.venv/bin/python -m roomscan.web` from the repo root with
+`Restart=always`, `RestartSec=2`, and
+`Environment=ROOMSCAN_MANAGED=roomscan-web.service`.
+
+**`Restart=always` makes systemd the single lifecycle authority — do not fight
+it.** Anything that stops the server out-of-band (`kill`, a bare
+`terminate()`, a second `python -m roomscan.web`) is either undone within
+`RestartSec` or races the supervised copy for port 8000 + the device stream (a
+double-bind crash-loop). So:
+
+- **Reload new code with `systemctl --user restart`**, not `kill` + `setsid
+  python -m roomscan.web`. The old manual-relaunch recipe now collides with the
+  supervisor.
+- **The `ROOMSCAN_MANAGED` marker teaches the server to cooperate**: `/api/restart`
+  (the "Restart Server" button) detects it and simply exits, letting `Restart=always`
+  respawn — it does *not* spawn its own relaunch child.
+- **The agent lifecycle tools drive the unit** when it is installed: `rig_down()`
+  `systemctl --user stop`s it (so it stays down for an unattended `capture.py --udp`
+  or exclusive device access); `rig_up()` (no replay) `systemctl --user start`s it;
+  `rig_up(replay=…)` stops it first so the replay can bind, and `rig_up()` restores
+  the live server afterwards. On a box **without** the unit these tools fall back to
+  the old bare-process path unchanged.
+- **Recording while the UI stays live still goes through the server's own recorder**
+  (`rig_record()` / the `/ws` `record` message), not `capture.py` — the service
+  owning the stream doesn't change that (`recording-vs-web-server` memory).
+
 ## Environment notes
 
 - **No USB link to this host** — Ethernet/UDP is the only transport here; the USB

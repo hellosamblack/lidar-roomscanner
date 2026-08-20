@@ -4655,6 +4655,18 @@ def run_bridge_mode(script: Path = BRIDGE_SCRIPT,
             "output": output.strip(), "error": None}
 
 
+def managed_unit() -> str | None:
+    """The systemd unit supervising this server, or None if unsupervised.
+
+    Set by the unit file (`Environment=ROOMSCAN_MANAGED=roomscan-web.service`).
+    When present, /api/restart must NOT spawn its own relaunch child: systemd's
+    `Restart=always` already owns the process, so a second detached relaunch
+    races it for port 8000 + the device stream -- a permanent double-bind
+    crash-loop (#207). We just exit and let systemd bring the server back.
+    """
+    return os.environ.get("ROOMSCAN_MANAGED") or None
+
+
 def restart_argv() -> list[str]:
     """The command that relaunches this server.
 
@@ -4691,11 +4703,25 @@ async def api_bridge_mode() -> JSONResponse:
 async def api_restart() -> JSONResponse:
     """Relaunch the server process.
 
-    Spawns a detached child that waits for this process to release port 8000,
-    then execs a fresh server; this process exits once the response is on the
-    wire. stdout/stderr are inherited so the new process keeps writing to
-    whatever log the old one had (e.g. /tmp/web-live.log).
+    Under systemd supervision (`managed_unit()` set) we do NOT spawn a relaunch
+    child: we just exit, and `Restart=always` respawns the server. Spawning our
+    own child there would race systemd for port 8000 + the device stream and
+    crash-loop the loser forever (#207).
+
+    Unsupervised, we spawn a detached child that waits for this process to
+    release port 8000, then execs a fresh server; this process exits once the
+    response is on the wire. stdout/stderr are inherited so the new process keeps
+    writing to whatever log the old one had (e.g. /tmp/web-live.log).
     """
+    unit = managed_unit()
+    if unit:
+        async def _exit_soon_managed() -> None:
+            await asyncio.sleep(0.3)   # let the JSON response flush
+            os._exit(0)                # systemd Restart=always respawns us
+        asyncio.create_task(_exit_soon_managed())
+        return JSONResponse({"ok": True, "restart_via": "systemd", "unit": unit,
+                             "restart_in_s": RESTART_DELAY_S})
+
     argv = restart_argv()
     try:
         subprocess.Popen(

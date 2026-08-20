@@ -1420,3 +1420,38 @@ def test_profile_estimate_requires_a_whole_manual_candidate():
 
     assert r["ok"] is False
     assert "exposure_ms" in r["errors"][0]
+
+
+def test_unit_helpers_parse_systemctl_output(monkeypatch):
+    """`_unit_loaded`/`_unit_active` gate the whole managed lifecycle path (#207).
+    They must read `systemctl --user` output exactly, and treat any failure to
+    reach the user bus as "unmanaged" so the bare-process path runs unchanged."""
+    from roomscan.mcp_server import tools_rig as T
+
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        assert argv[:2] == ["systemctl", "--user"], argv
+        if "show" in argv:                       # LoadState query
+            return SimpleNamespace(returncode=0, stdout="loaded\n", stderr="")
+        if "is-active" in argv:
+            return SimpleNamespace(returncode=0, stdout="active\n", stderr="")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(T.subprocess, "run", fake_run)
+    assert T._unit_loaded() is True
+    assert T._unit_active() is True
+
+    # not-loaded / inactive
+    monkeypatch.setattr(T.subprocess, "run", lambda a, **k: SimpleNamespace(
+        returncode=1, stdout="not-found\n" if "show" in a else "inactive\n", stderr=""))
+    assert T._unit_loaded() is False
+    assert T._unit_active() is False
+
+    # unreachable user bus (no systemd, headless cron) -> unmanaged, never raises
+    def boom(a, **k):
+        raise OSError("no bus")
+    monkeypatch.setattr(T.subprocess, "run", boom)
+    assert T._unit_loaded() is False
+    assert T._unit_active() is False

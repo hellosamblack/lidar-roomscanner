@@ -61,6 +61,39 @@ def _http_ok(timeout: float = 2.0) -> bool:
         return False
 
 
+# The systemd *user* unit that supervises roomscan-web on this box (#207). When
+# it is installed, it -- not these tools -- owns the server's lifecycle: it keeps
+# the live server up (`Restart=always`) and restarts it at boot. So rig_up/
+# rig_down must drive the unit (`systemctl --user start/stop`) rather than a bare
+# process, or `terminate()` gets undone within RestartSec. When the unit is
+# absent (e.g. another box, or the MCP process cannot reach the user bus) every
+# helper degrades to "unmanaged" and the old bare-process path runs unchanged.
+WEB_UNIT = "roomscan-web.service"
+
+
+def _systemctl(*args: str, timeout: float = 10.0) -> subprocess.CompletedProcess:
+    """Run `systemctl --user <args>`; never raises on non-zero (read returncode)."""
+    return subprocess.run(["systemctl", "--user", *args], capture_output=True,
+                          text=True, timeout=timeout, check=False)
+
+
+def _unit_loaded() -> bool:
+    """Whether the roomscan-web user unit is installed and reachable here."""
+    try:
+        r = _systemctl("show", WEB_UNIT, "-p", "LoadState", "--value")
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0 and r.stdout.strip() == "loaded"
+
+
+def _unit_active() -> bool:
+    try:
+        r = _systemctl("is-active", WEB_UNIT)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.stdout.strip() == "active"
+
+
 @mcp.tool()
 async def rig_status(reconnect: bool = True) -> dict:
     """Whether roomscan-web is up, what it is playing, and how it is streaming.
@@ -131,11 +164,44 @@ async def rig_up(replay: str = "", replay_fps: float = 0.0, wait_s: float = 30.0
     `replay` points at a capture (repo-relative) to play instead of the live device
     -- the usual choice for verification, since it is deterministic and does not
     need the board. Returns the server's first `state` broadcast.
+
+    On a systemd-supervised box (#207): a no-replay `rig_up()` starts/restores the
+    managed live server through the unit (so it stays supervised); a replay first
+    stops the unit -- which otherwise holds :8000 + the device and `Restart=always`
+    would fight the bare replay process -- then runs the replay as before.
+    `rig_up()` (no args) or `rig_down()` then `rig_up()` restores the live server.
     """
+    managed = _unit_loaded()
+
+    # A replay must displace a supervised LIVE server before it can bind.
+    if replay and managed and _unit_active():
+        await asyncio.to_thread(_systemctl, "stop", WEB_UNIT, timeout=20.0)
+        for _ in range(20):
+            if not _http_ok():
+                break
+            await asyncio.sleep(0.25)
+
     if _http_ok():
         return {"ok": True, "already_running": True,
                 "pids": [p.info["pid"] for p in _server_procs()],
                 "status": await rig_status()}
+
+    # No replay on a supervised box -> (re)start the managed live server via the
+    # unit, so it comes back under supervision rather than as a bare process.
+    if not replay and managed:
+        r = await asyncio.to_thread(_systemctl, "start", WEB_UNIT, timeout=20.0)
+        if r.returncode != 0:
+            return {"ok": False,
+                    "error": f"systemctl --user start {WEB_UNIT} failed: {r.stderr.strip()}"}
+        deadline = asyncio.get_event_loop().time() + wait_s
+        while asyncio.get_event_loop().time() < deadline:
+            if _http_ok():
+                await asyncio.sleep(1.0)
+                return {"ok": True, "managed": True, "unit": WEB_UNIT,
+                        "status": await rig_status()}
+            await asyncio.sleep(0.5)
+        return {"ok": False, "unit": WEB_UNIT,
+                "error": f"unit started but no HTTP within {wait_s}s"}
 
     cmd = [str(VENV_PY), "-m", "roomscan.web"]
     if replay:
@@ -168,8 +234,19 @@ async def rig_up(replay: str = "", replay_fps: float = 0.0, wait_s: float = 30.0
 
 @mcp.tool()
 async def rig_down() -> dict:
-    """Stop roomscan-web and drop the /ws connection."""
+    """Stop roomscan-web and drop the /ws connection.
+
+    On a supervised box, `terminate()` alone is undone by `Restart=always` within
+    RestartSec, so if the unit is managing the server we `systemctl --user stop`
+    it (which holds it down) before reaping any stray non-unit process such as a
+    leftover replay (#207). `rig_up()` restores the live server.
+    """
     await rig.close()
+    managed = _unit_loaded()
+    unit_stopped = False
+    if managed and _unit_active():
+        r = await asyncio.to_thread(_systemctl, "stop", WEB_UNIT, timeout=20.0)
+        unit_stopped = r.returncode == 0
     procs = _server_procs()
     pids = [p.info["pid"] for p in procs]
     for p in procs:
@@ -186,7 +263,8 @@ async def rig_down() -> dict:
                 survivors.append(p.info["pid"])
         except Exception:
             pass
-    return {"ok": not _http_ok(), "terminated": pids, "killed": survivors}
+    return {"ok": not _http_ok(), "terminated": pids, "killed": survivors,
+            "managed": managed, "unit_stopped": unit_stopped}
 
 
 # Per-command minimum wait, keyed by `resolve_command()`'s command NAME (not its
