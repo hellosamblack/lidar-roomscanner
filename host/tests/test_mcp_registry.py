@@ -43,6 +43,7 @@ EXPOSED: dict[str, tuple[str, ...]] = {
     "orientation_probe.py": ("orientation_probe",),
     "profile_probe.py": ("capture_profile_probe",),
     "profile_tuning.py": ("profile_tuning",),
+    "rtabmap_compare.py": ("rtabmap_trajectory_compare",),
     "skew_check.py": ("capture_skew",),
     "slam_ensemble.py": ("slam_ensemble",),
     "slam_icp_bench.py": ("slam_icp_bench",),

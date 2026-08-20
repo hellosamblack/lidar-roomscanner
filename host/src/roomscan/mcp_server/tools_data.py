@@ -113,6 +113,43 @@ def capture_list(surveyed: bool = True) -> dict:
 
 
 @mcp.tool()
+def rtabmap_trajectory_compare(
+    rtabmap_db: str,
+    roomscan_tum: str,
+    alignment_window_s: float = 30.0,
+    final_window_s: float = 60.0,
+    clock_step_s: float = 0.02,
+) -> dict:
+    """Compare roomscanner SLAM with an attached phone's independent RTAB-Map path.
+
+    Reads the graph-optimized trajectory directly from RTAB-Map's `.db`, aligns
+    its clock to the roomscanner `.tum` by angular-speed correlation (invariant
+    to the unknown rigid phone mount), rigidly aligns only the leading position
+    window, and reports held-out per-axis error growth. Partial phone coverage is
+    expected: AshOffice's RTAB path ended after 43% of the scanner recording.
+
+    Read `distance.path_length_ratio_roomscanner_over_rtabmap` for physical scale.
+    `alignment.full_overlap_similarity_scale_diagnostic` is labelled separately
+    because Umeyama scale collapses when the path shapes disagree; it is a fit
+    parameter, not evidence that the scanner scale is wrong.
+    """
+    from roomscan.trajectory_compare import compare_rtabmap_to_roomscan
+
+    db_path = Path(rtabmap_db)
+    tum_path = Path(roomscan_tum)
+    if not db_path.is_absolute():
+        db_path = REPO / db_path
+    if not tum_path.is_absolute():
+        tum_path = REPO / tum_path
+    return compare_rtabmap_to_roomscan(
+        db_path, tum_path,
+        alignment_window_s=alignment_window_s,
+        final_window_s=final_window_s,
+        clock_step_s=clock_step_s,
+    )
+
+
+@mcp.tool()
 def capture_analyze(path: str, min_zero_run: int = 50, zero_scan_frames: int = 8,
                     dump_bytes: int = 0, include_frame_log: bool = False) -> dict:
     """Byte-exact forensics plus stream continuity: CRC, skip runs, truncation, lost frames.

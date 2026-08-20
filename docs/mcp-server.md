@@ -144,6 +144,7 @@ carries the same ranging state (`ranging_profile`, `ranging_measured_fps`,
 ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, compare?)`,
 `capture_skew(path, window_s?)`, `capture_motion(path)`, `capture_heading(path, cal_path?)`,
 `capture_meta(path)`, `capture_profile_probe(path, requested_fps?, udp_stats?)`,
+`rtabmap_trajectory_compare(rtabmap_db, roomscan_tum, alignment_window_s?, final_window_s?, clock_step_s?)`,
 `profile_estimate(profile?, ranging_mode?, fps?, exposure_ms?, power_mode?, imu_env_rate_hz?, transport?)`,
 `profile_tuning(ranging_mode?, power_config?, resolution?, dss?, output_interface?, fps?, exposure_ms?, ambient_lux?)`,
 `slam_rerender(capture, voxel_size?, block_count?, device?, max_frames?, icp_trace_start_s?, icp_trace_end_s?)`,
@@ -202,6 +203,17 @@ fitness/RMSE, per-axis extents + ratio, floor footprint, bidirectional cloud-to-
 distance, and a vertical/ceiling-fork analysis, writing overlay/heatmap PLYs and
 floor-plan + elevation PNGs under `results/compare/<stem>__vs__<ref>/`. Torch-free
 (open3d + plyfile), shelled out to `roomscan-splat compare` like the other heavy jobs.
+
+`rtabmap_trajectory_compare` is the independent path-level witness for a paired phone
+and roomscanner run. It reads RTAB-Map's optimized poses directly from the phone `.db`
+(`Admin.opt_ids` / `Admin.opt_poses` are raw-zlib blobs), joins timestamps from
+`Node.stamp`, and aligns clocks by angular-speed magnitude so no phone-mount extrinsic is
+needed. It then rigidly fits only a short leading window and reports held-out error growth
+in RTAB-Map's +Z-up frame; RTAB ending before the scanner is normal and is reported under
+`coverage`. Keep `distance.path_length_ratio_roomscanner_over_rtabmap` separate from
+`alignment.full_overlap_similarity_scale_diagnostic`: the former measures physical path
+scale, while the latter is a least-squares fit parameter that can collapse when the two
+trajectory shapes disagree (0.955 versus 0.497 on AshOffice).
 
 `splat_vram_sweep` and `splat_sfm_probe` answer "how dense a splat can we get away
 with on THIS capture?" — density has two independent ceilings and each tool measures
