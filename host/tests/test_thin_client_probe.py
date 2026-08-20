@@ -1,4 +1,4 @@
-"""Regression test for `tools/thin_client_probe.py`'s orbit measurement (#197).
+"""Regression tests for `tools/thin_client_probe.py`'s observables (#197).
 
 Live finding, 2026-08-18: `thin_orbit` read as pixel-dead on a real server at
 a high negotiated fps (jpeg@30) while a direct websocket client saw it move
@@ -23,7 +23,14 @@ import numpy as np
 import pytest
 
 from roomscan.thin_render import pack_thin_frame, rgba_to_rgb565
-from tools.thin_client_probe import DEFAULT_THIN_INTERVAL_S, DRAIN_POLL_TIMEOUT, _ThinLink, _probe_orbit
+from tools import thin_client_probe as probe
+from tools.thin_client_probe import (
+    DEFAULT_THIN_INTERVAL_S,
+    DRAIN_POLL_TIMEOUT,
+    _ThinLink,
+    _collect_initial,
+    _probe_orbit,
+)
 
 
 def _solid_frame(level: int, size: int = 4) -> bytes:
@@ -97,6 +104,82 @@ class _LiveProducer:
 
 def _fresh_report() -> dict:
     return {"commands_sent": [], "errors": [], "decode_errors": [], "server_error": None}
+
+
+class _FakeClock:
+    """Module-shaped monotonic clock whose advances are exact and explicit."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _TimedFrameLink:
+    """Three wire frames arriving at a fixed cadence on the fake clock."""
+
+    def __init__(self, clock: _FakeClock, count: int, interval_s: float):
+        self.clock = clock
+        self.remaining = count
+        self.interval_s = interval_s
+        self.closed_error = None
+
+    async def next_frame(self, _timeout: float):
+        if not self.remaining:
+            return None
+        self.remaining -= 1
+        self.clock.advance(self.interval_s)
+        return {
+            "tag": 2,
+            "width": 1,
+            "height": 1,
+            "total_bytes": 19,
+            "rgb": np.zeros((1, 1, 3), dtype=np.uint8),
+        }
+
+
+def test_collect_initial_excludes_probe_postprocessing_from_wire_fps(monkeypatch, tmp_path):
+    """Slow stats/PNG observability must not throttle or contaminate the rate.
+
+    The fake wire is exactly 10 fps. Each probe-only postprocessing step costs
+    a full second, deliberately dwarfing that cadence. The pre-fix interleaved
+    loop therefore reported 0.48 fps; collecting/timestamping first reports the
+    actual 10.0 fps while retaining all three per-frame artifacts.
+    """
+    clock = _FakeClock()
+    link = _TimedFrameLink(clock, count=3, interval_s=0.1)
+    report = {
+        **_fresh_report(),
+        "frames": [],
+        "frames_received": 0,
+        "measured_fps": None,
+        "measured_bytes_per_s": None,
+        "measured_mbps": None,
+    }
+
+    def slow_stats(_rgb):
+        clock.advance(1.0)
+        return {"distinct_colors": 1}
+
+    def slow_save(_rgb, path):
+        clock.advance(1.0)
+        return {"path": str(path), "saved": True}
+
+    monkeypatch.setattr(probe, "time", clock)
+    monkeypatch.setattr(probe, "frame_stats", slow_stats)
+    monkeypatch.setattr(probe, "save_png", slow_save)
+
+    asyncio.run(_collect_initial(link, 3, tmp_path, report, timeout=1.0))
+
+    assert report["measured_fps"] == 10.0
+    assert report["measured_bytes_per_s"] == 190
+    assert report["measured_mbps"] == pytest.approx(0.002)
+    assert report["frames_received"] == 3
+    assert len(report["frames"]) == 3
 
 
 def _run_probe_orbit(ws, report, tmp_path, *, interval_s: float, timeout: float = 5.0):

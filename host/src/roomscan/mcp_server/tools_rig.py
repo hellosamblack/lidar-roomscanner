@@ -1073,7 +1073,10 @@ async def rig_thin_probe(frames: int = 5, url: str = "", out_dir: str = "",
 
     `frame_stats` per frame includes `distinct_colors` -- a silently failed
     render is a uniformly filled buffer that every mean/variance check calls a
-    picture, so check that number before believing a frame.
+    picture, so check that number before believing a frame. `measured_fps` and
+    `measured_mbps` cover the initial decoded receive batch and are timestamped
+    before the probe computes those statistics or writes PNGs; the probe's own
+    observability work therefore cannot masquerade as server/network latency.
 
     `record=False` by default and must be passed explicitly: `thin_record`
     starts a REAL capture. Everything else here is read-only.

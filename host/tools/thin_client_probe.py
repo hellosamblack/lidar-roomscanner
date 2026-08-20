@@ -522,9 +522,16 @@ async def _probe_hello(link: _ThinLink, report: dict, *, fmt: str | None,
 
 async def _collect_initial(link: _ThinLink, frames: int, out_dir: Path,
                            report: dict, timeout: float) -> None:
-    """Receive `frames` frames in the default mode, timing the real cadence."""
-    started = None
-    last = None
+    """Receive `frames` frames in the default mode, timing the wire cadence.
+
+    Decode happens in ``link.next_frame`` and is therefore part of the client
+    cost, just as it is on the CrowPanel.  Image statistics and PNG writes are
+    probe-only observability work, though, and must happen *after* collection:
+    doing them between credited v2 frames makes this instrument throttle the
+    server and then misreport that observer delay as the server's frame rate.
+    """
+    received: list[dict] = []
+    received_at: list[float] = []
     for i in range(frames):
         info = await link.next_frame(timeout)
         if info is None:
@@ -533,20 +540,31 @@ async def _collect_initial(link: _ThinLink, frames: int, out_dir: Path,
                    f"no THIN_FRAME within {timeout:g}s")
             report["errors"].append(f"{why} (frame {i + 1} of {frames})")
             break
-        now = time.monotonic()
-        if started is None:
-            started = now  # start the clock on the FIRST frame: everything before
-            # it is connect + the server's first-tick latency, not feed cadence
-        last = now
+        received.append(info)
+        received_at.append(time.monotonic())
+
+    got = len(received)
+    span = ((received_at[-1] - received_at[0]) if got > 1 else 0.0)
+    report["frames_received"] = got
+    report["measured_fps"] = round((got - 1) / span, 2) if span > 0 else None
+    # Match bytes to the same N-1 intervals used by measured_fps: the first
+    # frame opens the timing window, so counting it would overstate the rate.
+    measured_bytes = sum(int(info["total_bytes"]) for info in received[1:])
+    measured_bytes_per_s = (measured_bytes / span) if span > 0 else None
+    report["measured_bytes_per_s"] = (
+        round(measured_bytes_per_s) if measured_bytes_per_s is not None else None)
+    report["measured_mbps"] = (
+        round(measured_bytes_per_s * 8.0 / 1_000_000.0, 3)
+        if measured_bytes_per_s is not None else None)
+
+    # Preserve the probe's existing per-frame artifacts, but keep their CPU and
+    # filesystem cost outside the receive-cadence measurement and v2 credit loop.
+    for i, info in enumerate(received):
         entry = {"index": i, "tag": info.get("tag"), "width": info["width"],
                  "height": info["height"], "total_bytes": info["total_bytes"],
                  **frame_stats(info["rgb"])}
         entry.update(save_png(info["rgb"], out_dir / f"frame_{i:02d}.png"))
         report["frames"].append(entry)
-    got = len(report["frames"])
-    span = (last - started) if (started is not None and last is not None) else 0.0
-    report["frames_received"] = got
-    report["measured_fps"] = round((got - 1) / span, 2) if got > 1 and span > 0 else None
 
 
 async def _probe_orbit(link: _ThinLink, out_dir: Path, report: dict,
@@ -700,7 +718,8 @@ async def probe_async(frames: int = DEFAULT_FRAMES, url: str = DEFAULT_URL,
     report: dict = {
         "ok": False, "url": ws_url, "out_dir": str(out),
         "frames_requested": int(frames), "frames_received": 0,
-        "measured_fps": None, "frames": [], "decode_errors": [],
+        "measured_fps": None, "measured_bytes_per_s": None,
+        "measured_mbps": None, "frames": [], "decode_errors": [],
         "hello": None, "orbit": None, "modes": {}, "record": None,
         "telemetry": None, "telemetry_seen": 0,
         "commands_sent": [], "server_error": None, "errors": [],
@@ -831,7 +850,8 @@ def _print(rep: dict) -> None:
         e = rep["server_error"]
         print(f"  SERVER REFUSED: {e.get('error')}: {e.get('message')}")
     print(f"  frames {rep['frames_received']}/{rep['frames_requested']}"
-          f"  fps {rep['measured_fps']}  telemetry msgs {rep['telemetry_seen']}")
+          f"  fps {rep['measured_fps']}  wire {rep['measured_mbps']} Mbps"
+          f"  telemetry msgs {rep['telemetry_seen']}")
     for f in rep["frames"]:
         print(f"    frame {f['index']:02d} {f.get('width')}x{f.get('height')} "
               f"{f.get('distinct_colors')} colors  nonblack {f.get('nonblack_frac')}"
