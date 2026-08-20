@@ -161,8 +161,11 @@ real-time view modes `#seg-view-mode button[data-viewmode=world|fpv|mirror]`
 plus their camera framing `sl-cam-distance`/`sl-cam-height`/`sl-cam-rotation`
 and `btn-cam-reset` (each edits the *selected* mode's framing) plus the
 world-only auto-orbit `chk-orbit`/`sl-orbit-speed`,
-the Record card `btn-record` (Live page only), the Playback card
-`#transport-card` with `btn-golive`, `btn-playpause`, `btn-transport-restart`
+the top-bar Record control `#topbar-record`/`btn-record` (Live page only; moved
+out of its sidebar card by #118), the floating playback panel
+`#playback-panel` (replaced the `#transport-card` sidebar card, #123 — fixed
+position over the viewport bottom, replay only) with `btn-golive`,
+`btn-playpause`, `btn-transport-restart`
 (**not** `btn-restart`, which is the top bar's Restart Server — see BUG-047),
 `seg-speed button[data-fps=…]`, `chk-loop`, `seek`, `pos-status`, the §12
 View-page capture browser `#browser-card` with `#cap-grid .cap-tile[data-name]`,

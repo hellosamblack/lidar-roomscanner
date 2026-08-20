@@ -79,7 +79,7 @@ in-process call meanwhile.
 | `rig_idle(auto_idle?, level?, wake?)` | wake the ToF laser and/or control the laser-wear auto-idle; disable `auto_idle` before recording a static scene (else the laser parks mid-capture and only IMU is recorded), restore it after |
 | `rig_record(on)` | records via the server, returning the capture path |
 | `rig_set(...)` | legacy display options; verifies the echo before reporting success |
-| `rig_view(source?, display?, regenerate?)` | authoritative Live/View and Point cloud/Preview/SLAM/Detailed control |
+| `rig_view(source?, display?, regenerate?)` | authoritative Live/View and Point cloud/Preview/SLAM/Detailed control. With `regenerate=True` it awaits the server's `detailed` broadcast (the same way `rig_save` awaits `saved`) and returns it as `detailed` (`{"started": bool, "reason": ...}` plus progress fields); `ok=False` with the refusal reason as `error` when the rebuild did not start (#189) |
 | `rig_profile(profile?, ranging_mode?, fps?, exposure_ms?, power_mode?, force?)` | read or set the ranging profile; `ok=true` only once the **device** reads back the requested config (see below) |
 | `rig_imu_env_rate(rate_hz?, coupled?, require_full_env?)` | read or set the IMU/env poll rate (streams 9/10/11) — a second, independent command from `rig_profile` |
 | `rig_playback(action, value?)` | `go_live` / `load_capture` / transport. **`go_live`, `load_capture`, `seek` and `restart` discard the ephemeral SLAM map** — they begin a new replay timeline, so the worker/TSDF/trajectory/cached mesh and all sensor state reset (BUG-091, `docs/web-protocol.md` → "Timeline discontinuities"). Seeking mid-scan throws the scan away and restarts from the seek point; `pause`/`resume`/`speed`/`loop` keep the map |
