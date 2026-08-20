@@ -97,9 +97,14 @@ export function createCommStatus(hub) {
         introEl.textContent = (t.addr ? t.addr + ' — ' : '') + (t.detail || '');
 
         factsOrEmpty(linkEl, t.link, 'no link data');
-        factsOrEmpty(deviceEl, t.device,
-            t.informational ? 'not connected — informational, not a fault'
-                            : 'no device data yet');
+
+        // Only show "not connected" if device is genuinely absent (no link data).
+        // A present device with no device facts should show neutral text.
+        const deviceIsAbsent = !t.link || Object.keys(t.link).length === 0;
+        const emptyDeviceText = deviceIsAbsent && t.informational
+            ? 'not connected — informational, not a fault'
+            : 'no device data yet';
+        factsOrEmpty(deviceEl, t.device, emptyDeviceText);
 
         const hasMgmt = !!(t.management && (t.management.reboot || t.management.logs));
         mgmtSection.classList.toggle('hidden', !hasMgmt);
