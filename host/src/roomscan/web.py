@@ -1468,19 +1468,15 @@ def resources_to_dict(res) -> dict | None:
     GPU, no NVML, or a psutil error all report absence rather than a zero that
     reads as a measurement (the trap in the verify-the-knob memory).
 
-    `gpu_util`/`gpu_source` fall back to device-wide NVML utilization
-    (`_device_gpu_util`, "nvml-device") when the per-process sampler has
-    nothing (`res.gpu_util is None`) -- the common case here, since this box
-    has no `pynvml`. The per-process figure, when present, always wins.
+    This is deliberately a pure projection of the background sampler's cached
+    snapshot. In particular it performs no NVML call: on this host opening and
+    querying NVML costs about 40 ms, and doing that here used to block the
+    asyncio broadcaster every 4 Hz metrics tick (#197). `ResourceSampler`
+    applies the device-wide fallback on its own thread; the per-process figure,
+    when present, still wins.
     """
     if res is None:
         return None
-    gpu_util, gpu_source = res.gpu_util, res.gpu_source
-    if gpu_util is None:
-        dev_util = _device_gpu_util()
-        if dev_util is not None:
-            gpu_util = float(dev_util["gpu_pct"])
-            gpu_source = "nvml-device"
     return {
         "proc_cpu_percent": round(float(res.proc_cpu_percent), 1),
         "n_cores": int(res.n_cores),
@@ -1489,11 +1485,11 @@ def resources_to_dict(res) -> dict | None:
         "ram_used": None if res.ram_used is None else int(res.ram_used),
         "sys_cpu_percent": (None if res.sys_cpu_percent is None
                             else round(float(res.sys_cpu_percent), 1)),
-        "gpu_util": None if gpu_util is None else round(float(gpu_util), 1),
+        "gpu_util": None if res.gpu_util is None else round(float(res.gpu_util), 1),
         "proc_vram": None if res.proc_vram is None else int(res.proc_vram),
         "vram_total": None if res.vram_total is None else int(res.vram_total),
         "gpu_name": res.gpu_name,
-        "gpu_source": gpu_source,
+        "gpu_source": res.gpu_source,
         "device_vram_used": (None if res.device_vram_used is None
                              else int(res.device_vram_used)),
         "device_vram_total": (None if res.device_vram_total is None
@@ -7773,9 +7769,13 @@ def main(argv=None) -> int:
     bus = LogBus()
     # Resource monitor (owner ask, 2026-07-31). The sampler has existed since
     # Phase 1 but was never constructed, so `metrics.resources` was hardcoded
-    # null. It is a daemon thread doing one psutil + one NVML read every 0.7 s;
-    # on a GPU-less box the NVML half reports "n/a" and everything still works.
-    resource_sampler = ResourceSampler()
+    # null. It is a daemon thread doing psutil + NVML sampling every 0.7 s; on
+    # a GPU-less box the NVML fields report "n/a" and everything still works.
+    # The ctypes device-utilization fallback belongs on the sampler thread.
+    # `resources_to_dict` runs on the 4 Hz asyncio broadcaster and must remain
+    # a cached projection: opening/querying NVML there measured ~40 ms and was
+    # enough to pull a negotiated 30 fps thin feed down to ~26 fps (#197).
+    resource_sampler = ResourceSampler(device_util_probe=_device_gpu_util)
     resource_sampler.start()
     metrics = MetricsRegistry(window_s=2.0, sampler=resource_sampler)
     dispatcher = CommandDispatcher(client, on_message=bus.publish)

@@ -162,11 +162,11 @@ class ResourceSnapshot:
     n_cores: int
     proc_rss: int                   # our process resident set size (bytes)
     ram_total: int                  # system RAM (the capacity the bar fills toward)
-    gpu_util: float | None          # our process SM utilization %, None if no NVML
+    gpu_util: float | None          # process or device SM utilization; see gpu_source
     proc_vram: int | None           # our process VRAM (bytes), None if unavailable
     vram_total: int | None
     gpu_name: str | None
-    gpu_source: str                 # "pynvml" | "n/a" | test tag
+    gpu_source: str                 # "pynvml" | "nvml-device" | "n/a" | test tag
     # System/device-wide (all None-able: no psutil sample yet, or no GPU).
     sys_cpu_percent: float | None = None    # whole-box CPU %, 0..100 across all cores
     ram_used: int | None = None             # system RAM in use (total - available)
@@ -463,18 +463,22 @@ class ResourceSampler:
     probe never stalls it.
 
     Samples both scopes: this process (``proc_*``, psutil + per-process NVML) and
-    the whole box (``sys_cpu_percent`` / ``ram_used`` / ``device_vram_*``). Both
-    probes are injectable (``gpu_probe``, ``vram_probe``) so tests need no GPU;
-    ``pid`` defaults to the current process.
+    the whole box (``sys_cpu_percent`` / ``ram_used`` / ``device_vram_*``).
+    ``device_util_probe`` optionally supplies the device-wide utilization
+    fallback when the per-process probe has none. Every probe runs on this
+    thread -- a consumer of :meth:`latest` must never perform hardware I/O.
+    All probes are injectable so tests need no GPU; ``pid`` defaults to the
+    current process.
     """
 
     def __init__(self, interval: float = 0.7, gpu_probe=None, pid: int | None = None,
-                 vram_probe=None):
+                 vram_probe=None, device_util_probe=None):
         import os
         self.interval = interval
         self._pid = pid if pid is not None else os.getpid()
         self._gpu_probe = gpu_probe if gpu_probe is not None else (lambda: probe_gpu_process(self._pid))
         self._vram_probe = vram_probe if vram_probe is not None else probe_device_vram
+        self._device_util_probe = device_util_probe
         self._latest: ResourceSnapshot | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -522,6 +526,16 @@ class ResourceSampler:
             except psutil.Error:
                 sys_cpu = None
             gpu_util, proc_vram, vram_total, gpu_name, src = self._gpu_probe()
+            if gpu_util is None and self._device_util_probe is not None:
+                try:
+                    dev_util = self._device_util_probe()
+                    fallback_util = (None if dev_util is None
+                                     else float(dev_util["gpu_pct"]))
+                except Exception:
+                    fallback_util = None
+                if fallback_util is not None:
+                    gpu_util = fallback_util
+                    src = "nvml-device"
             dev_used, dev_total, dev_name, dev_src = self._vram_probe()
             self._latest = ResourceSnapshot(
                 proc_cpu_percent=float(cpu),

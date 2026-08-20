@@ -571,6 +571,16 @@ not queued) in addition to the server-side reject in `_set_profile`/`_set_manual
 `_set_imu_env_rate` (a second change while pending is rejected, never silently overwriting the
 in-flight request).
 
+*Resource sampling stays off the event loop (#197).* `metrics.resources` is a
+cached `ResourceSampler` snapshot; `build_metrics_message` and
+`resources_to_dict` perform no psutil/NVML I/O. When per-process `pynvml`
+utilization is unavailable, the sampler applies the ctypes NVML device-wide
+fallback on its background thread and publishes `gpu_source="nvml-device"`.
+This placement is load-bearing: opening/querying NVML synchronously from the
+4 Hz metrics projection measured about 40 ms and pulled a concurrent negotiated
+thin feed down to 26.43 fps; moving the unchanged measurement off-loop restored
+the identical full-broadcaster profile to 30.01 fps.
+
 ### JSON (`type` → shape)
 
 | type | key fields | built by | notes |

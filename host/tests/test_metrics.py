@@ -4,6 +4,7 @@ registry, GPU probe fallback chain, and the resource sampler.
 All GPU access is mocked (no real GPU dependency); psutil is real (installed)
 and exercised lightly through the ResourceSampler integration test.
 """
+import threading
 import time
 
 from roomscan.metrics import (
@@ -257,6 +258,33 @@ def test_resource_sampler_gpu_na_when_probe_fails():
         assert snap is not None
         assert snap.gpu_source == "n/a"
         assert snap.gpu_util is None
+    finally:
+        s.stop()
+
+
+def test_resource_sampler_device_util_fallback_is_sampled_off_consumer_thread():
+    calls = []
+
+    def na_probe():
+        return (None, None, None, None, "n/a")
+
+    def device_util_probe():
+        calls.append(threading.current_thread().name)
+        return {"gpu_pct": 42, "mem_pct": 10}
+
+    s = ResourceSampler(interval=0.05, gpu_probe=na_probe,
+                        device_util_probe=device_util_probe)
+    s.start()
+    try:
+        deadline = time.monotonic() + 3.0
+        snap = None
+        while snap is None and time.monotonic() < deadline:
+            snap = s.latest()
+            time.sleep(0.02)
+        assert snap is not None
+        assert snap.gpu_util == 42.0
+        assert snap.gpu_source == "nvml-device"
+        assert calls and set(calls) == {"resource-sampler"}
     finally:
         s.stop()
 

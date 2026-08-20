@@ -446,6 +446,17 @@ read-back of the camera state would prove nothing (the #106 lesson).
 `thin_ready` per consumed frame, exercising the credit machinery end to end;
 without the auto-grant the server correctly stalls after `credits` frames.
 
+The 30 fps gate is a **full-broadcaster** measurement, not an isolated encoder
+benchmark (#197). A 600-frame replay profile originally measured 26.43 fps,
+83.08 ms p95 frame intervals and 68 skipped ticks even though the render thread
+alone had ample headroom. Profiling found a synchronous device-wide NVML probe
+on every 4 Hz `metrics` projection (~40 ms each) blocking the asyncio loop.
+That fallback now runs on `ResourceSampler`'s background thread and the JSON
+projection only reads its cached snapshot. The identical no-port, real-capture,
+real-Open3D profile then measured **30.01 fps**, 39.94 ms p95, one skipped tick
+and no interval over 60 ms. This is also why new resource observability must be
+sampled off-loop rather than hidden inside a message builder.
+
 At a high negotiated fps, the probe's own receive buffer can hold several
 frames the server already produced before a command was sent — the probe
 (decode + PNG-write per frame) is a slower consumer than the server is a

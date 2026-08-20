@@ -6116,12 +6116,9 @@ def test_slamrunner_poll_refreshes_device_as_it_becomes_known():
 # BUG-061 Part B -- device-wide GPU utilization fallback
 # ---------------------------------------------------------------------------
 
-def test_resources_to_dict_falls_back_to_device_wide_gpu_util(monkeypatch):
-    """`pynvml` is absent here, so the per-process sampler always reports
-    `gpu_util=None`; the device-wide NVML utilization now fills that hole
-    rather than leaving the HUD blank."""
-    res = _resource_snapshot(gpu_util=None, gpu_source="n/a")
-    monkeypatch.setattr(web, "_device_gpu_util", lambda: {"gpu_pct": 42, "mem_pct": 10})
+def test_resources_to_dict_projects_cached_device_wide_gpu_util():
+    """The background sampler's device-wide fallback reaches the wire."""
+    res = _resource_snapshot(gpu_util=42.0, gpu_source="nvml-device")
     out = web.resources_to_dict(res)
     assert out["gpu_util"] == 42.0
     assert out["gpu_source"] == "nvml-device"
@@ -6136,9 +6133,11 @@ def test_resources_to_dict_prefers_the_per_process_gpu_util_when_present():
     assert out["gpu_source"] == "pynvml"
 
 
-def test_resources_to_dict_stays_null_when_no_gpu_source_at_all(monkeypatch):
+def test_resources_to_dict_stays_null_without_probing_on_consumer_thread(monkeypatch):
     res = _resource_snapshot(gpu_util=None, gpu_source="n/a")
-    monkeypatch.setattr(web, "_device_gpu_util", lambda: None)
+    monkeypatch.setattr(
+        web, "_device_gpu_util",
+        lambda: pytest.fail("cached resource projection must not query NVML"))
     out = web.resources_to_dict(res)
     assert out["gpu_util"] is None
     assert out["gpu_source"] == "n/a"
