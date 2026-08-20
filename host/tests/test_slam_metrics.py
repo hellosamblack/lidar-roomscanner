@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -72,6 +74,32 @@ def test_baro_divergence_reports_unavailable_without_a_pressure_reference():
     assert s["available"] is False
     assert s["diverged"] is False
     assert s["peak_abs_m"] is None
+
+
+def test_icp_trace_is_relative_windowed_and_json_finite():
+    steps = [
+        SimpleNamespace(fitness=0.9, rmse=0.01, inliers=90, source_points=100,
+                        tracking_lost=False),
+        SimpleNamespace(fitness=0.0, rmse=float("inf"), inliers=70, source_points=100,
+                        tracking_lost=True),
+        SimpleNamespace(fitness=0.8, rmse=0.02, inliers=80, source_points=100,
+                        tracking_lost=False),
+    ]
+    poses = [_pose([0, 0, 0]), _pose([0, -1, 0]), _pose([0, -3, 0])]
+
+    trace = metrics.icp_trace(steps, [50.0, 51.0, 52.0], poses, 0.5, 1.5)
+
+    assert trace["window_s"] == [0.5, 1.5]
+    assert len(trace["frames"]) == 1
+    row = trace["frames"][0]
+    assert row == {"frame": 1, "t_s": 1.0, "fitness": 0.0, "rmse_m": None,
+                   "inliers": 70, "source_points": 100, "tracking_lost": True,
+                   "height_m": 1.0, "vertical_step_m": 1.0}
+
+
+def test_icp_trace_rejects_an_inverted_window():
+    with pytest.raises(ValueError, match="start <= end"):
+        metrics.icp_trace([], [], [], 2.0, 1.0)
 
 def test_timing_stats():
     s = timing_stats([10.0, 20.0, 40.0, 50.0])

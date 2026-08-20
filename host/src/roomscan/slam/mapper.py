@@ -132,6 +132,10 @@ class FrameStep:
     raycast_ms: float = 0.0
     icp_ms: float = 0.0
     integrate_ms: float = 0.0
+    # Exact ICP match count plus its denominator. Zero on bootstrap/pre-ICP
+    # frames; defaults preserve remote workers and older test constructors.
+    inliers: int = 0
+    source_points: int = 0
 
 
 class Mapper:
@@ -577,6 +581,7 @@ class Mapper:
         lost = False
         held = False
         fitness = rmse = 0.0
+        inliers = source_points = 0
         raycast_ms = icp_ms = 0.0
 
         if n_valid < _MIN_VALID_POINTS:
@@ -632,6 +637,7 @@ class Mapper:
                 elif res.source == "imu":
                     self.icp_imu_fallback_count += 1
                 fitness, rmse = res.fitness, res.rmse
+                inliers, source_points = res.inliers, res.source_points
                 if res.ok:
                     pose = self._apply_baro_z(T_pred @ res.pose, pressure_pa)
                     # Accelerometer ZUPT (BUG-069): a MAP-REACHING zero-velocity
@@ -706,7 +712,8 @@ class Mapper:
                          blocks_used=self._blocks_used,
                          blocks_capacity=self._blocks_capacity,
                          blocks_configured=self._tsdf.block_count or None,
-                         raycast_ms=raycast_ms, icp_ms=icp_ms, integrate_ms=integrate_ms)
+                         raycast_ms=raycast_ms, icp_ms=icp_ms, integrate_ms=integrate_ms,
+                         inliers=inliers, source_points=source_points)
 
     def _sample_block_usage(self) -> None:
         """Refresh the cached TSDF occupancy, at most every

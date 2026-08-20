@@ -122,6 +122,51 @@ def baro_divergence_stats(
     return base
 
 
+def icp_trace(steps, timestamps, poses, start_s: float, end_s: float) -> dict:
+    """Serialize exact per-frame ICP diagnostics inside a relative-time window.
+
+    The mapper must process the capture prefix before ``start_s`` because its
+    frame-to-model target depends on that history; this function only bounds the
+    returned rows. Times are relative to the first processed depth frame.
+    """
+    start_s, end_s = float(start_s), float(end_s)
+    if start_s < 0 or end_s < start_s:
+        raise ValueError("ICP trace window must satisfy 0 <= start <= end")
+    n = min(len(steps), len(timestamps), len(poses))
+    out = {"window_s": [start_s, end_s], "frames": []}
+    if n == 0:
+        return out
+    t0 = float(timestamps[0])
+    origin = np.asarray(poses[0], dtype=np.float64)[:3, 3]
+    up = world_up()
+    previous = origin
+
+    def finite(value):
+        value = float(value)
+        return value if np.isfinite(value) else None
+
+    for index, (step, timestamp, pose) in enumerate(
+            zip(steps[:n], timestamps[:n], poses[:n])):
+        position = np.asarray(pose, dtype=np.float64)[:3, 3]
+        relative_s = float(timestamp) - t0
+        vertical_step = float((position - previous) @ up) if index else 0.0
+        previous = position
+        if relative_s < start_s or relative_s > end_s:
+            continue
+        out["frames"].append({
+            "frame": index,
+            "t_s": relative_s,
+            "fitness": finite(step.fitness),
+            "rmse_m": finite(step.rmse),
+            "inliers": int(step.inliers),
+            "source_points": int(step.source_points),
+            "tracking_lost": bool(step.tracking_lost),
+            "height_m": float((position - origin) @ up),
+            "vertical_step_m": vertical_step,
+        })
+    return out
+
+
 def footprint_area_m2(points, cell_m: float = 0.1, up_axis: int = 1) -> float:
     """Floor area covered by a reconstruction: the up axis is dropped, the other
     two coordinates are binned onto a `cell_m` grid, and the occupied cells are

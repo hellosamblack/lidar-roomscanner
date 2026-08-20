@@ -634,7 +634,9 @@ async def orientation_probe(mode: str = "jitter", seconds: float = 15.0,
 @mcp.tool()
 def slam_rerender(capture: str, voxel_size: float = 0.0, block_count: int = 0,
                   device: str = "", max_frames: int = 0, icp_mode: str = "",
-                  out_mesh: str = "", out_traj: str = "", timeout_s: int = 1800) -> dict:
+                  out_mesh: str = "", out_traj: str = "", timeout_s: int = 1800,
+                  icp_trace_start_s: float = -1.0,
+                  icp_trace_end_s: float = -1.0) -> dict:
     """Re-run SLAM over a recorded capture at a chosen resolution, offline.
 
     A live scan is only a preview: the capture stores raw ToF frames, not a map, so
@@ -668,6 +670,12 @@ def slam_rerender(capture: str, voxel_size: float = 0.0, block_count: int = 0,
     path was vertical motion that never happened, and every "% of path" drift
     figure computed against it was flattered by the same factor (BUG-037).
 
+    To investigate a tracking failure, set BOTH `icp_trace_start_s` and
+    `icp_trace_end_s` to a relative-time window. The chosen mode then includes
+    per-frame fitness, RMSE, exact inlier/source-point counts, tracking state,
+    height and vertical step for only that window. The preceding frames still
+    run because frame-to-model ICP depends on the map they built.
+
     Runs `roomscan-slam` as a subprocess (this is a long batch job -- many minutes on
     a full-length capture, and it must not block the server's event loop or pull CUDA
     into this process). Bound it with `max_frames` for a quick check. Zero/empty
@@ -684,6 +692,12 @@ def slam_rerender(capture: str, voxel_size: float = 0.0, block_count: int = 0,
                 break
     if not cap.exists():
         return {"ok": False, "error": f"capture not found: {capture}"}
+    trace_start_set = icp_trace_start_s >= 0.0
+    trace_end_set = icp_trace_end_s >= 0.0
+    if trace_start_set != trace_end_set:
+        return {"ok": False, "error": "set both icp_trace_start_s and icp_trace_end_s"}
+    if trace_start_set and icp_trace_end_s < icp_trace_start_s:
+        return {"ok": False, "error": "ICP trace window must satisfy start <= end"}
 
     with tempfile.TemporaryDirectory() as tmp:
         report_path = Path(tmp) / "slam.json"
@@ -694,6 +708,8 @@ def slam_rerender(capture: str, voxel_size: float = 0.0, block_count: int = 0,
                             ("--out-traj", out_traj)):
             if value:
                 cmd += [flag, str(value)]
+        if trace_start_set:
+            cmd += ["--icp-trace", f"{icp_trace_start_s}:{icp_trace_end_s}"]
         try:
             p = subprocess.run(cmd, cwd=str(REPO), timeout=timeout_s,
                                capture_output=True, text=True)

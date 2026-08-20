@@ -9,12 +9,54 @@ import re
 import struct
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 
 
 from tools.analyze_capture import MAGIC, scan
 from tools.headless_doctor import Doctor
 
 REPO = Path(__file__).resolve().parents[2]
+
+
+def test_slam_rerender_threads_an_opt_in_icp_trace_window(tmp_path, monkeypatch):
+    import json
+    from roomscan.mcp_server import tools_data
+
+    capture = tmp_path / "capture.bin"
+    capture.write_bytes(b"capture")
+    seen = {}
+
+    def fake_run(cmd, **_kwargs):
+        seen["cmd"] = cmd
+        report = Path(cmd[cmd.index("--json") + 1])
+        report.write_text(json.dumps({
+            "chosen_mode": "translation",
+            "modes": {"translation": {
+                "map": {"saturated": False},
+                "tracking": {"died": False},
+                "icp_trace": {"window_s": [100.0, 175.0], "frames": []},
+            }},
+        }))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(tools_data.subprocess, "run", fake_run)
+    result = tools_data.slam_rerender(
+        str(capture), icp_trace_start_s=100.0, icp_trace_end_s=175.0,
+    )
+
+    assert result["ok"] is True
+    i = seen["cmd"].index("--icp-trace")
+    assert seen["cmd"][i + 1] == "100.0:175.0"
+
+
+def test_slam_rerender_rejects_a_half_specified_icp_trace_window(tmp_path):
+    from roomscan.mcp_server.tools_data import slam_rerender
+
+    capture = tmp_path / "capture.bin"
+    capture.write_bytes(b"capture")
+    result = slam_rerender(str(capture), icp_trace_start_s=100.0)
+    assert result["ok"] is False
+    assert "both" in result["error"]
 
 
 def _frame(*, stream: int = 7, seq: int = 0, payload: bytes = b"\x01\x02\x03\x04",

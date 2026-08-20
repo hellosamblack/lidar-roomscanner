@@ -25,6 +25,36 @@ def test_cli_runs_on_synthetic_capture(tmp_path, monkeypatch):
     assert (tmp_path / "t.tum").exists()
 
 
+def test_cli_icp_trace_contains_only_the_requested_relative_time_window(tmp_path, monkeypatch):
+    import json
+
+    frames = [(np.full((42, 54), 1000.0 + 5 * i, np.float32), None, None,
+               (1.0, 0.0, 0.0, 0.0), 101325.0, 50.0 + i * 0.03) for i in range(4)]
+    monkeypatch.setattr(
+        slamcli, "_load_frames",
+        lambda path, max_frames=None, with_imu=False: (frames, 54, 42),
+    )
+    report = tmp_path / "report.json"
+
+    rc = main([
+        str(tmp_path / "dummy.bin"), "--icp-trace", "0.02:0.07",
+        "--json", str(report), "--out-mesh", str(tmp_path / "m.ply"),
+        "--out-traj", str(tmp_path / "t.tum"),
+    ])
+
+    assert rc == 0
+    trace = json.loads(report.read_text())["modes"]["translation"]["icp_trace"]
+    assert trace["window_s"] == [0.02, 0.07]
+    assert [row["frame"] for row in trace["frames"]] == [1, 2]
+    assert [row["t_s"] for row in trace["frames"]] == pytest.approx([0.03, 0.06])
+    for row in trace["frames"]:
+        assert {"fitness", "rmse_m", "inliers", "source_points",
+                "tracking_lost", "height_m", "vertical_step_m"} <= row.keys()
+        assert 0 <= row["inliers"] <= row["source_points"]
+        if row["fitness"]:
+            assert row["inliers"] == round(row["fitness"] * row["source_points"])
+
+
 def test_reflectance_and_confidence_are_forwarded_to_mapper(monkeypatch):
     # _run() must pass each frame's reflectance/confidence through to
     # Mapper.step (not silently drop them) -- proven by capturing step()'s

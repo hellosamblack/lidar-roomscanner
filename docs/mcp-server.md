@@ -146,7 +146,7 @@ ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, com
 `capture_meta(path)`, `capture_profile_probe(path, requested_fps?, udp_stats?)`,
 `profile_estimate(profile?, ranging_mode?, fps?, exposure_ms?, power_mode?, imu_env_rate_hz?, transport?)`,
 `profile_tuning(ranging_mode?, power_config?, resolution?, dss?, output_interface?, fps?, exposure_ms?, ambient_lux?)`,
-`slam_rerender(capture, voxel_size?, block_count?, device?, max_frames?)`,
+`slam_rerender(capture, voxel_size?, block_count?, device?, max_frames?, icp_trace_start_s?, icp_trace_end_s?)`,
 `slam_ensemble(capture, n?, device?, voxel_size?, block_count?, icp_mode?, max_frames?, apply_quat_phase?, quat_interp_mode?)`,
 `slam_stall_profile(capture, frames?, device?, decimate?)`,
 `slam_icp_bench(capture?, what?, frames?, raycast_frames?, ensemble_n?, device?, ab_pairs?, ab_frames?, baseline_icp_device?, candidate_icp_device?)`,
@@ -376,6 +376,14 @@ calling in-process: the job runs for many minutes and would otherwise block the 
 and pull CUDA into the server. It reads that run's `--json` report instead of scraping
 stdout, so prose and structured output stay one implementation with two front ends. Bound
 exploratory runs with `max_frames`; the default `timeout_s` is 1800.
+
+For a suspected tracking-collapse interval, set both `icp_trace_start_s` and
+`icp_trace_end_s` (seconds relative to the first depth frame). The chosen mode then returns
+an `icp_trace` containing every frame in that window: fitness, RMSE, the **exact** final ICP
+correspondence count and source-point denominator, tracking state, reconstructed height, and
+vertical step. Output is windowed, computation is not: frame-to-model ICP must still replay
+the prefix before the requested window to build the map it registered against. Leaving both
+arguments at their defaults adds no trace or retention cost.
 
 `capture_magcheck` scores a magnetometer calibration against a capture it never saw — the
 BUG-030 closing test. Read `verdict`, which is the worse of two deliberately different

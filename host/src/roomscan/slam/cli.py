@@ -233,7 +233,7 @@ def _load_frames_maybe_imu(path, max_frames=None, need_imu=False, quat_interp=Fa
     return frames, width, height, None
 
 
-def _run(frames, width, height, cfg, mode, device=None, imu_aux=None):
+def _run(frames, width, height, cfg, mode, device=None, imu_aux=None, trace_window=None):
     # `cfg.mapper_kwargs()` is the single source for the Mapper field list
     # (BUG-062). This used to re-list all eighteen knobs by hand, which is the
     # second-construction-site shape that bug is about -- item 5 (2026-08-02)
@@ -249,6 +249,7 @@ def _run(frames, width, height, cfg, mode, device=None, imu_aux=None):
                   device=device if device is not None else cfg.device)
     mapper = Mapper(width, height, **kwargs)
     timings, ts = [], []
+    trace_steps = [] if trace_window is not None else None
     for i, (depth, reflectance, confidence, quat, pa, t_s) in enumerate(frames):
         # imu_aux (BUG-067/069 levers) is opt-in and index-aligned to `frames`;
         # None everywhere when a caller did not load it, so step() sees the same
@@ -260,7 +261,22 @@ def _run(frames, width, height, cfg, mode, device=None, imu_aux=None):
                            imu_raw=imu_raw, quat_offset_us=offset)
         timings.append(step.slam_ms)
         ts.append(t_s)
+        if trace_steps is not None:
+            trace_steps.append(step)
+    if trace_window is not None:
+        mapper.icp_trace = metrics.icp_trace(
+            trace_steps, ts, mapper.trajectory, *trace_window)
     return mapper, timings, ts
+
+
+def _icp_trace_window(value: str) -> tuple[float, float]:
+    try:
+        start_s, end_s = (float(part) for part in value.split(":", 1))
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("expected START:END seconds") from None
+    if start_s < 0 or end_s < start_s:
+        raise argparse.ArgumentTypeError("expected 0 <= START <= END")
+    return start_s, end_s
 
 
 def main(argv=None) -> int:
@@ -290,6 +306,12 @@ def main(argv=None) -> int:
                     help="also write the run's stats to PATH as JSON. The prose above is for "
                          "humans; this is the machine-readable front end (roomscan-mcp's "
                          "slam_rerender reads it) so nothing has to scrape stdout.")
+    ap.add_argument(
+        "--icp-trace", type=_icp_trace_window, metavar="START:END",
+        help="include per-frame ICP fitness, RMSE, exact inlier/source counts, and vertical "
+             "motion for this relative-time window in --json. The capture prefix is still "
+             "processed because frame-to-model ICP depends on it; only output is windowed.",
+    )
     ap.add_argument("--voxel-size", type=float, default=None,
                     help="TSDF voxel size in metres, overriding [slam] voxel_size. The live "
                          "scan is only a preview -- the capture holds raw frames, so re-running "
@@ -358,8 +380,9 @@ def main(argv=None) -> int:
               # JSON is what `slam_rerender` and any later A/B reads.
               "icp_device": cfg.icp_device, "quat_interp": interp_stats, "modes": {}}
     for mode in modes:
+        trace_kw = {"trace_window": args.icp_trace} if args.icp_trace is not None else {}
         mapper, timings, ts = _run(frames, width, height, cfg, mode, device=args.device,
-                                   imu_aux=imu_aux)
+                                   imu_aux=imu_aux, **trace_kw)
         tstats = metrics.trajectory_stats(mapper.trajectory)
         divergence = metrics.baro_divergence_stats(
             mapper.trajectory, [frame[4] for frame in frames], ts)
@@ -399,7 +422,7 @@ def main(argv=None) -> int:
                 if saturated else "")
         print(f"  map: {used} blocks, {100.0 * used / cap:.0f}% of the configured {cap} "
               f"(live grid capacity {live_cap}){note}")
-        report["modes"][mode] = {
+        mode_report = {
             "trajectory": dict(tstats), "timing": dict(mstats),
             "vertical_divergence": divergence,
             "tracking_lost": mapper.tracking_lost_count,
@@ -412,6 +435,9 @@ def main(argv=None) -> int:
                     "percent_of_capacity": round(100.0 * used / cap, 1),
                     "saturated": bool(saturated)},
         }
+        if args.icp_trace is not None:
+            mode_report["icp_trace"] = mapper.icp_trace
+        report["modes"][mode] = mode_report
 
     chosen = modes[0]
     mapper, _, _, ts = results[chosen]

@@ -38,6 +38,9 @@ def test_translation_recovered():
     # source-to-target moves source back by -shift
     assert np.allclose(res.pose[:3, 3], -shift, atol=0.01)
     assert np.allclose(res.pose[:3, :3], np.eye(3), atol=1e-9)   # rotation held
+    assert res.source_points == len(source.point.positions)
+    assert res.inliers == round(res.fitness * res.source_points)
+    assert 0 < res.inliers <= res.source_points
 
 
 def test_6dof_leaves_rotation_free():
@@ -53,6 +56,8 @@ def test_6dof_leaves_rotation_free():
     assert res.ok
     assert np.allclose(res.pose[:3, :3], np.eye(3), atol=1e-2)
     assert np.allclose(res.pose[:3, 3], np.zeros(3), atol=1e-2)
+    assert res.source_points == len(src.point.positions)
+    assert res.inliers == len(src.point.positions)
 
 
 def test_rotation_angle_deg_measures_geodesic_magnitude():

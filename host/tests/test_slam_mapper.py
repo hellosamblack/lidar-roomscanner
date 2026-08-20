@@ -166,6 +166,8 @@ def test_pose_translation_tracks_a_synthetic_shift():
     m.step(_textured_wall(1.20), q, 101325.0)
     step = m.step(_textured_wall(1.15), q, 101325.0)
     assert not step.tracking_lost
+    assert step.source_points > 0
+    assert step.inliers == round(step.fitness * step.source_points)
     # camera translation z should be ~ +0.05 (moved toward the wall)
     assert abs(step.pose[2, 3] - 0.05) < 0.03
 
@@ -978,7 +980,6 @@ def test_the_four_stationary_knobs_are_inert_when_the_hold_is_off():
 # ---- BUG-069 accel ZUPT + BUG-031/067 quat-phase: plumbing through Mapper.step
 
 import types
-from roomscan.slam.motion import _G as _GRAV
 
 
 def _batch(accel_g=None, gyro_dps=None, gbias_dps=None):

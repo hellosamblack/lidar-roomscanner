@@ -273,16 +273,21 @@ class RegistrationResult:
     # prior). Lets the Mapper count how often each source won, for tuning. New
     # field WITH a default so every existing positional constructor is unaffected.
     source: str = "translation"
+    # Exact final-iteration correspondence count and its denominator. Fitness
+    # alone hides whether 0.8 means 80/100 sparse points or 1800/2250 dense
+    # points; #187 needs both to diagnose a vertical-collapse window.
+    inliers: int = 0
+    source_points: int = 0
 
 
 def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: np.ndarray,
                      t0: np.ndarray, max_dist: float, max_iter: int,
                      tol: float = 1e-7,
                      device: str | o3d.core.Device = "CPU:0",
-                     cond_cap: float = _COND_CAP) -> tuple[np.ndarray, float, float, bool]:
+                     cond_cap: float = _COND_CAP) -> tuple[np.ndarray, float, float, int, bool]:
     """Iterated closest-point, translation-only, point-to-plane. `rotated_src`
     is the source cloud with the (held-fixed) prior rotation already applied.
-    Returns (t, fitness, rmse, singular) -- fitness/rmse mirror Open3D's ICP
+    Returns (t, fitness, rmse, inliers, singular) -- fitness/rmse mirror Open3D's ICP
     result semantics (fitness = matched_fraction, rmse = RMS of the
     point-to-plane residual among matches); singular=True means the normal
     equations were unsolvable (non-finite, or rank zero) and the caller should
@@ -302,7 +307,7 @@ def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: 
     nns.hybrid_index(max_dist)
 
     t = np.asarray(t0, dtype=np.float64).copy()
-    fitness, rmse = 0.0, float("inf")
+    fitness, rmse, n_valid = 0.0, float("inf"), 0
     for _ in range(max_iter):
         query = rotated_src + t
         idx, _dist2, counts = nns.hybrid_search(
@@ -310,7 +315,7 @@ def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: 
         matched = counts.cpu().numpy().reshape(-1) > 0
         n_valid = int(matched.sum())
         if n_valid == 0:
-            return t, 0.0, float("inf"), False
+            return t, 0.0, float("inf"), 0, False
         rows = idx.cpu().numpy().reshape(-1)[matched]
         q = tgt_pts[rows]
         n = tgt_normals[rows]
@@ -323,11 +328,11 @@ def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: 
         b = -(n * r[:, None]).sum(axis=0)
         dt, _cond = _solve_translation_step(a, b, cond_cap)
         if dt is None:
-            return t, fitness, rmse, True
+            return t, fitness, rmse, n_valid, True
         t = t + dt
         if np.linalg.norm(dt) < tol:
             break
-    return t, fitness, rmse, False
+    return t, fitness, rmse, n_valid, False
 
 
 def _soft_prior_icp(src_pts: np.ndarray, tgt_pts: np.ndarray, tgt_normals: np.ndarray,
@@ -336,11 +341,11 @@ def _soft_prior_icp(src_pts: np.ndarray, tgt_pts: np.ndarray, tgt_normals: np.nd
                     tol: float = 1e-7,
                     device: str | o3d.core.Device = "CPU:0",
                     cond_cap: float = _COND_CAP
-                    ) -> tuple[np.ndarray, np.ndarray, float, float, bool]:
+                    ) -> tuple[np.ndarray, np.ndarray, float, float, int, bool]:
     """Iterated closest-point, full 6-DoF point-to-plane, with the rotation held
     near the IMU prior `R0` by a soft Tikhonov prior (see `_solve_soft_prior_step`).
     `src_pts` is the RAW source cloud (unrotated); `R0`/`t0` are the prior pose.
-    Returns (R, t, fitness, rmse, singular).
+    Returns (R, t, fitness, rmse, inliers, singular).
 
     This is BUG-067's fix: `_translation_icp` freezes rotation at `R0` and can only
     reduce a residual by translating, so a rotation-prior error becomes fabricated
@@ -358,7 +363,7 @@ def _soft_prior_icp(src_pts: np.ndarray, tgt_pts: np.ndarray, tgt_normals: np.nd
 
     R = np.asarray(R0, dtype=np.float64).copy()
     t = np.asarray(t0, dtype=np.float64).copy()
-    fitness, rmse = 0.0, float("inf")
+    fitness, rmse, n_valid = 0.0, float("inf"), 0
     for _ in range(max_iter):
         query = (R @ src_pts.T).T + t
         idx, _dist2, counts = nns.hybrid_search(
@@ -366,7 +371,7 @@ def _soft_prior_icp(src_pts: np.ndarray, tgt_pts: np.ndarray, tgt_normals: np.nd
         matched = counts.cpu().numpy().reshape(-1) > 0
         n_valid = int(matched.sum())
         if n_valid == 0:
-            return R, t, 0.0, float("inf"), False
+            return R, t, 0.0, float("inf"), 0, False
         rows = idx.cpu().numpy().reshape(-1)[matched]
         q = tgt_pts[rows]
         n = tgt_normals[rows]
@@ -384,14 +389,14 @@ def _soft_prior_icp(src_pts: np.ndarray, tgt_pts: np.ndarray, tgt_normals: np.nd
         phi = _so3_log(R @ R0.T)                        # current deviation from the prior
         xi, _cond = _solve_soft_prior_step(A, b, phi, rot_prior_weight, cond_cap)
         if xi is None:
-            return R, t, fitness, rmse, True
+            return R, t, fitness, rmse, n_valid, True
         omega, dt = xi[:3], xi[3:]
         R_delta = _so3_exp(omega)
         R = R_delta @ R                                 # world-frame left update...
         t = R_delta @ t + dt                            # ...so translation rotates with it
         if np.linalg.norm(xi) < tol:
             break
-    return R, t, fitness, rmse, False
+    return R, t, fitness, rmse, n_valid, False
 
 
 def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointCloud,
@@ -459,35 +464,39 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
         tgt_pts = target.point.positions.cpu().numpy().astype(np.float64, copy=False)
         tgt_normals = target.point.normals.cpu().numpy().astype(np.float64, copy=False)
         rotated_src = (R @ src_pts.T).T
-        t, fitness, rmse, singular = _translation_icp(
+        t, fitness, rmse, inliers, singular = _translation_icp(
             rotated_src, tgt_pts, tgt_normals, init_pose[:3, 3], max_dist, max_iter,
             device=device, cond_cap=cond_cap)
         if singular:
             return RegistrationResult(pose=init_pose.copy(), fitness=0.0,
-                                      rmse=float("inf"), ok=False)
+                                      rmse=float("inf"), ok=False, inliers=inliers,
+                                      source_points=len(src_pts))
         T = np.eye(4)
         T[:3, :3] = R
         T[:3, 3] = t
         ok = bool(fitness >= min_fitness and rmse <= max_rmse)
-        return RegistrationResult(pose=T, fitness=float(fitness), rmse=float(rmse), ok=ok)
+        return RegistrationResult(pose=T, fitness=float(fitness), rmse=float(rmse), ok=ok,
+                                  inliers=inliers, source_points=len(src_pts))
 
     if mode == "soft_prior":
         R0 = init_pose[:3, :3]
         src_pts = source.point.positions.cpu().numpy().astype(np.float64, copy=False)
         tgt_pts = target.point.positions.cpu().numpy().astype(np.float64, copy=False)
         tgt_normals = target.point.normals.cpu().numpy().astype(np.float64, copy=False)
-        R, t, fitness, rmse, singular = _soft_prior_icp(
+        R, t, fitness, rmse, inliers, singular = _soft_prior_icp(
             src_pts, tgt_pts, tgt_normals, R0, init_pose[:3, 3], rot_prior_weight,
             max_dist, max_iter, device=device, cond_cap=cond_cap)
         if singular:
             return RegistrationResult(pose=init_pose.copy(), fitness=0.0,
-                                      rmse=float("inf"), ok=False, source="soft_prior")
+                                      rmse=float("inf"), ok=False, source="soft_prior",
+                                      inliers=inliers, source_points=len(src_pts))
         T = np.eye(4)
         T[:3, :3] = R
         T[:3, 3] = t
         ok = bool(fitness >= min_fitness and rmse <= max_rmse)
         return RegistrationResult(pose=T, fitness=float(fitness), rmse=float(rmse),
-                                  ok=ok, source="soft_prior")
+                                  ok=ok, source="soft_prior", inliers=inliers,
+                                  source_points=len(src_pts))
 
     init = o3d.core.Tensor(init_pose, device=_resolve_device(device))
     criteria = _reg.ICPConvergenceCriteria(max_iteration=max_iter)
@@ -500,11 +509,15 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
         # FOV) -- Open3D raises rather than returning a degenerate result.
         # Degrade to tracking-lost instead of crashing the mapper.
         return RegistrationResult(pose=init_pose.copy(), fitness=0.0,
-                                  rmse=float("inf"), ok=False, source="6dof")
+                                  rmse=float("inf"), ok=False, source="6dof",
+                                  source_points=len(source.point.positions))
     T = result.transformation.cpu().numpy().copy()
     ok = bool(result.fitness >= min_fitness and result.inlier_rmse <= max_rmse)
+    correspondences = result.correspondence_set.cpu().numpy()
+    inliers = int(np.count_nonzero(correspondences >= 0))
     return RegistrationResult(pose=T, fitness=float(result.fitness),
-                              rmse=float(result.inlier_rmse), ok=ok, source="6dof")
+                              rmse=float(result.inlier_rmse), ok=ok, source="6dof",
+                              inliers=inliers, source_points=len(source.point.positions))
 
 
 def register_escalating(source, target, init_pose, retry_dist: float = 0.0,
