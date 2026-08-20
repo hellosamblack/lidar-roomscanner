@@ -3524,24 +3524,35 @@ def test_pi_bridge_module_importable_without_pythonpath_help():
         _sys.modules.update(saved_modules)
 
 
+async def _fake_resolve_bridge_host(_state=None):
+    """Stand-in for `web._resolve_bridge_host` in tests that don't care about
+    resolution -- keeps them off the real network (#209 mDNS follow-up: a
+    live getaddrinfo/mDNS call from a test would be exactly the forbidden
+    live network probe)."""
+    return "172.31.100.1"
+
+
 def test_api_bridge_reboot_delegates_to_pi_bridge_and_reports_result(monkeypatch):
     calls = []
 
-    def fake_reboot():
-        calls.append(True)
+    def fake_reboot(host):
+        calls.append(host)
         return {"ok": True, "note": "the Pi takes roughly 30 s to come back"}
 
     monkeypatch.setattr(web, "_pi_bridge_module",
                         lambda: SimpleNamespace(reboot=fake_reboot))
+    monkeypatch.setattr(web, "_resolve_bridge_host", _fake_resolve_bridge_host)
     web.app.state.bus = LogBus()
     resp = asyncio.run(web.api_bridge_reboot())
-    assert calls == [True]
+    assert calls == ["172.31.100.1"]
     assert json.loads(resp.body)["ok"] is True
 
 
 def test_api_bridge_reboot_reports_failure_not_500(monkeypatch):
     monkeypatch.setattr(web, "_pi_bridge_module",
-                        lambda: SimpleNamespace(reboot=lambda: {"ok": False, "error": "unreachable"}))
+                        lambda: SimpleNamespace(
+                            reboot=lambda host: {"ok": False, "error": "unreachable"}))
+    monkeypatch.setattr(web, "_resolve_bridge_host", _fake_resolve_bridge_host)
     web.app.state.bus = None
     resp = asyncio.run(web.api_bridge_reboot())
     body = json.loads(resp.body)
@@ -3551,38 +3562,40 @@ def test_api_bridge_reboot_reports_failure_not_500(monkeypatch):
 def test_api_bridge_logs_passes_unit_and_lines(monkeypatch):
     calls = []
 
-    def fake_logs(unit, lines):
-        calls.append((unit, lines))
+    def fake_logs(unit, lines, host):
+        calls.append((unit, lines, host))
         return {"ok": True, "unit": unit, "text": "log line\n"}
 
     monkeypatch.setattr(web, "_pi_bridge_module",
                         lambda: SimpleNamespace(logs=fake_logs))
+    monkeypatch.setattr(web, "_resolve_bridge_host", _fake_resolve_bridge_host)
 
     class _FakeRequest:
         async def json(self):
             return {"unit": "roomscan-tee", "lines": 50}
 
     resp = asyncio.run(web.api_bridge_logs(_FakeRequest()))
-    assert calls == [("roomscan-tee", 50)]
+    assert calls == [("roomscan-tee", 50, "172.31.100.1")]
     assert json.loads(resp.body)["ok"] is True
 
 
 def test_api_bridge_logs_defaults_when_body_is_empty(monkeypatch):
     calls = []
 
-    def fake_logs(unit, lines):
-        calls.append((unit, lines))
+    def fake_logs(unit, lines, host):
+        calls.append((unit, lines, host))
         return {"ok": True, "unit": unit, "text": ""}
 
     monkeypatch.setattr(web, "_pi_bridge_module",
                         lambda: SimpleNamespace(logs=fake_logs))
+    monkeypatch.setattr(web, "_resolve_bridge_host", _fake_resolve_bridge_host)
 
     class _EmptyRequest:
         async def json(self):
             raise ValueError("no body")
 
     asyncio.run(web.api_bridge_logs(_EmptyRequest()))
-    assert calls == [("roomscan-bridge", 200)]
+    assert calls == [("roomscan-bridge", 200, "172.31.100.1")]
 
 
 def test_transport_counters_none_when_not_udp():
@@ -8335,12 +8348,40 @@ def test_bridge_health_loop_caches_status_result(monkeypatch):
     monkeypatch.setattr(web, "_pi_bridge_module",
                         lambda: SimpleNamespace(status=lambda ip, timeout=8.0:
                                                 {"ok": True, "wlan0": {"rssi_dbm": -50}}))
+    monkeypatch.setattr(web, "_resolve_bridge_host", _fake_resolve_bridge_host)
     state = SimpleNamespace(config=None)
 
     asyncio.run(_run_and_cancel(lambda: web._bridge_health_loop(state),
                                 lambda: getattr(state, "last_bridge_health", None) is not None))
 
     assert state.last_bridge_health == {"ok": True, "wlan0": {"rssi_dbm": -50}}
+
+
+def test_bridge_health_loop_resolves_host_before_polling(monkeypatch):
+    """The health loop must hand `pi_bridge.status` the RESOLVED bridge
+    address, not the raw configured default -- otherwise it inherits the
+    exact bug this issue fixes (an explicit IP short-circuits
+    `pi_bridge.resolve_host`'s own mDNS cascade entirely)."""
+    seen_hosts = []
+
+    def fake_status(ip, timeout=8.0):
+        seen_hosts.append(ip)
+        return {"ok": True}
+
+    monkeypatch.setattr(web, "_pi_bridge_module",
+                        lambda: SimpleNamespace(status=fake_status))
+
+    async def fake_resolve(state):
+        return "172.17.2.78"   # the bridge's real wlan0 address, not 172.17.2.66
+
+    monkeypatch.setattr(web, "_resolve_bridge_host", fake_resolve)
+    state = SimpleNamespace(config=None)
+
+    asyncio.run(_run_and_cancel(lambda: web._bridge_health_loop(state),
+                                lambda: getattr(state, "last_bridge_health", None) is not None))
+
+    assert seen_hosts and seen_hosts[0] == "172.17.2.78"
+    assert seen_hosts[0] != web.commstatus.DEFAULT_BRIDGE_IP
 
 
 def test_bridge_health_loop_caches_none_on_unreachable(monkeypatch):
@@ -8350,6 +8391,7 @@ def test_bridge_health_loop_caches_none_on_unreachable(monkeypatch):
     monkeypatch.setattr(web, "_pi_bridge_module",
                         lambda: SimpleNamespace(status=lambda ip, timeout=8.0:
                                                 {"ok": False, "error": "ssh timed out"}))
+    monkeypatch.setattr(web, "_resolve_bridge_host", _fake_resolve_bridge_host)
     state = SimpleNamespace(config=None, last_bridge_health="stale-marker")
     seen = []
 

@@ -5,9 +5,15 @@ issues #192/#193/#209).
 The web UI shows one small cluster in the top-right that answers "can the
 server actually reach the rig?" for each hop the frames traverse:
 
-  * **Bridge**    (default 172.17.2.66) -- the Raspberry Pi bridge node that
+  * **Bridge**    (`roomscan-bridge.local` via mDNS, falling back to the
+    configured/last-resort IP -- #209 mDNS follow-up, see
+    `resolve_bridge_target`) -- the Raspberry Pi bridge node that
     replaced the RavPower FileHub as the scanner's wireless uplink (issue
-    #191). Reachability = ICMP echo, the same cadence as every other hop here;
+    #191). Its host-facing address is wlan0 via DHCP and can move, so the
+    hostname is the durable target; the literal `DEFAULT_BRIDGE_IP`
+    (172.17.2.66) is only reached when mDNS resolution fails. Reachability =
+    ICMP echo against whichever address won, the same cadence as every other
+    hop here;
     a slower, separate ssh poll (`host/tools/pi_bridge.py`, driven from
     web.py -- this module stays a pure transport layer with no ssh of its
     own) enriches the chip with radio RSSI/bitrate, uptime-ish health, tee
@@ -49,7 +55,9 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import socket
 import subprocess
+import time
 from dataclasses import dataclass
 
 # Infrastructure addresses. Both overridable from the environment so a
@@ -57,8 +65,28 @@ from dataclasses import dataclass
 # code change. The scanner's is normally discovered via mDNS (sources.py) and
 # the live UDP peer is the authoritative value -- web.py prefers that and
 # falls back to this default.
+#
+# The Bridge's *literal* address is not durable (issue #209/#193 follow-up):
+# eth0 sits on the scanner-side subnet, and the host-facing address is wlan0
+# via DHCP -- it moves. `DEFAULT_BRIDGE_IP` (env-overridable, last-resort
+# 172.17.2.66) is therefore only the FALLBACK target now; `probe()` resolves
+# `DEFAULT_BRIDGE_HOSTNAME` first via `resolve_bridge_target` below and only
+# falls back to this literal when that resolution fails.
 DEFAULT_BRIDGE_IP = os.environ.get("ROOMSCAN_BRIDGE_IP", "172.17.2.66")
+DEFAULT_BRIDGE_HOSTNAME = "roomscan-bridge.local"
 DEFAULT_SCANNER_IP = os.environ.get("ROOMSCAN_SCANNER_IP", "172.17.2.58")
+
+# Resolving a `.local` name is a real multicast round-trip -- slow when mDNS
+# is healthy, much slower (a full timeout) when it is not. `BRIDGE_RESOLVE_TTL_S`
+# bounds how often that cost is paid: the ICMP probe cadence is 3s
+# (`COMM_PROBE_INTERVAL_S` in web.py) and re-resolving on every tick would mean
+# every single ping pays a multicast round-trip. Caching for a couple of
+# minutes means a DHCP-moved wlan0 address is picked up promptly without
+# paying resolution cost on the hot path. `BRIDGE_RESOLVE_TIMEOUT_S` bounds the
+# resolution call itself so a dead mDNS responder degrades to "fell back to
+# the configured IP" within ~1.5s, not a multi-second stall.
+BRIDGE_RESOLVE_TTL_S = 120.0
+BRIDGE_RESOLVE_TIMEOUT_S = 1.5
 
 # ST-Link/V2-1 and V3 present VID 0483 with a PID in the 0x374x family. Matching
 # on the VID alone is enough to say "a debug probe is attached to this host".
@@ -74,6 +102,79 @@ _STREAMING_FLOOR_HZ = 1.0
 class PingResult:
     up: bool
     rtt_ms: float | None = None
+
+
+@dataclass
+class _BridgeResolveCache:
+    """Mutable, module-scoped cache for the last resolved bridge target.
+
+    A plain dataclass (not frozen) so `resolve_bridge_target` can update it in
+    place; tests construct their own instance to avoid cross-test leakage
+    rather than mutating the module-level singleton.
+    """
+    addr: str | None = None
+    resolved_from: str | None = None
+    expires_at: float = 0.0
+
+
+#: Shared across every `probe()`/`resolve_bridge_target()` call in this
+#: process so the ICMP loop (3s cadence) and the ssh health loop (45s
+#: cadence, web.py) pay for exactly one resolution per TTL window between them.
+_bridge_resolve_cache = _BridgeResolveCache()
+
+
+def _resolve_hostname_sync(hostname: str) -> str | None:
+    """Blocking `getaddrinfo` -- ONLY ever called inside an executor thread
+    (see `resolve_bridge_target`), never on the event loop directly. Returns
+    the first IPv4 address, or None on any failure (no responder, mDNS down,
+    hostname unknown) -- never raises."""
+    try:
+        infos = socket.getaddrinfo(hostname, None, family=socket.AF_INET)
+    except Exception:
+        return None
+    return infos[0][4][0] if infos else None
+
+
+async def resolve_bridge_target(
+    configured_ip: str,
+    *,
+    hostname: str = DEFAULT_BRIDGE_HOSTNAME,
+    timeout_s: float = BRIDGE_RESOLVE_TIMEOUT_S,
+    ttl_s: float = BRIDGE_RESOLVE_TTL_S,
+    cache: _BridgeResolveCache | None = None,
+    now: float | None = None,
+) -> dict:
+    """Resolve the bridge probe target: `hostname` (mDNS) first, falling back
+    to `configured_ip` (env `ROOMSCAN_BRIDGE_IP` / config `bridge_ip`, itself
+    defaulting to the last-resort literal `DEFAULT_BRIDGE_IP`). Returns
+    `{"addr": ..., "resolved_from": "mdns"|"fallback", "hostname": hostname}`.
+
+    Never touches the event loop with `getaddrinfo` directly -- the `.local`
+    lookup is a real multicast round-trip that can block far longer than a
+    ping, especially when nothing answers. The lookup runs in the default
+    executor under `timeout_s`, and the result (win OR fallback) is cached for
+    `ttl_s` so the 3s ICMP cadence isn't paying a resolution per ping; caching
+    the fallback too (not just successes) means a live mDNS recovery is picked
+    up again once the TTL lapses, rather than being pinned to fallback forever
+    the first time it fires.
+    """
+    cache = cache if cache is not None else _bridge_resolve_cache
+    t = time.monotonic() if now is None else now
+    if cache.addr is not None and t < cache.expires_at:
+        return {"addr": cache.addr, "resolved_from": cache.resolved_from, "hostname": hostname}
+
+    loop = asyncio.get_running_loop()
+    try:
+        addr = await asyncio.wait_for(
+            loop.run_in_executor(None, _resolve_hostname_sync, hostname), timeout=timeout_s)
+    except Exception:
+        addr = None
+
+    if addr:
+        cache.addr, cache.resolved_from, cache.expires_at = addr, "mdns", t + ttl_s
+    else:
+        cache.addr, cache.resolved_from, cache.expires_at = configured_ip, "fallback", t + ttl_s
+    return {"addr": cache.addr, "resolved_from": cache.resolved_from, "hostname": hostname}
 
 
 async def ping_host(ip: str, timeout_s: float = 1.0) -> PingResult:
@@ -164,9 +265,10 @@ def _bridge_detail(up: bool, rtt_ms: float | None, health: dict | None) -> str:
     return _fmt_rtt(rtt_ms)
 
 
-def _bridge_link(bridge: PingResult, bridge_ip: str, health: dict | None) -> dict:
+def _bridge_link(bridge: PingResult, bridge_ip: str, health: dict | None,
+                 resolved_from: str | None = None) -> dict:
     wlan = (health or {}).get("wlan0") or {}
-    return {
+    d = {
         "reachable": bridge.up,
         "rtt_ms": bridge.rtt_ms,
         "addr": bridge_ip,
@@ -174,6 +276,43 @@ def _bridge_link(bridge: PingResult, bridge_ip: str, health: dict | None) -> dic
         "bitrate_mbps": wlan.get("bitrate_mbps"),
         "ssh_latency_ms": (health or {}).get("ssh_latency_ms"),
     }
+    if resolved_from is not None:
+        # "mdns" | "fallback" -- which target actually got probed (#209
+        # mDNS follow-up). Surfaced so the modal can say e.g. "resolved via
+        # mDNS" vs. "using the configured fallback address" rather than
+        # silently showing whichever address won.
+        d["resolved_from"] = resolved_from
+    return d
+
+
+def _scanner_addr_and_via(scanner_ip: str, bridge_ip: str, bridge_up: bool,
+                          bridge_health: dict | None) -> tuple[str, dict | None]:
+    """Work out what address to show for the Scanner chip, and whether the
+    stream is actually arriving via the Bridge's NAT hop (#209 mDNS follow-up).
+
+    When the host receives frames via the bridge, the apparent source address
+    of the UDP stream (parsed in web.py's `_scanner_ip`) is the BRIDGE's own
+    masquerade/NAT address on its host-facing interface -- not the scanner's.
+    That is exactly `bridge_ip` once resolution (mDNS or fallback) has run, so
+    `scanner_ip == bridge_ip` while the bridge is reachable is the signal.
+
+    Decision (#209/#193): prefer the scanner's real behind-bridge lease IP
+    from the already-cached `bridge_health` (`eth0.scanner_lease.ip`,
+    collected by the existing ssh health poll -- this adds no new ssh
+    traffic). When no health has been cached yet, or the lease is missing,
+    there is no address left that is honestly "the scanner's" -- so this
+    returns no addr at all rather than presenting the NAT address as one; the
+    caller folds the NAT address into `detail`/`link` as "via bridge (<addr>)"
+    instead.
+    """
+    if not (bridge_up and scanner_ip and bridge_ip and scanner_ip == bridge_ip):
+        return scanner_ip, None
+    lease = ((bridge_health or {}).get("eth0") or {}).get("scanner_lease")
+    lease_ip = lease.get("ip") if isinstance(lease, dict) else \
+        (lease if isinstance(lease, str) else None)
+    if lease_ip:
+        return lease_ip, {"via_bridge": True, "bridge_addr": scanner_ip, "source": "lease"}
+    return None, {"via_bridge": True, "bridge_addr": scanner_ip, "source": "nat"}
 
 
 def _crowpanel_detail(connected: bool, cp: dict | None) -> str:
@@ -201,6 +340,7 @@ def build_comm_message(
     scanner_transport: str | None = None,
     bridge_health: dict | None = None,
     crowpanel: dict | None = None,
+    bridge_resolved_from: str | None = None,
 ) -> dict:
     """Assemble the `/ws` `comm` message from already-gathered facts (pure).
 
@@ -212,6 +352,14 @@ def build_comm_message(
     none to show), and `management` (available control actions, or None) so
     the UI's per-chip modal has one schema to render regardless of which chip
     was clicked.
+
+    `bridge_ip` is whatever address was actually probed -- `probe()` resolves
+    `DEFAULT_BRIDGE_HOSTNAME` (or falls back) before calling this, so by the
+    time it gets here it is a plain IP; `bridge_resolved_from` says how that
+    IP was obtained ("mdns" | "fallback" | None when the caller didn't resolve
+    at all, e.g. a direct unit-test call). See `_scanner_addr_and_via` for how
+    that same resolved address is used to keep the Scanner chip honest when
+    the stream is arriving via the Bridge's NAT hop.
     """
     bridge_up = bridge.up
     bridge_target = {
@@ -221,7 +369,7 @@ def build_comm_message(
         "state": "up" if bridge_up else "absent",
         "detail": _bridge_detail(bridge_up, bridge.rtt_ms, bridge_health),
         "informational": not bridge_up,
-        "link": _bridge_link(bridge, bridge_ip, bridge_health),
+        "link": _bridge_link(bridge, bridge_ip, bridge_health, bridge_resolved_from),
         "device": bridge_health if (bridge_up and bridge_health) else None,
         "management": {"reboot": True, "logs": True} if bridge_up else None,
     }
@@ -232,13 +380,24 @@ def build_comm_message(
         scanner_detail = f"streaming {scanner_fps:.1f} fps"
     else:
         scanner_detail = f"reachable, no frames ({_fmt_rtt(scanner.rtt_ms)})"
+
+    scanner_addr, via_bridge = _scanner_addr_and_via(scanner_ip, bridge_ip, bridge_up,
+                                                      bridge_health)
+    if via_bridge is not None:
+        if via_bridge["source"] == "lease":
+            scanner_detail = f"{scanner_detail} -- via bridge (lease {scanner_addr})"
+        else:
+            scanner_detail = f"{scanner_detail} -- via bridge ({via_bridge['bridge_addr']})"
+    scanner_link = {"reachable": scanner.up, "rtt_ms": scanner.rtt_ms, "addr": scanner_addr}
+    if via_bridge is not None:
+        scanner_link.update(via_bridge)
     scanner_target = {
         "id": "scanner",
         "label": "Scanner",
-        "addr": scanner_ip,
+        "addr": scanner_addr,
         "state": "up" if scanner.up else "down",
         "detail": scanner_detail,
-        "link": {"reachable": scanner.up, "rtt_ms": scanner.rtt_ms, "addr": scanner_ip},
+        "link": scanner_link,
         "device": {"fps": scanner_fps, "transport": scanner_transport} if scanner.up else None,
         "management": None,
     }
@@ -296,10 +455,15 @@ async def probe(
     bridge_health: dict | None = None,
     crowpanel: dict | None = None,
     timeout_s: float = 1.0,
+    bridge_hostname: str = DEFAULT_BRIDGE_HOSTNAME,
 ) -> dict:
     """Probe the pingable hops (Bridge, Scanner, ST-Link) and return the `comm`
     message. Never raises.
 
+    `bridge_ip` here is the CONFIGURED fallback (env `ROOMSCAN_BRIDGE_IP` /
+    config `bridge_ip`, itself defaulting to the last-resort literal
+    `DEFAULT_BRIDGE_IP`) -- `bridge_hostname` (mDNS) is tried first via
+    `resolve_bridge_target`, and only the winning address is actually pinged.
     `bridge_health` and `crowpanel` are NOT collected here -- they are already-
     gathered facts the caller hands in (see the module docstring): an ssh poll
     is far too slow/heavy to run on this cadence, and CrowPanel state lives in
@@ -309,9 +473,12 @@ async def probe(
     treated as its failure verdict (down / absent), so a flaky `ping` degrades
     the indicator rather than the server.
     """
+    resolved = await resolve_bridge_target(bridge_ip, hostname=bridge_hostname)
+    bridge_addr = resolved["addr"]
+
     loop = asyncio.get_running_loop()
     bridge, scanner, stlink = await asyncio.gather(
-        ping_host(bridge_ip, timeout_s),
+        ping_host(bridge_addr, timeout_s),
         ping_host(scanner_ip, timeout_s),
         loop.run_in_executor(None, detect_stlink),
         return_exceptions=True,
@@ -324,6 +491,6 @@ async def probe(
         stlink = False
     return build_comm_message(
         bridge=bridge, scanner=scanner, stlink_present=bool(stlink),
-        bridge_ip=bridge_ip, scanner_ip=scanner_ip, scanner_fps=scanner_fps,
+        bridge_ip=bridge_addr, scanner_ip=scanner_ip, scanner_fps=scanner_fps,
         scanner_transport=scanner_transport, bridge_health=bridge_health,
-        crowpanel=crowpanel)
+        crowpanel=crowpanel, bridge_resolved_from=resolved["resolved_from"])

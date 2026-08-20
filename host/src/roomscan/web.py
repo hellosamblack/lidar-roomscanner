@@ -4763,8 +4763,9 @@ async def api_bridge_reboot() -> JSONResponse:
     """
     pi_bridge = _pi_bridge_module()
     try:
+        host = await _resolve_bridge_host(app.state)
         result = await asyncio.wait_for(
-            asyncio.to_thread(pi_bridge.reboot), timeout=BRIDGE_HEALTH_WAIT_S)
+            asyncio.to_thread(pi_bridge.reboot, host), timeout=BRIDGE_HEALTH_WAIT_S)
     except asyncio.TimeoutError:
         result = {"ok": False, "error": f"timed out after {BRIDGE_HEALTH_WAIT_S:g}s"}
     bus = getattr(app.state, "bus", None)
@@ -4790,8 +4791,9 @@ async def api_bridge_logs(request: Request) -> JSONResponse:
     lines = int((body or {}).get("lines") or 200)
     pi_bridge = _pi_bridge_module()
     try:
+        host = await _resolve_bridge_host(app.state)
         result = await asyncio.wait_for(
-            asyncio.to_thread(pi_bridge.logs, unit, lines), timeout=BRIDGE_HEALTH_WAIT_S)
+            asyncio.to_thread(pi_bridge.logs, unit, lines, host), timeout=BRIDGE_HEALTH_WAIT_S)
     except asyncio.TimeoutError:
         result = {"ok": False, "error": f"timed out after {BRIDGE_HEALTH_WAIT_S:g}s", "unit": unit}
     return JSONResponse(result)
@@ -5218,6 +5220,19 @@ BRIDGE_HEALTH_TIMEOUT_S = 8.0     # per-attempt ssh budget
 BRIDGE_HEALTH_WAIT_S = 12.0       # wall-clock guard around the executor call
 
 
+async def _resolve_bridge_host(state) -> str:
+    """The bridge address to hand `tools.pi_bridge` as an explicit `host=`
+    (#209 mDNS follow-up): resolves `roomscan-bridge.local` first, falling
+    back to the configured `bridge_ip` (env `ROOMSCAN_BRIDGE_IP` / config
+    `bridge_ip`, itself defaulting to `commstatus.DEFAULT_BRIDGE_IP`). Shares
+    `commstatus`'s TTL cache with the ICMP loop -- one resolution policy for
+    every ssh caller (health poll, reboot, logs), not one per call site."""
+    bridge_ip = getattr(getattr(state, "config", None), "bridge_ip", None) \
+        or commstatus.DEFAULT_BRIDGE_IP
+    resolved = await commstatus.resolve_bridge_target(bridge_ip)
+    return resolved["addr"]
+
+
 def _pi_bridge_module():
     """Import `tools.pi_bridge`, adding `host/` to `sys.path` first if needed.
 
@@ -5246,14 +5261,22 @@ async def _bridge_health_loop(state) -> None:
     off-thread is still a blocking call if nothing bounds how long it runs).
     Result is cached on `state.last_bridge_health`; `None` on any failure --
     `_comm_probe_loop` already treats that as 'no data yet', never a fabricated
-    reading."""
-    bridge_ip = getattr(getattr(state, "config", None), "bridge_ip", None) \
-        or commstatus.DEFAULT_BRIDGE_IP
+    reading.
+
+    Target resolution (#209 mDNS follow-up) is the SAME `resolve_bridge_target`
+    the ICMP loop uses, and the two loops share its module-level TTL cache --
+    so this poll almost never pays its own resolution cost, it just reads
+    whatever the ICMP loop (or a previous tick of this one) already resolved
+    and cached. The resolved address is handed to `pi_bridge.status` as an
+    explicit `host=`, which short-circuits `pi_bridge.resolve_host`'s own
+    argument/env/mDNS/fallback cascade -- deliberately, so there is exactly
+    one resolution policy in force rather than two that could disagree."""
     while True:
         try:
+            host = await _resolve_bridge_host(state)
             pi_bridge = _pi_bridge_module()
             result = await asyncio.wait_for(
-                asyncio.to_thread(pi_bridge.status, bridge_ip, timeout=BRIDGE_HEALTH_TIMEOUT_S),
+                asyncio.to_thread(pi_bridge.status, host, timeout=BRIDGE_HEALTH_TIMEOUT_S),
                 timeout=BRIDGE_HEALTH_WAIT_S)
             state.last_bridge_health = result if result.get("ok") else None
         except Exception as exc:
