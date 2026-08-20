@@ -413,6 +413,48 @@ the host's `UdpSource` lookup, which asks for the literal name
 neither, with no error surfaced anywhere. If you need to fall back to the
 FileHub, physically disconnect the Pi first.
 
+The FileHub's recovery scripts moved out of the repo root with #192
+(2026-08-20): `tools/cold-spare/filehub-bridgemode.sh` and
+`tools/cold-spare/filehub-batteryCheck.sh`, README alongside. The web UI's
+**Bridge Mode** button and `/api/bridge-mode` endpoint were removed in the
+same change — cold-spare recovery means running the script by hand.
+Day-to-day bridge maintenance is now the status bar's **Bridge chip modal**
+(#209): link health (mDNS-resolved address, RSSI/bitrate), device health
+(uptime, tee, scanner lease, nft counters), and Reboot / Fetch-recent-logs
+buttons. The probe target is `roomscan-bridge.local` (mDNS, 120 s TTL cache)
+falling back to `ROOMSCAN_BRIDGE_IP` — the wlan0 address is DHCP and moves,
+so never hardcode it.
+
+## 9.5. Power-loss resilience & SD wear (#210, 2026-08-20 — conservative tier)
+
+The image builder + payload now carry protection against abrupt power cuts
+and SD-card write wear. What ships, and where each config lands:
+
+- **cmdline.txt**: permanent `fsck.mode=force fsck.repair=yes`
+  (`RESILIENCE_CMDLINE_ARGS` in `build_image.py` — unlike the firstrun args,
+  never stripped), so every boot after a hard cut fscks and self-repairs
+  unattended.
+- **fstab** (`/usr/local/sbin/roomscan-bridge-harden-fstab`, idempotent, run
+  from `install.sh`): `noatime,commit=60` on `/`, `noatime` on
+  `/boot/firmware`, bounded tmpfs `/tmp` (100 MB).
+- **journald** (`journald.conf.d/roomscan-bridge.conf`): persistent but
+  bounded (64 MB / 16 MB per file / 2 weeks) with explicit
+  `SyncIntervalSec=5min`. Deliberately NOT volatile — the journal is the
+  postmortem evidence for exactly the failure this mitigates (#200).
+- **masked if present** (`install.sh harden_storage`): `dphys-swapfile`
+  (+ `swapoff -a`) and `rsyslog`.
+- **Deliberately still on SD**: the journal (above) and the pcap tee ring
+  (bounded 2 GB) — both exist to survive the power-loss event; tmpfs would
+  erase the evidence they're for. dnsmasq's lease file stays (single static
+  infinite lease ≈ write-once). Full inventory in issue #210.
+- **Deferred**: full read-only root + RAM overlay (bigger blast radius,
+  needs a live boot to prove) and relocating the dnsmasq lease file — see
+  issue #210's worker report.
+
+`test_pi_bridge_resilience.py` (23 tests) pins the payload contents. The
+live pull-the-plug verification is issue #210's operator runbook; until it
+passes 3/3, treat the resilience as landed-but-unproven.
+
 ## 10. Invariants this must keep
 
 From the design spec §8 — these are load-bearing, not incidental:
