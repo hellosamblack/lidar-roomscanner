@@ -347,6 +347,79 @@ def test_dispatch_none_client_reaches_bus_classified_as_error():
 
 
 # =============================================================================
+# 5b. TX_QUEUE_STATS (EVENT code 7) event-log heartbeat filter (issue #211)
+# =============================================================================
+# Live-verified flood: one code=7 line every ~2.1s (~30/min) drowns the web
+# event log. `TxQueueStatsLogFilter` + `_should_broadcast_bus_msg` throttle
+# what reaches /ws clients to a ~1/min heartbeat, except any drops/stalls
+# increment or high_water growth logs immediately.
+
+_TX_STATS_MSG = ("TX_QUEUE_STATS transport=udp high_water=5 pending=1 "
+                  "drops=0 stalls=0 emitted=32.86 MiB")
+_TX_STATS_LINE = f"[event] code=7 detail=66053 {_TX_STATS_MSG}"
+
+
+def test_tx_queue_stats_filter_heartbeats_at_most_once_per_minute():
+    """Synthetic ~0.5 Hz TX_QUEUE_STATS stream (one sample every 2s, matching
+    the live-verified cadence), steady state (counters never change) for 10
+    minutes: the filter must not let more than ~1 line/min through."""
+    filt = web.TxQueueStatsLogFilter()
+    emitted_at = []
+    t = 0.0
+    while t < 600.0:
+        if filt.should_emit(_TX_STATS_MSG, t):
+            emitted_at.append(t)
+        t += 2.0
+    # 10 minutes of heartbeat at >=60s apart -> at most 11 lines (1 initial +
+    # 1 per each full 60s window), never fewer than 2 (it isn't silenced
+    # forever either).
+    assert 2 <= len(emitted_at) <= 11
+    for prev, cur in zip(emitted_at, emitted_at[1:]):
+        assert cur - prev >= 60.0
+
+
+@pytest.mark.parametrize("bump", ["drops=1", "stalls=1", "high_water=6"])
+def test_tx_queue_stats_filter_emits_immediately_on_anomaly(bump):
+    """A drops/stalls increment or high_water growth must log immediately,
+    without waiting out the heartbeat window -- 'the filter must never eat
+    the first interesting sample.'"""
+    filt = web.TxQueueStatsLogFilter()
+    assert filt.should_emit(_TX_STATS_MSG, 0.0) is True    # first sample, baseline
+    assert filt.should_emit(_TX_STATS_MSG, 1.0) is False   # steady state, filtered
+    field_name = bump.split("=")[0]
+    baseline = next(tok for tok in _TX_STATS_MSG.split() if tok.startswith(f"{field_name}="))
+    bumped = _TX_STATS_MSG.replace(baseline, bump)
+    assert filt.should_emit(bumped, 1.5) is True
+
+
+def test_tx_queue_stats_filter_no_anomaly_when_counter_falls():
+    """A counter going DOWN (e.g. across a reconnect) is not an anomaly --
+    only growth is."""
+    filt = web.TxQueueStatsLogFilter()
+    high = _TX_STATS_MSG.replace("high_water=5", "high_water=9")
+    assert filt.should_emit(high, 0.0) is True
+    assert filt.should_emit(_TX_STATS_MSG, 1.0) is False   # high_water fell 9->5: no anomaly
+
+
+def test_should_broadcast_bus_msg_filters_tx_queue_stats_only():
+    """Non-code-7 events, cmd results, and plain log lines all pass through
+    unaffected -- only code=7 TX_QUEUE_STATS is ever filtered."""
+    filt = web.TxQueueStatsLogFilter()
+
+    other_event = web.classify_bus_line("[event] code=2 detail=0 trigger timeout")
+    log_line = web.classify_bus_line("reader stopped: RuntimeError('boom')")
+    cmd_line = web.classify_bus_line("ping -> OK applied=1")
+    for msg in (other_event, log_line, cmd_line):
+        for now in (0.0, 1.0, 2.0, 3.0):
+            assert web._should_broadcast_bus_msg(msg, filt, now) is True
+
+    tx_msg = web.classify_bus_line(_TX_STATS_LINE)
+    assert web._should_broadcast_bus_msg(tx_msg, filt, 0.0) is True    # first sample
+    assert web._should_broadcast_bus_msg(tx_msg, filt, 1.0) is False   # filtered
+    assert web._should_broadcast_bus_msg(tx_msg, filt, 2.0) is False   # filtered
+
+
+# =============================================================================
 # resolve_command (pure) -- inbound name -> (code, param, label)
 # =============================================================================
 

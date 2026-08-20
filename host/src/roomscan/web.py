@@ -79,6 +79,7 @@ from .protocol import (
     HEADER_SIZE,
     MAGIC,
     CommandCode,
+    EventCode,
     FrameHeader,
     FrameType,
     ProtocolError,
@@ -219,6 +220,13 @@ SENSOR_JITTER_WINDOW_S = 5.0
 # JSON). Sent ONLY to tabs that have the modal open -- `state.magcal_clients`.
 MAGCAL_INTERVAL = 1.0 / 5.0
 MISSING_PLANE_LOG_INTERVAL = 3.0   # debounce for missing-plane bus lines
+# TX_QUEUE_STATS (EVENT code 7) event-log heartbeat (issue #211): the firmware
+# emits this telemetry every ~64 ToF frames -- ~2.1s at 30fps, ~30 lines/min --
+# which drowns the web event log with a routine, steady-state line. Rule: at
+# most one heartbeat line per this many seconds in steady state, but ANY
+# increase in drops/stalls or growth in high_water logs immediately (see
+# `TxQueueStatsLogFilter`).
+TX_QUEUE_STATS_HEARTBEAT_S = 60.0
 
 # Recording & playback (web Phase 3).
 CAPTURES_DIR = "captures"          # where Record writes + the library browses
@@ -561,6 +569,84 @@ def _cmd_status(tail: str) -> str | None:
     if _CMD_SUCCESS_RE.match(tail):
         return "ok"
     return None
+
+
+# --- TX_QUEUE_STATS (EVENT code 7) event-log heartbeat filter (issue #211) --
+#
+# `describe_event`'s formatted TX_QUEUE_STATS message, e.g.:
+#   "TX_QUEUE_STATS transport=udp high_water=5 pending=1 drops=0 stalls=0 emitted=32.86 MiB"
+# Only the three counters that matter for the anomaly rule are extracted here;
+# `emitted`/`transport`/`pending` are cosmetic and never gate the filter.
+_TX_QUEUE_STATS_COUNTERS_RE = re.compile(
+    r"high_water=(\d+) pending=\d+ drops=(\d+) stalls=(\d+)")
+
+
+def _tx_queue_stats_counters(msg: str) -> tuple[int, int, int] | None:
+    """(high_water, drops, stalls) parsed out of a decoded TX_QUEUE_STATS
+    message, or None if it doesn't match that shape (e.g. describe_event's
+    "malformed N-byte payload" fallback) -- callers treat None as "don't
+    filter this, let it through", since an unrecognized shape is exactly the
+    kind of thing a human should see."""
+    m = _TX_QUEUE_STATS_COUNTERS_RE.search(msg)
+    if m is None:
+        return None
+    hw, drops, stalls = (int(g) for g in m.groups())
+    return hw, drops, stalls
+
+
+class TxQueueStatsLogFilter:
+    """Steady-state heartbeat + anomaly-passthrough for TX_QUEUE_STATS
+    event-log lines (see the `TX_QUEUE_STATS_HEARTBEAT_S` comment). Filtered
+    server-side, at the single `/ws` fan-out point (`_broadcaster`'s bus-drain
+    loop via `_should_broadcast_bus_msg`) rather than client-side, so every
+    tab sees the identical log regardless of when it connected -- and so
+    other LogBus consumers (the deprecated desktop `panel.py`, the CLI
+    reader/viewer) are unaffected: this only throttles what reaches `/ws`.
+
+    One instance lives for the broadcaster's process lifetime
+    (`state.tx_stats_filter`, lazily created like `OrientationSmoother` /
+    `OrientationJitter`); `reset()` on a live/replay source switch (same spot
+    those two reset) so a jump in counters across sources is never read as a
+    device anomaly.
+    """
+
+    def __init__(self, heartbeat_s: float = TX_QUEUE_STATS_HEARTBEAT_S):
+        self._heartbeat_s = heartbeat_s
+        self._last: tuple[int, int, int] | None = None   # (high_water, drops, stalls)
+        self._last_emit: float = float("-inf")
+
+    def reset(self) -> None:
+        self._last = None
+        self._last_emit = float("-inf")
+
+    def should_emit(self, msg: str, now: float) -> bool:
+        """True if this TX_QUEUE_STATS sample should become a log line. The
+        very first sample always emits (the heartbeat deadline starts at
+        -inf), establishing the baseline the anomaly check compares against."""
+        counters = _tx_queue_stats_counters(msg)
+        if counters is None:
+            return True
+        hw, drops, stalls = counters
+        anomaly = False
+        if self._last is not None:
+            last_hw, last_drops, last_stalls = self._last
+            anomaly = drops > last_drops or stalls > last_stalls or hw > last_hw
+        self._last = counters
+        heartbeat_due = (now - self._last_emit) >= self._heartbeat_s
+        emit = anomaly or heartbeat_due
+        if emit:
+            self._last_emit = now
+        return emit
+
+
+def _should_broadcast_bus_msg(msg: dict, tx_filter: "TxQueueStatsLogFilter", now: float) -> bool:
+    """True if a classified bus-line dict (`classify_bus_line`'s return)
+    should reach `/ws` clients. Only code=7 TX_QUEUE_STATS events are ever
+    filtered (issue #211); every other event code, every `cmd` result, and
+    every plain `log` line passes through unconditionally."""
+    if msg.get("type") == "event" and msg.get("code") == EventCode.TX_QUEUE_STATS:
+        return tx_filter.should_emit(msg.get("msg", ""), now)
+    return True
 
 
 def _apply_colormap(vn: np.ndarray, colormap: str) -> np.ndarray:
@@ -6513,6 +6599,11 @@ async def _broadcaster() -> None:
     jitter = getattr(state, "orientation_jitter", None)
     if jitter is None:
         jitter = state.orientation_jitter = OrientationJitter()
+    # TX_QUEUE_STATS (EVENT code 7) event-log heartbeat filter (issue #211) --
+    # same lazy-create pattern as the two above.
+    tx_stats_filter = getattr(state, "tx_stats_filter", None)
+    if tx_stats_filter is None:
+        tx_stats_filter = state.tx_stats_filter = TxQueueStatsLogFilter()
     # Elevation readout (owner ask, 2026-07-31): the EMA that makes a ~1.2 ft
     # noise band readable, and the cached sea-level reference it is measured
     # against. Same lazy-create pattern as the two above, so a hand-built
@@ -6567,6 +6658,7 @@ async def _broadcaster() -> None:
             smoother.reset()
             jitter.reset()
             elevation.reset()
+            tx_stats_filter.reset()
             ui.ir_freeze_range = None
             state.latest_mesh = None
             # A live<->replay switch must never leave a thin client looking at
@@ -6853,7 +6945,7 @@ async def _broadcaster() -> None:
                 await _broadcast_text(clients, json.dumps(ctrl.session_message(pos, time.time())))
             for line in bus.drain(bus_handle):
                 msg = classify_bus_line(line, state.command_labels)
-                if msg is not None:
+                if msg is not None and _should_broadcast_bus_msg(msg, tx_stats_filter, now):
                     await _broadcast_text(clients, json.dumps(msg))
 
             # Ranging profile / IMU-env poll rate (Task 10): measured_fps reuses
