@@ -44,5 +44,6 @@ Agent guidance lives one level up in [`AGENTS.md`](../AGENTS.md) (`CLAUDE.md` is
 ## <img src="https://api.iconify.design/material-symbols/folder-open.svg?color=white#gh-dark-mode-only" width="28" height="28" align="absmiddle"><img src="https://api.iconify.design/material-symbols/folder-open.svg#gh-light-mode-only" width="28" height="28" align="absmiddle"> History & Archives
 
 *   [**`roadmap-history.md`**](roadmap-history.md) - Completed-phase narratives and measured outcomes; the historical record behind [`ROADMAP.md`](../ROADMAP.md).
+*   [**`codex-token-burndown.md`**](codex-token-burndown.md) - Ready-to-paste prompt (plus model/effort choice) for a Codex token-burndown session against the issue backlog; single-session counterpart to the `issue-fleet` skill.
 *   [**`issue-migration-map.md`**](issue-migration-map.md) - Legacy `BUG-NNN` / `SLAM-N` / `DC-<letter>` → GitHub issue mapping (2026-08-10 migration). Generated from `issue-migration-map.json`, which is the machine-readable source of truth.
 *   **`superpowers/`** - Design documents (`specs/`) and phase execution checklists (`plans/`). Active work sits at each directory root; historical records under `completed/`, superseded ones under `deprecated/`. The register in [`ROADMAP.md`](../ROADMAP.md) is the inventory.
