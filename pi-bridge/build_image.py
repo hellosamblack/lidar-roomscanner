@@ -142,6 +142,18 @@ FIRSTRUN_ARGS = (
     "systemd.unit=kernel-command-line.target",
 )
 
+#: Permanent kernel cmdline arguments for power-loss resilience (issue #210).
+#: Unlike FIRSTRUN_ARGS these are never stripped -- firstrun.sh's cleanup sed
+#: only removes the three `systemd.*` tokens it itself added, by name, so a
+#: fsck.* token added here survives every future boot for the life of the
+#: card. The bridge's hardware watchdog reset (#200) and any other abrupt
+#: power loss are, from the filesystem's point of view, an unplug; forcing
+#: fsck (rather than the kernel's default of skipping it unless a dirty bit
+#: was set, which an ext4 journal replay can mask) plus unattended repair is
+#: what turns that into "boots clean" instead of "wedged until someone runs
+#: fsck by hand with a keyboard and screen this box does not have".
+RESILIENCE_CMDLINE_ARGS = ("fsck.mode=force", "fsck.repair=yes")
+
 PAYLOAD_TAR_NAME = "roomscan-bridge-payload.tar.gz"
 
 #: uuid5 namespace so NetworkManager profile UUIDs are stable across rebuilds.
@@ -400,6 +412,33 @@ def strip_firstrun_args(cmdline: str, args: tuple[str, ...] = FIRSTRUN_ARGS) -> 
     body = cmdline.rstrip("\r\n")
     kept = [tok for tok in body.split() if tok not in args]
     return " ".join(kept) + "\n"
+
+
+def ensure_cmdline_args(cmdline: str, args: tuple[str, ...]) -> str:
+    """Ensure each of `args` is present in cmdline.txt, appending whichever are
+    missing. Pure, idempotent.
+
+    Deliberately NOT all-or-nothing the way `append_firstrun_args` is: that
+    function's strict "some but not all" refusal exists because FIRSTRUN_ARGS
+    are removed together, as one triple, by firstrun.sh's cleanup sed, so a
+    partial match means something corrupted the injection. RESILIENCE_CMDLINE_
+    ARGS carries no such invariant -- some recent Raspberry Pi OS releases
+    already ship `fsck.repair=yes` in their stock cmdline.txt, and treating
+    that overlap as a corrupted build would fail every real build against
+    such a release. Each arg is added independently instead.
+    """
+    body = cmdline.rstrip("\r\n")
+    if "\n" in body or "\r" in body:
+        raise BuildError(
+            "cmdline.txt has more than one line; the Pi bootloader passes only "
+            "the first, so appending would silently do nothing")
+    if not body.strip():
+        raise BuildError("cmdline.txt is empty -- refusing to invent one")
+    present = set(body.split())
+    missing = [a for a in args if a not in present]
+    if not missing:
+        return body + "\n"
+    return body + " " + " ".join(missing) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -1076,6 +1115,9 @@ def build(secrets_path: Path, *, release_key: str = DEFAULT_RELEASE,
 
         cmdline = fat_read(out, boot.offset, "/cmdline.txt").decode()
         new_cmdline = append_firstrun_args(cmdline)
+        # Permanent, unlike the firstrun args above: fsck should run forced
+        # on every boot for the life of the card, not just the first one.
+        new_cmdline = ensure_cmdline_args(new_cmdline, RESILIENCE_CMDLINE_ARGS)
         cl = td_p / "cmdline.txt"
         cl.write_text(new_cmdline)
         fat_write(out, boot.offset, cl, "/cmdline.txt")
@@ -1083,6 +1125,9 @@ def build(secrets_path: Path, *, release_key: str = DEFAULT_RELEASE,
     # --- verify by reading back, not by echoing ---------------------------
     res.cmdline = fat_read(out, boot.offset, "/cmdline.txt").decode().strip()
     for arg in FIRSTRUN_ARGS:
+        if arg not in res.cmdline.split():
+            raise BuildError(f"cmdline.txt in the built image is missing {arg!r}")
+    for arg in RESILIENCE_CMDLINE_ARGS:
         if arg not in res.cmdline.split():
             raise BuildError(f"cmdline.txt in the built image is missing {arg!r}")
     listing = fat_list(out, boot.offset)

@@ -1,0 +1,98 @@
+#!/bin/bash
+# roomscan-bridge-harden-fstab -- mount-option and tmpfs hardening for
+# SD-card wear and power-loss resilience (issue #210).
+#
+# Two independent, cheap, reversible goals:
+#
+#   1. Cut needless writes on the root filesystem: `noatime` (no metadata
+#      write triggered by every file *read*) and a longer ext4 journal
+#      commit interval (`commit=60` vs. ext4's own default of 5s -- far
+#      fewer forced flushes, at the cost of up to 60s of the most recent
+#      writes on a hard crash. `fsck.mode=force fsck.repair=yes` on the
+#      kernel cmdline -- see RESILIENCE_CMDLINE_ARGS in build_image.py --
+#      is what cleans up whatever that window left inconsistent on the very
+#      next boot, unattended.)
+#   2. Move the one path that churns constantly and does not need to survive
+#      a reboot (/tmp) onto tmpfs, so its writes never touch the SD card.
+#
+# Deliberately does NOT touch /var/log or the pcap tee spool
+# (/var/lib/roomscan-bridge/tee):
+#   - journald's Storage=persistent (roomscan-bridge journald.conf.d) is a
+#     DELIBERATE choice, made so a boot that goes silent leaves a
+#     post-mortem behind (issue #191/#200). tmpfs-ing /var/log would destroy
+#     exactly the evidence that fix exists to keep.
+#   - the tee's ring is there specifically to survive the power-loss/
+#     watchdog-reset event this issue is mitigating; putting it in RAM would
+#     defeat its own purpose.
+# Both are bounded already (64 MB journal, 2 GB ring) -- see their own
+# units/drop-ins for the sizing rationale. This script's job is everything
+# ELSE that writes to the SD card for no benefit.
+#
+# Idempotent: every edit checks for its own effect before making it, so
+# re-running (e.g. on every `bridge_update`) is a no-op on a box already
+# hardened. FSTAB is overridable so this can be exercised against a scratch
+# file instead of the real /etc/fstab -- see host/tests/test_pi_bridge_
+# resilience.py.
+set -euo pipefail
+
+FSTAB="${FSTAB:-/etc/fstab}"
+
+if [ ! -f "${FSTAB}" ]; then
+    echo "roomscan-bridge-harden-fstab: ${FSTAB} not found, nothing to do" >&2
+    exit 0
+fi
+
+# Adds $2 to the options (4th, whitespace-separated) field of the fstab line
+# whose mount point (2nd field) is exactly $1, unless it is already there.
+# A no-op, not an error, if that mount point has no line at all -- some
+# images do not carry a separate /boot/firmware entry.
+ensure_mount_option() {
+    local mountpoint="$1" option="$2"
+    python3 - "${FSTAB}" "${mountpoint}" "${option}" <<'PY'
+import sys
+
+path, mountpoint, option = sys.argv[1:4]
+with open(path) as f:
+    lines = f.readlines()
+
+out = []
+for line in lines:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        out.append(line)
+        continue
+    fields = stripped.split()
+    if len(fields) < 4 or fields[1] != mountpoint:
+        out.append(line)
+        continue
+    opts = [o for o in fields[3].split(",") if o]
+    if option not in opts:
+        opts.append(option)
+        fields[3] = ",".join(opts)
+        line = "\t".join(fields) + "\n"
+    out.append(line)
+
+with open(path, "w") as f:
+    f.writelines(out)
+PY
+}
+
+# Appends a `tmpfs <mountpoint> tmpfs <options> 0 0` line, unless a line for
+# that mount point already exists (whatever its filesystem type -- never
+# duplicate a mount point that is already spoken for).
+ensure_tmpfs_line() {
+    local mountpoint="$1" options="$2"
+    if awk -v mp="${mountpoint}" \
+        '!/^[[:space:]]*#/ && NF >= 2 && $2 == mp { found=1 } END { exit !found }' \
+        "${FSTAB}"; then
+        return 0
+    fi
+    printf 'tmpfs\t%s\ttmpfs\t%s\t0\t0\n' "${mountpoint}" "${options}" >> "${FSTAB}"
+}
+
+ensure_mount_option "/" "noatime"
+ensure_mount_option "/" "commit=60"
+ensure_mount_option "/boot/firmware" "noatime"
+ensure_tmpfs_line "/tmp" "defaults,noatime,nosuid,nodev,mode=1777,size=100m"
+
+echo "roomscan-bridge-harden-fstab: done"

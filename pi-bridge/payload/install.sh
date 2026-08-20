@@ -395,6 +395,50 @@ install_sbin_tools() {
     done
 }
 
+# ---------------------------------------------------------------------------
+# SD-wear + power-loss resilience (issue #210)
+# ---------------------------------------------------------------------------
+
+# Masks a base-image service this box has no use for, but only if it is
+# actually present -- do not assume either way (AGENTS.md's vendor-default
+# rule: Raspberry Pi OS Lite's package set has changed release to release,
+# so asserting a unit exists would break on an image that dropped it, and
+# assuming it does not would silently leave it running on one that kept it).
+# Best-effort and non-fatal: neither unit is in REQUIRED_UNITS, and a masked-
+# but-still-running service is no worse than the stock image's own default.
+mask_if_present() {
+    local unit="$1" reason="$2"
+    if unit_exists "${unit}"; then
+        log "masking ${unit} (${reason})"
+        systemctl mask "${unit}" 2>/dev/null || log "WARNING: could not mask ${unit}"
+        systemctl stop "${unit}" 2>/dev/null || true
+    else
+        log "${unit} not present on this image, nothing to mask"
+    fi
+}
+
+# Applies the mount-option/tmpfs edits and disables the two other routine SD
+# writers a stock Raspberry Pi OS Lite image can carry. See
+# roomscan-bridge-harden-fstab's own header for what does and does not move
+# to tmpfs, and why (journald's persistent, bounded journal and the pcap tee
+# spool deliberately stay on real storage -- they exist specifically to
+# survive the power-loss/watchdog-reset event this hardening is mitigating).
+harden_storage() {
+    mask_if_present "dphys-swapfile.service" \
+        "swap on the SD card is a wear source this box does not need"
+    mask_if_present "rsyslog.service" \
+        "journald already owns logging here; rsyslog would duplicate every line to /var/log/*.log on SD"
+    swapoff -a 2>/dev/null || true
+
+    local fstab_tool="/usr/local/sbin/roomscan-bridge-harden-fstab"
+    if [ -x "${fstab_tool}" ]; then
+        log "applying fstab mount-option + tmpfs hardening"
+        "${fstab_tool}" || log "WARNING: ${fstab_tool} reported an error (non-fatal)"
+    else
+        log "WARNING: ${fstab_tool} not installed (expected at ${fstab_tool}), skipping fstab hardening"
+    fi
+}
+
 install_wifi_override() {
     local override_src="/boot/firmware/wifi-override.nmconnection"
     local override_dest="/etc/NetworkManager/system-connections/roomscan-wifi-override.nmconnection"
@@ -736,6 +780,7 @@ main() {
     ensure_nftables_include
     ensure_dnsmasq_reads_dropins
     install_sbin_tools
+    harden_storage
     install_wifi_override
     install_authorized_key
     harden_admin_access
