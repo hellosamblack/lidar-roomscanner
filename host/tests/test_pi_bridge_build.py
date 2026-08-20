@@ -855,6 +855,24 @@ def test_install_sh_clears_a_latched_start_limit_before_restarting():
         "the latch must be cleared BEFORE the start attempt, or it changes nothing"
 
 
+def test_update_enables_new_optional_units_for_the_next_boot():
+    """Starting a newly deployed timer is not the same as installing it.
+
+    Issue #200's health logger was added through ``bridge_update()``.  The
+    update branch restarted its timer, so samples appeared immediately, but it
+    never enabled the unit.  The next cold boot therefore left the timer
+    disabled and inactive.  Keep an explicit enable in the update branch; a
+    successful restart only proves the current boot.
+    """
+    text = (PAYLOAD / "install.sh").read_text()
+    optional_loop = text.split(
+        'for unit in "${OPTIONAL_UNITS[@]}"; do', 1
+    )[1].split("\n    done", 1)[0]
+    update_branch = optional_loop.split("else", 1)[1]
+    assert 'systemctl enable "${unit}"' in update_branch, \
+        "bridge_update starts new optional units but leaves them disabled at boot"
+
+
 def test_dnsmasq_survives_an_eth0_that_has_no_address_yet():
     """eth0 is a point-to-point link to a scanner that is unplugged most of the
     time, and NM addresses it asynchronously after boot regardless.

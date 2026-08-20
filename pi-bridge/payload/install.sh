@@ -685,7 +685,11 @@ activate_units() {
             log "enabling + starting optional unit ${unit}"
             systemctl enable --now "${unit}" || log "WARNING: optional unit ${unit} failed to enable+start"
         else
-            log "restarting optional unit ${unit}"
+            # Updates can introduce a brand-new optional unit.  Restarting it
+            # proves only this boot; without enable it silently disappears on
+            # the next reboot (issue #200's health logger did exactly that).
+            log "enabling + restarting optional unit ${unit}"
+            systemctl enable "${unit}" || log "WARNING: optional unit ${unit} failed to enable for boot"
             systemctl restart "${unit}" || log "WARNING: optional unit ${unit} failed to restart"
         fi
     done
