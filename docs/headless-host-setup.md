@@ -16,6 +16,13 @@ host/.venv/bin/python host/tools/headless_doctor.py --build   # verify + build t
 `headless_doctor.py` runs every check below and prints the exact fix for any
 failure. Green across the board ⇒ `./view-web.sh` shows live data.
 
+On a box with the systemd service installed (the dev box — see "Keeping the
+server up" below), `./view-web.sh` **delegates to the service** instead of
+spawning a competing server: a plain call just ensures the managed unit is up
+and prints the URL; passing args (`./view-web.sh --replay …`) runs a one-off and
+restores the live service on exit. Day-to-day you manage it directly with
+`systemctl --user {start,stop,restart} roomscan-web`.
+
 ## The four gaps (why each check exists)
 
 1. **Native transform library** — the board streams *raw* frames; the PC runs

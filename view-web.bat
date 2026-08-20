@@ -8,6 +8,11 @@ rem (VID:PID CAFE:4001). Bootstraps the Python venv/dependencies on first run
 rem (needs Python 3.11 or 3.12).
 rem Extra args pass through, e.g.:  view-web.bat --color reflectance
 rem                                 view-web.bat --replay recordings\scan.bin
+rem
+rem NOTE: on the Linux dev box roomscan-web runs as an always-on systemd user
+rem service (#207) and is managed with `systemctl --user ... roomscan-web` (see
+rem docs/headless-host-setup.md). Windows has no such unit, so this launcher
+rem still starts the server directly, as below.
 rem ---------------------------------------------------------------------------
 setlocal
 cd /d "%~dp0"
