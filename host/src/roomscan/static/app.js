@@ -19,6 +19,7 @@ import { createBrowser } from './browser.js';
 import { createSlam } from './slam.js';
 import { createSplat } from './splat.js';
 import { createAdmin } from './admin.js';
+import { createCommStatus } from './comm-status.js';
 import { createIdle } from './idle.js';
 import { createSpotlight } from './spotlight.js';
 
@@ -45,6 +46,10 @@ createIr(hub);
 // takes `hub` only to watch 'conn' so the Restart button can clear its busy
 // state when the socket comes back.
 createAdmin(hub);
+// Comm-status chip modal (#209): hud.js paints the Bridge/Scanner/CrowPanel/
+// ST-Link chips themselves; this owns the Link/Device/Management modal a
+// click on one opens.
+createCommStatus(hub);
 createSlam(hub, sceneApi);
 // Splat source (Live/View/Splat): renders an offline Gaussian-splat
 // reconstruction into the SAME scene, drawn by the single render loop.

@@ -286,14 +286,18 @@
         .dot.connected { background-color: var(--success); box-shadow: 0 0 12px var(--success); } /* unslop-ignore: intentional health-LED glow, not decorative */
 
         /* Comm-status cluster (top-right): one chip per hop the frames traverse
-           — FileHub · Scanner · ST-Link. The dot colour is the reachability
-           verdict from the server's `comm` probe; title= carries addr + detail. */
+           — Bridge · Scanner · CrowPanel · ST-Link. The dot colour is the
+           reachability verdict from the server's `comm` probe; title= carries
+           addr + detail, and a click opens the chip's Link/Device/Management
+           modal (comm-status.js). */
         #comm-status { display: flex; align-items: center; gap: 12px; margin-right: 4px; }
         .comm-item {
             display: flex; align-items: center; gap: 5px;
             font-size: 0.72rem; font-weight: 500; color: var(--text-muted);
-            cursor: default; white-space: nowrap;
+            cursor: pointer; white-space: nowrap; background: none; border: none;
+            padding: 0; font-family: inherit;
         }
+        .comm-item:hover { color: var(--text-main); background: none; }
         .comm-item__dot {
             width: 8px; height: 8px; border-radius: 50%;
             background-color: var(--text-muted); flex: none;
@@ -1095,21 +1099,31 @@
         /* ---- connection-idled park notice ---- */
         #idle-modal .modal { width: min(420px, 96vw); }
 
-        /* ---- bridge-mode confirm ---- */
-        #bridge-modal .modal { width: min(520px, 96vw); }
-        .bridge-steps {
-            margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 5px;
-            font-size: 0.78rem; line-height: 1.45; color: var(--text-muted);
+        /* ---- comm-status chip modal (#209): one shared modal for every
+           top-bar chip (Bridge/Scanner/CrowPanel/ST-Link), rendered from the
+           /ws `comm` message's per-target link/device/management data --
+           comm-status.js owns the fill logic. ---- */
+        #comm-modal .modal { width: min(560px, 96vw); }
+        .commx-section + .commx-section { margin-top: 4px; }
+        .commx-section__title {
+            margin: 0 0 6px; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.02em;
+            text-transform: uppercase; color: var(--text-muted);
         }
-        .bridge-steps strong { color: var(--text-main); font-weight: 600; }
-        .bridge-output {
+        .commx-section__empty { margin: 0; font-size: 0.75rem; color: var(--text-muted); }
+        .commx-facts { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; }
+        .commx-facts dt { font-size: 0.7rem; color: var(--text-muted); }
+        .commx-facts dd {
+            margin: 0; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem;
+            color: var(--text-main); text-align: right;
+        }
+        .comm-output {
             margin: 0; padding: 10px; max-height: 220px; overflow: auto;
             background: rgba(0, 0, 0, 0.35); border: 1px solid var(--panel-border);
             border-radius: 6px; font-size: 0.7rem; line-height: 1.4;
             white-space: pre-wrap; word-break: break-word; color: var(--text-muted);
         }
-        .bridge-output.ok { color: var(--success); }
-        .bridge-output.err { color: var(--danger); }
+        .comm-output.ok { color: var(--success); }
+        .comm-output.err { color: var(--danger); }
         .record-name-row { display: flex; align-items: center; gap: 8px; }
         .record-name-row input[type="text"] {
             flex: 1; min-width: 0;
@@ -1535,12 +1549,12 @@
                 <button data-display="detailed" title="Build or view the saved detailed reconstruction">Detailed</button>
             </div>
         </div>
-        <!-- Owner maintenance actions. Both POST to /api/*; neither is part of
-             the /ws protocol. Bridge Mode opens a confirm modal because it is
-             only step 3 of a 4-step physical sequence (see the modal body). -->
+        <!-- Owner maintenance action. POSTs to /api/restart; not part of the
+             /ws protocol. The FileHub "Bridge Mode" button was retired
+             2026-08-20 (#192) -- the Pi bridge replaced the FileHub, and its
+             own reboot/logs controls now live in the Bridge chip's modal
+             below, not the top bar. -->
         <div class="topbar-admin">
-            <button id="btn-bridge" class="topbar-btn"
-                    title="Re-apply transparent bridge mode on the RavPower FileHub">Bridge Mode</button>
             <button id="btn-restart" class="topbar-btn"
                     title="Relaunch the roomscan-web server process">Restart Server</button>
         </div>
@@ -1556,8 +1570,11 @@
             <div class="cap-status" id="record-status"></div>
         </div>
         <!-- Comm-status: server->rig link health, one chip per hop (populated by
-             the /ws `comm` message; hud.js renders it). ST-Link is informational
-             and reads neutral when absent, which is normal on the Ethernet rig. -->
+             the /ws `comm` message; hud.js renders it). Bridge and CrowPanel
+             are informational when absent, same idiom as ST-Link -- neither is
+             wired into every rig configuration. Each chip is clickable and
+             opens #comm-modal with that hop's Link/Device/Management detail
+             (comm-status.js). -->
         <div id="comm-status" title="Server → rig link health"></div>
         <div class="status-indicator">
             <span id="conn-text">Offline</span>
@@ -2408,32 +2425,40 @@ cover the whole sphere from this viewpoint, and a gap behind you still has to be
         </div>
     </div>
 
-    <!-- Bridge-mode confirm. The script is only step 3 of a physical sequence,
-         and running it out of order makes the FileHub treat its LAN port as
-         WAN -- so the ordered steps are stated here rather than firing on a
-         single click. -->
-    <div id="bridge-modal" class="modal-backdrop hidden">
-        <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="bridge-title">
+    <!-- Comm-status chip modal (#209): ONE shared modal for every top-bar
+         chip (Bridge/Scanner/CrowPanel/ST-Link). comm-status.js fills the
+         title + three sections from that chip's `link`/`device`/`management`
+         data in the last `comm` message -- Link health (reachability/RTT,
+         radio or ws-thin/USB specifics), Device health (what the hop itself
+         reports, when it reports anything), and Management controls (only
+         when a device is honestly controllable -- today that is the Bridge's
+         Reboot + Fetch logs, backed by /api/bridge/reboot and /api/bridge/logs,
+         which call the same host/tools/pi_bridge.py functions the MCP
+         bridge_* tools do). A chip with nothing controllable simply has no
+         Management section, rather than one full of disabled buttons. -->
+    <div id="comm-modal" class="modal-backdrop hidden">
+        <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="commx-title">
             <div class="modal__header">
-                <h2 class="modal__title" id="bridge-title">FileHub Bridge Mode</h2>
-                <button id="bridge-close" class="modal__close" title="Cancel (Esc)">&times;</button>
+                <h2 class="modal__title" id="commx-title">Link</h2>
+                <button id="commx-close" class="modal__close" title="Close (Esc)">&times;</button>
             </div>
             <div class="modal__body">
-                <p class="modal__intro">
-                    This runs <strong>step 3 only</strong>. The FileHub treats its port as
-                    <strong>WAN</strong> if these are done out of order, so confirm the first
-                    two are already complete:
-                </p>
-                <ol class="bridge-steps">
-                    <li>Unplug the Ethernet cable from the FileHub.</li>
-                    <li>Power-cycle the FileHub and wait for it to finish booting.</li>
-                    <li><strong>Run the bridge script</strong> &larr; this button.</li>
-                    <li>Replug the Ethernet cable.</li>
-                </ol>
-                <pre class="bridge-output hidden" id="bridge-output"></pre>
-                <div class="btn-row">
-                    <button id="bridge-cancel" title="Close without running anything">Cancel</button>
-                    <button id="bridge-run" class="primary" title="Run the bridge script on the FileHub. Only do this after steps 1 and 2 above.">Run step 3</button>
+                <p class="modal__intro" id="commx-intro"></p>
+                <div class="commx-section">
+                    <h3 class="commx-section__title">Link health</h3>
+                    <div id="commx-link"></div>
+                </div>
+                <div class="commx-section" id="commx-device-section">
+                    <h3 class="commx-section__title">Device health</h3>
+                    <div id="commx-device"></div>
+                </div>
+                <div class="commx-section hidden" id="commx-mgmt-section">
+                    <h3 class="commx-section__title">Management controls</h3>
+                    <div class="btn-row">
+                        <button id="commx-reboot" title="Reboot the Pi bridge node (~30s to come back)">Reboot</button>
+                        <button id="commx-logs" title="Fetch the last 200 lines of the bridge's journal">Fetch recent logs</button>
+                    </div>
+                    <pre class="comm-output hidden" id="commx-output"></pre>
                 </div>
             </div>
         </div>

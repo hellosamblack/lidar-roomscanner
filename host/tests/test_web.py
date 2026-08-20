@@ -3364,49 +3364,10 @@ def test_root_redirects_to_static_index():
 
 
 # =============================================================================
-# 13. Admin endpoints -- FileHub bridge mode + server restart (2026-07-31)
+# 13. Admin endpoints -- server restart + Pi bridge management (2026-07-31,
+#     reworked 2026-08-20 #192/#193/#209: FileHub bridge-mode retired, Pi
+#     bridge reboot/logs added)
 # =============================================================================
-
-def test_bridge_mode_reports_missing_script(tmp_path):
-    """A missing script must come back as a readable reason, not an exception:
-    the button's whole job is to say what happened."""
-    res = web.run_bridge_mode(script=tmp_path / "nope.sh")
-    assert res["ok"] is False
-    assert "not found" in res["error"]
-    assert res["returncode"] is None
-
-
-def test_bridge_mode_captures_output_and_success(tmp_path):
-    script = tmp_path / "fake-bridge.sh"
-    script.write_text("#!/bin/bash\necho 'bridge applied'\nexit 0\n")
-    script.chmod(0o755)
-    res = web.run_bridge_mode(script=script)
-    assert res["ok"] is True
-    assert res["returncode"] == 0
-    assert "bridge applied" in res["output"]
-    assert res["error"] is None
-
-
-def test_bridge_mode_reports_nonzero_exit_as_failure(tmp_path):
-    """A script that runs but fails is NOT ok -- an earlier draft keyed success
-    off "did it execute", which would report a dead router as a fixed one."""
-    script = tmp_path / "fail.sh"
-    script.write_text("#!/bin/bash\necho 'cannot reach router' >&2\nexit 1\n")
-    script.chmod(0o755)
-    res = web.run_bridge_mode(script=script)
-    assert res["ok"] is False
-    assert res["returncode"] == 1
-    assert "cannot reach router" in res["output"]
-
-
-def test_bridge_mode_times_out_without_hanging(tmp_path):
-    script = tmp_path / "hang.sh"
-    script.write_text("#!/bin/bash\nsleep 30\n")
-    script.chmod(0o755)
-    res = web.run_bridge_mode(script=script, timeout_s=0.5)
-    assert res["ok"] is False
-    assert "did not finish" in res["error"]
-
 
 def test_managed_unit_reflects_env(monkeypatch):
     """Under the systemd unit, ROOMSCAN_MANAGED names the supervising unit and
@@ -3443,13 +3404,112 @@ def test_restart_command_defers_and_execs():
 
 def test_admin_endpoints_are_post_only():
     """POST-only so a prefetch, crawler, or browser refresh can never restart
-    the server or reconfigure the router."""
-    paths = {"/api/bridge-mode", "/api/restart"}
+    the server or reach out to the bridge."""
+    paths = {"/api/restart", "/api/bridge/reboot", "/api/bridge/logs"}
     found = {r.path: r.methods for r in web.app.routes if getattr(r, "path", "") in paths}
     assert set(found) == paths
     for path, methods in found.items():
         assert "POST" in methods, path
         assert "GET" not in methods, path
+
+
+def test_bridge_mode_endpoint_retired():
+    """#192: the FileHub bridge-mode button and its endpoint are gone -- the
+    Pi bridge (#191) replaced the FileHub, so there is no router left to
+    re-bridge. Regression: an earlier draft left the route registered."""
+    paths = {r.path for r in web.app.routes}
+    assert "/api/bridge-mode" not in paths
+    assert not hasattr(web, "run_bridge_mode")
+
+
+def test_pi_bridge_module_importable_without_pythonpath_help():
+    """`_pi_bridge_module` must work under `roomscan-web`'s real deployment
+    (systemd `WorkingDirectory` = repo root, no PYTHONPATH tweak) -- not only
+    under pytest, which already has `host/` on `sys.path` via pyproject's
+    `pythonpath = ["src", "."]`. Import by (repo-relative) file path so this
+    exercises the real sys.path-insertion branch rather than short-circuiting
+    on an import pytest had already made available."""
+    import sys as _sys
+
+    web_path = Path(web.__file__)
+    assert (web_path.parents[3] / "host" / "tools" / "pi_bridge.py").is_file()
+
+    saved = list(_sys.path)
+    saved_modules = {k: v for k, v in _sys.modules.items() if k.startswith("tools")}
+    try:
+        _sys.path = [p for p in _sys.path if not p.endswith("host") and p != ""]
+        for k in list(_sys.modules):
+            if k.startswith("tools"):
+                del _sys.modules[k]
+        mod = web._pi_bridge_module()
+        assert hasattr(mod, "status") and hasattr(mod, "reboot") and hasattr(mod, "logs")
+    finally:
+        _sys.path = saved
+        for k in list(_sys.modules):
+            if k.startswith("tools") and k not in saved_modules:
+                del _sys.modules[k]
+        _sys.modules.update(saved_modules)
+
+
+def test_api_bridge_reboot_delegates_to_pi_bridge_and_reports_result(monkeypatch):
+    calls = []
+
+    def fake_reboot():
+        calls.append(True)
+        return {"ok": True, "note": "the Pi takes roughly 30 s to come back"}
+
+    monkeypatch.setattr(web, "_pi_bridge_module",
+                        lambda: SimpleNamespace(reboot=fake_reboot))
+    web.app.state.bus = LogBus()
+    resp = asyncio.run(web.api_bridge_reboot())
+    assert calls == [True]
+    assert json.loads(resp.body)["ok"] is True
+
+
+def test_api_bridge_reboot_reports_failure_not_500(monkeypatch):
+    monkeypatch.setattr(web, "_pi_bridge_module",
+                        lambda: SimpleNamespace(reboot=lambda: {"ok": False, "error": "unreachable"}))
+    web.app.state.bus = None
+    resp = asyncio.run(web.api_bridge_reboot())
+    body = json.loads(resp.body)
+    assert body["ok"] is False and body["error"] == "unreachable"
+
+
+def test_api_bridge_logs_passes_unit_and_lines(monkeypatch):
+    calls = []
+
+    def fake_logs(unit, lines):
+        calls.append((unit, lines))
+        return {"ok": True, "unit": unit, "text": "log line\n"}
+
+    monkeypatch.setattr(web, "_pi_bridge_module",
+                        lambda: SimpleNamespace(logs=fake_logs))
+
+    class _FakeRequest:
+        async def json(self):
+            return {"unit": "roomscan-tee", "lines": 50}
+
+    resp = asyncio.run(web.api_bridge_logs(_FakeRequest()))
+    assert calls == [("roomscan-tee", 50)]
+    assert json.loads(resp.body)["ok"] is True
+
+
+def test_api_bridge_logs_defaults_when_body_is_empty(monkeypatch):
+    calls = []
+
+    def fake_logs(unit, lines):
+        calls.append((unit, lines))
+        return {"ok": True, "unit": unit, "text": ""}
+
+    monkeypatch.setattr(web, "_pi_bridge_module",
+                        lambda: SimpleNamespace(logs=fake_logs))
+
+    class _EmptyRequest:
+        async def json(self):
+            raise ValueError("no body")
+
+    asyncio.run(web.api_bridge_logs(_EmptyRequest()))
+    assert calls == [("roomscan-bridge", 200)]
 
 
 def test_transport_counters_none_when_not_udp():
@@ -8043,6 +8103,7 @@ def lifespan_sandbox(monkeypatch):
              for k in ("ready", "port", "zeroconf_factory", "mdns",
                        "broadcast_task", "idle_reconcile_task",
                        "ranging_init_task", "comm_probe_task",
+                       "bridge_health_task",
                        "detailed_runner", "splat_runner")}
 
     async def _noop(*a, **kw):
@@ -8052,6 +8113,7 @@ def lifespan_sandbox(monkeypatch):
     monkeypatch.setattr(web, "_idle_reconcile_loop", _noop)
     monkeypatch.setattr(web, "_init_ranging_state", _noop)
     monkeypatch.setattr(web, "_comm_probe_loop", _noop)
+    monkeypatch.setattr(web, "_bridge_health_loop", _noop)
     st.detailed_runner = None
     st.splat_runner = None
     try:
@@ -8122,6 +8184,117 @@ def test_ws_flow_counters_reports_thin_client_count():
 
     del state.thin_clients                    # absent entirely -> 0, never a raise
     assert web.ws_flow_counters(state)["thin_clients"] == 0
+
+
+# --- 11.5 CrowPanel comm-status facts (#209) --------------------------------
+
+
+def test_crowpanel_status_none_when_no_thin_clients():
+    state = SimpleNamespace(thin_clients={})
+    assert web._crowpanel_status(state) is None
+    state2 = SimpleNamespace()   # attribute entirely absent -> also None
+    assert web._crowpanel_status(state2) is None
+
+
+def test_crowpanel_status_reports_negotiated_format_and_credits():
+    flow = web.ThinFlow(format="jpeg", fps=12.0, width=480, height=480,
+                        proto=2, credits=3, credits_max=4, dropped=7)
+    flow.tx_log.append((time.monotonic(), 4000))
+    state = SimpleNamespace(thin_clients={object(): flow})
+    status = web._crowpanel_status(state)
+    assert status["connected"] is True
+    assert status["count"] == 1
+    assert status["format"] == "jpeg"
+    assert status["credits"] == 3 and status["credits_max"] == 4
+    assert status["dropped"] == 7
+    assert status["tx_fps"] > 0
+
+
+def test_crowpanel_status_counts_multiple_flows():
+    flows = {object(): web.ThinFlow(), object(): web.ThinFlow()}
+    status = web._crowpanel_status(SimpleNamespace(thin_clients=flows))
+    assert status["count"] == 2
+
+
+# --- 11.6 comm probe + bridge health loop wiring (#193) --------------------
+
+
+async def _run_and_cancel(coro_factory, until):
+    """Start a background loop task, poll `until(...)` for up to 2s, cancel."""
+    task = asyncio.create_task(coro_factory())
+    deadline = asyncio.get_event_loop().time() + 2.0
+    while not until() and asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+def test_comm_probe_loop_passes_bridge_health_and_crowpanel_through(monkeypatch):
+    calls = []
+
+    async def fake_probe(bridge_ip, scanner_ip, scanner_fps=None,
+                         scanner_transport=None, bridge_health=None,
+                         crowpanel=None, timeout_s=1.0):
+        calls.append({"bridge_ip": bridge_ip, "bridge_health": bridge_health,
+                      "crowpanel": crowpanel})
+        return {"type": "comm", "targets": []}
+
+    monkeypatch.setattr(web.commstatus, "probe", fake_probe)
+    flow = web.ThinFlow(format="raw", fps=10.0)
+    state = SimpleNamespace(
+        clients=set(), config=None, controller=None, metrics=None,
+        thin_clients={object(): flow},
+        last_bridge_health={"wlan0": {"rssi_dbm": -60}})
+
+    asyncio.run(_run_and_cancel(lambda: web._comm_probe_loop(state), lambda: calls))
+
+    assert calls, "commstatus.probe was never called"
+    assert calls[0]["bridge_ip"] == web.commstatus.DEFAULT_BRIDGE_IP
+    assert calls[0]["bridge_health"] == {"wlan0": {"rssi_dbm": -60}}
+    assert calls[0]["crowpanel"]["connected"] is True
+    assert state.last_comm == {"type": "comm", "targets": []}
+
+
+def test_bridge_health_loop_caches_status_result(monkeypatch):
+    monkeypatch.setattr(web, "_pi_bridge_module",
+                        lambda: SimpleNamespace(status=lambda ip, timeout=8.0:
+                                                {"ok": True, "wlan0": {"rssi_dbm": -50}}))
+    state = SimpleNamespace(config=None)
+
+    asyncio.run(_run_and_cancel(lambda: web._bridge_health_loop(state),
+                                lambda: getattr(state, "last_bridge_health", None) is not None))
+
+    assert state.last_bridge_health == {"ok": True, "wlan0": {"rssi_dbm": -50}}
+
+
+def test_bridge_health_loop_caches_none_on_unreachable(monkeypatch):
+    """An unreachable bridge must cache `None`, not a stale/failed dict --
+    `_comm_probe_loop` (and `build_comm_message`) already treat `None` as
+    'no data yet', which is what an honest unreachable bridge is."""
+    monkeypatch.setattr(web, "_pi_bridge_module",
+                        lambda: SimpleNamespace(status=lambda ip, timeout=8.0:
+                                                {"ok": False, "error": "ssh timed out"}))
+    state = SimpleNamespace(config=None, last_bridge_health="stale-marker")
+    seen = []
+
+    async def _drive():
+        task = asyncio.create_task(web._bridge_health_loop(state))
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while state.last_bridge_health == "stale-marker" and \
+                asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        seen.append(state.last_bridge_health)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_drive())
+    assert seen == [None]
 
 
 def test_thin_telemetry_orientation_is_the_sensor_message_verbatim():

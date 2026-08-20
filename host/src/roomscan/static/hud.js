@@ -195,9 +195,12 @@ export function createHud(hub) {
         if (connDot) connDot.classList.toggle('connected', open);
     });
 
-    // Comm-status: server->rig link health, one chip per hop (FileHub, Scanner,
-    // ST-Link). The server computes each `state`; we only paint. title= carries
-    // the address + detail so the reachability story is one hover away.
+    // Comm-status: server->rig link health, one chip per hop (Bridge, Scanner,
+    // CrowPanel, ST-Link). The server computes each `state`; we only paint.
+    // title= carries the address + detail so the reachability story is one
+    // hover away, and a click emits 'comm_chip_click' on the hub for
+    // comm-status.js's modal to pick up (#209) -- this module stays the
+    // per-tick chip painter, not the modal's own (much larger) render logic.
     const commEl = document.getElementById('comm-status');
     hub.on('comm', (msg) => {
         if (!commEl) return;
@@ -205,10 +208,12 @@ export function createHud(hub) {
         commEl.innerHTML = '';
         for (const t of targets) {
             const state = ['up', 'down', 'absent', 'unknown'].includes(t.state) ? t.state : 'unknown';
-            const item = document.createElement('div');
+            const item = document.createElement('button');
+            item.type = 'button';
             item.className = 'comm-item comm-item--' + state;
             const addr = t.addr ? ' (' + t.addr + ')' : '';
-            item.title = (t.label || t.id) + addr + (t.detail ? ' — ' + t.detail : '');
+            item.title = (t.label || t.id) + addr + (t.detail ? ' — ' + t.detail : '') + ' — click for detail';
+            item.addEventListener('click', () => hub.emit('comm_chip_click', t.id));
             const dot = document.createElement('span');
             dot.className = 'comm-item__dot';
             const label = document.createElement('span');

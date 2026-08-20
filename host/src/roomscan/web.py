@@ -42,7 +42,7 @@ from pathlib import Path
 
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketState
@@ -4495,6 +4495,9 @@ async def _lifespan(app: FastAPI):
         # probe loop -- decoupled from the frame broadcaster so a ping stall can
         # never touch the stream, and vice versa.
         app.state.comm_probe_task = asyncio.create_task(_comm_probe_loop(app.state))
+        # Pi bridge ssh health (#193): independent, much slower loop -- see its
+        # own docstring for why this must not share the ICMP cadence above.
+        app.state.bridge_health_task = asyncio.create_task(_bridge_health_loop(app.state))
         # Advertise this server so a thin client (and any future one) can find
         # it without a hardcoded IP. Off the event loop: `register_service`
         # blocks on multicast announcement.
@@ -4514,6 +4517,9 @@ async def _lifespan(app: FastAPI):
     comm_task = getattr(app.state, "comm_probe_task", None)
     if comm_task is not None:
         comm_task.cancel()
+    bridge_health_task = getattr(app.state, "bridge_health_task", None)
+    if bridge_health_task is not None:
+        bridge_health_task.cancel()
     detailed = getattr(app.state, "detailed_runner", None)
     if detailed is not None:
         await asyncio.to_thread(detailed.close)
@@ -4554,19 +4560,25 @@ async def root_redirect() -> RedirectResponse:
     return RedirectResponse(url="/static/index.html", status_code=307)
 
 
-# --- admin endpoints: FileHub bridge mode + server restart ------------------
+# --- admin endpoints: server restart + Pi bridge management -----------------
 #
-# Two owner-facing maintenance actions surfaced as top-bar buttons. Both are
+# Owner-facing maintenance actions surfaced as top-bar/modal buttons. All are
 # POST-only so a stray GET (prefetch, crawler, refresh) can never fire them.
 #
 # DELIBERATELY UNAUTHENTICATED (owner's call, 2026-07-31), and the server binds
-# 0.0.0.0 -- so anyone who can reach port 8000 can run the bridge script or
-# bounce the process. That is acceptable on this isolated rig LAN; it would not
-# be on a shared network. If this ever moves, gate on request.client.host.
+# 0.0.0.0 -- so anyone who can reach port 8000 can bounce the process or the Pi
+# bridge. That is acceptable on this isolated rig LAN; it would not be on a
+# shared network. If this ever moves, gate on request.client.host.
+#
+# The FileHub bridge-mode button + `/api/bridge-mode` endpoint were retired
+# 2026-08-20 (#192): the Pi bridge (#191) replaced the FileHub as the
+# scanner's wireless uplink, so there is no router left to re-bridge. The
+# script that endpoint ran, `filehub-bridgemode.sh` (plus its sibling
+# `filehub-batteryCheck.sh`), moved to `tools/cold-spare/` as a labeled cold
+# spare rather than being deleted, in case the FileHub is ever pressed back
+# into service.
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-BRIDGE_SCRIPT = REPO_ROOT / "filehub-bridgemode.sh"
-BRIDGE_TIMEOUT_S = 45.0
 RESTART_DELAY_S = 2.0
 
 
@@ -4619,42 +4631,6 @@ def transport_counters(state) -> dict | None:
     }
 
 
-def run_bridge_mode(script: Path = BRIDGE_SCRIPT,
-                    timeout_s: float = BRIDGE_TIMEOUT_S) -> dict:
-    """Run the FileHub bridge-mode script and report what actually happened.
-
-    Pure-ish helper (no FastAPI types) so it is testable and reusable. Returns
-    {ok, returncode, output, error}. Never raises: every failure mode -- missing
-    script, missing `expect`, timeout, non-zero exit -- comes back as a dict the
-    UI can render, because the whole point of the button is to tell the owner
-    whether the router is bridged, not to 500 at them.
-
-    NOTE this is only step 3 of the owner's 4-step recovery (unplug Ethernet ->
-    power-cycle the FileHub -> run this -> replug). Running it out of order
-    makes the FileHub treat the port as WAN; the UI states the sequence.
-    """
-    if not script.is_file():
-        return {"ok": False, "returncode": None, "output": "",
-                "error": f"script not found: {script}"}
-    if shutil.which("expect") is None:
-        return {"ok": False, "returncode": None, "output": "",
-                "error": "'expect' is not installed on this host (apt install expect)"}
-    try:
-        proc = subprocess.run(
-            ["bash", str(script)], cwd=str(REPO_ROOT), capture_output=True,
-            text=True, timeout=timeout_s,
-        )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "returncode": None, "output": "",
-                "error": f"script did not finish within {timeout_s:g}s "
-                         f"(is the FileHub powered on and reachable?)"}
-    except OSError as exc:
-        return {"ok": False, "returncode": None, "output": "", "error": str(exc)}
-    output = (proc.stdout or "") + (proc.stderr or "")
-    return {"ok": proc.returncode == 0, "returncode": proc.returncode,
-            "output": output.strip(), "error": None}
-
-
 def managed_unit() -> str | None:
     """The systemd unit supervising this server, or None if unsupervised.
 
@@ -4688,14 +4664,50 @@ def restart_command(delay_s: float = RESTART_DELAY_S) -> list[str]:
     return ["sh", "-c", f"sleep {delay_s:g}; exec {quoted}"]
 
 
-@app.post("/api/bridge-mode", include_in_schema=False)
-async def api_bridge_mode() -> JSONResponse:
-    """Put the RavPower FileHub back into transparent-bridge mode."""
-    result = await asyncio.to_thread(run_bridge_mode)
+@app.post("/api/bridge/reboot", include_in_schema=False)
+async def api_bridge_reboot() -> JSONResponse:
+    """Reboot the Pi bridge node (#209 management controls).
+
+    One implementation, two front ends: this calls the exact same
+    `tools.pi_bridge.reboot` the `bridge_reboot` MCP tool and the CLI call --
+    there is no second copy of "how to reboot the bridge" living in the web
+    layer. Runs off the event loop (it is an ssh hop) with the same wall-clock
+    guard as the health poll, so a wedged bridge can never stall this request
+    past a bounded timeout.
+    """
+    pi_bridge = _pi_bridge_module()
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(pi_bridge.reboot), timeout=BRIDGE_HEALTH_WAIT_S)
+    except asyncio.TimeoutError:
+        result = {"ok": False, "error": f"timed out after {BRIDGE_HEALTH_WAIT_S:g}s"}
     bus = getattr(app.state, "bus", None)
     if bus is not None:
-        bus.publish(f"[bridge] {'ok' if result['ok'] else 'FAILED'}: "
-                    f"{result['error'] or 'bridge mode applied'}")
+        bus.publish(f"[bridge] reboot {'ok' if result.get('ok') else 'FAILED'}: "
+                    f"{result.get('error') or result.get('note') or 'requested'}")
+    return JSONResponse(result)
+
+
+@app.post("/api/bridge/logs", include_in_schema=False)
+async def api_bridge_logs(request: Request) -> JSONResponse:
+    """Tail one unit's journal on the Pi bridge (#209 management controls).
+
+    Same pure `tools.pi_bridge.logs` the `bridge_logs` MCP tool wraps. Body is
+    optional JSON `{"unit": "...", "lines": 200}`; `logs()` itself rejects an
+    unsafe unit name, so this endpoint does no extra validation beyond parsing.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    unit = (body or {}).get("unit") or "roomscan-bridge"
+    lines = int((body or {}).get("lines") or 200)
+    pi_bridge = _pi_bridge_module()
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(pi_bridge.logs, unit, lines), timeout=BRIDGE_HEALTH_WAIT_S)
+    except asyncio.TimeoutError:
+        result = {"ok": False, "error": f"timed out after {BRIDGE_HEALTH_WAIT_S:g}s", "unit": unit}
     return JSONResponse(result)
 
 
@@ -5062,6 +5074,18 @@ def _scanner_ip(state) -> str:
     return commstatus.DEFAULT_SCANNER_IP
 
 
+def _scanner_transport(state) -> str | None:
+    """The transport half of the source label (`Ethernet/UDP`, `USB CDC`), for
+    the Bridge/Scanner chip's Device-health section (#209). A replay or an
+    empty label isn't a live transport, so this returns None rather than a
+    misleading guess -- the UI shows nothing in that case, not a stale value."""
+    ctrl = getattr(state, "controller", None)
+    label = getattr(ctrl, "source_label", "") if ctrl is not None else ""
+    if not label or "Replay" in label:
+        return None
+    return label.split("·", 1)[0].strip() or None
+
+
 def _scanner_fps(state) -> float | None:
     """Live receive rate for the scanner detail line: the fastest per-stream
     host rate (the ToF stream dominates). None when no metrics/frames."""
@@ -5076,17 +5100,99 @@ def _scanner_fps(state) -> float | None:
     return max(rates) if rates else None
 
 
+def _crowpanel_status(state) -> dict | None:
+    """Facts about the connected `/ws-thin` v2 client(s), for the CrowPanel
+    chip (#209) -- pure dict-building over whatever `_thin_clients` already
+    holds; no I/O of its own. Picks the first flow when several are connected
+    (the common case is exactly one CrowPanel) and folds the rest into `count`
+    so the chip never silently hides a second client."""
+    flows = getattr(state, "thin_clients", None)
+    if not flows:
+        return None
+    flow = next(iter(flows.values()))
+    tx_fps, tx_bytes_per_s = thin_tx_stats(flow)
+    return {
+        "connected": True,
+        "count": len(flows),
+        "format": flow.format,
+        "fps": flow.fps,
+        "width": flow.width,
+        "height": flow.height,
+        "proto": flow.proto,
+        "credits": flow.credits,
+        "credits_max": flow.credits_max,
+        "dropped": flow.dropped,
+        "tx_fps": tx_fps,
+        "tx_bytes_per_s": tx_bytes_per_s,
+    }
+
+
+BRIDGE_HEALTH_INTERVAL_S = 45.0   # ssh hop cadence (#193): 30-60s, off the hot path
+BRIDGE_HEALTH_TIMEOUT_S = 8.0     # per-attempt ssh budget
+BRIDGE_HEALTH_WAIT_S = 12.0       # wall-clock guard around the executor call
+
+
+def _pi_bridge_module():
+    """Import `tools.pi_bridge`, adding `host/` to `sys.path` first if needed.
+
+    `pi_bridge.py` lives under `host/tools/`, a sibling of the installed
+    `roomscan` package, not inside it (same layout `mcp_server/tools_bridge.py`
+    already relies on). Under the MCP server `PYTHONPATH=host/src:host` makes
+    this a plain import; under `roomscan-web` (systemd `WorkingDirectory` is
+    the repo root, no such `PYTHONPATH`) it is not, so this adds the one path
+    entry needed -- once, not on every call."""
+    import sys as _sys
+    host_dir = str(REPO_ROOT / "host")
+    if host_dir not in _sys.path:
+        _sys.path.insert(0, host_dir)
+    from tools import pi_bridge
+    return pi_bridge
+
+
+async def _bridge_health_loop(state) -> None:
+    """Background task (started from `_lifespan`): low-rate ssh poll of the Pi
+    bridge's own status script (#193). Deliberately its own loop, far slower
+    than `_comm_probe_loop`'s ICMP cadence -- an ssh round-trip is a real
+    network hop with real latency, and running it on the fast cadence would
+    mean a wedged bridge stalls a poll every 3 s instead of every ~45 s. Run in
+    an executor thread with a wall-clock guard so a hung ssh can never touch
+    the event loop (the Open3D/GIL lesson applies here too: a blocking call
+    off-thread is still a blocking call if nothing bounds how long it runs).
+    Result is cached on `state.last_bridge_health`; `None` on any failure --
+    `_comm_probe_loop` already treats that as 'no data yet', never a fabricated
+    reading."""
+    bridge_ip = getattr(getattr(state, "config", None), "bridge_ip", None) \
+        or commstatus.DEFAULT_BRIDGE_IP
+    while True:
+        try:
+            pi_bridge = _pi_bridge_module()
+            result = await asyncio.wait_for(
+                asyncio.to_thread(pi_bridge.status, bridge_ip, timeout=BRIDGE_HEALTH_TIMEOUT_S),
+                timeout=BRIDGE_HEALTH_WAIT_S)
+            state.last_bridge_health = result if result.get("ok") else None
+        except Exception as exc:
+            log.info("bridge health poll failed (informational): %r", exc)
+            state.last_bridge_health = None
+        await asyncio.sleep(BRIDGE_HEALTH_INTERVAL_S)
+
+
 async def _comm_probe_loop(state) -> None:
-    """Background task (started from `_lifespan`): probe the FileHub / scanner /
+    """Background task (started from `_lifespan`): probe the Bridge / scanner /
     ST-Link on a slow cadence and broadcast the `comm` message. Fully decoupled
     from `_broadcaster` so a `ping` stall can never touch the frame stream. The
     latest result is cached on `state.last_comm` so a freshly-connected client
-    gets it immediately, without waiting a whole interval."""
-    filehub_ip = getattr(getattr(state, "config", None), "filehub_ip", None) \
-        or commstatus.DEFAULT_FILEHUB_IP
+    gets it immediately, without waiting a whole interval. `bridge_health` and
+    `crowpanel` are read from whatever the slower/local sources already have --
+    this loop never performs an ssh hop itself (see `_bridge_health_loop`)."""
+    bridge_ip = getattr(getattr(state, "config", None), "bridge_ip", None) \
+        or commstatus.DEFAULT_BRIDGE_IP
     while True:
         try:
-            msg = await commstatus.probe(filehub_ip, _scanner_ip(state), _scanner_fps(state))
+            msg = await commstatus.probe(
+                bridge_ip, _scanner_ip(state), _scanner_fps(state),
+                scanner_transport=_scanner_transport(state),
+                bridge_health=getattr(state, "last_bridge_health", None),
+                crowpanel=_crowpanel_status(state))
             state.last_comm = msg
             await _broadcast_text(state.clients, json.dumps(msg))
         except Exception as exc:
