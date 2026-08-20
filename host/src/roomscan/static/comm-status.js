@@ -98,10 +98,10 @@ export function createCommStatus(hub) {
 
         factsOrEmpty(linkEl, t.link, 'no link data');
 
-        // Only show "not connected" if device is genuinely absent (no link data).
-        // A present device with no device facts should show neutral text.
-        const deviceIsAbsent = !t.link || Object.keys(t.link).length === 0;
-        const emptyDeviceText = deviceIsAbsent && t.informational
+        // Only show "not connected — informational" for genuinely absent targets
+        // whose absence is expected/normal (state='absent' AND informational=true).
+        // Down/up/unknown targets (or non-informational absent ones) show neutral text.
+        const emptyDeviceText = (t.state === 'absent' && t.informational)
             ? 'not connected — informational, not a fault'
             : 'no device data yet';
         factsOrEmpty(deviceEl, t.device, emptyDeviceText);
