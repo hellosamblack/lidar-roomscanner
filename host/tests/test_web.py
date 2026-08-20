@@ -4833,11 +4833,16 @@ def test_list_captures_reports_the_reconstruction_where_one_exists(tmp_path):
     cap = tmp_path / "a.bin"
     _cap_with_quat(cap)
     results = tmp_path / "results"
+    divergence = {"available": True, "diverged": True, "peak_abs_m": 2.1,
+                  "first_trigger_s": 119.8}
     _write_sidecar(results, cap, stats={"frames": 900, "path_m": 23.9, "gap_m": 0.74,
-                                        "area_m2": 31.2})
+                                        "horizontal_gap_m": 0.61, "vertical_gap_m": -0.42,
+                                        "vertical_divergence": divergence, "area_m2": 31.2})
     (item,) = web.list_captures(tmp_path, results_dir=results, thumbs_dir=tmp_path / "t")
     assert item["slam"] == {"exists": True, "current": True, "frames": 900,
-                            "path_m": 23.9, "gap_m": 0.74, "area_m2": 31.2}
+                            "path_m": 23.9, "gap_m": 0.74,
+                            "horizontal_gap_m": 0.61, "vertical_gap_m": -0.42,
+                            "vertical_divergence": divergence, "area_m2": 31.2}
 
 
 def test_sidecar_summary_reads_a_pre_area_manifest_as_none(tmp_path):
@@ -4852,6 +4857,9 @@ def test_sidecar_summary_reads_a_pre_area_manifest_as_none(tmp_path):
     summary = web._sidecar_summary(cap, results)
     assert summary["area_m2"] is None
     assert summary["path_m"] == 1.0
+    assert summary["horizontal_gap_m"] is None
+    assert summary["vertical_gap_m"] is None
+    assert summary["vertical_divergence"] is None
 
 
 def test_sidecar_summary_cache_is_keyed_on_the_manifest_not_the_capture(tmp_path):
@@ -6836,7 +6844,6 @@ from roomscan.thin_render import (
     THIN_HEADER,
     THIN_HEIGHT,
     THIN_WIDTH,
-    ThinCamera,
     ThinRenderUnavailable,
     ThinRenderer,
 )

@@ -140,8 +140,10 @@ def test_progress_monotonic_fraction_to_one_and_terminal_stats():
     assert final.stats is not None
     assert final.stats["frames"] == len(frames)
     assert final.stats["lost"] == 0
-    for key in ("gap_m", "path_m", "verts", "lost", "frames"):
+    for key in ("gap_m", "horizontal_gap_m", "vertical_gap_m",
+                "vertical_divergence", "path_m", "verts", "lost", "frames"):
         assert key in final.stats
+    assert final.stats["vertical_divergence"]["available"] is False
 
 
 def test_non_terminal_publishes_have_no_stats():

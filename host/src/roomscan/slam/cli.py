@@ -361,11 +361,19 @@ def main(argv=None) -> int:
         mapper, timings, ts = _run(frames, width, height, cfg, mode, device=args.device,
                                    imu_aux=imu_aux)
         tstats = metrics.trajectory_stats(mapper.trajectory)
+        divergence = metrics.baro_divergence_stats(
+            mapper.trajectory, [frame[4] for frame in frames], ts)
         mstats = metrics.timing_stats(timings)
         results[mode] = (mapper, tstats, mstats, ts)
         print(f"\n=== mode={mode} ===")
         print(f"  trajectory: n={tstats['n']} path={tstats['path_length_m']:.3f} m "
-              f"gap={tstats['start_end_gap_m']:.3f} m max_step={tstats['max_step_m']:.3f} m")
+              f"gap={tstats['start_end_gap_m']:.3f} m "
+              f"(horizontal={tstats['horizontal_gap_m']:.3f} m, "
+              f"vertical={tstats['vertical_gap_m']:+.3f} m) "
+              f"max_step={tstats['max_step_m']:.3f} m")
+        if divergence["diverged"]:
+            print(f"  vertical drift: FLAGGED at {divergence['first_trigger_s']:.1f} s "
+                  f"(peak disagreement {divergence['peak_abs_m']:.3f} m)")
         print(f"  timing: median={mstats['median_ms']:.1f} ms p90={mstats['p90_ms']:.1f} "
               f"p99={mstats['p99_ms']:.1f} max={mstats['max_ms']:.1f} "
               f"over35ms={mstats['over_budget_frac']*100:.1f}% lost={mapper.tracking_lost_count}")
@@ -393,6 +401,7 @@ def main(argv=None) -> int:
               f"(live grid capacity {live_cap}){note}")
         report["modes"][mode] = {
             "trajectory": dict(tstats), "timing": dict(mstats),
+            "vertical_divergence": divergence,
             "tracking_lost": mapper.tracking_lost_count,
             "tracking": dict(kstats),
             "icp_escalations": mapper.icp_escalations,

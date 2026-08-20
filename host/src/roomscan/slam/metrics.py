@@ -4,17 +4,122 @@ from __future__ import annotations
 
 import numpy as np
 
+from .frames import baro_height_m, world_up
+
 _BUDGET_MS = 35.0
 
 
 def trajectory_stats(poses: list[np.ndarray]) -> dict:
     t = np.array([p[:3, 3] for p in poses]) if poses else np.zeros((0, 3))
     if len(t) < 2:
-        return {"n": len(t), "path_length_m": 0.0, "start_end_gap_m": 0.0, "max_step_m": 0.0}
+        return {"n": len(t), "path_length_m": 0.0, "start_end_gap_m": 0.0,
+                "horizontal_gap_m": 0.0, "vertical_gap_m": 0.0,
+                "max_step_m": 0.0}
     steps = np.linalg.norm(np.diff(t, axis=0), axis=1)
+    delta = t[-1] - t[0]
+    vertical = float(delta @ world_up())
+    horizontal = delta - vertical * world_up()
     return {"n": len(t), "path_length_m": float(steps.sum()),
-            "start_end_gap_m": float(np.linalg.norm(t[-1] - t[0])),
+            "start_end_gap_m": float(np.linalg.norm(delta)),
+            "horizontal_gap_m": float(np.linalg.norm(horizontal)),
+            "vertical_gap_m": vertical,
             "max_step_m": float(steps.max())}
+
+
+def baro_divergence_stats(
+    poses: list[np.ndarray],
+    pressures: list[float],
+    timestamps: list[float] | np.ndarray,
+    *,
+    ref_frames: int = 90,
+    smooth_s: float = 10.0,
+    threshold_m: float = 1.5,
+    sustain_s: float = 10.0,
+) -> dict:
+    """Detect sustained vertical disagreement between barometer and trajectory.
+
+    This is a warning, not a pose correction.  The barometric height is averaged
+    over a trailing time window and compared with translation along the rig's
+    actual world-up axis.  A run is flagged only when the absolute disagreement
+    stays above ``threshold_m`` continuously for ``sustain_s``.
+
+    The 1.5 m / 10 s defaults were selected against the failing AshOffice run
+    and six healthy/null captures for issue #187.  They flag AshOffice near
+    t=120 s without firing on those controls.  ``first_trigger_s`` is the start
+    of the sustained excursion, relative to the first usable sample.
+    """
+    base = {
+        "available": False,
+        "diverged": False,
+        "samples": 0,
+        "threshold_m": float(threshold_m),
+        "sustain_s": float(sustain_s),
+        "smooth_s": float(smooth_s),
+        "peak_abs_m": None,
+        "first_trigger_s": None,
+        "end_signed_m": None,
+    }
+    if ref_frames < 1 or smooth_s < 0 or threshold_m <= 0 or sustain_s < 0:
+        raise ValueError("invalid barometer-divergence detector parameters")
+
+    n = min(len(poses), len(pressures), len(timestamps))
+    if n == 0:
+        return base
+    try:
+        positions = np.asarray([pose[:3, 3] for pose in poses[:n]], dtype=np.float64)
+        pressure = np.asarray(pressures[:n], dtype=np.float64)
+        time_s = np.asarray(timestamps[:n], dtype=np.float64)
+    except (TypeError, ValueError, IndexError):
+        return base
+    if positions.shape != (n, 3):
+        return base
+
+    valid = (np.isfinite(positions).all(axis=1) & np.isfinite(pressure) &
+             (pressure > 0.0) & np.isfinite(time_s))
+    positions, pressure, time_s = positions[valid], pressure[valid], time_s[valid]
+    base["samples"] = int(len(time_s))
+    if len(time_s) < ref_frames or np.any(np.diff(time_s) < 0):
+        return base
+
+    ref_pa = float(np.mean(pressure[:ref_frames]))
+    if not np.isfinite(ref_pa) or ref_pa <= 0:
+        return base
+    base["available"] = True
+
+    trajectory_height = (positions - positions[0]) @ world_up()
+    baro_height = np.asarray(baro_height_m(pressure, ref_pa), dtype=np.float64)
+    smoothed = np.empty_like(baro_height)
+    left = 0
+    rolling_sum = 0.0
+    for right, value in enumerate(baro_height):
+        rolling_sum += float(value)
+        while time_s[left] < time_s[right] - smooth_s:
+            rolling_sum -= float(baro_height[left])
+            left += 1
+        smoothed[right] = rolling_sum / (right - left + 1)
+
+    disagreement = smoothed - trajectory_height
+    evaluate = time_s - time_s[0] >= smooth_s
+    evaluated = disagreement[evaluate]
+    if evaluated.size == 0:
+        return base
+    base["peak_abs_m"] = float(np.max(np.abs(evaluated)))
+    base["end_signed_m"] = float(evaluated[-1])
+
+    above_since = None
+    for t, value, ready in zip(time_s, disagreement, evaluate):
+        if not ready:
+            continue
+        if abs(float(value)) > threshold_m:
+            if above_since is None:
+                above_since = float(t)
+            if float(t) - above_since >= sustain_s:
+                base["diverged"] = True
+                base["first_trigger_s"] = above_since - float(time_s[0])
+                break
+        else:
+            above_since = None
+    return base
 
 
 def footprint_area_m2(points, cell_m: float = 0.1, up_axis: int = 1) -> float:

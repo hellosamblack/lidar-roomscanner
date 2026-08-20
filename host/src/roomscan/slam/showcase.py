@@ -38,7 +38,7 @@ import numpy as np
 import open3d as o3d
 
 from . import metrics as _metrics
-from .cli import _load_frames, _load_frames_maybe_imu
+from .cli import _load_frames_maybe_imu
 from .mapper import Mapper
 from .tsdf import TsdfCapacityError
 
@@ -128,6 +128,11 @@ class PostProcessWorker:
         self._height = height
         self._mesh_every = max(1, int(mesh_every))
         self._mapper_kwargs = mapper_kwargs
+        # Mapper appends one trajectory pose only when step() returns.  Keep the
+        # matching environment samples explicitly so a skipped/corrupt frame
+        # cannot shift the barometer detector onto the wrong pose.
+        self._trajectory_pressures = []
+        self._trajectory_timestamps = []
 
         self._lock = threading.Lock()
         self._latest: Progress | None = None
@@ -170,9 +175,14 @@ class PostProcessWorker:
         stats = None
         if done:
             tstats = _metrics.trajectory_stats(mapper.trajectory)
+            divergence = _metrics.baro_divergence_stats(
+                mapper.trajectory, self._trajectory_pressures, self._trajectory_timestamps)
             stats = {
                 "frames": frames_done,
                 "gap_m": tstats["start_end_gap_m"],
+                "horizontal_gap_m": tstats["horizontal_gap_m"],
+                "vertical_gap_m": tstats["vertical_gap_m"],
+                "vertical_divergence": divergence,
                 "path_m": tstats["path_length_m"],
                 "verts": int(len(mesh.vertex.positions)),
                 "lost": mapper.tracking_lost_count,
@@ -273,6 +283,8 @@ class PostProcessWorker:
         the background thread, and what tests call directly for
         determinism. Safe to call on an empty frame list."""
         total = len(self._frames)
+        self._trajectory_pressures = []
+        self._trajectory_timestamps = []
         try:
             mapper = Mapper(self._width, self._height, **self._mapper_kwargs)
         except Exception:
@@ -285,7 +297,7 @@ class PostProcessWorker:
             self._publish(mapper, 0, 0, done=True)
             return
         published_final = False
-        for i, (depth, reflectance, confidence, quat, pressure, _t_s) in enumerate(self._frames, start=1):
+        for i, (depth, reflectance, confidence, quat, pressure, t_s) in enumerate(self._frames, start=1):
             if self._stop_evt.is_set():
                 return   # stopping mid-run: publish nothing further
             imu_raw = offset = None
@@ -294,6 +306,8 @@ class PostProcessWorker:
             try:
                 mapper.step(depth, quat, pressure, reflectance=reflectance, confidence=confidence,
                             imu_raw=imu_raw, quat_offset_us=offset)
+                self._trajectory_pressures.append(pressure)
+                self._trajectory_timestamps.append(t_s)
             except TsdfCapacityError as exc:
                 # NOT a bad frame -- the map has outgrown the device and every
                 # remaining frame would raise the same thing. `continue` here

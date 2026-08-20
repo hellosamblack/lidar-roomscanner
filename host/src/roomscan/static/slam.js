@@ -816,7 +816,13 @@ export function createSlam(hub, sceneApi) {
         const bar = $('detailed-build-bar');
         const timing = $('detailed-build-time');
         const detail = $('detailed-build-detail');
+        const divergence = b.stats && b.stats.vertical_divergence;
+        const driftFlagged = !!(divergence && divergence.diverged);
+        const haveSplitGap = !!(b.stats &&
+            Number.isFinite(Number(b.stats.horizontal_gap_m)) &&
+            Number.isFinite(Number(b.stats.vertical_gap_m)));
         if (title) title.textContent = b.phase === 'failed' ? 'Detailed reconstruction could not load'
+            : done && driftFlagged ? 'Detailed reconstruction saved — vertical drift warning'
             : done ? 'Detailed reconstruction saved'
             : b.phase === 'loading_cached' ? 'Loading saved detailed reconstruction'
             : b.phase === 'extracting_mesh' ? 'Extracting preview mesh'
@@ -836,6 +842,12 @@ export function createSlam(hub, sceneApi) {
             : `Elapsed ${elapsed || '0:00'} · ${eta ? 'ETA ' + eta : 'calculating ETA'}`;
         if (detail) {
             if (b.phase === 'failed') detail.textContent = b.reason || 'The saved reconstruction could not be loaded.';
+            else if (done && driftFlagged) detail.textContent =
+                `Vertical drift flagged: ${Number(divergence.peak_abs_m).toFixed(2)} m peak ` +
+                `barometer/trajectory disagreement, beginning at ${fmtTime(Number(divergence.first_trigger_s)) || '—'}.`;
+            else if (done && haveSplitGap) detail.textContent =
+                `Saved reconstruction is ready · horizontal gap ${Number(b.stats.horizontal_gap_m).toFixed(2)} m · ` +
+                `vertical gap ${Number(b.stats.vertical_gap_m).toFixed(2)} m.`;
             else if (done) detail.textContent = 'Saved reconstruction is ready to inspect or download.';
             else if (b.phase === 'loading_cached') detail.textContent = 'Reading the saved mesh and preparing it for the viewport.';
             else if (b.phase === 'extracting_mesh') detail.textContent = `Extracting a preview mesh at frame ${processed || '—'}; frame progress pauses briefly during this GPU step.`;

@@ -72,7 +72,7 @@ from .magsweep import (
     view_calibration,
 )
 from .metrics import MetricsRegistry, MetricsSnapshot, ResourceSampler
-from .flatfield import FlatField, FlatFieldSet
+from .flatfield import FlatFieldSet
 from .pipeline import TransformStage
 from .reader import _Pacer, _run_reader, follow_camera_target
 from .protocol import (
@@ -116,7 +116,7 @@ from .motion import coherence
 from .sources import FileSource, Recorder, SerialSource, UdpSource, get_best_source
 from zeroconf import ServiceInfo, Zeroconf
 from .thin_render import (
-    DEFAULT_JPEG_QUALITY, THIN_HEIGHT, THIN_MODES, THIN_WIDTH, ThinCamera,
+    DEFAULT_JPEG_QUALITY, THIN_HEIGHT, THIN_WIDTH, ThinCamera,
     ThinRenderer, ThinRenderUnavailable, extract_ir_full, extract_ir_grid, image_scene,
     jpeg_available, points_scene, unpack_mesh_scene, warm_jpeg_import,
 )
@@ -130,7 +130,7 @@ from .slam.metrics import write_tum
 from .slam.frames import baro_height_m
 from .slam.showcase import PostProcessWorker
 from .splat import list_splats as list_splats_on_disk
-from .splat import SplatPreset, list_source_videos, slugify, splat_defaults
+from .splat import list_source_videos, slugify, splat_defaults
 from .viewer import Stats, resolve_args
 from .weather import FALLBACK_MSL_PA, MslPressure
 
@@ -2603,10 +2603,11 @@ _SIDECAR_SUMMARY_CACHE: dict[tuple[str, int, int], dict] = {}
 def _sidecar_summary(capture, results_dir) -> dict | None:
     """Reconstruction summary for the browser tile, or None if there is none.
 
-    ``{exists, current, frames, path_m, gap_m, area_m2}``. Distance travelled and
-    area covered only exist where a reconstruction does -- they are outputs of
-    the SLAM run, not of the capture -- so a capture with no sidecar renders an
-    em dash rather than a zero.
+    ``{exists, current, frames, path_m, gap_m, horizontal_gap_m,
+    vertical_gap_m, vertical_divergence, area_m2}``. Distance travelled and area
+    covered only exist where a reconstruction does -- they are outputs of the
+    SLAM run, not of the capture -- so a capture with no sidecar renders an em
+    dash rather than a zero.
 
     Cached on the MANIFEST's own `(path, size, mtime_ns)`, not the capture's: the
     sidecar changes independently (a rebuild rewrites it while the capture is
@@ -2633,7 +2634,11 @@ def _sidecar_summary(capture, results_dir) -> dict | None:
     stats = (status.get("manifest") or {}).get("stats") or {}
     out = {"exists": True, "current": bool(status.get("current")),
            "frames": stats.get("frames"), "path_m": stats.get("path_m"),
-           "gap_m": stats.get("gap_m"), "area_m2": stats.get("area_m2")}
+           "gap_m": stats.get("gap_m"),
+           "horizontal_gap_m": stats.get("horizontal_gap_m"),
+           "vertical_gap_m": stats.get("vertical_gap_m"),
+           "vertical_divergence": stats.get("vertical_divergence"),
+           "area_m2": stats.get("area_m2")}
     _SIDECAR_SUMMARY_CACHE[key] = out
     return dict(out)
 

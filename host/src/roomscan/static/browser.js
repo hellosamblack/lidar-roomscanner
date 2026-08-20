@@ -284,6 +284,7 @@ export function createBrowser(hub, capture, scene) {
         if (previewName) previewName.textContent = c.name;
         if (previewFacts) {
             const s = c.slam;
+            const divergence = s && s.vertical_divergence;
             const rows = [
                 ['Duration', fmtTime(c.duration_s), 'Wall-clock length from timestamps'],
                 ['Frames', String(c.frames || 0), 'Depth frames in the capture'],
@@ -291,7 +292,16 @@ export function createBrowser(hub, capture, scene) {
                 ['Orientation', c.has_stream_9 ? 'yes' : 'no', 'Stream 9 quaternion'],
                 ['Distance', s ? num(s.path_m, ' m', 2) : '—', 'Trajectory length'],
                 ['Area', s ? num(s.area_m2, ' m²', 1) : '—', 'Floor area covered'],
-                ['Closure', s ? num(s.gap_m, ' m', 2) : '—', 'Loop closure gap'],
+                ['Horizontal gap', s ? num(s.horizontal_gap_m ?? s.gap_m, ' m', 2) : '—',
+                    'Start/end gap projected onto the floor'],
+                ['Vertical gap', s ? num(s.vertical_gap_m, ' m', 2) : '—',
+                    'Signed start/end displacement along world up'],
+                ...(divergence && divergence.diverged ? [[
+                    'Vertical drift', `FLAGGED · ${num(divergence.peak_abs_m, ' m peak', 2)}`,
+                    `Barometer and trajectory differed by more than ${num(divergence.threshold_m, ' m', 1)} ` +
+                    `for ${num(divergence.sustain_s, ' s', 0)}; excursion began at ` +
+                    `${num(divergence.first_trigger_s, ' s', 1)}`,
+                ]] : []),
                 ['Reconstruction', s ? (s.current ? 'current' : 'stale') : 'none', 'Detailed status'],
             ];
             previewFacts.innerHTML = rows.map(([k, v, tip]) =>

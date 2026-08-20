@@ -522,6 +522,17 @@ def test_camera_views_cover_every_display_and_slam_uses_the_shared_scanner_model
     assert "viewMode === 'mirror' ? 'scaleX(-1)'" in browser
 
 
+def test_capture_details_surface_horizontal_vertical_and_divergence_separately():
+    """#187: a 3-D closure scalar must not hide a vertical failure."""
+    browser = (STATIC / "browser.js").read_text(encoding="utf-8")
+    slam = (STATIC / "slam.js").read_text(encoding="utf-8")
+    for label in ("Horizontal gap", "Vertical gap", "Vertical drift"):
+        assert label in browser
+    assert "vertical_divergence" in browser
+    assert "vertical_divergence" in slam
+    assert "Vertical drift flagged" in slam
+
+
 # ---------------------------------------------------------------------------
 # BUG-061 -- credit-based /ws-mesh transport, World-follow "track, keep my
 # framing", and scanner-model visibility keyed on view mode.

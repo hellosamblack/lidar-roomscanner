@@ -2,7 +2,13 @@ import numpy as np
 import pytest
 
 from roomscan.slam import metrics
-from roomscan.slam.metrics import trajectory_stats, timing_stats, write_tum, compare_kiss
+from roomscan.slam.metrics import (
+    baro_divergence_stats,
+    compare_kiss,
+    timing_stats,
+    trajectory_stats,
+    write_tum,
+)
 
 def _pose(t):
     T = np.eye(4)
@@ -16,6 +22,56 @@ def test_trajectory_stats():
     assert np.isclose(s["path_length_m"], 1.5)
     assert np.isclose(s["start_end_gap_m"], 1.5)
     assert np.isclose(s["max_step_m"], 1.0)
+
+
+def test_trajectory_stats_splits_horizontal_and_signed_vertical_gap():
+    poses = [_pose([0, 0, 0]), _pose([3, -2, 4])]
+    s = trajectory_stats(poses)
+    assert np.isclose(s["start_end_gap_m"], np.sqrt(29))
+    assert np.isclose(s["horizontal_gap_m"], 5.0)
+    # The SLAM world is Y-down, so moving to y=-2 is +2 m vertically.
+    assert np.isclose(s["vertical_gap_m"], 2.0)
+
+
+def test_baro_divergence_flags_only_a_sustained_vertical_disagreement():
+    times = np.arange(0.0, 31.0)
+    pressures = [101325.0] * len(times)
+    poses = [_pose([0, -2.0 if t >= 10.0 else 0, 0]) for t in times]
+
+    s = baro_divergence_stats(
+        poses, pressures, times,
+        ref_frames=3, smooth_s=2.0, threshold_m=1.5, sustain_s=10.0,
+    )
+
+    assert s["available"] is True
+    assert s["diverged"] is True
+    assert s["first_trigger_s"] == pytest.approx(10.0)
+    assert s["peak_abs_m"] == pytest.approx(2.0)
+    assert s["end_signed_m"] == pytest.approx(-2.0)
+
+
+def test_baro_divergence_ignores_a_short_excursion():
+    times = np.arange(0.0, 31.0)
+    pressures = [101325.0] * len(times)
+    poses = [_pose([0, -2.0 if 10.0 <= t < 16.0 else 0, 0]) for t in times]
+
+    s = baro_divergence_stats(
+        poses, pressures, times,
+        ref_frames=3, smooth_s=2.0, threshold_m=1.5, sustain_s=10.0,
+    )
+
+    assert s["available"] is True
+    assert s["diverged"] is False
+    assert s["first_trigger_s"] is None
+
+
+def test_baro_divergence_reports_unavailable_without_a_pressure_reference():
+    s = baro_divergence_stats(
+        [_pose([0, 0, 0])] * 4, [0.0] * 4, np.arange(4.0), ref_frames=3,
+    )
+    assert s["available"] is False
+    assert s["diverged"] is False
+    assert s["peak_abs_m"] is None
 
 def test_timing_stats():
     s = timing_stats([10.0, 20.0, 40.0, 50.0])
