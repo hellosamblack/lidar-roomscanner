@@ -434,10 +434,26 @@ reworked, so its paired-percentage figure undercounts a decoupled capture's true
 fragment is dropped before the recorder ever sees it — so pass `udp_stats` from `rig_status()`'s
 own metrics if that field matters; omitted, it reports `None` rather than a guess.
 
-**build** — `fw_build()`, `fw_flash()`, `run_tests()`. These encode the host facts
-that bite every session: Ninja comes from the venv, the packaged stlink 1.8.0 cannot
-identify an H5 (a locally built `develop` is used, expect chipid `0x484`), and pytest
-must run with cwd=`host/`.
+**build** — `fw_build()`, `fw_flash()`, `run_tests()`, `impacted_tests()`. These encode
+the host facts that bite every session: Ninja comes from the venv, the packaged stlink
+1.8.0 cannot identify an H5 (a locally built `develop` is used, expect chipid `0x484`),
+and pytest must run with cwd=`host/`.
+
+**Test triage (local/agent fast path — CI still runs the whole suite).** The full
+suite is 121 files run serially, so `run_tests(changed=..., parallel=..., markers=...)`
+adds two levers. `impacted_tests(base?)` is a dry run: it maps the working tree's diff
+vs `base` (default `origin/main`) to the tests whose static import closure a changed
+module reaches — a deterministic, DB-free AST graph over the `test_<module>.py`
+convention (`roomscan.testtriage`), so it works cold in a fleet worktree with no
+warm-up. It is **correctness-first**: a foundational change (`protocol.py`, `config.py`,
+`pyproject.toml`, shared fixtures/helpers) or any file it cannot map forces a **full
+run**, never an empty selection — a false negative would silently skip a real
+regression. `run_tests(changed="auto")` runs that selection (reporting `triaged`,
+`selected_count`, `full_run`); `markers` is a `-m` filter (`"not slow"` skips the
+subprocess/Open3D/socket families, auto-tagged by `tests/conftest.py`); `parallel=True`
+runs pytest-xdist as two passes (`-n auto -m "not serial"` then the timing-sensitive
+`serial` remainder) so nothing flakes. **CI is deliberately untouched** — triage is
+never the gate that lets a regression onto `main`.
 
 **On-rig verified 2026-07-29.** `fw_build()` returned `text=148044 data=13231
 bss=54232`, `.bin` 161279 B (`size` is `null` on a no-op build — `ninja: no work to

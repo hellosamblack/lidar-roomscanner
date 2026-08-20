@@ -8,7 +8,7 @@ requires-python = ">=3.11,<3.13"  # upper bound: open3d wheel availability
 dependencies = ["numpy>=1.26", "pyserial>=3.5", "open3d>=0.18", "psutil>=5.9", "Pillow>=10", "zeroconf>=0.130", "plyfile>=1.0"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.4"]
+dev = ["pytest>=8", "ruff>=0.4", "pytest-xdist>=3.5"]
 # Metrics-HUD GPU/VRAM readout via NVML. Optional: without it the panel falls
 # back to `nvidia-smi`, then to "GPU n/a" on non-NVIDIA hosts (metrics.py).
 monitor = ["nvidia-ml-py>=12"]
@@ -47,6 +47,16 @@ testpaths = ["tests"]
 # Resolve `roomscan` from ./src and `tools` from ./ without relying on an
 # editable install (matters when running the suite from a git worktree).
 pythonpath = ["src", "."]
+# Slow-family + xdist-safety markers, auto-applied by tests/conftest.py from each
+# file's own source (see the docstring there). `-m "not slow"` carves a fast lane;
+# `-m "not serial"` a parallel lane for `pytest -n auto`.
+markers = [
+    "slow: heavyweight test (subprocess build, Open3D, or real socket)",
+    "open3d: requires the Open3D tensor/GUI stack",
+    "subprocess: spawns a subprocess (C-shim / firmware / pi-bridge / MCP build)",
+    "net: binds a real socket or runs a uvicorn.Server",
+    "serial: timing-sensitive; must not run concurrently under pytest -n (xdist)",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
