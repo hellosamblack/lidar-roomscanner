@@ -9,6 +9,7 @@ operator gate, backed by firstrun.log landing on the FAT partition.
 from __future__ import annotations
 
 import importlib.util
+import lzma
 import os
 import shutil
 import subprocess
@@ -1235,3 +1236,27 @@ def test_pinned_releases_declare_a_full_sha256_and_a_matching_suite():
         assert rel.url.endswith(rel.filename)
         assert rel.url.startswith("https://"), "the pin must be fetched over TLS"
     assert bi.DEFAULT_RELEASE in bi.RELEASES
+
+
+def test_compress_xz_roundtrip(tmp_path):
+    img = tmp_path / "test.img"
+    data = b"pi bridge disk image payload test data " * 500
+    img.write_bytes(data)
+    out = bi.compress_xz(img, quiet=True)
+    assert Path(out).is_file()
+    assert img.is_file()  # -k keeps original
+    with lzma.open(out, "rb") as f:
+        assert f.read() == data
+
+
+def test_compress_xz_fallback_when_no_xz(tmp_path, monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+    img = tmp_path / "test_fallback.img"
+    data = b"fallback lzma compression test data " * 500
+    img.write_bytes(data)
+    out = bi.compress_xz(img, quiet=True)
+    assert Path(out).is_file()
+    assert img.is_file()
+    with lzma.open(out, "rb") as f:
+        assert f.read() == data
+

@@ -919,6 +919,37 @@ def userconf_line(username: str, password: str) -> str:
 # The build
 # ---------------------------------------------------------------------------
 
+def compress_xz(img: Path, *, quiet: bool = False, threads: int = 0) -> str:
+    """Compress the built image to `.img.xz`, using every core available.
+
+    Both Raspberry Pi Imager and balenaEtcher write `.img.xz` directly, and the
+    result is roughly a fifth the size -- which is the difference between a
+    convenient copy to the flashing machine and an annoying one.
+
+    Prefer the `xz` binary with `-T0`: Python's `lzma` is single-threaded, and on
+    a ~2.7 GB image that is tens of minutes of one core while 25 others idle. The
+    stdlib path stays as a fallback so the builder still works without `xz`, but
+    it is genuinely slow -- say so rather than letting it look hung.
+    """
+    xz_out = Path(str(img) + ".xz")
+    exe = shutil.which("xz")
+    if exe:
+        if not quiet:
+            print(f"  compressing image with {exe} -T{threads or 0}", file=sys.stderr)
+        # -k keeps the .img (we want both), -f overwrites a stale .xz.
+        r = _run([exe, "-z", "-k", "-f", f"-T{threads}", "-6", str(img)])
+        if r.returncode == 0:
+            return str(xz_out)
+        raise BuildError(f"xz failed: {r.stderr.decode('utf-8', 'replace').strip()}")
+
+    if not quiet:
+        print("  compressing image with Python lzma (single-threaded -- install "
+              "`xz-utils` to use all cores; this will take a while)", file=sys.stderr)
+    with img.open("rb") as fi, lzma.open(xz_out, "wb", preset=6) as fo:
+        shutil.copyfileobj(fi, fo, 1 << 20)
+    return str(xz_out)
+
+
 @dataclass
 class BuildResult:
     image: Path | None = None
@@ -1063,12 +1094,7 @@ def build(secrets_path: Path, *, release_key: str = DEFAULT_RELEASE,
             raise BuildError(f"{want} is not present in the built image's boot partition")
 
     if xz:
-        if not quiet:
-            print("  compressing image", file=sys.stderr)
-        xz_out = Path(str(out) + ".xz")
-        with out.open("rb") as fi, lzma.open(xz_out, "wb", preset=6) as fo:
-            shutil.copyfileobj(fi, fo, 1 << 20)
-        res.xz = str(xz_out)
+        res.xz = compress_xz(out, quiet=quiet)
 
     return res.to_dict()
 
