@@ -47,7 +47,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketState
 
-from .colors import gray, turbo
+from .colors import amber, gray, turbo
 from . import commstatus
 from .config import ViewerConfig
 from .control import (
@@ -117,9 +117,10 @@ from .motion import coherence
 from .sources import FileSource, Recorder, SerialSource, UdpSource, get_best_source
 from zeroconf import ServiceInfo, Zeroconf
 from .thin_render import (
-    DEFAULT_JPEG_QUALITY, THIN_HEIGHT, THIN_WIDTH, ThinCamera,
-    ThinRenderer, ThinRenderUnavailable, extract_ir_full, extract_ir_grid, image_scene,
-    jpeg_available, points_scene, unpack_mesh_scene, warm_jpeg_import,
+    DEFAULT_JPEG_QUALITY, THIN_HEIGHT, THIN_POINT_SIZE_MAX, THIN_POINT_SIZE_MIN,
+    THIN_WIDTH, ThinCamera, ThinRenderer, ThinRenderUnavailable, ThinViewConfig,
+    extract_ir_full, extract_ir_grid, image_scene, jpeg_available, points_scene,
+    unpack_mesh_scene, warm_jpeg_import,
 )
 from .slam.config import DetailedSlamPreset, preferred_device
 from .slam.detailed import (build_manifest, estimate_seconds, sidecar_paths,
@@ -245,6 +246,13 @@ _SPEED_BASE_FPS = 30.0
 _VALID_COLOR_MODES = ("depth", "reflectance", "confidence")
 _VALID_IR_COLORMAPS = ("gray", "turbo")
 _VALID_VIEW_COLORMAPS = ("turbo", "gray")
+# The thin voxel view adds the CrowPanel IR "amber" ramp on top of the browser's
+# tones (issue #215); the browser viewport itself stays turbo/gray.
+_VALID_THIN_COLORMAPS = ("amber", "turbo", "gray")
+# Thin voxel point size, in pixels (Open3D's material scalar). Distinct from the
+# browser's fractional `point_size` (world units) -- a different renderer, a
+# different unit -- so it has its own range (#215).
+_THIN_POINT_SIZE_RANGE = (THIN_POINT_SIZE_MIN, THIN_POINT_SIZE_MAX)
 _VALID_SURFACE_MODES = ("grid", "spatial")
 _VALID_IDLE_LEVELS = ("soft", "hard")
 # View-page capture browser (§12). Sorting is applied CLIENT-side off the
@@ -487,6 +495,11 @@ class UiState:
     # scene.js). See `_VALID_ORBIT_MODES` / `_ORBIT_AMPLITUDE_RANGE`.
     orbit_mode: str = "continuous"
     orbit_amplitude_deg: float = 45.0
+    # Thin-client voxel view (issue #215): amber IR tone + a fixed FPV framing
+    # with a gentle server-side auto-orbit, all editable from the CrowPanel
+    # modal. Shared by every thin client; the per-connection manual-drag
+    # override lives on `ThinCamera`. See `ThinViewConfig`.
+    thin_view: ThinViewConfig = field(default_factory=ThinViewConfig)
     idle_enabled: bool = True
     idle_level: str = "soft"           # "soft" | "hard"
     browser_idle_timeout_s: float = 300.0   # idle.js: how long without user
@@ -650,7 +663,11 @@ def _should_broadcast_bus_msg(msg: dict, tx_filter: "TxQueueStatsLogFilter", now
 
 
 def _apply_colormap(vn: np.ndarray, colormap: str) -> np.ndarray:
-    return gray(vn) if colormap == "gray" else turbo(vn)
+    if colormap == "gray":
+        return gray(vn)
+    if colormap == "amber":
+        return amber(vn)
+    return turbo(vn)
 
 
 # `display_rotation` now lives in `sensors.py` (beside T_WORLD_TO_CV /
@@ -1197,22 +1214,23 @@ class OrientationJitter:
         self._prev_heading = None
 
 
-def select_colors(outputs: dict, deproj: Deprojector, color_mode: str,
-                  colormap: str = "turbo"):
-    """Deproject depth and colorize by the selected plane (§7.2).
+def deproject_normalize(outputs: dict, deproj: Deprojector, color_mode: str):
+    """Deproject depth and compute the per-point normalized colour scalar.
 
-    Returns (pts, colors, fell_back): pts (N,3) float32 metres, colors (N,3)
-    float32 in [0,1], and fell_back True iff the requested non-depth plane was
-    missing this frame and depth coloring was substituted. Coloring reuses the
-    validity mask (finite, >0, < max_range) + min-max normalize + turbo/gray,
-    exactly as the classic viewer. `color_mode == "depth"` colors by deprojected Z.
+    Returns (pts, vn, fell_back): pts (N,3) float32 metres, vn (N,) float64 in
+    [0,1] (min-max stretch of the selected plane, or depth Z on fallback), and
+    fell_back True iff the requested non-depth plane was missing this frame. The
+    colour-map step is deliberately split out so one deproject can feed two
+    tones -- the browser cloud and the thin voxel view (#215) share this `vn`
+    without a second deprojection. `pts` is empty and `vn` empty when no points
+    survive the validity mask.
     """
     depth = outputs["depth"]
     pts = deproj(depth)
     fell_back = False
     if len(pts) == 0:
         empty = np.zeros((0, 3), dtype=np.float32)
-        return empty, empty, False
+        return empty, np.zeros(0, dtype=np.float64), False
 
     if color_mode == "depth":
         vals = pts[:, 2].astype(np.float64, copy=False)
@@ -1226,8 +1244,24 @@ def select_colors(outputs: dict, deproj: Deprojector, color_mode: str,
             vals = plane[valid].astype(np.float64, copy=False)
 
     vn = (vals - vals.min()) / max(float(np.ptp(vals)), 1e-6)
+    return pts.astype(np.float32, copy=False), vn, fell_back
+
+
+def select_colors(outputs: dict, deproj: Deprojector, color_mode: str,
+                  colormap: str = "turbo"):
+    """Deproject depth and colorize by the selected plane (§7.2).
+
+    Returns (pts, colors, fell_back): pts (N,3) float32 metres, colors (N,3)
+    float32 in [0,1], and fell_back True iff the requested non-depth plane was
+    missing this frame and depth coloring was substituted. Coloring reuses the
+    validity mask (finite, >0, < max_range) + min-max normalize + turbo/gray,
+    exactly as the classic viewer. `color_mode == "depth"` colors by deprojected Z.
+    """
+    pts, vn, fell_back = deproject_normalize(outputs, deproj, color_mode)
+    if len(pts) == 0:
+        return pts, np.zeros((0, 3), dtype=np.float32), False
     colors = _apply_colormap(vn, colormap)
-    return pts.astype(np.float32, copy=False), colors.astype(np.float32, copy=False), fell_back
+    return pts, colors.astype(np.float32, copy=False), fell_back
 
 
 def pack_point_cloud(pts: np.ndarray, colors: np.ndarray) -> bytes:
@@ -1240,12 +1274,16 @@ def pack_point_cloud(pts: np.ndarray, colors: np.ndarray) -> bytes:
 
 def select_surface(outputs: dict, deproj: Deprojector, color_mode: str,
                    colormap: str = "turbo", surface_mode: str = "grid",
-                   threshold_pct: float = 4.0):
+                   threshold_pct: float = 4.0,
+                   thin_colormap: str | None = None):
     """Grid-structured coloring + triangulation for surface mode.
 
-    Returns (pts_grid, colors_grid, valid, triangles, covered, fell_back):
-    pts_grid (h,w,3) f32, colors_grid (h,w,3) f32, valid (h,w) bool,
-    triangles (T,3) int64, covered (h*w,) bool, fell_back bool."""
+    Returns (pts_grid, colors_grid, valid, triangles, covered, fell_back,
+    thin_colors_grid): pts_grid (h,w,3) f32, colors_grid (h,w,3) f32, valid
+    (h,w) bool, triangles (T,3) int64, covered (h*w,) bool, fell_back bool. When
+    `thin_colormap` is given and differs from `colormap`, thin_colors_grid is a
+    second (h,w,3) f32 grid toned for the thin voxel view off the *same* `vn`
+    (#215); otherwise it is `colors_grid` itself (same object, no extra work)."""
     from .surface import grid_triangles, grid_triangles_3d
 
     depth = outputs["depth"]
@@ -1271,6 +1309,14 @@ def select_surface(outputs: dict, deproj: Deprojector, color_mode: str,
     vn = np.clip((vals - lo) / rng, 0.0, 1.0)
     colors_grid = _apply_colormap(vn, colormap)
     colors_grid[~valid] = 0.0
+    colors_grid = colors_grid.astype(np.float32, copy=False)
+
+    if thin_colormap is None or thin_colormap == colormap:
+        thin_colors_grid = colors_grid            # same object -- no extra work
+    else:
+        thin_colors_grid = _apply_colormap(vn, thin_colormap)
+        thin_colors_grid[~valid] = 0.0
+        thin_colors_grid = thin_colors_grid.astype(np.float32, copy=False)
 
     if surface_mode == "spatial":
         mean_z = float(np.mean(pts_grid[valid, 2])) if np.any(valid) else 1.0
@@ -1281,7 +1327,7 @@ def select_surface(outputs: dict, deproj: Deprojector, color_mode: str,
 
     return (pts_grid.astype(np.float32, copy=False),
             colors_grid.astype(np.float32, copy=False),
-            valid, triangles, covered, fell_back)
+            valid, triangles, covered, fell_back, thin_colors_grid)
 
 
 def pack_surface_cloud(pts_grid: np.ndarray, colors_grid: np.ndarray,
@@ -2370,6 +2416,9 @@ def _state_message(ui: UiState, controller=None, detailed=None,
             "orbit_speed_deg_s": ui.orbit_speed_deg_s,
             "orbit_mode": ui.orbit_mode,
             "orbit_amplitude_deg": ui.orbit_amplitude_deg,
+            # Thin-client voxel framing/tone (#215); the CrowPanel modal reads
+            # and edits these via `set_thin_view`.
+            "thin_view": asdict(ui.thin_view),
             "mode": ui.mode, "source": ui.source, "display": ui.display,
             "selected_capture": ui.selected_capture,
             "selected_splat": ui.selected_splat, "detailed": detail,
@@ -2465,6 +2514,24 @@ def ui_from_config(cfg: ViewerConfig) -> UiState:
         amplitude = None
     if amplitude is not None and _ORBIT_AMPLITUDE_RANGE[0] <= amplitude <= _ORBIT_AMPLITUDE_RANGE[1]:
         ui.orbit_amplitude_deg = amplitude
+    # Thin-client voxel view (#215): tone + FPV framing + auto-orbit knobs.
+    if cfg.thin_view_colormap in _VALID_THIN_COLORMAPS:
+        ui.thin_view.colormap = cfg.thin_view_colormap
+    ui.thin_view.orbit_enabled = bool(cfg.thin_view_orbit_enabled)
+    ui.thin_view.point_size_auto = bool(cfg.thin_view_point_size_auto)
+    for key, attr, (lo, hi) in (
+            ("thin_view_distance_m", "distance_m", _CAM_DISTANCE_RANGE),
+            ("thin_view_height_m", "height_m", _CAM_HEIGHT_RANGE),
+            ("thin_view_rotation_deg", "rotation_deg", _CAM_ROTATION_RANGE),
+            ("thin_view_orbit_speed_deg_s", "orbit_speed_deg_s", _ORBIT_SPEED_RANGE),
+            ("thin_view_orbit_amplitude_deg", "orbit_amplitude_deg", _ORBIT_AMPLITUDE_RANGE),
+            ("thin_view_point_size", "point_size", _THIN_POINT_SIZE_RANGE)):
+        try:
+            v = float(getattr(cfg, key))
+        except (TypeError, ValueError):
+            continue                          # corrupt value: keep the default
+        if lo <= v <= hi:
+            setattr(ui.thin_view, attr, v)
     ui.slam_trajectory = bool(cfg.slam_trajectory)
     if cfg.slam_walls in _VALID_WALL_MODES:
         ui.slam_walls = cfg.slam_walls
@@ -2539,6 +2606,16 @@ def apply_ui_to_config(ui: UiState, cfg: ViewerConfig) -> None:
     cfg.web_orbit_speed_deg_s = float(ui.orbit_speed_deg_s)
     cfg.web_orbit_mode = ui.orbit_mode
     cfg.web_orbit_amplitude_deg = float(ui.orbit_amplitude_deg)
+    tv = ui.thin_view
+    cfg.thin_view_colormap = tv.colormap
+    cfg.thin_view_distance_m = float(tv.distance_m)
+    cfg.thin_view_height_m = float(tv.height_m)
+    cfg.thin_view_rotation_deg = float(tv.rotation_deg)
+    cfg.thin_view_orbit_enabled = bool(tv.orbit_enabled)
+    cfg.thin_view_orbit_speed_deg_s = float(tv.orbit_speed_deg_s)
+    cfg.thin_view_orbit_amplitude_deg = float(tv.orbit_amplitude_deg)
+    cfg.thin_view_point_size = float(tv.point_size)
+    cfg.thin_view_point_size_auto = bool(tv.point_size_auto)
     cfg.slam_trajectory = bool(ui.slam_trajectory)
     cfg.slam_walls = ui.slam_walls
     cfg.slam_follow = bool(ui.slam_follow)
@@ -6167,8 +6244,12 @@ async def _thin_render_loop(state, websocket, flow: ThinFlow) -> None:
         if not thin_tick_may_send(flow):
             continue
 
-        # Snapshot the camera: an orbit command arriving mid-render must not
-        # mutate the state the render thread is reading.
+        # Resolve the FPV pose for this tick (auto-orbit sweep, or a held manual
+        # drag) from the server-global thin-view config, then snapshot: an orbit
+        # command arriving mid-render must not mutate the state the render thread
+        # is reading (#194/#215).
+        flow.camera.resolve(
+            getattr(getattr(state, "ui_state", None), "thin_view", None), now)
         try:
             frame = await asyncio.wrap_future(
                 renderer.submit(scene, replace(flow.camera),
@@ -6769,30 +6850,44 @@ async def _broadcaster() -> None:
                 surf_key = ((ui.surface_enabled, ui.surface_mode,
                              ui.surface_threshold_pct) if ui.surface_enabled
                             else None)
+                # `ui.thin_view.colormap` is in the key so a thin-only tone
+                # change (which never touches the browser cloud) still rebuilds
+                # and refreshes the `/ws-thin` stash (#215).
+                thin_cmap = ui.thin_view.colormap
                 key = (header.seq, ui.color_mode, ui.view_colormap, surf_key,
-                       rotation_key(view_rot))
+                       rotation_key(view_rot), thin_cmap)
                 if key != last_pc_key:
                     if ui.surface_enabled:
-                        pg, cg, val, tris, cov, fell_back = select_surface(
+                        pg, cg, val, tris, cov, fell_back, thin_cg = select_surface(
                             outputs, state.deproj, ui.color_mode,
                             ui.view_colormap, ui.surface_mode,
-                            ui.surface_threshold_pct)
+                            ui.surface_threshold_pct, thin_colormap=thin_cmap)
                         rot = rotate_points(pg, view_rot)
                         last_pc_bytes = pack_surface_cloud(
                             rot, cg, val, tris, cov)
                         # `/ws-thin` renders the *gravity-corrected* grid so
-                        # its own orbit camera is the only thing moving.
-                        state.thin_latest_pc = (cur_gen, rot, cg)
+                        # its own orbit camera is the only thing moving; the
+                        # thin stash carries the amber-toned copy (#215).
+                        state.thin_latest_pc = (cur_gen, rot, thin_cg)
                     else:
-                        pts, colors, fell_back = select_colors(
-                            outputs, state.deproj, ui.color_mode, ui.view_colormap)
+                        # One deproject + normalize feeds two tones: the browser
+                        # cloud (turbo/gray) and the thin voxel view (amber by
+                        # default). The thin colours reuse the browser array when
+                        # the tones match, so nothing extra is computed then.
+                        pts, vn, fell_back = deproject_normalize(
+                            outputs, state.deproj, ui.color_mode)
+                        colors = _apply_colormap(vn, ui.view_colormap).astype(
+                            np.float32, copy=False)
                         rot = rotate_points(pts, view_rot)
                         last_pc_bytes = pack_point_cloud(rot, colors)
+                        thin_colors = (colors if thin_cmap == ui.view_colormap
+                                       else _apply_colormap(vn, thin_cmap).astype(
+                                           np.float32, copy=False))
                         # Stash for `/ws-thin` (#194): a generation-tagged
-                        # reference to the arrays this tick already built --
-                        # one assignment, no copy, no recomputation. The thin
-                        # loop drops a stash whose generation no longer matches.
-                        state.thin_latest_pc = (cur_gen, rot, colors)
+                        # reference to the arrays this tick already built. The
+                        # thin loop drops a stash whose generation no longer
+                        # matches.
+                        state.thin_latest_pc = (cur_gen, rot, thin_colors)
                     if fell_back:
                         _log_debounced(state, bus, f"color-miss:{ui.color_mode}",
                                        f"color mode {ui.color_mode!r} unavailable this frame, showing depth")
@@ -7563,6 +7658,46 @@ async def _handle_inbound(state, msg: dict, ws=None) -> None:
             if a is not None and _ORBIT_AMPLITUDE_RANGE[0] <= a <= _ORBIT_AMPLITUDE_RANGE[1]:
                 ui.orbit_amplitude_deg = a
                 changed = True
+        if changed:
+            _persist_ui(state)
+            await _broadcast_state(state)
+
+    elif mtype == "set_thin_view":
+        # Thin-client voxel view framing/tone (#215), edited from the CrowPanel
+        # modal. Every field is optional; out-of-range/invalid values are
+        # dropped (the current value survives) rather than rejecting the whole
+        # message, mirroring `set_view`.
+        tv = ui.thin_view
+        changed = False
+        if "colormap" in msg:
+            if msg["colormap"] not in _VALID_THIN_COLORMAPS:
+                log.warning("invalid set_thin_view colormap: %r", msg.get("colormap"))
+                return
+            tv.colormap = msg["colormap"]
+            changed = True
+        for key, attr, (lo, hi) in (
+                ("distance", "distance_m", _CAM_DISTANCE_RANGE),
+                ("height", "height_m", _CAM_HEIGHT_RANGE),
+                ("rotation", "rotation_deg", _CAM_ROTATION_RANGE),
+                ("orbit_speed", "orbit_speed_deg_s", _ORBIT_SPEED_RANGE),
+                ("orbit_amplitude", "orbit_amplitude_deg", _ORBIT_AMPLITUDE_RANGE),
+                ("point_size", "point_size", _THIN_POINT_SIZE_RANGE)):
+            if key not in msg:
+                continue
+            try:
+                v = float(msg[key])
+            except (TypeError, ValueError):
+                log.warning("invalid set_thin_view %s: %r", key, msg.get(key))
+                continue
+            if lo <= v <= hi:
+                setattr(tv, attr, v)
+                changed = True
+        if "orbit" in msg:
+            tv.orbit_enabled = bool(msg["orbit"])
+            changed = True
+        if "point_size_auto" in msg:
+            tv.point_size_auto = bool(msg["point_size_auto"])
+            changed = True
         if changed:
             _persist_ui(state)
             await _broadcast_state(state)

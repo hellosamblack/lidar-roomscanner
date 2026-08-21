@@ -81,6 +81,20 @@ class ViewerConfig:
                                        # (owner ask, 2026-07-31): a triangle wave about the
                                        # azimuth where oscillation started, +-web_orbit_amplitude_deg
     web_orbit_amplitude_deg: float = 45.0  # oscillate mode's half-swing, degrees
+    # Thin-client voxel view (issue #215): the CrowPanel's server-rendered
+    # /ws-thin point-cloud feed. Amber IR tone + a fixed FPV framing (metres,
+    # relative to the cloud centre) with a gentle server-side auto-orbit swing.
+    # Flat scalars because the TOML writer is scalar-only; grouped/validated in
+    # web.py. See `ThinViewConfig`.
+    thin_view_colormap: str = "amber"      # "amber" (CrowPanel IR ramp) | "turbo" | "gray"
+    thin_view_distance_m: float = 1.0      # eye distance back from the cloud centre
+    thin_view_height_m: float = 0.6        # eye height above the cloud centre
+    thin_view_rotation_deg: float = 0.0    # base azimuth the auto-orbit swings about
+    thin_view_orbit_enabled: bool = True   # server-side auto-orbit sweep on/off
+    thin_view_orbit_speed_deg_s: float = 5.0    # sweep rate, deg/s
+    thin_view_orbit_amplitude_deg: float = 10.0  # half-swing about the base azimuth, deg
+    thin_view_point_size: float = 4.0      # voxel point size in PIXELS (Open3D material scalar)
+    thin_view_point_size_auto: bool = True  # scale the point size by the framing distance
     web_see_through: float = 0.0       # x-ray strength 0..1: how strongly geometry hidden BEHIND
                                        # other geometry is drawn back over its occluder. 0 = off
                                        # (opaque, the historical look), 1 = the hidden layer wins

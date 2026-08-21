@@ -225,6 +225,86 @@ def test_select_colors_falls_back_to_depth_when_plane_missing():
     np.testing.assert_array_equal(c_fb, c_depth)
 
 
+def test_deproject_normalize_feeds_select_colors():
+    # The split-out helper is the single source of the colour scalar: mapping
+    # its `vn` reproduces select_colors exactly, which is what lets the browser
+    # and thin views share one deproject (#215).
+    outputs, h, w = _synthetic_outputs()
+    deproj = Deprojector(w, h)
+    pts, vn, fell_back = web.deproject_normalize(outputs, deproj, "depth")
+    pts2, colors, fb2 = web.select_colors(outputs, deproj, "depth", "turbo")
+    assert fell_back is fb2
+    np.testing.assert_array_equal(pts, pts2)
+    remapped = web._apply_colormap(vn, "turbo").astype(np.float32, copy=False)
+    np.testing.assert_array_equal(remapped, colors)
+
+
+def test_select_surface_thin_colormap_recolors_off_the_same_grid():
+    outputs, h, w = _synthetic_outputs()
+    deproj = Deprojector(w, h)
+    pg, cg, val, tris, cov, fb, thin_cg = web.select_surface(
+        outputs, deproj, "depth", "turbo", thin_colormap="amber")
+    assert cg.shape == thin_cg.shape
+    # Distinct tones on the valid cells; both invalid-masked to black.
+    assert not np.array_equal(cg[val], thin_cg[val])
+    # When the thin tone matches the browser's, it's the same array (no work).
+    _, cg2, _, _, _, _, thin_cg2 = web.select_surface(
+        outputs, deproj, "depth", "turbo", thin_colormap="turbo")
+    assert thin_cg2 is cg2
+
+
+def test_set_thin_view_updates_state_echo_and_persists(tmp_path):
+    import types
+    import roomscan.config as config_mod
+    p = tmp_path / "roomscan.toml"
+    state = types.SimpleNamespace(config=ViewerConfig(), ui_state=web.UiState(),
+                                  clients=set(), controller=None)
+    orig = config_mod.config_path
+    config_mod.config_path = lambda: p
+    try:
+        asyncio.run(web._handle_inbound(state, {
+            "type": "set_thin_view", "colormap": "turbo", "distance": 2.5,
+            "height": 1.2, "rotation": 45.0, "orbit": False,
+            "orbit_speed": 12.0, "orbit_amplitude": 20.0,
+            "point_size": 8.0, "point_size_auto": False}))
+    finally:
+        config_mod.config_path = orig
+    tv = state.ui_state.thin_view
+    assert (tv.colormap, tv.distance_m, tv.height_m, tv.rotation_deg) == (
+        "turbo", 2.5, 1.2, 45.0)
+    assert tv.orbit_enabled is False
+    assert (tv.orbit_speed_deg_s, tv.orbit_amplitude_deg) == (12.0, 20.0)
+    assert tv.point_size == 8.0 and tv.point_size_auto is False
+    echoed = web._state_message(state.ui_state)["thin_view"]
+    assert echoed["colormap"] == "turbo" and echoed["distance_m"] == 2.5
+    assert echoed["point_size"] == 8.0 and echoed["point_size_auto"] is False
+    back = ViewerConfig.load(p)
+    assert back.thin_view_colormap == "turbo" and back.thin_view_distance_m == 2.5
+    assert back.thin_view_point_size == 8.0 and back.thin_view_point_size_auto is False
+
+
+def test_set_thin_view_drops_invalid_values():
+    import types
+    state = types.SimpleNamespace(config=None, ui_state=web.UiState(),
+                                  clients=set(), controller=None)
+    default = web.UiState().thin_view
+    # Bad colormap rejects the whole message; out-of-range scalar is dropped.
+    asyncio.run(web._handle_inbound(state, {"type": "set_thin_view", "colormap": "bogus"}))
+    asyncio.run(web._handle_inbound(state, {"type": "set_thin_view", "distance": 999.0}))
+    tv = state.ui_state.thin_view
+    assert tv.colormap == default.colormap
+    assert tv.distance_m == default.distance_m
+
+
+def test_state_message_carries_thin_view_defaults():
+    tv = web._state_message(web.UiState())["thin_view"]
+    assert tv["colormap"] == "amber"
+    assert tv["distance_m"] == 1.0 and tv["height_m"] == 0.6
+    assert tv["orbit_enabled"] is True
+    assert tv["orbit_speed_deg_s"] == 5.0 and tv["orbit_amplitude_deg"] == 10.0
+    assert tv["point_size"] == 4.0 and tv["point_size_auto"] is True
+
+
 # =============================================================================
 # 4. IR encoding (pure) -- reflectance_to_rgb feeding pack_ir_image
 # =============================================================================

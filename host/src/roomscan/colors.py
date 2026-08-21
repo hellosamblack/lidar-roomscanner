@@ -26,6 +26,40 @@ def gray(zn: np.ndarray) -> np.ndarray:
     return np.stack([x, x, x], axis=-1)
 
 
+#: The CrowPanel firmware's IR-feed thermal ramp, as an exact 256-entry LUT.
+#: This is a byte-for-byte port of `ir_thermal_rgb565`'s pre-565 RGB
+#: (`CrowPanelProp/main/prop_ui.c`): black -> red -> yellow -> white, with the
+#: two knees at 96 and 192 and the same integer divisors (95, 95, 63). We index
+#: this LUT rather than evaluate a continuous ramp so the thin voxel view the
+#: host renders matches the CrowPanel's own IR tone at *every* level, not just
+#: the endpoints. (The panel further quantises to RGB565 on its own display; we
+#: keep 8-bit here since the thin frame carries full RGB.)
+_AMBER_LUT: np.ndarray | None = None
+
+
+def _amber_lut() -> np.ndarray:
+    global _AMBER_LUT
+    if _AMBER_LUT is None:
+        v = np.arange(256, dtype=np.int64)
+        r = np.where(v < 96, v * 255 // 95, 255)
+        g = np.where(v < 96, 0, np.where(v < 192, (v - 96) * 255 // 95, 255))
+        b = np.where(v < 192, 0, (v - 192) * 255 // 63)
+        _AMBER_LUT = np.clip(np.stack([r, g, b], axis=-1), 0, 255).astype(np.uint8)
+    return _AMBER_LUT
+
+
+def amber(zn: np.ndarray) -> np.ndarray:
+    """Map values in [0, 1] to (N, 3) RGB in [0, 1] via the CrowPanel IR ramp.
+
+    Black -> red -> yellow -> white, matching the CrowPanel's IR feed so the
+    thin voxel view reads as the same instrument. Input is clipped; the scalar
+    is quantised to the 8-bit ramp index (`_amber_lut`) so a given normalised
+    depth lands on the exact colour the panel would show for that intensity."""
+    x = np.clip(np.asarray(zn, dtype=np.float64), 0.0, 1.0)
+    idx = np.clip(np.rint(x * 255.0).astype(np.int64), 0, 255)
+    return _amber_lut()[idx].astype(np.float64) / 255.0
+
+
 def percentile_range(vals: np.ndarray, lo_pct: float = 2.0,
                      hi_pct: float = 98.0) -> tuple[float, float]:
     """Return (vmin, vmax) as the lo_pct/hi_pct percentiles of the finite values.

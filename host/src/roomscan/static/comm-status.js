@@ -32,6 +32,28 @@ export function createCommStatus(hub) {
     const btnReboot = $('commx-reboot');
     const btnLogs = $('commx-logs');
 
+    // Voxel view (issue #215): editable framing/tone for the server-rendered
+    // /ws-thin point-cloud feed. CrowPanel-only, mirroring the Pi-only gating
+    // of the Management section below. Edits go out as `set_thin_view`; values
+    // are server-authoritative and come back on the `state` echo (never applied
+    // optimistically), exactly like the browser View controls in controls.js.
+    const voxelSection = $('commx-voxel-section');
+    const segThinColormap = $('seg-thin-colormap');
+    const chkThinPointAuto = $('chk-thin-point-auto');
+    const slThinPointSize = $('sl-thin-point-size');
+    const thinPointSizeVal = $('thin-point-size-val');
+    const slThinDistance = $('sl-thin-distance');
+    const slThinHeight = $('sl-thin-height');
+    const slThinRotation = $('sl-thin-rotation');
+    const chkThinOrbit = $('chk-thin-orbit');
+    const slThinOrbitSpeed = $('sl-thin-orbit-speed');
+    const slThinOrbitAmplitude = $('sl-thin-orbit-amplitude');
+    const thinDistanceVal = $('thin-distance-val');
+    const thinHeightVal = $('thin-height-val');
+    const thinRotationVal = $('thin-rotation-val');
+    const thinOrbitSpeedVal = $('thin-orbit-speed-val');
+    const thinOrbitAmplitudeVal = $('thin-orbit-amplitude-val');
+
     let targets = [];    // latest comm.targets, cached for the click handler
     let current = null;  // the target object currently shown in the modal
 
@@ -91,10 +113,79 @@ export function createCommStatus(hub) {
         container.appendChild(dl);
     }
 
+    function setThinView(fields) {
+        hub.send({ type: 'set_thin_view', ...fields });
+    }
+
+    function applyThinView(tv) {
+        if (!tv) return;
+        if (segThinColormap) {
+            for (const b of segThinColormap.querySelectorAll('button')) {
+                b.classList.toggle('active', b.dataset.thincolormap === tv.colormap);
+            }
+        }
+        if (slThinDistance !== null && tv.distance_m !== undefined) {
+            slThinDistance.value = tv.distance_m;
+            if (thinDistanceVal) thinDistanceVal.textContent = Number(tv.distance_m).toFixed(2) + ' m';
+        }
+        if (slThinHeight !== null && tv.height_m !== undefined) {
+            slThinHeight.value = tv.height_m;
+            if (thinHeightVal) thinHeightVal.textContent = Number(tv.height_m).toFixed(2) + ' m';
+        }
+        if (slThinRotation !== null && tv.rotation_deg !== undefined) {
+            slThinRotation.value = tv.rotation_deg;
+            if (thinRotationVal) thinRotationVal.textContent = Math.round(tv.rotation_deg) + '°';
+        }
+        if (chkThinPointAuto && tv.point_size_auto !== undefined) chkThinPointAuto.checked = !!tv.point_size_auto;
+        if (slThinPointSize !== null && tv.point_size !== undefined) {
+            slThinPointSize.value = tv.point_size;
+            if (thinPointSizeVal) thinPointSizeVal.textContent = tv.point_size + ' px';
+        }
+        if (chkThinOrbit && tv.orbit_enabled !== undefined) chkThinOrbit.checked = !!tv.orbit_enabled;
+        if (slThinOrbitSpeed !== null && tv.orbit_speed_deg_s !== undefined) {
+            slThinOrbitSpeed.value = tv.orbit_speed_deg_s;
+            if (thinOrbitSpeedVal) thinOrbitSpeedVal.textContent = tv.orbit_speed_deg_s + '°/s';
+        }
+        if (slThinOrbitAmplitude !== null && tv.orbit_amplitude_deg !== undefined) {
+            slThinOrbitAmplitude.value = tv.orbit_amplitude_deg;
+            if (thinOrbitAmplitudeVal) thinOrbitAmplitudeVal.textContent = Math.round(tv.orbit_amplitude_deg) + '°';
+        }
+    }
+
+    let lastThinView = null;   // latest state.thin_view, for a modal opened later
+    hub.on('state', (msg) => {
+        if (msg && msg.thin_view) {
+            lastThinView = msg.thin_view;
+            applyThinView(lastThinView);
+        }
+    });
+
+    if (segThinColormap) {
+        segThinColormap.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-thincolormap]');
+            if (btn) setThinView({ colormap: btn.dataset.thincolormap });
+        });
+    }
+    chkThinPointAuto?.addEventListener('change', () => setThinView({ point_size_auto: chkThinPointAuto.checked }));
+    slThinPointSize?.addEventListener('input', () => setThinView({ point_size: parseFloat(slThinPointSize.value) }));
+    slThinDistance?.addEventListener('input', () => setThinView({ distance: parseFloat(slThinDistance.value) }));
+    slThinHeight?.addEventListener('input', () => setThinView({ height: parseFloat(slThinHeight.value) }));
+    slThinRotation?.addEventListener('input', () => setThinView({ rotation: parseFloat(slThinRotation.value) }));
+    chkThinOrbit?.addEventListener('change', () => setThinView({ orbit: chkThinOrbit.checked }));
+    slThinOrbitSpeed?.addEventListener('input', () => setThinView({ orbit_speed: parseFloat(slThinOrbitSpeed.value) }));
+    slThinOrbitAmplitude?.addEventListener('input', () => setThinView({ orbit_amplitude: parseFloat(slThinOrbitAmplitude.value) }));
+
     function render(t) {
         current = t;
         titleEl.textContent = t.label || t.id;
         introEl.textContent = (t.addr ? t.addr + ' — ' : '') + (t.detail || '');
+
+        // Voxel-view editor is CrowPanel-only (it renders that device's feed).
+        if (voxelSection) {
+            const isCrowPanel = t.id === 'crowpanel';
+            voxelSection.classList.toggle('hidden', !isCrowPanel);
+            if (isCrowPanel && lastThinView) applyThinView(lastThinView);
+        }
 
         factsOrEmpty(linkEl, t.link, 'no link data');
 

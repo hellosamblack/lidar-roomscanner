@@ -2452,6 +2452,33 @@ cover the whole sphere from this viewpoint, and a gap behind you still has to be
                     <h3 class="commx-section__title">Device health</h3>
                     <div id="commx-device"></div>
                 </div>
+                <!-- Voxel view (issue #215): edits the server-rendered /ws-thin
+                     point-cloud feed's tone + FPV framing. CrowPanel target only;
+                     comm-status.js shows/hides this by target id and wires it to
+                     `set_thin_view`. -->
+                <div class="commx-section hidden" id="commx-voxel-section">
+                    <h3 class="commx-section__title">Voxel view</h3>
+                    <div class="field-label field-label--sub">Tone</div>
+                    <div class="segmented segmented--sm" id="seg-thin-colormap">
+                        <button data-thincolormap="amber" title="CrowPanel IR amber ramp (black→red→yellow→white)">Amber</button>
+                        <button data-thincolormap="turbo" title="Turbo false-colour depth ramp">Turbo</button>
+                        <button data-thincolormap="gray" title="Grayscale depth">Gray</button>
+                    </div>
+                    <label class="toggle" title="Grow the point size with the camera distance so the cloud stays filled as you pull back — the size below is the size at a 1 m framing"><input type="checkbox" id="chk-thin-point-auto" checked><span>Auto point size</span></label>
+                    <div class="field-label field-label--sub">Point Size <span class="hud-val" id="thin-point-size-val">4 px</span></div>
+                    <input type="range" class="slider" id="sl-thin-point-size" min="1" max="12" step="0.5" value="4" title="Voxel point size in pixels — when Auto is on this is the size at a 1 m framing distance">
+                    <div class="field-label field-label--sub">Distance <span class="hud-val" id="thin-distance-val">1.0 m</span></div>
+                    <input type="range" class="slider" id="sl-thin-distance" min="0" max="15" step="0.05" value="1.0" title="How far the camera sits back from the cloud centre (metres)">
+                    <div class="field-label field-label--sub">Height <span class="hud-val" id="thin-height-val">0.6 m</span></div>
+                    <input type="range" class="slider" id="sl-thin-height" min="-5" max="10" step="0.05" value="0.6" title="How far the camera sits above the cloud centre (metres)">
+                    <div class="field-label field-label--sub">Rotation <span class="hud-val" id="thin-rotation-val">0&deg;</span></div>
+                    <input type="range" class="slider" id="sl-thin-rotation" min="-180" max="180" step="1" value="0" title="Base azimuth the auto-orbit swings about (degrees)">
+                    <label class="toggle" title="Gently swing the camera around the base azimuth. A CrowPanel touch-drag temporarily takes over, then this resumes."><input type="checkbox" id="chk-thin-orbit" checked><span>Auto-orbit</span></label>
+                    <div class="field-label field-label--sub">Orbit Speed <span class="hud-val" id="thin-orbit-speed-val">5&deg;/s</span></div>
+                    <input type="range" class="slider" id="sl-thin-orbit-speed" min="-60" max="60" step="0.5" value="5" title="Sweep rate in degrees per second; negative reverses, 0 parks it">
+                    <div class="field-label field-label--sub">Orbit Amplitude <span class="hud-val" id="thin-orbit-amplitude-val">10&deg;</span></div>
+                    <input type="range" class="slider" id="sl-thin-orbit-amplitude" min="5" max="180" step="1" value="10" title="How far the camera swings each side of the base azimuth (degrees)">
+                </div>
                 <div class="commx-section hidden" id="commx-mgmt-section">
                     <h3 class="commx-section__title">Management controls</h3>
                     <div class="btn-row">

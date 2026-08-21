@@ -30,6 +30,7 @@ import logging
 import queue
 import struct
 import threading
+import time
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -78,6 +79,86 @@ DEFAULT_MODE = "point_cloud"
 PITCH_LIMIT_DEG = 89.0
 ZOOM_MIN = 0.25
 ZOOM_MAX = 8.0
+
+#: How long a CrowPanel touch-drag (`thin_orbit`) suspends the FPV auto-orbit
+#: before the sweep resumes from the configured base. The owner asked for
+#: "drag temporarily overrides" (issue #215): a drag pauses the sweep and lets
+#: the viewer look around, then auto-orbit takes back over after this idle gap.
+MANUAL_HOLD_S = 4.0
+
+#: Voxel-material point size, in pixels. Open3D's rasterised point cloud takes a
+#: single screen-space scalar (not a per-vertex `gl_PointSize` like the browser's
+#: patched shader), and that scalar is FIXED pixels -- it does not shrink as the
+#: camera pulls back -- so a fixed size leaves ever-wider gaps the farther the
+#: FPV camera sits. "Auto" therefore scales the size by the framing distance to
+#: keep the cloud filled at any distance (owner ask, #215): the configured size
+#: is the size at a 1 m framing, and it grows linearly from there. This is the
+#: single-scalar stand-in for the browser's "no dropout at range" net look.
+#: Clamped to a legible pixel band either way.
+THIN_POINT_SIZE_MIN = 1.0
+THIN_POINT_SIZE_MAX = 12.0
+DEFAULT_THIN_POINT_SIZE = 4.0
+
+
+def resolve_point_size(base_px: float, distance_m: float, auto: bool) -> float:
+    """Effective voxel point size in pixels.
+
+    Manual (`auto` False): `base_px` verbatim. Auto: `base_px` is the size at a
+    1 m framing distance, scaled linearly by `distance_m` so the cloud stays
+    filled as the camera pulls back (a fixed pixel size would leave gaps). Both
+    are clamped to `[THIN_POINT_SIZE_MIN, THIN_POINT_SIZE_MAX]`.
+    """
+    px = float(base_px)
+    if auto:
+        px *= max(float(distance_m), 1e-3)
+    return float(np.clip(px, THIN_POINT_SIZE_MIN, THIN_POINT_SIZE_MAX))
+
+
+def oscillate_offset(elapsed_s: float, speed_dps: float,
+                     amplitude_deg: float) -> float:
+    """Triangle-wave azimuth offset in degrees, in [-amplitude, +amplitude].
+
+    The server-side twin of the browser's `oscillate` orbit (`scene.js`): a
+    constant-|speed| sweep that reverses at each amplitude limit, so the camera
+    swings `+-amplitude_deg` about the base azimuth at `speed_dps` deg/s. Phased
+    to sit at 0 (the base) when `elapsed_s == 0` and ascend. A non-positive
+    amplitude or zero speed disables the sweep (returns 0.0); a negative speed
+    reverses the initial direction.
+    """
+    amp = abs(float(amplitude_deg))
+    s = float(speed_dps)
+    if amp <= 0.0 or s == 0.0 or not np.isfinite(elapsed_s):
+        return 0.0
+    span = 4.0 * amp
+    x = ((abs(s) * float(elapsed_s)) + amp) % span
+    tri = (x - amp) if x <= 2.0 * amp else (3.0 * amp - x)
+    return tri if s > 0.0 else -tri
+
+
+@dataclass
+class ThinViewConfig:
+    """Server-global framing for the thin *voxel* view (`point_cloud` mode).
+
+    Mirrors the browser View's `ViewCam` framing (distance/height/rotation as an
+    offset from an FPV baseline) plus its auto-orbit knobs, but for the
+    server-rendered thin feed. Held once on `UiState` and applied to every thin
+    client's voxel render; the per-connection manual-drag override lives on
+    `ThinCamera` instead. `colormap` selects the voxel tone -- `"amber"` is the
+    CrowPanel IR ramp (the default), `"turbo"`/`"gray"` reuse the browser tones.
+    """
+
+    colormap: str = "amber"
+    distance_m: float = 1.0
+    height_m: float = 0.6
+    rotation_deg: float = 0.0
+    orbit_enabled: bool = True
+    orbit_speed_deg_s: float = 5.0
+    orbit_amplitude_deg: float = 10.0
+    #: Voxel point size in pixels; `point_size_auto` scales it by the framing
+    #: distance (see `THIN_POINT_SIZE_*`). Thin-client only -- independent of the
+    #: browser's own `point_size`/`point_size_auto` (#215).
+    point_size: float = DEFAULT_THIN_POINT_SIZE
+    point_size_auto: bool = True
 
 _BACKGROUND = (0.03, 0.04, 0.06, 1.0)  # matches the web UI's dark instrument look
 
@@ -311,11 +392,39 @@ class ThinCamera:
     pitch: float = 20.0
     zoom: float = 1.0
     mode: str = DEFAULT_MODE
+    #: Monotonic timestamp of the last `thin_orbit` drag, or -inf if the viewer
+    #: has never dragged. Within `MANUAL_HOLD_S` of it the FPV sweep is paused
+    #: and the drag deltas (below) frame the shot instead (#215).
+    last_manual_t: float = float("-inf")
+    #: FPV pose resolved by `resolve()` each tick and read by `eye()`. These are
+    #: dataclass fields so `dataclasses.replace(camera)` -- the per-render
+    #: snapshot -- carries them onto the render thread. `fpv_active` gates the
+    #: FPV path; when False `eye()` falls back to the legacy bounds orbit.
+    fpv_active: bool = False
+    fpv_az_deg: float = 0.0
+    fpv_elev_deg: float = 0.0
+    fpv_distance_m: float = 1.0
+    fpv_height_m: float = 0.6
+    #: Resolved voxel-material point size in pixels for this tick (auto = size at
+    #: a 1 m framing scaled by `fpv_distance_m`; see `resolve_point_size`). A
+    #: dataclass field so the per-render `replace()` snapshot carries it.
+    point_size_px: float = DEFAULT_THIN_POINT_SIZE
+    #: Manual-drag rotation offsets from the FPV base, in added degrees, reset to
+    #: identity once the sweep resumes. A drag *only rotates* the view (owner ask,
+    #: #215): the framing distance and height are never touched by a drag, so
+    #: there is deliberately no manual zoom/pan here.
+    manual_az: float = 0.0
+    manual_elev: float = 0.0
 
     def apply_orbit(self, dyaw: float = 0.0, dpitch: float = 0.0,
-                    dzoom: float = 0.0) -> None:
+                    dzoom: float = 0.0, now: float | None = None) -> None:
         """Accumulate relative deltas, clamped. Non-finite deltas are ignored
-        rather than poisoning the camera with NaN for the rest of the session."""
+        rather than poisoning the camera with NaN for the rest of the session.
+
+        Drives both the legacy bounds orbit (`yaw`/`pitch`/`zoom`, used by the
+        SLAM mesh mode) and the FPV manual-override offsets, and stamps
+        `last_manual_t` so `resolve()` knows a drag is in progress (#215).
+        """
         for name, delta in (("yaw", dyaw), ("pitch", dpitch), ("zoom", dzoom)):
             if delta and not np.isfinite(delta):
                 log.warning("thin_orbit: ignoring non-finite d%s=%r", name, delta)
@@ -324,6 +433,15 @@ class ThinCamera:
         self.pitch = float(np.clip(self.pitch + float(dpitch),
                                    -PITCH_LIMIT_DEG, PITCH_LIMIT_DEG))
         self.zoom = float(np.clip(self.zoom + float(dzoom), ZOOM_MIN, ZOOM_MAX))
+        # FPV manual override: a drag ROTATES only -- swing the azimuth and tilt
+        # the elevation, never the framing distance/height (owner ask, #215). So
+        # `dzoom` is intentionally dropped here (it still drives the legacy bounds
+        # orbit's zoom above, for the SLAM mesh mode). Elevation is clamped so a
+        # drag cannot flip the camera through the pole.
+        self.manual_az = float((self.manual_az + float(dyaw)) % 360.0)
+        self.manual_elev = float(np.clip(self.manual_elev + float(dpitch),
+                                         -PITCH_LIMIT_DEG, PITCH_LIMIT_DEG))
+        self.last_manual_t = time.monotonic() if now is None else float(now)
 
     def set_mode(self, mode: str) -> bool:
         """Switch render mode. Returns False (and changes nothing) for junk."""
@@ -333,8 +451,63 @@ class ThinCamera:
         self.mode = mode
         return True
 
+    def resolve(self, cfg: "ThinViewConfig | None", now: float) -> None:
+        """Resolve the FPV pose for this tick from the server-global `cfg`.
+
+        Called once per render tick before the camera is snapshotted. FPV only
+        applies to the voxel (`point_cloud`) view; other modes keep the legacy
+        bounds orbit, so this just clears `fpv_active` for them. When a drag is
+        active (within `MANUAL_HOLD_S`) the auto-orbit sweep is frozen and the
+        manual offsets frame the shot; otherwise the offsets reset to identity
+        and the sweep drives the azimuth.
+        """
+        if cfg is None or self.mode != "point_cloud":
+            self.fpv_active = False
+            self.point_size_px = DEFAULT_THIN_POINT_SIZE
+            return
+        self.fpv_active = True
+        holding = (np.isfinite(self.last_manual_t)
+                   and (now - self.last_manual_t) < MANUAL_HOLD_S)
+        if holding:
+            orbit_off = 0.0
+        else:
+            self.manual_az = 0.0
+            self.manual_elev = 0.0
+            orbit_off = (oscillate_offset(now, cfg.orbit_speed_deg_s,
+                                          cfg.orbit_amplitude_deg)
+                         if cfg.orbit_enabled else 0.0)
+        self.fpv_az_deg = float(cfg.rotation_deg) + orbit_off + self.manual_az
+        self.fpv_elev_deg = self.manual_elev
+        self.fpv_distance_m = float(cfg.distance_m)
+        self.fpv_height_m = float(cfg.height_m)
+        self.point_size_px = resolve_point_size(
+            cfg.point_size, self.fpv_distance_m, cfg.point_size_auto)
+
     def eye(self, center: np.ndarray, radius: float) -> np.ndarray:
-        """Eye position orbiting `center` at a distance set by `radius`/zoom."""
+        """Eye position for this tick.
+
+        FPV (voxel view): a fixed-metre framing looking at the cloud centre --
+        `distance_m` back and `height_m` up from it, swung to `fpv_az_deg` about
+        the vertical. Otherwise the legacy bounds orbit: distance scales with
+        the geometry radius so the whole cloud stays framed.
+
+        The thin cloud lives in the browser's gravity-aligned world, which is
+        **Y-down** (up is -Y), so "up" here is negative Y -- lifting the eye by
+        `height_m` and the render's up vector both point that way (#215). Getting
+        this wrong renders the whole view upside down.
+        """
+        center = np.asarray(center, dtype=np.float32)
+        if self.fpv_active:
+            az = np.radians(self.fpv_az_deg)
+            elev = np.radians(self.fpv_elev_deg)
+            dist = max(self.fpv_distance_m, 1e-3)
+            horiz = dist * np.cos(elev)
+            offset = np.array([
+                horiz * np.sin(az),
+                -(self.fpv_height_m + dist * np.sin(elev)),   # up is -Y
+                horiz * np.cos(az),
+            ], dtype=np.float32)
+            return center + offset
         radius = max(float(radius), 1e-3)
         dist = radius * 2.5 / max(self.zoom, ZOOM_MIN)
         yaw = np.radians(self.yaw)
@@ -344,7 +517,7 @@ class ThinCamera:
             dist * np.sin(pitch),
             dist * np.cos(pitch) * np.cos(yaw),
         ], dtype=np.float32)
-        return np.asarray(center, dtype=np.float32) + offset
+        return center + offset
 
 
 # --------------------------------------------------------------------------
@@ -779,7 +952,15 @@ class ThinRenderer:
         cheap part, and it is what the client's orbit commands move.
         """
         rendering = o3d.visualization.rendering
-        key = (scene.kind, id(scene.points), id(scene.colors), id(scene.triangles))
+        # The material (incl. point size) is applied only on a geometry
+        # re-upload, so fold a quantised point size into the key: a size change
+        # on an otherwise-static cloud then forces the material to re-apply,
+        # while a steady size (the common case) never churns the upload (#215).
+        point_size = float(getattr(camera, "point_size_px",
+                                   DEFAULT_THIN_POINT_SIZE))
+        ps_key = round(point_size, 1)
+        key = (scene.kind, id(scene.points), id(scene.colors),
+               id(scene.triangles), ps_key)
         if key != current_key:
             renderer.scene.clear_geometry()
             mat = rendering.MaterialRecord()
@@ -803,7 +984,7 @@ class ThinRenderer:
                 geom.compute_vertex_normals()
             else:
                 mat.shader = "defaultUnlit"
-                mat.point_size = 4.0
+                mat.point_size = point_size
                 geom = o3d.geometry.PointCloud()
                 geom.points = o3d.utility.Vector3dVector(
                     np.asarray(scene.points, dtype=np.float64))
@@ -819,10 +1000,16 @@ class ThinRenderer:
 
         center, radius = scene.bounds()
         eye = camera.eye(center, radius)
+        # The FPV voxel view frames the browser's Y-DOWN world, so its up vector
+        # is -Y (matching `eye()`); without this the view renders upside down
+        # (#215). The legacy bounds orbit keeps +Y, unchanged.
+        up = (np.array([0.0, -1.0, 0.0], dtype=np.float32)
+              if getattr(camera, "fpv_active", False)
+              else np.array([0.0, 1.0, 0.0], dtype=np.float32))
         renderer.setup_camera(60.0,
                               np.asarray(center, dtype=np.float32),
                               np.asarray(eye, dtype=np.float32),
-                              np.array([0.0, 1.0, 0.0], dtype=np.float32))
+                              up)
         return current_key
 
 

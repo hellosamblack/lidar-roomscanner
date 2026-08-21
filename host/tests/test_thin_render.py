@@ -1000,3 +1000,121 @@ def test_extract_ir_full_refuses_rather_than_resamples_when_over_budget():
     assert tr.extract_ir_full(img, 64) is None
     assert tr.extract_ir_full(img, 54 * 42) is not None      # exactly fits
 
+
+
+# --------------------------------------------------------------------------
+# FPV voxel camera + auto-orbit (#215)
+# --------------------------------------------------------------------------
+
+from roomscan.thin_render import (  # noqa: E402
+    MANUAL_HOLD_S, ThinViewConfig, oscillate_offset,
+)
+
+
+def test_oscillate_offset_starts_at_base_and_stays_within_amplitude():
+    assert oscillate_offset(0.0, 5.0, 10.0) == 0.0
+    ts = np.linspace(0.0, 100.0, 5000)
+    vals = np.array([oscillate_offset(t, 5.0, 10.0) for t in ts])
+    assert vals.max() <= 10.0 + 1e-9
+    assert vals.min() >= -10.0 - 1e-9
+    assert np.isclose(vals.max(), 10.0, atol=0.05)   # the peak is actually reached
+    assert np.isclose(vals.min(), -10.0, atol=0.05)
+
+
+def test_oscillate_offset_speed_is_constant_magnitude():
+    # |d(offset)/dt| should be the configured speed away from the turning points.
+    dt = 1e-3
+    for t in (0.1, 0.5, 0.9):
+        slope = abs(oscillate_offset(t + dt, 5.0, 10.0)
+                    - oscillate_offset(t, 5.0, 10.0)) / dt
+        assert np.isclose(slope, 5.0, atol=0.05)
+
+
+def test_oscillate_offset_disabled_cases():
+    assert oscillate_offset(3.0, 0.0, 10.0) == 0.0     # zero speed parks it
+    assert oscillate_offset(3.0, 5.0, 0.0) == 0.0      # zero amplitude
+    assert oscillate_offset(float("inf"), 5.0, 10.0) == 0.0
+
+
+def test_fpv_eye_default_framing_at_base_azimuth():
+    cam = ThinCamera(mode="point_cloud")
+    cfg = ThinViewConfig()   # distance 1.0, height 0.6, rotation 0, orbit on
+    cam.resolve(cfg, 0.0)    # t=0 -> sweep offset is exactly 0
+    eye = cam.eye(np.zeros(3, dtype=np.float32), 1.0)
+    # 1 m back along +Z, 0.6 m up in the Y-DOWN world (up is -Y), looking at
+    # the origin -- the render's up vector matches, so it is not upside down.
+    assert np.allclose(eye, [0.0, -0.6, 1.0], atol=1e-5)
+
+
+def test_fpv_only_applies_to_point_cloud_mode():
+    cfg = ThinViewConfig()
+    slam = ThinCamera(mode="slam")
+    slam.resolve(cfg, 0.0)
+    assert slam.fpv_active is False
+    # Falls back to the legacy bounds orbit (distance scales with radius), so a
+    # bigger cloud pushes the eye further out -- unlike the fixed-metre FPV.
+    near = np.linalg.norm(slam.eye(np.zeros(3), 1.0))
+    far = np.linalg.norm(slam.eye(np.zeros(3), 4.0))
+    assert far > near
+
+
+def test_manual_drag_overrides_then_auto_orbit_resumes():
+    cfg = ThinViewConfig(rotation_deg=0.0, orbit_enabled=True,
+                         orbit_speed_deg_s=5.0, orbit_amplitude_deg=10.0)
+    cam = ThinCamera(mode="point_cloud")
+    cam.apply_orbit(dyaw=30.0, now=100.0)          # a drag at t=100
+    # Within the hold window the sweep is frozen and the drag frames the shot.
+    cam.resolve(cfg, 100.0 + MANUAL_HOLD_S / 2)
+    assert np.isclose(cam.fpv_az_deg, 30.0)
+    # After the hold expires the manual offset resets and the sweep drives it.
+    cam.resolve(cfg, 100.0 + MANUAL_HOLD_S + 1.0)
+    assert cam.manual_az == 0.0
+    assert abs(cam.fpv_az_deg) <= 10.0 + 1e-9      # back to +-amplitude of base
+
+
+def test_thin_point_size_auto_fills_with_framing_distance():
+    # Auto keeps the cloud filled as the camera pulls back (#215): the size is
+    # the size at a 1 m framing and grows linearly with distance.
+    assert np.isclose(tr.resolve_point_size(4.0, 1.0, True), 4.0)
+    assert np.isclose(tr.resolve_point_size(4.0, 2.0, True), 8.0)   # farther -> larger
+    assert np.isclose(tr.resolve_point_size(4.0, 0.5, True), 2.0)   # closer -> smaller
+
+
+def test_thin_point_size_manual_is_fixed_regardless_of_distance():
+    assert np.isclose(tr.resolve_point_size(4.0, 3.0, False), 4.0)
+    assert np.isclose(tr.resolve_point_size(4.0, 0.2, False), 4.0)
+
+
+def test_thin_point_size_clamped_to_legible_band():
+    assert tr.resolve_point_size(6.0, 5.0, True) == tr.THIN_POINT_SIZE_MAX   # far -> capped
+    assert tr.resolve_point_size(1.0, 0.05, True) == tr.THIN_POINT_SIZE_MIN  # very close -> floored
+
+
+def test_thin_camera_resolves_point_size_from_framing_distance():
+    cam = ThinCamera(mode="point_cloud")
+    cam.resolve(ThinViewConfig(distance_m=2.0, point_size=4.0, point_size_auto=True), 0.0)
+    assert np.isclose(cam.point_size_px, 8.0)
+    # SLAM mode isn't the FPV voxel view -> the default size, no auto scaling.
+    slam = ThinCamera(mode="slam")
+    slam.resolve(ThinViewConfig(distance_m=2.0, point_size=4.0, point_size_auto=True), 0.0)
+    assert slam.point_size_px == tr.DEFAULT_THIN_POINT_SIZE
+
+
+def test_manual_drag_rotates_only_never_changes_distance():
+    # Owner ask (#215): a drag ROTATES the view, nothing else -- a dzoom in the
+    # same command must not pull the framing distance in/out.
+    cfg = ThinViewConfig(distance_m=1.0)
+    cam = ThinCamera(mode="point_cloud")
+    cam.apply_orbit(dyaw=25.0, dpitch=10.0, dzoom=0.5, now=50.0)
+    cam.resolve(cfg, 50.0 + MANUAL_HOLD_S / 2)    # inside the hold window
+    assert np.isclose(cam.fpv_az_deg, 25.0)        # rotated
+    assert np.isclose(cam.fpv_elev_deg, 10.0)      # tilted
+    assert cam.fpv_distance_m == 1.0               # distance untouched by dzoom
+
+
+def test_apply_orbit_ignores_nonfinite_delta():
+    cam = ThinCamera(mode="point_cloud")
+    cam.apply_orbit(dyaw=15.0, now=1.0)
+    cam.apply_orbit(dyaw=float("nan"), now=2.0)    # ignored, no NaN poisoning
+    assert cam.manual_az == 15.0
+    assert np.isfinite(cam.last_manual_t)
