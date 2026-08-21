@@ -29,11 +29,22 @@ server actually reach the rig?" for each hop the frames traverse:
     echo, enriched with whether DATA frames are *actually arriving* right now
     (the real data path, from the MetricsRegistry) so a reachable-but-silent
     board reads differently from a streaming one.
-  * **CrowPanel**  -- a `/ws-thin` v2 thin client (issues #202/#205). Not
-    pinged (it is a local websocket, not an IP target this host reaches out
-    to); web.py hands in whatever it already knows about the connected
-    flow(s). No connection is a normal, informational state -- most sessions
-    never have one attached.
+  * **CrowPanel**  -- `comm-unit-7`, a `/ws-thin` v2 thin client (issues
+    #202/#205) that is ALSO a real host on the network (mDNS `comm-unit-7.local`,
+    falling back to `DEFAULT_CROWPANEL_IP`, same resolve-then-ping shape as
+    Bridge). A `/ws-thin` session is the richer signal (it carries format/fps/
+    credits), so `state` prefers it, but the unit reads "up" off ICMP alone
+    too -- a CrowPanel that is powered on and reachable but not currently
+    holding a `/ws-thin` flow (reconnect backoff, nobody has the viewer open)
+    used to be indistinguishable from "never existed"; it no longer is.
+    `informational` follows the Bridge's rule (`not up`): reachable (via
+    either signal) is a real "up" fact, colored like the Bridge chip is when
+    reachable; only true absence -- no ping reply AND no `/ws-thin` flow --
+    is the neutral/informational state.
+  * **CrowPanel Prog**  -- the CrowPanel's CH340 USB-serial programming
+    adapter, if plugged into THIS host. Mirrors ST-Link exactly (same
+    best-effort `lsusb` scan, same "absence is healthy" semantics) but keys
+    off the CH340 vendor id instead.
   * **ST-Link**  -- the SWD/VCOM debug probe, if one is plugged into THIS
     host. Purely informational: on the normal Ethernet-tethered rig there is
     no ST-Link here at all, and its absence is a healthy state, not a fault.
@@ -76,6 +87,13 @@ DEFAULT_BRIDGE_IP = os.environ.get("ROOMSCAN_BRIDGE_IP", "172.17.2.66")
 DEFAULT_BRIDGE_HOSTNAME = "roomscan-bridge.local"
 DEFAULT_SCANNER_IP = os.environ.get("ROOMSCAN_SCANNER_IP", "172.17.2.58")
 
+# The CrowPanel (`comm-unit-7`) is a real network host, not just a `/ws-thin`
+# client -- resolved the same way as the Bridge (mDNS first, literal IP as the
+# last-resort fallback) so its chip can read "up" off ICMP even when nothing
+# has an active `/ws-thin` flow open to it.
+DEFAULT_CROWPANEL_IP = os.environ.get("ROOMSCAN_CROWPANEL_IP", "172.17.2.67")
+DEFAULT_CROWPANEL_HOSTNAME = "comm-unit-7.local"
+
 # Resolving a `.local` name is a real multicast round-trip -- slow when mDNS
 # is healthy, much slower (a full timeout) when it is not. `BRIDGE_RESOLVE_TTL_S`
 # bounds how often that cost is paid: the ICMP probe cadence is 3s
@@ -91,6 +109,10 @@ BRIDGE_RESOLVE_TIMEOUT_S = 1.5
 # ST-Link/V2-1 and V3 present VID 0483 with a PID in the 0x374x family. Matching
 # on the VID alone is enough to say "a debug probe is attached to this host".
 _STLINK_USB_VID = "0483"
+
+# The CrowPanel's programming port is a CH340/CH34x USB-serial adapter
+# (QinHeng Electronics, VID 1a86) -- distinct from ST-Link's VID above.
+_CH340_USB_VID = "1a86"
 
 # A stream slower than this (in Hz) counts as "not really flowing" for the
 # scanner detail line -- covers the idle/parked laser case where only the IMU
@@ -121,6 +143,11 @@ class _BridgeResolveCache:
 #: process so the ICMP loop (3s cadence) and the ssh health loop (45s
 #: cadence, web.py) pay for exactly one resolution per TTL window between them.
 _bridge_resolve_cache = _BridgeResolveCache()
+
+#: Same idea, separate cache -- CrowPanel and Bridge resolve independently
+#: (different hostnames, different TTL windows), so they must not share one
+#: `_BridgeResolveCache` instance or the second resolve would clobber the first.
+_crowpanel_resolve_cache = _BridgeResolveCache()
 
 
 def _resolve_hostname_sync(hostname: str) -> str | None:
@@ -245,6 +272,26 @@ def detect_stlink() -> bool:
     return False
 
 
+def detect_crowpanel_prog() -> bool:
+    """True iff the CrowPanel's CH340 USB-serial programming adapter is
+    attached to THIS host (best effort). Structurally identical to
+    `detect_stlink` -- same `lsusb` scan, same "can't tell degrades to not
+    present" contract -- just matching the CH340 vendor id instead.
+    """
+    lsusb = shutil.which("lsusb")
+    if lsusb is None:
+        return False
+    try:
+        out = subprocess.run([lsusb], capture_output=True, text=True, timeout=2.0)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    for line in out.stdout.splitlines():
+        # `lsusb` lines read "... ID 1a86:7522 QinHeng Electronics CH340 serial converter".
+        if f"ID {_CH340_USB_VID}:" in line or "ch340" in line.lower():
+            return True
+    return False
+
+
 def _fmt_rtt(rtt_ms: float | None) -> str:
     return f"{rtt_ms:g} ms" if rtt_ms is not None else "reachable"
 
@@ -315,8 +362,11 @@ def _scanner_addr_and_via(scanner_ip: str, bridge_ip: str, bridge_up: bool,
     return None, {"via_bridge": True, "bridge_addr": scanner_ip, "source": "nat"}
 
 
-def _crowpanel_detail(connected: bool, cp: dict | None) -> str:
+def _crowpanel_detail(connected: bool, cp: dict | None, reachable: bool = False,
+                      rtt_ms: float | None = None) -> str:
     if not connected or not cp:
+        if reachable:
+            return f"reachable, no /ws-thin session ({_fmt_rtt(rtt_ms)})"
         return "not connected (informational)"
     fmt = cp.get("format", "raw")
     fps = cp.get("fps")
@@ -341,6 +391,10 @@ def build_comm_message(
     bridge_health: dict | None = None,
     crowpanel: dict | None = None,
     bridge_resolved_from: str | None = None,
+    crowpanel_ping: PingResult | None = None,
+    crowpanel_ip: str | None = None,
+    crowpanel_resolved_from: str | None = None,
+    crowpanel_prog_present: bool = False,
 ) -> dict:
     """Assemble the `/ws` `comm` message from already-gathered facts (pure).
 
@@ -360,6 +414,13 @@ def build_comm_message(
     at all, e.g. a direct unit-test call). See `_scanner_addr_and_via` for how
     that same resolved address is used to keep the Scanner chip honest when
     the stream is arriving via the Bridge's NAT hop.
+
+    `crowpanel_ping`/`crowpanel_ip`/`crowpanel_resolved_from` mirror the
+    Bridge's resolve-then-ping facts for the CrowPanel's network identity
+    (`comm-unit-7`) -- all default to "not probed" so callers that only pass
+    the `/ws-thin` `crowpanel` dict (older call sites, most unit tests) keep
+    behaving exactly as before. `crowpanel_prog_present` is the CrowPanel's
+    CH340 programming-port analog of `stlink_present`.
     """
     bridge_up = bridge.up
     bridge_target = {
@@ -403,22 +464,34 @@ def build_comm_message(
     }
 
     cp_connected = bool(crowpanel and crowpanel.get("connected"))
-    crowpanel_target = {
-        "id": "crowpanel",
-        "label": "CrowPanel",
-        "addr": None,
-        "state": "up" if cp_connected else "absent",
-        "detail": _crowpanel_detail(cp_connected, crowpanel),
-        "informational": not cp_connected,
-        "link": {
-            "connected": cp_connected,
+    cp_reachable = bool(crowpanel_ping and crowpanel_ping.up)
+    cp_up = cp_connected or cp_reachable
+    crowpanel_link = {
+        "connected": cp_connected,
+        "reachable": cp_reachable,
+        "rtt_ms": crowpanel_ping.rtt_ms if crowpanel_ping else None,
+        "addr": crowpanel_ip,
+    }
+    if crowpanel_resolved_from is not None:
+        crowpanel_link["resolved_from"] = crowpanel_resolved_from
+    if cp_connected:
+        crowpanel_link.update({
             "count": (crowpanel or {}).get("count", 0),
             "tx_fps": (crowpanel or {}).get("tx_fps"),
             "tx_bytes_per_s": (crowpanel or {}).get("tx_bytes_per_s"),
             "credits": (crowpanel or {}).get("credits"),
             "credits_max": (crowpanel or {}).get("credits_max"),
             "proto": (crowpanel or {}).get("proto"),
-        } if cp_connected else {"connected": False},
+        })
+    crowpanel_target = {
+        "id": "crowpanel",
+        "label": "CrowPanel",
+        "addr": crowpanel_ip if cp_reachable else None,
+        "state": "up" if cp_up else "absent",
+        "detail": _crowpanel_detail(cp_connected, crowpanel, cp_reachable,
+                                    crowpanel_ping.rtt_ms if crowpanel_ping else None),
+        "informational": not cp_up,
+        "link": crowpanel_link,
         "device": {
             "format": crowpanel.get("format"),
             "fps": crowpanel.get("fps"),
@@ -431,6 +504,19 @@ def build_comm_message(
 
     # Informational: absence is normal on the Ethernet-tethered rig, so it is its
     # own "absent" state (rendered neutral), never "down" (which reads as a fault).
+    crowpanel_prog_target = {
+        "id": "crowpanel_prog",
+        "label": "CrowPanel Prog",
+        "addr": None,
+        "state": "up" if crowpanel_prog_present else "absent",
+        "detail": "programming adapter attached" if crowpanel_prog_present
+                   else "not connected (informational)",
+        "informational": True,
+        "link": {"present": crowpanel_prog_present},
+        "device": None,
+        "management": None,
+    }
+
     stlink_target = {
         "id": "stlink",
         "label": "ST-Link",
@@ -444,7 +530,8 @@ def build_comm_message(
     }
 
     return {"type": "comm",
-            "targets": [bridge_target, scanner_target, crowpanel_target, stlink_target]}
+            "targets": [crowpanel_target, crowpanel_prog_target, bridge_target,
+                        scanner_target, stlink_target]}
 
 
 async def probe(
@@ -456,41 +543,60 @@ async def probe(
     crowpanel: dict | None = None,
     timeout_s: float = 1.0,
     bridge_hostname: str = DEFAULT_BRIDGE_HOSTNAME,
+    crowpanel_ip: str = DEFAULT_CROWPANEL_IP,
+    crowpanel_hostname: str = DEFAULT_CROWPANEL_HOSTNAME,
 ) -> dict:
-    """Probe the pingable hops (Bridge, Scanner, ST-Link) and return the `comm`
-    message. Never raises.
+    """Probe the pingable hops (CrowPanel, Bridge, Scanner, ST-Link, CrowPanel
+    Prog) and return the `comm` message. Never raises.
 
     `bridge_ip` here is the CONFIGURED fallback (env `ROOMSCAN_BRIDGE_IP` /
     config `bridge_ip`, itself defaulting to the last-resort literal
     `DEFAULT_BRIDGE_IP`) -- `bridge_hostname` (mDNS) is tried first via
     `resolve_bridge_target`, and only the winning address is actually pinged.
+    `crowpanel_ip`/`crowpanel_hostname` go through the exact same
+    resolve-then-ping shape, with their own cache (`_crowpanel_resolve_cache`)
+    so the two resolutions don't clobber each other.
     `bridge_health` and `crowpanel` are NOT collected here -- they are already-
     gathered facts the caller hands in (see the module docstring): an ssh poll
-    is far too slow/heavy to run on this cadence, and CrowPanel state lives in
-    web.py's own thin-client map, not anything this module can reach. The two
-    pings run concurrently; the ST-Link USB scan is sync and cheap but still
-    offloaded to a thread so it can't stall the loop. Any probe that dies is
-    treated as its failure verdict (down / absent), so a flaky `ping` degrades
-    the indicator rather than the server.
+    is far too slow/heavy to run on this cadence, and the `/ws-thin` flow facts
+    live in web.py's own thin-client map, not anything this module can reach.
+    All pings run concurrently; the USB scans (ST-Link, CrowPanel Prog) are
+    sync and cheap but still offloaded to a thread so they can't stall the
+    loop. Any probe that dies is treated as its failure verdict (down /
+    absent), so a flaky `ping` degrades the indicator rather than the server.
     """
-    resolved = await resolve_bridge_target(bridge_ip, hostname=bridge_hostname)
-    bridge_addr = resolved["addr"]
+    bridge_resolved, crowpanel_resolved = await asyncio.gather(
+        resolve_bridge_target(bridge_ip, hostname=bridge_hostname),
+        resolve_bridge_target(crowpanel_ip, hostname=crowpanel_hostname,
+                              cache=_crowpanel_resolve_cache),
+    )
+    bridge_addr = bridge_resolved["addr"]
+    crowpanel_addr = crowpanel_resolved["addr"]
 
     loop = asyncio.get_running_loop()
-    bridge, scanner, stlink = await asyncio.gather(
+    bridge, scanner, crowpanel_ping, stlink, crowpanel_prog = await asyncio.gather(
         ping_host(bridge_addr, timeout_s),
         ping_host(scanner_ip, timeout_s),
+        ping_host(crowpanel_addr, timeout_s),
         loop.run_in_executor(None, detect_stlink),
+        loop.run_in_executor(None, detect_crowpanel_prog),
         return_exceptions=True,
     )
     if isinstance(bridge, BaseException):
         bridge = PingResult(False)
     if isinstance(scanner, BaseException):
         scanner = PingResult(False)
+    if isinstance(crowpanel_ping, BaseException):
+        crowpanel_ping = PingResult(False)
     if isinstance(stlink, BaseException):
         stlink = False
+    if isinstance(crowpanel_prog, BaseException):
+        crowpanel_prog = False
     return build_comm_message(
         bridge=bridge, scanner=scanner, stlink_present=bool(stlink),
         bridge_ip=bridge_addr, scanner_ip=scanner_ip, scanner_fps=scanner_fps,
         scanner_transport=scanner_transport, bridge_health=bridge_health,
-        crowpanel=crowpanel, bridge_resolved_from=resolved["resolved_from"])
+        crowpanel=crowpanel, bridge_resolved_from=bridge_resolved["resolved_from"],
+        crowpanel_ping=crowpanel_ping, crowpanel_ip=crowpanel_addr,
+        crowpanel_resolved_from=crowpanel_resolved["resolved_from"],
+        crowpanel_prog_present=bool(crowpanel_prog))

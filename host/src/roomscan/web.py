@@ -5286,13 +5286,18 @@ async def _bridge_health_loop(state) -> None:
 
 
 async def _comm_probe_loop(state) -> None:
-    """Background task (started from `_lifespan`): probe the Bridge / scanner /
-    ST-Link on a slow cadence and broadcast the `comm` message. Fully decoupled
-    from `_broadcaster` so a `ping` stall can never touch the frame stream. The
-    latest result is cached on `state.last_comm` so a freshly-connected client
-    gets it immediately, without waiting a whole interval. `bridge_health` and
-    `crowpanel` are read from whatever the slower/local sources already have --
-    this loop never performs an ssh hop itself (see `_bridge_health_loop`)."""
+    """Background task (started from `_lifespan`): probe CrowPanel / Bridge /
+    Scanner / ST-Link / CrowPanel Prog on a slow cadence and broadcast the
+    `comm` message. Fully decoupled from `_broadcaster` so a `ping` stall can
+    never touch the frame stream. The latest result is cached on
+    `state.last_comm` so a freshly-connected client gets it immediately,
+    without waiting a whole interval. `bridge_health` and `crowpanel` are read
+    from whatever the slower/local sources already have -- this loop never
+    performs an ssh hop itself (see `_bridge_health_loop`); CrowPanel's own
+    ICMP reachability is resolved/pinged inside `commstatus.probe` using its
+    module-level defaults (`DEFAULT_CROWPANEL_IP`/`DEFAULT_CROWPANEL_HOSTNAME`)
+    -- there is no per-deployment config override for it yet, unlike the
+    Bridge's `bridge_ip`."""
     bridge_ip = getattr(getattr(state, "config", None), "bridge_ip", None) \
         or commstatus.DEFAULT_BRIDGE_IP
     while True:

@@ -19,7 +19,8 @@ def test_message_shape_and_order():
         stlink_present=False, bridge_ip="172.17.2.66", scanner_ip="172.17.2.58",
         scanner_fps=27.8)
     assert msg["type"] == "comm"
-    assert [t["id"] for t in msg["targets"]] == ["bridge", "scanner", "crowpanel", "stlink"]
+    assert [t["id"] for t in msg["targets"]] == \
+        ["crowpanel", "crowpanel_prog", "bridge", "scanner", "stlink"]
 
 
 def test_bridge_up_carries_rtt_and_addr():
@@ -115,6 +116,36 @@ def test_crowpanel_absent_is_informational():
     assert "not connected" in t["detail"]
 
 
+def test_crowpanel_reachable_but_no_ws_thin_session_is_still_up():
+    """Regression: a CrowPanel that is powered on and reachable but not
+    currently holding a `/ws-thin` flow (reconnect backoff, nobody has the
+    viewer open) used to read identically to 'never existed' -- absent. It
+    must now read up off ICMP alone -- and, matching the Bridge chip's rule
+    (`informational = not up`), a reachable CrowPanel is a real 'up' fact, not
+    a muted/informational one, exactly like a reachable Bridge."""
+    t = _by_id(build_comm_message(
+        bridge=PingResult(True), scanner=PingResult(True), stlink_present=False,
+        bridge_ip="a", scanner_ip="b", crowpanel=None,
+        crowpanel_ping=PingResult(True, 4.0), crowpanel_ip="172.17.2.67"), "crowpanel")
+    assert t["state"] == "up"
+    assert t["informational"] is False
+    assert t["addr"] == "172.17.2.67"
+    assert t["device"] is None
+    assert "reachable" in t["detail"] and "no /ws-thin session" in t["detail"]
+    assert t["link"]["reachable"] is True
+    assert t["link"]["connected"] is False
+
+
+def test_crowpanel_truly_absent_is_neither_reachable_nor_connected():
+    t = _by_id(build_comm_message(
+        bridge=PingResult(True), scanner=PingResult(True), stlink_present=False,
+        bridge_ip="a", scanner_ip="b", crowpanel=None,
+        crowpanel_ping=PingResult(False), crowpanel_ip="172.17.2.67"), "crowpanel")
+    assert t["state"] == "absent"
+    assert t["informational"] is True
+    assert t["addr"] is None
+
+
 def test_crowpanel_connected_reports_format_fps_and_credits():
     cp = {"connected": True, "count": 1, "format": "jpeg", "fps": 12.0,
           "width": 480, "height": 480, "dropped": 3,
@@ -163,13 +194,42 @@ def test_detect_stlink_false_when_lsusb_missing(monkeypatch):
     assert commstatus.detect_stlink() is False
 
 
+def test_detect_crowpanel_prog_false_when_lsusb_missing(monkeypatch):
+    monkeypatch.setattr(commstatus.shutil, "which", lambda _: None)
+    assert commstatus.detect_crowpanel_prog() is False
+
+
+def test_detect_crowpanel_prog_matches_ch340_vid(monkeypatch):
+    monkeypatch.setattr(commstatus.shutil, "which", lambda name: "/usr/bin/lsusb")
+    fake = SimpleNamespace(
+        stdout="Bus 001 Device 025: ID 1a86:7522 QinHeng Electronics CH340 serial converter\n")
+    monkeypatch.setattr(commstatus.subprocess, "run", lambda *a, **k: fake)
+    assert commstatus.detect_crowpanel_prog() is True
+
+
+def test_crowpanel_prog_target_shape():
+    absent = _by_id(build_comm_message(
+        bridge=PingResult(True), scanner=PingResult(True), stlink_present=False,
+        bridge_ip="a", scanner_ip="b"), "crowpanel_prog")
+    assert absent["state"] == "absent" and absent["informational"] is True
+    present = _by_id(build_comm_message(
+        bridge=PingResult(True), scanner=PingResult(True), stlink_present=False,
+        bridge_ip="a", scanner_ip="b", crowpanel_prog_present=True), "crowpanel_prog")
+    assert present["state"] == "up"
+    assert present["link"] == {"present": True}
+
+
 def _no_mdns(monkeypatch):
     """Simulate an unreachable/absent mDNS responder (no live network call) so
-    `probe()` falls back to pinging its `bridge_ip` argument verbatim -- the
-    behaviour these older tests were written against, before the mDNS
-    resolution step existed."""
+    `probe()` falls back to pinging its `bridge_ip`/`crowpanel_ip` argument
+    verbatim -- the behaviour these older tests were written against, before
+    the mDNS resolution step existed. Also stubs `detect_crowpanel_prog` (the
+    other new USB scan `probe()` now runs) to a safe default so tests that
+    don't care about it don't shell out to a real `lsusb`."""
     monkeypatch.setattr(commstatus, "_resolve_hostname_sync", lambda hostname: None)
     monkeypatch.setattr(commstatus, "_bridge_resolve_cache", commstatus._BridgeResolveCache())
+    monkeypatch.setattr(commstatus, "_crowpanel_resolve_cache", commstatus._BridgeResolveCache())
+    monkeypatch.setattr(commstatus, "detect_crowpanel_prog", lambda: False)
 
 
 def test_probe_orchestrates_without_raising(monkeypatch):
@@ -348,9 +408,11 @@ def test_probe_resolves_bridge_hostname_before_pinging(monkeypatch):
 
     monkeypatch.setattr(commstatus, "ping_host", fake_ping)
     monkeypatch.setattr(commstatus, "detect_stlink", lambda: False)
+    monkeypatch.setattr(commstatus, "detect_crowpanel_prog", lambda: False)
     monkeypatch.setattr(commstatus, "_resolve_hostname_sync",
                         lambda hostname: "172.17.2.78")
     monkeypatch.setattr(commstatus, "_bridge_resolve_cache", commstatus._BridgeResolveCache())
+    monkeypatch.setattr(commstatus, "_crowpanel_resolve_cache", commstatus._BridgeResolveCache())
 
     msg = asyncio.run(commstatus.probe("172.17.2.66", "172.17.2.58"))
 
@@ -386,9 +448,11 @@ def test_probe_regression_pinging_the_configured_default_directly(monkeypatch):
     # Now the real, fixed `probe()`: must NOT reproduce that behaviour.
     pinged.clear()
     monkeypatch.setattr(commstatus, "detect_stlink", lambda: False)
+    monkeypatch.setattr(commstatus, "detect_crowpanel_prog", lambda: False)
     monkeypatch.setattr(commstatus, "_resolve_hostname_sync",
                         lambda hostname: "172.17.2.78")
     monkeypatch.setattr(commstatus, "_bridge_resolve_cache", commstatus._BridgeResolveCache())
+    monkeypatch.setattr(commstatus, "_crowpanel_resolve_cache", commstatus._BridgeResolveCache())
     asyncio.run(commstatus.probe("172.17.2.66", "172.17.2.58"))
     assert "172.17.2.66" not in pinged
     assert "172.17.2.78" in pinged
