@@ -216,7 +216,12 @@ in the repo. The evidence for every one is in `docs/roadmap-history.md`.
   while the renderer ignored both (#106). A read-back proves the setter ran, nothing more. An
   end-to-end claim needs an observable on the **far side** of the layer in question; for a rendering
   path that means **pixels**, framed so a null result cannot be explained away (the first attempt had
-  the camera inside the splat, where alpha saturation could have masked a real change).
+  the camera inside the splat, where alpha saturation could have masked a real change). It is not
+  only a rendering trap: for a **rate**, the far-side observable is the measured arrival rate.
+  `/ws-thin`'s negotiated telemetry cadence (#216) acked `0.1` faithfully and passed every unit
+  test while delivering 8.0 Hz, because the gate re-anchored its schedule to `now` on each send and
+  so quantized the period up to a multiple of the render tick. Nothing inside the negotiation could
+  see it; `thin_client_probe.py` measuring `telemetry_hz` from arrival times saw it immediately.
 - **A percentage of a path is meaningless when the path is invented.** `icp_mode="translation"` gives
   rotation-prior error no rotational DoF to land in, so it emerges as translation — 18–20 m of
   fabricated path at 0 lost frames and 0.88 fitness (BUG-067). Validate against a null capture before

@@ -1099,7 +1099,8 @@ async def rig_thin_probe(frames: int = 5, url: str = "", out_dir: str = "",
                          format: str = "", fps: int = 0,
                          width: int = 0, height: int = 0,
                          quality: int = 0, v2: bool = False,
-                         credits: int = 0, max_frame_bytes: int = 0) -> dict:
+                         credits: int = 0, max_frame_bytes: int = 0,
+                         telemetry_interval: float = 0.0) -> dict:
     """Look at what `/ws-thin` is actually drawing, as PNGs, and prove the
     commands move it.
 
@@ -1120,12 +1121,24 @@ async def rig_thin_probe(frames: int = 5, url: str = "", out_dir: str = "",
     the client is slow; watch `telemetry.tx_fps` / `tx_bytes_per_s` /
     `dropped` for the per-client truth vs the rig-internal `fps`).
 
-    `format`/`fps`/`width`/`height`/`quality` negotiate `thin_hello` before
-    anything else, when any is given (non-empty/non-zero); leaving all five at
-    their defaults sends no hello at all, so a default call still proves the
-    un-negotiated path -- today's tag-1 RGB565 480x480 @ 10 fps, byte-identical
-    to before #197. `width` alone (no `height`) is sent as a square request
-    (this protocol is square-only). The result's `hello` key reports the exact
+    `format`/`fps`/`width`/`height`/`quality`/`telemetry_interval` negotiate
+    `thin_hello` before anything else, when any is given (non-empty/non-zero);
+    leaving them all at their defaults sends no hello at all, so a default call
+    still proves the un-negotiated path -- today's tag-1 RGB565 480x480 @ 10 fps,
+    byte-identical to before #197. `width` alone (no `height`) is sent as a
+    square request (this protocol is square-only), and must be one of
+    160/320/480 -- 160 is the #216 thumbnail tier for a client whose preview
+    pane is small (the CrowPanel dashboard's 132x132), at ~1.5-2.5 KB/frame
+    instead of ~12 KB. Anything else snaps to the nearest of the three.
+
+    `telemetry_interval` (#216) requests a `thin_telemetry` cadence in seconds,
+    clamped server-side to [0.05, 1.0]; the IR grid rides that message, so 0.1
+    is a 10 Hz thermal feed against the 2 Hz default. Judge it by the result's
+    `telemetry_hz`, MEASURED from arrival times -- not by the ack, which only
+    echoes what was negotiated. It is additionally capped by `fps`: telemetry
+    is built once per render tick, so 20 Hz telemetry needs >= 20 fps too.
+
+    The result's `hello` key reports the exact
     request, the ACKED (clamped) effective values, and `degraded` (True only
     when `format="jpeg"` was requested but the server acked `format="raw"` --
     `simplejpeg` unavailable server-side). `ok` REQUIRES the ack to have
@@ -1180,4 +1193,5 @@ async def rig_thin_probe(frames: int = 5, url: str = "", out_dir: str = "",
                              width=width or None, height=height or None,
                              quality=quality or None,
                              proto=2 if v2 else None, credits=credits or None,
-                             max_frame_bytes=max_frame_bytes or None)
+                             max_frame_bytes=max_frame_bytes or None,
+                             telemetry_interval=telemetry_interval or None)

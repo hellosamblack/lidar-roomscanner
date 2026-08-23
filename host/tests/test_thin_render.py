@@ -764,6 +764,54 @@ def test_submit_negotiated_resolution_also_applies_to_jpeg(broken_renderer):
     assert plen == len(frame) - tr.THIN_HEADER_JPEG.size
 
 
+def test_submit_encodes_the_160_thumbnail_tier(broken_renderer):
+    """#216: the thumbnail tier is served by the SAME host-side downscale as
+    320 -- the offscreen renderer is never resized (a second
+    `OffscreenRenderer` aborts the process), so this only has to prove the
+    numpy path and the header agree at the new size."""
+    frame = broken_renderer.submit(image_scene(_ramp(7)), ThinCamera(),
+                                   out_width=160, out_height=160).result(timeout=5.0)
+    tag, w, h = THIN_HEADER.unpack_from(frame, 0)
+    assert (w, h) == (160, 160)
+    assert len(frame) == 8 + 160 * 160 * 2
+
+
+def test_submit_160_jpeg_round_trips_and_is_small(broken_renderer):
+    """The bandwidth claim that motivates the tier: spec §1 budgets
+    ~1.5-2.5 KB for a 160x160 JPEG against ~12 KB at 480x480. Asserted as a
+    generous CEILING, not a range -- the exact size is content-dependent, but
+    a frame that came back at 480-tier size would mean the negotiated
+    resolution never reached the encoder.
+    """
+    simplejpeg = pytest.importorskip("simplejpeg")
+    frame = broken_renderer.submit(image_scene(_ramp(7)), ThinCamera(),
+                                   fmt="jpeg", out_width=160,
+                                   out_height=160).result(timeout=5.0)
+    tag, w, h, _seq, plen = tr.THIN_HEADER_JPEG.unpack_from(frame, 0)
+    assert (w, h) == (160, 160)
+    assert plen == len(frame) - tr.THIN_HEADER_JPEG.size
+    assert plen < 8192, f"160x160 JPEG was {plen} B"
+    decoded = simplejpeg.decode_jpeg(frame[tr.THIN_HEADER_JPEG.size:],
+                                     colorspace="rgb")
+    assert decoded.shape == (160, 160, 3)
+
+
+def test_submit_resolution_changes_do_not_corrupt_later_frames(broken_renderer):
+    """Spec §3.3: a client re-negotiating mid-connection (dashboard preview
+    -> full LiDAR page and back) must not leave the render target in a state
+    that corrupts the next frame. Sizes are alternated rather than stepped
+    monotonically, so a stale-buffer bug cannot be masked by every frame
+    happening to shrink.
+    """
+    for want in (160, 480, 160, 320, 160):
+        frame = broken_renderer.submit(image_scene(_ramp(7)), ThinCamera(),
+                                       out_width=want,
+                                       out_height=want).result(timeout=5.0)
+        _tag, w, h = THIN_HEADER.unpack_from(frame, 0)
+        assert (w, h) == (want, want)
+        assert len(frame) == 8 + want * want * 2
+
+
 def test_submit_jpeg_raises_when_simplejpeg_unavailable(broken_renderer, monkeypatch):
     """`submit` itself does not degrade -- graceful fallback is a `web.py`
     negotiation-time decision (#197 requirement 5); a caller that asks for

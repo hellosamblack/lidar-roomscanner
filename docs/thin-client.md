@@ -81,7 +81,8 @@ WS upgrade):
  "credits": 2, "max_frame_bytes": 262144, "ir_cells": 4096}
 {"type": "thin_hello_ack", "proto": 2, "encoding": "jpeg",
  "format": "jpeg", "fps": 10.0, "width": 480, "height": 480,
- "quality": 75, "credits": 2, "ir_cells": 4096}
+ "quality": 75, "credits": 2, "ir_cells": 4096,
+ "telemetry_interval_s": 0.1}
 ```
 
 - `proto: 2` opts the flow into **credit-based flow control** (below). It
@@ -96,6 +97,14 @@ WS upgrade):
   whole frame message; a packed frame larger than this is dropped for this
   client (counted in `dropped`, logged once) rather than sent to certain
   reassembly failure.
+- `telemetry_interval_s` (clamped to [0.05, 1.0], #216) sets this flow's
+  `thin_telemetry` cadence in seconds. Omit it and a **v1** flow keeps 0.5 s
+  (2 Hz, unchanged), while a flow that ratchets to `proto: 2` is granted
+  **0.1 s (10 Hz)** on that same hello. The IR grid rides this message, so
+  the interval *is* the thermal feed's frame rate — at 0.5 s the CrowPanel's
+  IR FEED is pinned at 2 FPS however fast the sensor runs. Once negotiated
+  the value sticks: a later hello that omits the field keeps the client's
+  chosen cadence rather than snapping back to a default.
 - `ir_cells` (clamped to [64, 4096]) advertises how many IR **zones** the
   client can render. Send it and `thin_telemetry` upgrades from the 8x8
   `ir_grid` to `ir_grid_b64` at the sensor's native resolution (54x42 =
@@ -107,9 +116,20 @@ WS upgrade):
 
 All fields optional; a field omitted keeps its current value. Clamped
 server-side, and the ack echoes the CLAMPED effective values, never the
-raw request: `width`/`height` to the nearest of {320, 480} (square only —
-a non-square request is rejected outright and the prior width/height are
-kept), `quality` to [40, 95]. A malformed or non-finite value for one
+raw request: `width`/`height` to the nearest of {160, 320, 480} (square
+only — a non-square request is rejected outright and the prior
+width/height are kept), `quality` to [40, 95].
+
+**160 is the thumbnail tier** (#216). The CrowPanel dashboard's scanner
+page embeds a 132×132 voxel preview, so serving it 480×480 spent ~85% of a
+~1.5 Mbit/s uplink on pixels the client downscaled away. A 160×160 JPEG is
+~1.5–2.5 KB against ~12 KB at 480×480, which fits 30 fps into ~60–120 KB/s
+instead of the ~16–18 fps ceiling the full-size path hits. The renderer is
+never resized for this — a second `OffscreenRenderer` aborts the process —
+so every tier below native is a numpy `resize_nearest` of the already
+rendered frame. A tie snaps to the CHEAPER tier: `THIN_HELLO_RESOLUTIONS`
+is ascending and `_nearest` keeps the first minimum, so a request for 240
+resolves to 160, not 320. A malformed or non-finite value for one
 field (wrong type, `Infinity`/`NaN`, non-square pair) is a no-op for that
 field only; the rest of the same message still applies, and the ack is
 always sent.
@@ -167,7 +187,25 @@ still ~1.6 Mbit/s — the same queue, growing more slowly).
 
 ### JSON out: `thin_telemetry`
 
-Sent every 500 ms — deliberately not per-frame.
+Sent every 500 ms by default — deliberately not per-frame — or at the
+`telemetry_interval_s` this flow negotiated (#216; 0.1 s for a v2 flow that
+did not name one).
+
+The ACHIEVED rate is bounded by the flow's **fps**: this message is built
+once per pass of the render loop, so a flow at 10 fps cannot exceed 10 Hz
+telemetry however short an interval it asked for. Negotiate the fps first.
+Below that ceiling the cadence is accurate — the schedule advances by whole
+intervals from the previous due time rather than re-anchoring to each tick,
+which would otherwise quantize the rate up to a multiple of the tick period
+(measured on a 41 ms tick before that fix: a 0.1 s request delivered 8.0 Hz
+and a 0.05 s request 13.6 Hz; the same two requests measure 9.85 Hz and
+18.49 Hz on a 29 fps tick after it).
+
+`thin_client_probe.py` reports `telemetry_hz` **measured from arrival
+times**, and that is the number to judge this by — the ack only echoes what
+was negotiated, which is not evidence about the loop that has to honour it.
+The quantization above was invisible in every ack and every unit test; it
+showed up the first time the rate was measured on a real socket.
 
 ```json
 {

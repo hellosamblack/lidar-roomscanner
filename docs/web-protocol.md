@@ -104,7 +104,9 @@ backpressure.
 ## The thin-client channel — `/ws-thin` (not this protocol)
 
 A third endpoint, `GET /ws-thin`, serves **pre-rendered raster frames** (raw
-RGB565 by default; JPEG and fps/resolution negotiable via `thin_hello`, #197)
+RGB565 by default; JPEG, fps, resolution — 160/320/480, where 160 is the
+#216 thumbnail tier — and telemetry cadence all negotiable via `thin_hello`,
+#197/#202/#216)
 to GPU-less embedded clients (the CrowPanel prop). It is a separate
 protocol, not a mode of this one: a thin client never receives
 `POINT_CLOUD`/`MESH`/`IR_IMAGE` tags or any of the JSON messages documented

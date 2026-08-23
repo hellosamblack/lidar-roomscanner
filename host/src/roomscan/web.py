@@ -156,7 +156,24 @@ METRICS_INTERVAL = 1.0 / 4.0
 # cloud: each tick is a full server-side 3D render (~27 ms) plus a 460 KB
 # uncompressed frame, so 10 fps is ~4.6 MB/s per client on the wireless uplink.
 THIN_INTERVAL = 1.0 / 10.0
+#: `thin_telemetry` cadence for a flow that has never negotiated one (#216).
+#: Every v1 client, and any flow whose `thin_hello` omits
+#: `telemetry_interval_s`, keeps exactly this -- 2 Hz, byte-identical to
+#: pre-#216 behaviour.
 THIN_TELEMETRY_INTERVAL = 0.5
+#: default cadence granted to a flow the moment it ratchets to `proto: 2`
+#: without naming one (spec 2026-08-23 §2B: "default 0.1s for v2 flows").
+#: The IR grid rides `thin_telemetry`, so at 0.5 s the CrowPanel's thermal
+#: feed is pinned at 2 FPS no matter what the sensor can do; 10 Hz is
+#: fluid thermal video for ~30 KB/s of JSON on a ~187 KB/s link.
+THIN_TELEMETRY_INTERVAL_V2 = 0.1
+#: negotiation clamps for `telemetry_interval_s`. The floor is 20 Hz: the
+#: ToF source itself tops out near 30 fps, so anything faster re-sends
+#: numbers that have not changed, and the message is JSON (the full-res
+#: `ir_grid_b64` alone is ~3 KB) -- 20 Hz is already ~60 KB/s. The ceiling
+#: is the old default, so no client can make itself *slower* than v1.
+THIN_TELEMETRY_INTERVAL_MIN = 0.05
+THIN_TELEMETRY_INTERVAL_MAX = 1.0
 # `thin_hello` negotiation clamps (#197) -- deliberately generous but bounded:
 # a client that never sends `thin_hello` is unaffected (`ThinFlow` defaults
 # reproduce THIN_INTERVAL / THIN_WIDTH / THIN_HEIGHT exactly).
@@ -173,7 +190,15 @@ THIN_HELLO_FPS_MAX_RAW = 10
 THIN_HELLO_FPS_MAX_JPEG = 60
 #: square resolutions only -- a non-square request is rejected outright and
 #: the flow's prior width/height are kept, rather than distorting the image.
-THIN_HELLO_RESOLUTIONS = (320, 480)
+#:
+#: 160 is the THUMBNAIL tier (#216): the CrowPanel's dashboard scanner page
+#: embeds a 132x132 voxel preview, so serving it 480x480 spends ~85% of a
+#: ~1.5 Mbit/s uplink on pixels the client immediately downscales away. A
+#: 160x160 JPEG is ~1.5-2.5 KB, which fits 30 fps into ~60-120 KB/s.
+#: Ordered ascending, which matters for `_nearest`: an exact midpoint (240)
+#: ties, and `min` keeps the FIRST minimum, so a tie resolves to the
+#: cheaper resolution rather than the more expensive one.
+THIN_HELLO_RESOLUTIONS = (160, 320, 480)
 THIN_HELLO_QUALITY_MIN = 40
 THIN_HELLO_QUALITY_MAX = 95
 DEFAULT_THIN_FPS = 1.0 / THIN_INTERVAL   # 10.0, matches today's cadence exactly
@@ -5670,6 +5695,11 @@ class ThinFlow:
     #: 8x8 `ir_grid`; a value >= the sensor's native zone count upgrades this
     #: flow to the full-resolution `ir_grid_b64` instead.
     ir_cells: int | None = None
+    #: negotiated `thin_telemetry` cadence in seconds, or None if this flow
+    #: has never negotiated one -- None means THIN_TELEMETRY_INTERVAL (0.5 s),
+    #: so a v1 client's cadence is untouched by #216. Read it through the
+    #: `telemetry_interval` property, never directly.
+    telemetry_interval_s: float | None = None
     #: (monotonic_time, frame_bytes) per sent frame, trimmed to the last
     #: THIN_TX_WINDOW_S by the telemetry builder -- feeds tx_fps/tx_bytes_per_s.
     tx_log: deque = field(default_factory=deque)
@@ -5680,6 +5710,18 @@ class ThinFlow:
     def interval(self) -> float:
         """Per-flow render/send pacing interval, in seconds."""
         return (1.0 / self.fps) if self.fps > 0 else THIN_INTERVAL
+
+    @property
+    def telemetry_interval(self) -> float:
+        """Per-flow `thin_telemetry` cadence, in seconds (#216).
+
+        Resolves the "never negotiated" sentinel so no caller has to: an
+        un-negotiated flow reports the module default, which is what every
+        v1 client and every pre-#216 flow gets.
+        """
+        if self.telemetry_interval_s is None:
+            return THIN_TELEMETRY_INTERVAL
+        return self.telemetry_interval_s
 
 
 def _thin_clients(state) -> dict:
@@ -5760,12 +5802,18 @@ async def _apply_record(state, ctrl, on: bool) -> None:
 
 
 def thin_telemetry_message(state, flow: ThinFlow) -> dict:
-    """The curated 2 Hz `thin_telemetry` projection.
+    """The curated `thin_telemetry` projection, sent at `flow.telemetry_interval`.
 
     A strict subset of numbers the existing `ranging`/`sensor`/`metrics`
     builders already compute -- no new telemetry math. `mode` and `recording`
     are authoritative: `/ws-thin` has no ack protocol, so a dropped
     `thin_mode`/`thin_record` self-corrects at the next tick.
+
+    Cadence is 2 Hz unless negotiated (#216). Note the ACHIEVED rate is
+    bounded by the render tick rate as well as by the negotiated interval:
+    this message is built once per pass of `_thin_render_loop`, so a flow
+    at 10 fps cannot exceed 10 Hz telemetry however short an interval it
+    asked for. Ask for the fps first.
     """
     fps = None
     if getattr(state, "ranging_state", None) is not None:
@@ -5962,6 +6010,12 @@ def negotiate_thin_hello(msg: dict, flow: ThinFlow) -> dict:
     of the same choice; an explicit `format` wins when both appear. `proto`
     only ever ratchets UP to 2 -- a later hello without it does not demote
     the flow back to free-running.
+
+    #216 adds the 160 thumbnail tier to `THIN_HELLO_RESOLUTIONS` and a
+    negotiable `telemetry_interval_s`. Both are re-negotiable mid-connection
+    (the CrowPanel switches between a 132x132 dashboard preview and a full
+    LiDAR page), which needs nothing new here -- `pending_hello` already
+    routes every hello through this function, first or fiftieth.
     """
     proto = flow.proto
     requested_proto = _finite_float(msg.get("proto"))
@@ -6004,6 +6058,25 @@ def negotiate_thin_hello(msg: dict, flow: ThinFlow) -> dict:
     if requested_ir is not None:
         ir_cells = int(round(max(float(THIN_IR_CELLS_MIN),
                                  min(float(THIN_IR_CELLS_MAX), requested_ir))))
+
+    # `telemetry_interval_s` (#216). Three cases, in order:
+    #   explicit request  -> clamp it;
+    #   v2 and never negotiated -> the v2 default (0.1 s / 10 Hz);
+    #   anything else     -> keep what the flow already has, which for a v1
+    #                        flow is the None sentinel = 0.5 s.
+    # Note the middle case reads `proto` (the value this call is ratcheting
+    # TO), not `flow.proto`, so the v2 default lands on the same hello that
+    # opts the flow into v2 rather than one hello later. Once applied, the
+    # flow holds a concrete float, so a later re-negotiation that omits the
+    # field keeps the client's chosen cadence instead of snapping back.
+    telemetry_interval_s = flow.telemetry_interval_s
+    requested_ti = _finite_float(msg.get("telemetry_interval_s"))
+    if requested_ti is not None:
+        telemetry_interval_s = max(THIN_TELEMETRY_INTERVAL_MIN,
+                                   min(THIN_TELEMETRY_INTERVAL_MAX, requested_ti))
+    elif telemetry_interval_s is None and proto >= 2:
+        telemetry_interval_s = THIN_TELEMETRY_INTERVAL_V2
+
     fps_max = THIN_HELLO_FPS_MAX_JPEG if fmt == "jpeg" else THIN_HELLO_FPS_MAX_RAW
 
     fps = flow.fps
@@ -6030,7 +6103,8 @@ def negotiate_thin_hello(msg: dict, flow: ThinFlow) -> dict:
 
     return {"format": fmt, "fps": fps, "width": width, "height": height,
             "quality": quality, "proto": proto, "credits": credits,
-            "max_frame_bytes": max_frame_bytes, "ir_cells": ir_cells}
+            "max_frame_bytes": max_frame_bytes, "ir_cells": ir_cells,
+            "telemetry_interval_s": telemetry_interval_s}
 
 
 def _apply_pending_hello(flow: ThinFlow) -> dict | None:
@@ -6062,6 +6136,7 @@ def _apply_pending_hello(flow: ThinFlow) -> dict | None:
     flow.credits_max = effective["credits"]
     flow.max_frame_bytes = effective["max_frame_bytes"]
     flow.ir_cells = effective["ir_cells"]
+    flow.telemetry_interval_s = effective["telemetry_interval_s"]
     if flow.proto >= 2:
         if was_proto < 2:
             # The handshake itself is the initial grant (spec: "server starts
@@ -6084,7 +6159,11 @@ def _apply_pending_hello(flow: ThinFlow) -> dict | None:
     ack = {"type": "thin_hello_ack", "proto": flow.proto,
            "encoding": "jpeg" if flow.format == "jpeg" else "rgb565",
            **{k: effective[k] for k in
-              ("format", "fps", "width", "height", "quality")}}
+              ("format", "fps", "width", "height", "quality")},
+           # Always the RESOLVED cadence, never the None sentinel: a client
+           # that omitted the field still gets told what it will actually
+           # receive, which is the whole point of an authoritative ack.
+           "telemetry_interval_s": flow.telemetry_interval}
     if flow.proto >= 2:
         ack["credits"] = flow.credits_max
     if flow.ir_cells is not None:
@@ -6220,13 +6299,35 @@ async def _thin_render_loop(state, websocket, flow: ThinFlow) -> None:
                 await websocket.send_text(json.dumps(ack))
             except Exception:  # noqa: BLE001 - disconnect; the receive loop wins
                 return
+            # Force this tick's telemetry (#216). `next_telemetry` was
+            # scheduled under the PREVIOUS cadence, so a client shortening
+            # 1.0 s -> 0.05 s would otherwise wait out the full old interval
+            # before the new rate began -- and a re-negotiating client wants
+            # the server's authoritative mode/recording view now anyway.
+            next_telemetry = 0.0
 
         next_tick, skipped = _thin_next_tick(flow, next_tick, now)
         if skipped:
             flow.skipped += 1
 
         if now >= next_telemetry:
-            next_telemetry = now + THIN_TELEMETRY_INTERVAL
+            # Advance the schedule by whole intervals from the DUE time, not
+            # by re-anchoring it to `now` (#216). `now + interval` re-phases
+            # to the render tick on every send, which quantizes the achieved
+            # cadence up to a multiple of the tick period: measured on a
+            # 41 ms tick, a 0.1 s request landed at 8.0 Hz and a 0.05 s
+            # request at 13.6 Hz, because each send pushed the next due time
+            # a full interval past a tick boundary. Advancing absolutely
+            # keeps the average honest: the same two requests measure
+            # 9.85 Hz and 18.49 Hz on a 29 fps tick after this change.
+            next_telemetry += flow.telemetry_interval
+            if next_telemetry <= now:
+                # First tick (seeded 0.0), a cadence change, or a stall
+                # longer than one interval. Resync instead of bursting to
+                # catch up -- backlogged telemetry is worthless, and on this
+                # transport a burst is exactly the queue growth /ws-thin's
+                # credit scheme exists to prevent.
+                next_telemetry = now + flow.telemetry_interval
             try:
                 await websocket.send_text(
                     json.dumps(thin_telemetry_message(state, flow)))

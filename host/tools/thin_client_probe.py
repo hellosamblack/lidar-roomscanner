@@ -286,6 +286,21 @@ def default_out_dir() -> Path:
 # --------------------------------------------------------------------------
 
 
+def _rate_hz(times: list[float]) -> float | None:
+    """Mean arrival rate over `times`, or None with fewer than two samples.
+
+    Deliberately `(n - 1) / span` and not `n / span`: with two arrivals one
+    interval elapsed, not two, and the off-by-one reads as a 2x overshoot at
+    the small sample counts a short probe actually collects.
+    """
+    if len(times) < 2:
+        return None
+    span = times[-1] - times[0]
+    if span <= 0:
+        return None
+    return round((len(times) - 1) / span, 2)
+
+
 class _ThinLink:
     """Receive side of one `/ws-thin` connection, sorting frames from JSON.
 
@@ -299,6 +314,12 @@ class _ThinLink:
         self.report = report
         self.telemetry: dict | None = None
         self.telemetry_seen = 0
+        #: `time.monotonic()` of each `thin_telemetry` arrival, so the probe
+        #: can report the ACHIEVED cadence (#216). The negotiated interval is
+        #: what was asked for; this is what the link actually delivered, and
+        #: they differ whenever the render tick rate is the binding constraint
+        #: (telemetry is built once per tick).
+        self.telemetry_times: list[float] = []
         self.frames_received = 0
         self.closed_error: str | None = None
         #: v2 flow control (#202): once a proto-2 hello is acked, every frame
@@ -357,6 +378,7 @@ class _ThinLink:
         if data.get("type") == "thin_telemetry":
             self.telemetry = data
             self.telemetry_seen += 1
+            self.telemetry_times.append(time.monotonic())
         elif data.get("type") == "error":
             self.report["server_error"] = data
         return "json", data
@@ -453,17 +475,23 @@ async def _probe_hello(link: _ThinLink, report: dict, *, fmt: str | None,
                        fps: int | None, width: int | None, height: int | None,
                        quality: int | None, timeout: float,
                        proto: int | None = None, credits: int | None = None,
-                       max_frame_bytes: int | None = None) -> None:
+                       max_frame_bytes: int | None = None,
+                       telemetry_interval: float | None = None) -> None:
     """Negotiate `thin_hello` (#197) when any of `fmt`/`fps`/`width`/`height`/
-    `quality` was passed. A default run (nothing passed) sends nothing and
-    keeps today's behaviour -- tag-1 RGB565 480x480 @ 10 fps.
+    `quality`/`telemetry_interval` was passed. A default run (nothing passed)
+    sends nothing and keeps today's behaviour -- tag-1 RGB565 480x480 @ 10 fps.
 
     `proto=2` sends the spec-shaped v2 hello (#202): `accept` preference list
     derived from `fmt` (default jpeg-first), plus `credits`/`max_frame_bytes`
     when given. A proto-2 ack turns on `link.auto_ready`, without which the
     server correctly stalls the stream after `credits` frames.
 
-    `width`/`height`: the protocol is SQUARE-ONLY (`THIN_HELLO_RESOLUTIONS`),
+    `telemetry_interval` (#216) requests a `thin_telemetry` cadence in
+    seconds (server clamps to [0.05, 1.0]). Sending it is enough on its own
+    to make this a real hello -- it does not need a format/size alongside.
+
+    `width`/`height`: the protocol is SQUARE-ONLY (`THIN_HELLO_RESOLUTIONS`,
+    now {160, 320, 480} -- 160 is the #216 thumbnail tier),
     and `--width` alone with no `--height` used to build a hello the server
     silently ignores in full (it requires both, or neither -- #197 review
     finding 7). Chosen fix: when only one of the two is given, use it for
@@ -494,6 +522,8 @@ async def _probe_hello(link: _ThinLink, report: dict, *, fmt: str | None,
         hello["height"] = height
     if quality is not None:
         hello["quality"] = quality
+    if telemetry_interval is not None:
+        hello["telemetry_interval_s"] = telemetry_interval
     if len(hello) == 1:
         report["hello"] = None
         return
@@ -510,7 +540,8 @@ async def _probe_hello(link: _ThinLink, report: dict, *, fmt: str | None,
     entry["ack"] = ack
     entry["acked"] = {k: ack.get(k) for k in
                       ("format", "fps", "width", "height", "quality",
-                       "proto", "encoding", "credits")}
+                       "proto", "encoding", "credits", "ir_cells",
+                       "telemetry_interval_s")}
     if int(ack.get("proto") or 1) >= 2:
         link.auto_ready = True
     # requested-vs-acked DRIFT, surfaced explicitly rather than left for the
@@ -695,7 +726,8 @@ async def probe_async(frames: int = DEFAULT_FRAMES, url: str = DEFAULT_URL,
                       width: int | None = None, height: int | None = None,
                       quality: int | None = None, proto: int | None = None,
                       credits: int | None = None,
-                      max_frame_bytes: int | None = None) -> dict:
+                      max_frame_bytes: int | None = None,
+                      telemetry_interval: float | None = None) -> dict:
     """Connect to `/ws-thin`, decode frames to PNG, round-trip the commands.
 
     The real implementation; `probe()` is the sync front end and
@@ -704,10 +736,10 @@ async def probe_async(frames: int = DEFAULT_FRAMES, url: str = DEFAULT_URL,
     renderer and a server that is not running are all *results* here, not
     exceptions.
 
-    `format`/`fps`/`width`/`height`/`quality` negotiate `thin_hello` (#197)
-    when any is given; leaving all five `None` sends no hello at all, so a
-    default run still proves the un-negotiated path -- today's tag-1 RGB565
-    480x480 @ 10 fps, byte-identical.
+    `format`/`fps`/`width`/`height`/`quality`/`telemetry_interval` negotiate
+    `thin_hello` (#197, #216) when any is given; leaving them all `None`
+    sends no hello at all, so a default run still proves the un-negotiated
+    path -- today's tag-1 RGB565 480x480 @ 10 fps, byte-identical.
     """
     ws_url = url.rstrip("/")
     if not ws_url.endswith("/ws-thin"):
@@ -721,7 +753,7 @@ async def probe_async(frames: int = DEFAULT_FRAMES, url: str = DEFAULT_URL,
         "measured_fps": None, "measured_bytes_per_s": None,
         "measured_mbps": None, "frames": [], "decode_errors": [],
         "hello": None, "orbit": None, "modes": {}, "record": None,
-        "telemetry": None, "telemetry_seen": 0,
+        "telemetry": None, "telemetry_seen": 0, "telemetry_hz": None,
         "commands_sent": [], "server_error": None, "errors": [],
     }
 
@@ -745,7 +777,8 @@ async def probe_async(frames: int = DEFAULT_FRAMES, url: str = DEFAULT_URL,
         await _probe_hello(link, report, fmt=format, fps=fps, width=width,
                            height=height, quality=quality, timeout=timeout,
                            proto=proto, credits=credits,
-                           max_frame_bytes=max_frame_bytes)
+                           max_frame_bytes=max_frame_bytes,
+                           telemetry_interval=telemetry_interval)
         await _collect_initial(link, max(int(frames), 0), out, report, timeout)
 
         # A refusal (`thin_client_limit`, `thin_render_unavailable`) is JSON
@@ -782,6 +815,11 @@ async def probe_async(frames: int = DEFAULT_FRAMES, url: str = DEFAULT_URL,
     finally:
         report["telemetry"] = link.telemetry
         report["telemetry_seen"] = link.telemetry_seen
+        # ACHIEVED cadence, measured across the arrivals rather than read
+        # back off the ack (#216) -- an ack echoes the negotiated interval
+        # whether or not the loop can keep it, and a read-back of the value
+        # you just sent verifies nothing.
+        report["telemetry_hz"] = _rate_hz(link.telemetry_times)
         report["frames_total_seen"] = link.frames_received
         report["thin_ready_sent"] = link.ready_sent
         if link.closed_error:
@@ -851,7 +889,8 @@ def _print(rep: dict) -> None:
         print(f"  SERVER REFUSED: {e.get('error')}: {e.get('message')}")
     print(f"  frames {rep['frames_received']}/{rep['frames_requested']}"
           f"  fps {rep['measured_fps']}  wire {rep['measured_mbps']} Mbps"
-          f"  telemetry msgs {rep['telemetry_seen']}")
+          f"  telemetry msgs {rep['telemetry_seen']}"
+          + (f" @ {rep['telemetry_hz']} Hz" if rep.get("telemetry_hz") else ""))
     for f in rep["frames"]:
         print(f"    frame {f['index']:02d} {f.get('width')}x{f.get('height')} "
               f"{f.get('distinct_colors')} colors  nonblack {f.get('nonblack_frac')}"
@@ -915,11 +954,13 @@ def main(argv=None) -> int:
     ap.add_argument("--fps", type=int, default=None,
                     help="negotiate thin_hello fps (#197)")
     ap.add_argument("--width", type=int, default=None,
-                    help="negotiate thin_hello width, one of 320/480 (#197); "
-                         "alone (no --height) sends a SQUARE request of this size")
+                    help="negotiate thin_hello width, one of 160/320/480 "
+                         "(#197, 160 added #216); alone (no --height) sends a "
+                         "SQUARE request of this size")
     ap.add_argument("--height", type=int, default=None,
-                    help="negotiate thin_hello height, one of 320/480 (#197); "
-                         "alone (no --width) sends a SQUARE request of this size")
+                    help="negotiate thin_hello height, one of 160/320/480 "
+                         "(#197, 160 added #216); alone (no --width) sends a "
+                         "SQUARE request of this size")
     ap.add_argument("--quality", type=int, default=None,
                     help="negotiate thin_hello JPEG quality 40-95 (#197)")
     ap.add_argument("--v2", action="store_true",
@@ -927,6 +968,11 @@ def main(argv=None) -> int:
                          "list + credit-based flow control (auto thin_ready)")
     ap.add_argument("--credits", type=int, default=None,
                     help="v2 credit depth to request (server clamps 1-8)")
+    ap.add_argument("--telemetry-interval", type=float, default=None,
+                    help="negotiate thin_telemetry cadence in seconds (#216); "
+                         "server clamps to 0.05-1.0, e.g. 0.1 for a 10 Hz IR "
+                         "feed. Capped in practice by --fps: telemetry is "
+                         "built once per render tick")
     ap.add_argument("--max-frame-bytes", type=int, default=None,
                     help="v2 advertised RX buffer; larger frames are dropped "
                          "server-side for this client")
@@ -938,7 +984,8 @@ def main(argv=None) -> int:
                 timeout=args.timeout, format=args.format, fps=args.fps,
                 width=args.width, height=args.height, quality=args.quality,
                 proto=2 if args.v2 else None, credits=args.credits,
-                max_frame_bytes=args.max_frame_bytes)
+                max_frame_bytes=args.max_frame_bytes,
+                telemetry_interval=args.telemetry_interval)
     if args.json:
         print(json.dumps(rep, indent=2, default=str))
     else:

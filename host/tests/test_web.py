@@ -7585,7 +7585,10 @@ def test_negotiate_thin_hello_malformed_values_leave_prior_values():
     assert effective == {"format": "jpeg", "fps": 15.0, "width": 320,
                          "height": 320, "quality": 60,
                          "proto": 1, "credits": web.THIN_CREDITS_DEFAULT,
-                         "max_frame_bytes": None, "ir_cells": None}
+                         "max_frame_bytes": None, "ir_cells": None,
+                         # never negotiated -> the None sentinel, i.e. the
+                         # 0.5 s v1 cadence (#216)
+                         "telemetry_interval_s": None}
 
 
 def test_negotiate_thin_hello_is_pure_and_never_mutates_the_flow():
@@ -7648,7 +7651,10 @@ def test_apply_pending_hello_applies_effective_values_and_clears_pending():
     assert flow.quality == 50
     assert ack == {"type": "thin_hello_ack", "format": "jpeg", "fps": 30.0,
                    "width": 320, "height": 320, "quality": 50,
-                   "proto": 1, "encoding": "jpeg"}   # v2 fields (#202)
+                   "proto": 1, "encoding": "jpeg",   # v2 fields (#202)
+                   # #216: always the RESOLVED cadence. This hello named
+                   # none and stayed v1, so it is the 0.5 s default.
+                   "telemetry_interval_s": web.THIN_TELEMETRY_INTERVAL}
 
 
 def test_apply_pending_hello_acks_the_clamped_effective_values_not_the_request():
@@ -7842,7 +7848,11 @@ def test_ws_thin_hello_negotiates_jpeg_and_reaches_the_renderer(thin_renderer):
                        "quality": 95,                        # 999 clamped to 95
                        # a #197-shape hello (no `proto`) stays v1 free-running;
                        # `encoding` is the spec's name for `format` (#202)
-                       "proto": 1, "encoding": "jpeg"}
+                       "proto": 1, "encoding": "jpeg",
+                       # #216: the ack always reports the cadence the client
+                       # will actually get; this hello named none, and a v1
+                       # flow is not promoted to the v2 default
+                       "telemetry_interval_s": web.THIN_TELEMETRY_INTERVAL}
 
         # drain messages until the render loop submits at least once more
         # AFTER the negotiation landed
@@ -8565,6 +8575,329 @@ def test_negotiate_thin_hello_clamps_ir_cells():
     # absent -> untouched, like every other negotiated field
     assert web.negotiate_thin_hello({}, web.ThinFlow(ir_cells=512))["ir_cells"] == 512
     assert web.negotiate_thin_hello({}, flow)["ir_cells"] is None
+
+
+# --------------------------------------------------------------------------
+# #216 -- 160x160 thumbnail tier + negotiable `thin_telemetry` cadence
+#
+# The CrowPanel dashboard's scanner page embeds a 132x132 voxel preview, so
+# the 480x480 it had to negotiate before this spent ~85% of a ~1.5 Mbit/s
+# uplink on pixels the client immediately threw away; and the IR grid rides
+# `thin_telemetry`, which was pinned at a module-constant 2 Hz.
+#
+# The through-line of these tests is the V1 FLOW: none of this may change
+# what a client that never asks receives. `telemetry_interval_s` is stored
+# as a None sentinel precisely so "never negotiated" stays distinguishable
+# from "negotiated 0.5", and the tests below pin both halves.
+# --------------------------------------------------------------------------
+
+
+def test_negotiate_thin_hello_accepts_the_160_thumbnail_resolution():
+    """Spec 2026-08-23 §3.1/§4: the whole point of the change."""
+    flow = web.ThinFlow()
+    effective = web.negotiate_thin_hello(
+        {"type": "thin_hello", "width": 160, "height": 160}, flow)
+    assert (effective["width"], effective["height"]) == (160, 160)
+
+
+def test_negotiate_thin_hello_snaps_near_misses_to_160():
+    """A client asking for its literal panel size (132) must land on the
+    thumbnail tier, not be rounded up to 320 -- that would restore exactly
+    the ~2.5x overspend this tier exists to remove."""
+    flow = web.ThinFlow()
+    for requested in (132, 128, 200):
+        effective = web.negotiate_thin_hello(
+            {"type": "thin_hello", "width": requested, "height": requested}, flow)
+        assert (effective["width"], effective["height"]) == (160, 160), requested
+
+
+def test_negotiate_thin_hello_resolution_tie_breaks_to_the_cheaper_tier():
+    """240 is equidistant from 160 and 320. `_nearest` uses `min`, which
+    keeps the FIRST minimum, so the ascending order of
+    `THIN_HELLO_RESOLUTIONS` is what decides this -- pinned here because it
+    is load-bearing and invisible at the call site. Cheaper wins: an
+    ambiguous request should not silently cost the client 4x the bytes."""
+    assert web.THIN_HELLO_RESOLUTIONS == tuple(sorted(web.THIN_HELLO_RESOLUTIONS))
+    effective = web.negotiate_thin_hello(
+        {"type": "thin_hello", "width": 240, "height": 240}, web.ThinFlow())
+    assert (effective["width"], effective["height"]) == (160, 160)
+
+
+def test_negotiate_thin_hello_still_snaps_the_old_resolutions_unchanged():
+    """Adding a tier must not move any pre-#216 request. 300 was 320 before
+    and stays 320 (|300-160| = 140 vs |300-320| = 20)."""
+    flow = web.ThinFlow()
+    # 400 is NOT in this list: it ties between 320 and 480 and resolved to
+    # 320 before this change too -- including it would assert a behaviour
+    # that never existed.
+    for requested, expected in ((300, 320), (320, 320), (450, 480), (640, 480)):
+        effective = web.negotiate_thin_hello(
+            {"type": "thin_hello", "width": requested, "height": requested}, flow)
+        assert effective["width"] == expected, requested
+
+
+def test_negotiate_thin_hello_clamps_telemetry_interval():
+    flow = web.ThinFlow()
+    assert web.negotiate_thin_hello(
+        {"telemetry_interval_s": 0.1}, flow)["telemetry_interval_s"] == 0.1
+    assert web.negotiate_thin_hello(
+        {"telemetry_interval_s": 0.0}, flow)["telemetry_interval_s"] \
+        == web.THIN_TELEMETRY_INTERVAL_MIN
+    assert web.negotiate_thin_hello(
+        {"telemetry_interval_s": 99.0}, flow)["telemetry_interval_s"] \
+        == web.THIN_TELEMETRY_INTERVAL_MAX
+
+
+@pytest.mark.parametrize("bad", ["nope", None, float("inf"), float("nan"), {}])
+def test_negotiate_thin_hello_malformed_telemetry_interval_is_a_no_op(bad):
+    """One bad field cannot corrupt the others in the same message, and a
+    v1 flow must not be knocked off its default by garbage."""
+    flow = web.ThinFlow()
+    effective = web.negotiate_thin_hello(
+        {"telemetry_interval_s": bad, "quality": 60}, flow)
+    assert effective["telemetry_interval_s"] is None
+    assert effective["quality"] == 60
+
+
+def test_thin_flow_telemetry_interval_defaults_to_the_v1_cadence():
+    """The None sentinel resolves to the module default, so a client that
+    never sends `thin_hello` -- the entire v1 population -- keeps 2 Hz."""
+    flow = web.ThinFlow()
+    assert flow.telemetry_interval_s is None
+    assert flow.telemetry_interval == web.THIN_TELEMETRY_INTERVAL == 0.5
+
+
+def test_negotiate_thin_hello_leaves_a_v1_flow_on_the_legacy_cadence():
+    """A pre-spec #197-shaped hello (no `proto`) must not be promoted to the
+    v2 default: it never asked, and its client cannot be assumed to survive
+    5x the telemetry."""
+    flow = web.ThinFlow()
+    effective = web.negotiate_thin_hello(
+        {"type": "thin_hello", "format": "jpeg", "fps": 30}, flow)
+    assert effective["telemetry_interval_s"] is None
+    assert effective["proto"] == 1
+
+
+def test_negotiate_thin_hello_v2_ratchet_grants_the_fast_default_cadence():
+    """Spec §2B: "default 0.1s for v2 flows". Applied on the SAME hello that
+    opts into v2, not one hello later -- the value read is the `proto` this
+    call is ratcheting to, not `flow.proto`."""
+    flow = web.ThinFlow()
+    assert flow.proto == 1
+    effective = web.negotiate_thin_hello({"type": "thin_hello", "proto": 2}, flow)
+    assert effective["proto"] == 2
+    assert effective["telemetry_interval_s"] == web.THIN_TELEMETRY_INTERVAL_V2 == 0.1
+
+
+def test_negotiate_thin_hello_v2_explicit_interval_beats_the_v2_default():
+    flow = web.ThinFlow()
+    effective = web.negotiate_thin_hello(
+        {"type": "thin_hello", "proto": 2, "telemetry_interval_s": 0.05}, flow)
+    assert effective["telemetry_interval_s"] == 0.05
+
+
+def test_negotiate_thin_hello_renegotiation_keeps_the_chosen_cadence():
+    """The CrowPanel re-sends `thin_hello` when the user switches screens,
+    and those later messages carry only the fields that changed. A hello
+    that omits `telemetry_interval_s` must keep the client's chosen cadence
+    -- not snap back to the v2 default, and not to 0.5."""
+    flow = web.ThinFlow(proto=2, telemetry_interval_s=0.05)
+    effective = web.negotiate_thin_hello(
+        {"type": "thin_hello", "width": 480, "height": 480}, flow)
+    assert effective["telemetry_interval_s"] == 0.05
+
+
+def test_apply_pending_hello_acks_the_negotiated_thumbnail_and_cadence():
+    """The full spec §2D ack shape for the dashboard-preview handshake."""
+    flow = web.ThinFlow()
+    flow.pending_hello = {"type": "thin_hello", "proto": 2, "width": 160,
+                          "height": 160, "fps": 30, "quality": 75,
+                          "credits": 6, "telemetry_interval_s": 0.1}
+    ack = web._apply_pending_hello(flow)
+    assert ack["type"] == "thin_hello_ack"
+    assert (ack["width"], ack["height"]) == (160, 160)
+    assert ack["telemetry_interval_s"] == 0.1
+    assert flow.width == flow.height == 160
+    assert flow.telemetry_interval == 0.1
+
+
+def test_apply_pending_hello_ack_reports_the_resolved_cadence_not_the_sentinel():
+    """`None` is an internal sentinel, not a wire value: a client that never
+    named a cadence still gets told the one it will actually receive.
+    Reporting `null` would leave it guessing, and reporting nothing at all
+    would make the field impossible to feature-detect."""
+    flow = web.ThinFlow()
+    flow.pending_hello = {"type": "thin_hello", "quality": 60}
+    ack = web._apply_pending_hello(flow)
+    assert ack["telemetry_interval_s"] == web.THIN_TELEMETRY_INTERVAL
+    assert flow.telemetry_interval_s is None   # sentinel survives internally
+
+
+def test_negotiate_thin_hello_with_only_a_cadence_leaves_everything_else_alone():
+    """A client that wants a faster IR feed and nothing else must not have
+    its format/size/fps disturbed."""
+    flow = web.ThinFlow(format="jpeg", fps=30.0, width=160, height=160,
+                        quality=75, proto=2)
+    effective = web.negotiate_thin_hello({"telemetry_interval_s": 0.2}, flow)
+    assert effective["telemetry_interval_s"] == 0.2
+    assert (effective["format"], effective["fps"]) == ("jpeg", 30.0)
+    assert (effective["width"], effective["height"]) == (160, 160)
+
+
+def test_negotiate_thin_hello_cadence_negotiation_is_pure():
+    """Same invariant as the rest of `negotiate_thin_hello`: the render loop
+    is the only writer of flow state."""
+    flow = web.ThinFlow()
+    web.negotiate_thin_hello(
+        {"type": "thin_hello", "proto": 2, "telemetry_interval_s": 0.05,
+         "width": 160, "height": 160}, flow)
+    assert flow.telemetry_interval_s is None
+    assert (flow.width, flow.height) == (web.THIN_WIDTH, web.THIN_HEIGHT)
+    assert flow.proto == 1
+
+
+def test_thin_render_loop_paces_telemetry_at_the_negotiated_cadence(thin_renderer):
+    """The observable on the FAR side of the negotiation: not that the ack
+    echoed 0.05, but that `thin_telemetry` messages actually arrive at that
+    rate on the socket. An ack is a read-back of the value just written and
+    proves nothing about the loop that has to honour it.
+
+    Counted over a real window with a wide margin rather than pinned to an
+    exact tick count -- the point is to separate "fast cadence" from the
+    0.5 s default (which could deliver at most ~2 in this window), not to
+    measure the scheduler.
+    """
+    thin_renderer()
+    state = _thin_state()
+    state.thin_latest_pc = (4, _THIN_PTS, _THIN_COLS)
+    flow = web.ThinFlow(format="jpeg", fps=30.0,
+                        telemetry_interval_s=web.THIN_TELEMETRY_INTERVAL_MIN)
+    ws = _FakeThinWs()
+
+    async def _drive():
+        task = asyncio.create_task(web._thin_render_loop(state, ws, flow))
+        await asyncio.sleep(0.6)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_drive())
+
+    telemetry = [p for k, p in ws.sent
+                 if k == "text" and json.loads(p).get("type") == "thin_telemetry"]
+    # 0.6 s at 20 Hz is ~12; the 0.5 s default could not exceed 2.
+    assert len(telemetry) >= 5, f"only {len(telemetry)} telemetry messages"
+
+
+def test_thin_render_loop_v1_flow_keeps_the_slow_default_cadence(thin_renderer):
+    """The null arm of the test above, and the one that actually protects
+    deployed clients: same window, same fps, no negotiation -- the flow must
+    stay at 2 Hz. Without this, a regression that hard-wired the fast cadence
+    would pass every test above.
+    """
+    thin_renderer()
+    state = _thin_state()
+    state.thin_latest_pc = (4, _THIN_PTS, _THIN_COLS)
+    flow = web.ThinFlow(format="jpeg", fps=30.0)
+    ws = _FakeThinWs()
+
+    async def _drive():
+        task = asyncio.create_task(web._thin_render_loop(state, ws, flow))
+        await asyncio.sleep(0.6)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_drive())
+
+    telemetry = [p for k, p in ws.sent
+                 if k == "text" and json.loads(p).get("type") == "thin_telemetry"]
+    # one at t=0 plus one at t=0.5; anything more means the cadence moved.
+    assert len(telemetry) <= 3, f"{len(telemetry)} telemetry messages at 2 Hz"
+
+
+def test_thin_render_loop_renegotiation_does_not_wait_out_the_old_interval(
+        thin_renderer):
+    """A flow parked on the 1.0 s ceiling that re-negotiates down to 20 Hz
+    must not sit silent for up to a second first: `next_telemetry` was
+    scheduled under the OLD cadence, so the ack has to reset it. This is the
+    switch-screens case -- the client wants the server's authoritative
+    mode/recording view immediately, not after the previous page's interval
+    finally expires.
+    """
+    thin_renderer()
+    state = _thin_state()
+    state.thin_latest_pc = (4, _THIN_PTS, _THIN_COLS)
+    flow = web.ThinFlow(format="jpeg", fps=30.0, telemetry_interval_s=1.0)
+    ws = _FakeThinWs()
+
+    async def _drive():
+        task = asyncio.create_task(web._thin_render_loop(state, ws, flow))
+        await asyncio.sleep(0.15)          # past the t=0 telemetry, mid-interval
+        before = sum(1 for k, p in ws.sent
+                     if k == "text" and json.loads(p).get("type") == "thin_telemetry")
+        flow.pending_hello = {"type": "thin_hello", "telemetry_interval_s": 0.05}
+        await asyncio.sleep(0.15)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return before
+
+    before = asyncio.run(_drive())
+
+    telemetry = [p for k, p in ws.sent
+                 if k == "text" and json.loads(p).get("type") == "thin_telemetry"]
+    assert before == 1, f"expected exactly the t=0 telemetry, got {before}"
+    # Under the un-reset schedule the next one would not be due until t=1.0.
+    assert len(telemetry) > before, "cadence change did not take effect promptly"
+
+
+def test_thin_render_loop_telemetry_cadence_is_not_quantized_by_the_tick(
+        thin_renderer):
+    """The negotiated interval must be honoured on AVERAGE, not rounded up
+    to a multiple of the render tick.
+
+    Regression test for the first live measurement of this feature: with
+    `next_telemetry = now + interval` the schedule re-anchored to the render
+    tick on every send, so a 0.1 s request on a ~41 ms tick delivered 8.0 Hz
+    and a 0.05 s request 13.6 Hz. Every ack was correct and every unit test
+    passed throughout -- the defect was only visible in the arrival RATE.
+
+    The interval here (0.075 s) is deliberately NOT a multiple of the tick
+    period (1/30 s = 0.0333 s): under the quantizing schedule this rounds up
+    to 3 ticks = 0.1 s = 10 Hz, comfortably under the bound asserted below,
+    so this test genuinely fails on the old code rather than passing by
+    coincidence.
+    """
+    thin_renderer()
+    state = _thin_state()
+    state.thin_latest_pc = (4, _THIN_PTS, _THIN_COLS)
+    flow = web.ThinFlow(format="jpeg", fps=30.0, telemetry_interval_s=0.075)
+    ws = _FakeThinWs()
+
+    async def _drive():
+        task = asyncio.create_task(web._thin_render_loop(state, ws, flow))
+        await asyncio.sleep(1.0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_drive())
+
+    n = sum(1 for k, p in ws.sent
+            if k == "text" and json.loads(p).get("type") == "thin_telemetry")
+    # ~13.3/s ideal over 1.0 s. The quantized schedule caps at 10/s; the
+    # floor is set below the ideal to absorb scheduler jitter but ABOVE what
+    # quantization can reach, which is the whole point of the test.
+    assert n >= 11, f"{n} telemetry messages in 1.0 s at a 0.075 s interval"
 
 
 def test_thin_telemetry_never_substitutes_a_euler_yaw_for_a_heading():
