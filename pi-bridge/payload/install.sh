@@ -396,8 +396,15 @@ install_sbin_tools() {
 }
 
 # ---------------------------------------------------------------------------
-# SD-wear + power-loss resilience (issue #210)
+# SD-wear + power-loss resilience (issue #210, #213)
 # ---------------------------------------------------------------------------
+
+# Permanent kernel cmdline arguments for power-loss resilience (issue #210, #213).
+# Matches build_image.py's RESILIENCE_CMDLINE_ARGS.
+RESILIENCE_CMDLINE_ARGS=(
+    "fsck.mode=force"
+    "fsck.repair=yes"
+)
 
 # Masks a base-image service this box has no use for, but only if it is
 # actually present -- do not assume either way (AGENTS.md's vendor-default
@@ -437,6 +444,76 @@ harden_storage() {
     else
         log "WARNING: ${fstab_tool} not installed (expected at ${fstab_tool}), skipping fstab hardening"
     fi
+}
+
+# Ensures kernel cmdline arguments in RESILIENCE_CMDLINE_ARGS are present in
+# cmdline.txt (/boot/firmware/cmdline.txt or /boot/cmdline.txt), appending
+# whichever are missing. Idempotent. Never creates the file if absent
+# (e.g. in test chroot/containers where /boot/firmware is not mounted).
+ensure_cmdline_args() {
+    local cmdline_file=""
+    if [ -n "${CMDLINE_FILE:-}" ]; then
+        if [ -f "${CMDLINE_FILE}" ]; then
+            cmdline_file="${CMDLINE_FILE}"
+        else
+            log "CMDLINE_FILE set to '${CMDLINE_FILE}' but file does not exist, skipping"
+            return 0
+        fi
+    elif [ -f "/boot/firmware/cmdline.txt" ]; then
+        cmdline_file="/boot/firmware/cmdline.txt"
+    elif [ -f "/boot/cmdline.txt" ]; then
+        cmdline_file="/boot/cmdline.txt"
+    else
+        log "no cmdline.txt found (/boot/firmware/cmdline.txt or /boot/cmdline.txt not present), skipping cmdline resilience args"
+        return 0
+    fi
+
+    if [ ! -s "${cmdline_file}" ]; then
+        log "WARNING: ${cmdline_file} is empty, refusing to invent one"
+        return 0
+    fi
+
+    # cmdline.txt must be a single line.
+    local lines=()
+    local l
+    while IFS= read -r l || [ -n "$l" ]; do
+        lines+=("$l")
+    done < "${cmdline_file}"
+
+    if [ "${#lines[@]}" -gt 1 ]; then
+        log "WARNING: ${cmdline_file} has more than one line (${#lines[@]} lines); refusing to modify"
+        return 0
+    fi
+
+    local current_line="${lines[0]}"
+    local -a current_tokens=(${current_line})
+    local -a missing=()
+    local arg found tok
+
+    for arg in "${RESILIENCE_CMDLINE_ARGS[@]}"; do
+        found=0
+        for tok in "${current_tokens[@]}"; do
+            if [ "${tok}" = "${arg}" ]; then
+                found=1
+                break
+            fi
+        done
+        if [ "${found}" -eq 0 ]; then
+            missing+=("${arg}")
+        fi
+    done
+
+    if [ "${#missing[@]}" -eq 0 ]; then
+        log "${cmdline_file} already carries all resilience args (${RESILIENCE_CMDLINE_ARGS[*]})"
+        return 0
+    fi
+
+    log "appending missing resilience arg(s) to ${cmdline_file}: ${missing[*]}"
+    local new_line="${current_line}"
+    for arg in "${missing[@]}"; do
+        new_line="${new_line} ${arg}"
+    done
+    printf '%s\n' "${new_line}" > "${cmdline_file}"
 }
 
 install_wifi_override() {
@@ -781,6 +858,7 @@ main() {
     ensure_dnsmasq_reads_dropins
     install_sbin_tools
     harden_storage
+    ensure_cmdline_args
     install_wifi_override
     install_authorized_key
     harden_admin_access
@@ -822,4 +900,6 @@ main() {
     exit 0
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi
