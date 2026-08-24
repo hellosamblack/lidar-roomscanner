@@ -742,7 +742,7 @@ def test_rig_session_stays_functional_when_ws_mesh_is_unavailable(monkeypatch):
 
     call_urls: list[str] = []
 
-    async def fake_connect(url, max_size=None):
+    async def fake_connect(url, max_size=None, **kwargs):
         call_urls.append(url)
         if url.endswith("/ws-mesh"):
             raise OSError("connection refused")
@@ -764,6 +764,53 @@ def test_rig_session_stays_functional_when_ws_mesh_is_unavailable(monkeypatch):
         assert rig.mesh_connected is False
         assert rig.mesh_connect_error is not None
         assert call_urls == ["ws://localhost:8000/ws", "ws://localhost:8000/ws-mesh"]
+        await rig.close()
+
+    asyncio.run(run())
+
+
+def test_rig_session_connect_disables_keepalive_ping(monkeypatch):
+    """`RigSession.connect()` must pass `ping_interval=None` to `websockets.connect`
+    on both `/ws` and `/ws-mesh` (issue #220) to prevent keepalive ping timeouts
+    under load/GIL stalls.
+    """
+    import asyncio
+
+    import websockets
+
+    from roomscan.mcp_server.session import RigSession
+
+    class _FakeWs:
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            await asyncio.Future()
+            yield
+
+        async def close(self):
+            pass
+
+    calls: list[dict] = []
+
+    async def fake_connect(url, **kwargs):
+        calls.append({"url": url, "kwargs": kwargs})
+        return _FakeWs()
+
+    monkeypatch.setattr(websockets, "connect", fake_connect)
+
+    rig = RigSession(url="ws://localhost:8000/ws")
+
+    async def run():
+        ok = await rig.connect(timeout=1.0)
+        assert ok is True
+        assert len(calls) == 2
+        assert calls[0]["url"] == "ws://localhost:8000/ws"
+        assert calls[0]["kwargs"].get("ping_interval") is None
+        assert calls[0]["kwargs"].get("max_size") is None
+        assert calls[1]["url"] == "ws://localhost:8000/ws-mesh"
+        assert calls[1]["kwargs"].get("ping_interval") is None
+        assert calls[1]["kwargs"].get("max_size") is None
         await rig.close()
 
     asyncio.run(run())
@@ -1786,8 +1833,6 @@ def test_ui_eval_reports_a_restore_instead_of_hiding_it(monkeypatch):
 
 def test_ui_browser_status_reports_the_reap_state():
     import asyncio
-
-    from roomscan.mcp_server import tools_ui
 
     # stop TTL well clear of the idle we simulate, so this exercises the PARK stage
     # rather than tripping straight through to stop.

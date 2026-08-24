@@ -101,13 +101,11 @@ class RigSession:
     the server last broadcast and never derives anything from it.
     """
 
-    # NOTE (#220): these sockets take the `websockets` keepalive DEFAULT -- a 20 s
-    # ping with a 20 s pong deadline, which closes a healthy connection when the peer
-    # is merely CPU-starved. That is what killed `CdpSession`'s CDP socket in #219.
-    # Here it is masked only by the stream's constant traffic; a >20 s GIL stall in
-    # roomscan-web (BUG-052/BUG-063 territory) would drop every MCP client and present
-    # as "the tools lost the rig". Left as the default deliberately for now, tracked
-    # in #220 -- do not "fix" it here without the reproduction that issue asks for.
+    # NOTE (#220): `ping_interval=None` disables the `websockets` keepalive ping
+    # on both `/ws` and `/ws-mesh`. `websockets` defaults to a 20 s ping with a
+    # 20 s pong deadline, which closes a healthy connection when the peer or host
+    # is under heavy load or experiencing a GIL stall (BUG-052/BUG-063 territory,
+    # matching `CdpSession`).
 
     def __init__(self, url: str = WEB_WS) -> None:
         self.url = url
@@ -138,7 +136,7 @@ class RigSession:
 
             try:
                 self._ws = await asyncio.wait_for(
-                    websockets.connect(self.url, max_size=None), timeout=timeout)
+                    websockets.connect(self.url, max_size=None, ping_interval=None), timeout=timeout)
             except Exception:
                 self._ws = None
                 return False
@@ -160,7 +158,7 @@ class RigSession:
         mesh_url = self.url.rsplit("/", 1)[0] + "/ws-mesh"
         try:
             self._ws_mesh = await asyncio.wait_for(
-                websockets.connect(mesh_url, max_size=None), timeout=timeout)
+                websockets.connect(mesh_url, max_size=None, ping_interval=None), timeout=timeout)
         except Exception as exc:
             self._ws_mesh = None
             self.mesh_connect_error = f"{mesh_url}: {exc}"
