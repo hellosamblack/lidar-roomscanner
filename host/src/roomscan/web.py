@@ -33,6 +33,7 @@ import sys
 import tempfile
 import threading
 import time
+import weakref
 from collections import deque
 import webbrowser
 import zlib
@@ -152,6 +153,27 @@ TAG_MAGPOSE = 5            # 30 Hz magcal pose/field sample (magcal 3D feedback)
 POINT_INTERVAL = 1.0 / 30.0
 IR_INTERVAL = 1.0 / 15.0
 METRICS_INTERVAL = 1.0 / 4.0
+#: Per-client cap on unsent bytes sitting in the asyncio transport's write
+#: buffer before the heavy binary payloads start being dropped for that client
+#: (#217). uvicorn's websocket send is `transport.write()` with no drain, so
+#: without this the buffer is unbounded -- measured at 10.9 MB and climbing for
+#: one stalled client, which is the ~7 s of IR latency the owner reported.
+#:
+#: 256 KB is ~4-5 POINT_CLOUD frames (~54 KB each at 54x42), i.e. ~150 ms of
+#: slack at 30 Hz: wide enough to ride out ordinary scheduling jitter without
+#: dropping anything on a healthy client, tight enough that the worst-case
+#: added latency stays well under a second instead of growing without limit.
+#:
+#: This is a check-then-send gate, so the ACHIEVED bound is the cap plus one
+#: tick's worth of payload that was already cleared to go -- measured against a
+#: 4x-oversubscribed client, the backlog sawtooths between 0 and ~331 KB
+#: (262144 + a 54 KB cloud + a 16 KB IR frame) and stays there indefinitely.
+#: Quote 331 KB / ~0.2 s, not 256 KB, when reasoning about worst-case latency.
+WS_BACKLOG_LIMIT_BYTES = 256 * 1024
+#: Resolved asyncio transports, keyed weakly by websocket -- the closure walk in
+#: `_ws_transport` is not free and runs per client per frame otherwise. Weak so a
+#: disconnected client's entry disappears with it, no `_drop_client` bookkeeping.
+_WS_TRANSPORT_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 # `/ws-thin` render cadence (#194). Deliberately far slower than the point
 # cloud: each tick is a full server-side 3D render (~27 ms) plus a 460 KB
 # uncompressed frame, so 10 fps is ~4.6 MB/s per client on the wireless uplink.
@@ -5453,6 +5475,148 @@ async def _drop_client(clients: set, ws: WebSocket) -> None:
     await _viewer_left(state)
 
 
+def _ws_transport(ws):
+    """The asyncio transport underneath a Starlette `WebSocket`, or None.
+
+    There is no public accessor for this. uvicorn's ASGI `send` is wrapped by
+    Starlette's exception middleware, so the protocol instance is reachable
+    only by walking bound-method `__self__` and function closures out of
+    `ws._send` until something exposes a `.transport` with a write buffer.
+    Measured shape on uvicorn 0.51 / websockets 16.1: the walk lands on
+    `WebSocketsSansIOProtocol`, whose transport is a `_SelectorSocketTransport`.
+
+    Deliberately fail-open: a shape this walk cannot follow (a future uvicorn,
+    the wsproto impl, a hand-built test double) returns None and every caller
+    then behaves exactly as it did before #217 -- an unbounded queue is bad,
+    but silently dropping every frame because we could not find a transport
+    would be worse. `test_ws_backpressure.py` asserts the walk still resolves
+    against a REAL uvicorn server, so a vendor bump that breaks it fails loudly
+    in CI rather than quietly disabling backpressure here.
+    """
+    try:
+        cached = _WS_TRANSPORT_CACHE.get(ws)
+    except TypeError:
+        # Not weak-referenceable -- a bare `object()` stand-in in a test, a
+        # `__slots__` class. Skip the cache entirely rather than raising: this
+        # helper runs inside `ws_flow_counters`, where an exception would take
+        # out the whole metrics broadcast over a client we merely cannot
+        # measure.
+        cached = None
+    if cached is not None:
+        return cached
+    seen: set[int] = set()
+
+    def walk(obj, depth: int):
+        if depth > 6 or id(obj) in seen:
+            return None
+        seen.add(id(obj))
+        tr = getattr(obj, "transport", None)
+        if tr is not None and hasattr(tr, "get_write_buffer_size"):
+            return tr
+        owner = getattr(obj, "__self__", None)
+        if owner is not None:
+            found = walk(owner, depth + 1)
+            if found is not None:
+                return found
+        for cell in (getattr(obj, "__closure__", None) or ()):
+            try:
+                content = cell.cell_contents
+            except ValueError:      # an empty cell (recursive closure)
+                continue
+            found = walk(content, depth + 1)
+            if found is not None:
+                return found
+        return None
+
+    try:
+        tr = walk(getattr(ws, "_send", None), 0)
+    except Exception:               # noqa: BLE001 - introspection must never raise
+        tr = None
+    if tr is not None:
+        try:
+            _WS_TRANSPORT_CACHE[ws] = tr
+        except TypeError:
+            pass        # see above: uncacheable is fine, just slower
+    return tr
+
+
+def ws_backlog_bytes(ws) -> int | None:
+    """Bytes handed to this client's socket that have NOT reached the kernel yet,
+    or None when the transport cannot be resolved.
+
+    This is the queue BUG-061 named and never bounded on `/ws`. uvicorn's
+    websocket send path is `transport.write(...)` with no drain (verified in
+    `websockets_sansio_impl.py`), so `send_bytes` returns immediately and the
+    surplus accrues in the asyncio transport's write buffer. Measured against a
+    stalled client at 54 KB/frame: 0 -> 10.9 MB in 280 sends, still climbing.
+
+    So the docstring on `_thin_render_loop` -- "on this stack `send_bytes` never
+    blocks and queues unboundedly, so a send-derived signal would measure
+    nothing" -- is right about *blocking* and wrong about *observing*: the queue
+    is invisible to the send's return value but perfectly visible here.
+    """
+    tr = _ws_transport(ws)
+    if tr is None:
+        return None
+    try:
+        return int(tr.get_write_buffer_size())
+    except Exception:               # noqa: BLE001 - transport closing mid-read
+        return None
+
+
+def writable_clients(clients, limit: int = WS_BACKLOG_LIMIT_BYTES):
+    """`clients` minus those already holding more than `limit` unsent bytes.
+
+    Latest-wins backpressure for the heavy per-frame payloads: a client that
+    cannot drain at the rate we produce loses THIS frame rather than being
+    handed one more to stack behind the others. Dropping is the correct
+    behaviour for a live view -- 12 fps of now beats 30 fps of seven seconds
+    ago, which is exactly what #217 reported.
+
+    Only the heavy binary payloads are gated. Small JSON (`state`, `session`,
+    `sensor`) still goes to everyone: it is a rounding error against a 54 KB
+    point cloud, and skipping a `state` echo would desynchronise the one-way
+    state flow. Letting the big payloads drop is also what lets the socket
+    drain far enough for that JSON to move again.
+
+    A client whose transport cannot be resolved is always writable, so an
+    environment where `_ws_transport` fails behaves exactly as it did before.
+    """
+    return {ws for ws in clients
+            if (backlog := ws_backlog_bytes(ws)) is None or backlog <= limit}
+
+
+def _advance_due(due: float, now: float, interval: float) -> float:
+    """Next due time for a periodic sub-cadence, advanced ABSOLUTELY (#217).
+
+    `due + interval`, not `now + interval`. Re-anchoring to `now` on each send
+    re-phases the schedule to whatever tick happened to notice it was due, so
+    the achieved period becomes a multiple of the tick period rather than the
+    requested interval -- a 66.7 ms (15 Hz) request on this loop's 33.3 ms tick
+    lands on 3 ticks far more often than 2 and measures 11.75 Hz.
+
+    A due time that is still in the past after one interval means the loop
+    stalled longer than an interval (or this is the seeded first tick):
+    resync to `now + interval` instead of bursting to catch up, since backlogged
+    telemetry is worthless and a burst is the queue growth `writable_clients`
+    exists to prevent. Same rule, same reason, as `_thin_render_loop`'s.
+    """
+    nxt = due + interval
+    return nxt if nxt > now else now + interval
+
+
+def _count_backpressure_drops(state, n: int) -> None:
+    """Record heavy-payload sends skipped for slow clients (#217).
+
+    A bounded queue that drops silently reads as "everything is fine" from
+    every dashboard -- the same trap as a silently truncated work list. This
+    surfaces in `metrics.ws.backpressure_drops`, so a client being held back is
+    visible rather than merely quiet.
+    """
+    if n > 0:
+        state.ws_backpressure_drops = getattr(state, "ws_backpressure_drops", 0) + n
+
+
 async def _broadcast_bytes(clients: set, data: bytes) -> None:
     for ws in list(clients):
         if not _ws_is_connected(ws):
@@ -5462,6 +5626,30 @@ async def _broadcast_bytes(clients: set, data: bytes) -> None:
             await ws.send_bytes(data)
         except Exception:
             await _drop_client(clients, ws)   # one dead tab must not stall the rest (§9)
+
+
+async def _broadcast_telemetry_text(state, clients: set, text: str) -> None:
+    """`_broadcast_text` for high-rate JSON that is latest-wins by nature (#217).
+
+    `/ws` is one ordered socket, so bounding only the binary payloads bounds
+    only the bytes -- a client can still fall behind on message COUNT, and
+    everything behind the backlog is late regardless of how small it is.
+    Measured after gating the binaries alone: `backlog_bytes_max` held at 0
+    while a slow client still read 17 s of latency, because `sensor` (15 Hz)
+    plus `metrics` (4 Hz) alone out-ran it.
+
+    Gating is by kind, not by size. `sensor` and `metrics` are periodic
+    telemetry: a dropped sample is superseded by the next one a few tens of ms
+    later, exactly like a dropped frame. Edge-triggered state -- `state`,
+    `session`, `saved`, `captures`, `splats`, `comm`, log lines -- is NEVER
+    gated: those are sent once when something changes, and a client that missed
+    one would stay wrong until the next unrelated change. That asymmetry is the
+    whole reason this is a separate function rather than a flag on
+    `_broadcast_text`.
+    """
+    engaged = writable_clients(clients)
+    _count_backpressure_drops(state, len(clients) - len(engaged))
+    await _broadcast_text(engaged, text)
 
 
 async def _broadcast_text(clients: set, text: str) -> None:
@@ -5633,6 +5821,15 @@ def ws_flow_counters(state) -> dict:
         "mesh_ack_timeouts_total": sum(f.ack_timeouts for f in flows),
         "latest_mesh_bytes": 0 if latest is None else len(latest),
         "thin_clients": len(getattr(state, "thin_clients", None) or {}),
+        # #217. `backpressure_drops` is cumulative heavy-payload sends skipped
+        # because a client was already over `WS_BACKLOG_LIMIT_BYTES`;
+        # `backlog_bytes_max` is the deepest write buffer right now, which is
+        # the number that should stay bounded. A rising drop count with a
+        # bounded backlog is the fix working, not a fault.
+        "backpressure_drops": getattr(state, "ws_backpressure_drops", 0),
+        "backlog_bytes_max": max(
+            [b for b in (ws_backlog_bytes(ws) for ws in clients) if b is not None],
+            default=0),
     }
 
 
@@ -6275,6 +6472,13 @@ async def _thin_render_loop(state, websocket, flow: ThinFlow) -> None:
     stack `send_bytes` never blocks and queues unboundedly (BUG-061), so a
     send-derived signal would measure nothing. A slow render costs this client
     frames (counted in `flow.skipped`) and never the other clients.
+
+    (#217 corrects the last clause: a send-derived signal measures nothing only
+    if you read the send's RETURN value. The queue itself is plainly visible --
+    see `ws_backlog_bytes` -- and `/ws` is now gated on it. The structural guard
+    here is still the right design for THIS endpoint, because a thin client's
+    cost is the render, not the bytes; the point is only that "unbounded" was
+    never the same claim as "unmeasurable".)
     """
     renderer = ThinRenderer.instance()
     loop = asyncio.get_running_loop()
@@ -6828,10 +7032,19 @@ async def _broadcaster() -> None:
             getattr(cfg, "latitude", 45.014060) if cfg else 45.014060,
             getattr(cfg, "longitude", -93.245526) if cfg else -93.245526,
             refresh_s=float(getattr(cfg, "msl_refresh_s", 1800.0) or 1800.0) if cfg else 1800.0)
-    last_ir = 0.0
-    last_metrics = 0.0
-    last_sensor = 0.0
-    last_magcal = 0.0
+    # Sub-cadence schedules as absolute DUE TIMES, advanced by whole intervals
+    # rather than re-anchored to `now` on each send (#217, the same defect #216
+    # fixed for `/ws-thin` telemetry). `now - last_x >= INTERVAL; last_x = now`
+    # quantizes the achieved rate UP to a multiple of this loop's 33.3 ms tick,
+    # because every send pushes the next due time a full interval past a tick
+    # boundary: IR measured 11.75 Hz against an intended 15 Hz, and `sensor` --
+    # which the IMU/device rate readouts are drawn from -- the same, which is
+    # why the owner read it as dropped frames. Seeded 0.0 so the first tick of
+    # each fires immediately, exactly as before.
+    due_ir = 0.0
+    due_metrics = 0.0
+    due_sensor = 0.0
+    due_magcal = 0.0
     magpose_seq = 0
     next_pc = time.monotonic()   # deadline-based pacing: sleep to the next tick,
     # issue #101 step 2: sentinel that never equals a real generation (an int,
@@ -6994,7 +7207,10 @@ async def _broadcaster() -> None:
                                        f"color mode {ui.color_mode!r} unavailable this frame, showing depth")
                     last_pc_key = key
                 if last_pc_bytes is not None:
-                    await _broadcast_bytes(_engaged_clients(state, now), last_pc_bytes)
+                    engaged = _engaged_clients(state, now)
+                    writable = writable_clients(engaged)
+                    _count_backpressure_drops(state, len(engaged) - len(writable))
+                    await _broadcast_bytes(writable, last_pc_bytes)
                     # Task 9: the literal "browser frames sent" counter -- see
                     # MetricsRegistry.tick_browser's docstring for why this is
                     # not the same thing as `render_fps`.
@@ -7017,8 +7233,8 @@ async def _broadcaster() -> None:
                     _cache_latest_mesh(state, mesh_bytes)
 
             # IR_IMAGE on its own slower cadence.
-            if now - last_ir >= IR_INTERVAL:
-                last_ir = now
+            if now >= due_ir:
+                due_ir = _advance_due(due_ir, now, IR_INTERVAL)
                 refl = outputs.get("reflectance")
                 if refl is not None:
                     if ui.ir_freeze:
@@ -7039,7 +7255,10 @@ async def _broadcaster() -> None:
                     # Stash the colorized frame for `/ws-thin` (#194) --
                     # already rotated and colormapped, nothing to recompute.
                     state.thin_latest_ir = (cur_gen, rgb)
-                    await _broadcast_bytes(_engaged_clients(state, now), pack_ir_image(rgb))
+                    engaged = _engaged_clients(state, now)
+                    writable = writable_clients(engaged)
+                    _count_backpressure_drops(state, len(engaged) - len(writable))
+                    await _broadcast_bytes(writable, pack_ir_image(rgb))
                 else:
                     _log_debounced(state, bus, "ir-miss",
                                    "reflectance unavailable this frame, holding IR pane")
@@ -7081,8 +7300,8 @@ async def _broadcaster() -> None:
         await _pump_mesh(state, now)
 
         # Sensor (streams 9/10) on its own cadence; silent until 9/10 arrives.
-        if now - last_sensor >= SENSOR_INTERVAL:
-            last_sensor = now
+        if now >= due_sensor:
+            due_sensor = _advance_due(due_sensor, now, SENSOR_INTERVAL)
             # issue #101 step 3: no sensor data while View isn't ready --
             # `state.sensor_state` is still being fed by whatever the reader
             # is doing (possibly live), and a browsing tab must see nothing.
@@ -7110,7 +7329,7 @@ async def _broadcaster() -> None:
                     # bearing of an axis, and four shipped defects were exactly
                     # that mistake.
                     state.thin_latest_sensor = smsg
-                    await _broadcast_text(clients, json.dumps(smsg))
+                    await _broadcast_telemetry_text(state, clients, json.dumps(smsg))
 
         # Magnetometer sweep (owner ask, 2026-07-29). Feed at the full loop
         # rate so a tumble is sampled as densely as the env stream allows, but
@@ -7137,13 +7356,13 @@ async def _broadcaster() -> None:
                 if pose is not None:
                     magpose_seq += 1
                     await _broadcast_bytes(magcal_clients, pose)
-            if magcal_clients and now - last_magcal >= MAGCAL_INTERVAL:
-                last_magcal = now
+            if magcal_clients and now >= due_magcal:
+                due_magcal = _advance_due(due_magcal, now, MAGCAL_INTERVAL)
                 await _broadcast_text(magcal_clients, json.dumps(_magcal_report(state)))
 
         # Metrics + session + bus drain on the slowest cadence.
-        if now - last_metrics >= METRICS_INTERVAL:
-            last_metrics = now
+        if now >= due_metrics:
+            due_metrics = _advance_due(due_metrics, now, METRICS_INTERVAL)
             snap = metrics.snapshot(now)
             # MetricsRegistry knows nothing about frame sequencing, so drops/gaps
             # come from the reader's Stats (panel.py did this; the web path never
@@ -7162,7 +7381,7 @@ async def _broadcaster() -> None:
                 msg = build_metrics_message(snap)
                 msg["transport"] = transport_counters(state)
                 msg["ws"] = ws_flow_counters(state)
-                await _broadcast_text(clients, json.dumps(msg))
+                await _broadcast_telemetry_text(state, clients, json.dumps(msg))
             ctrl = getattr(state, "controller", None)
             if ctrl is not None:
                 pos = _replay_position(ctrl, last_item)

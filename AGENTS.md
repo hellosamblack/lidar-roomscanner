@@ -174,7 +174,23 @@ in the repo. The evidence for every one is in `docs/roadmap-history.md`.
   (BUG-064: two cards covered 97% of the map).
 - **"No backpressure" is a property of the stack, not something a rate governor fixes** — a governor
   metered against an assumed drain rate does not bound a queue, and ordering matters on an ordered
-  transport (BUG-061: pose JSON head-of-line blocked behind a mesh backlog).
+  transport (BUG-061: pose JSON head-of-line blocked behind a mesh backlog). But **"the queue is
+  unbounded" and "the queue is unmeasurable" are different claims, and conflating them cost a year**
+  (#217). `/ws-thin`'s docstring reasoned that because `send_bytes` never blocks, "a send-derived
+  signal would measure nothing" — true of *blocking*, false of *observing*: uvicorn's send is a bare
+  `transport.write()`, so the surplus sits in the asyncio transport's write buffer where
+  `get_write_buffer_size()` reads it exactly (measured 0 → 10.9 MB for one stalled client). Bounding
+  it needed no protocol change and no client change, only a check before the send. Before designing
+  an ack/credit scheme to bound a queue, ask what the transport already exposes.
+- **A growing multi-second lag is queueing, not loss** — loss makes a stream jerky, not late. #217
+  was reported as "7 s of latency and the device/IMU frames have dropped", and the wire was carrying
+  a flawless 30.03 frames/s, 99.9 % complete, with zero kernel drops. Ask "what here is unbounded?"
+  before "what is dropping?". Two corollaries that each cost real time: cross-host rate counters
+  compared over **non-overlapping windows** invented a 57 % packet loss that a simultaneous
+  measurement showed was 0 % (this stream is bursty — always share the window); and `browser_fps` in
+  `metrics` is the server's *sent* counter, so it reads a healthy 30 while the client is seconds
+  behind. The far-side observable for display latency is **pixels in the browser** (`ui_eval` reading
+  the canvas), which measured 58–159 ms.
 - **Connection count is a performance variable on this server.** `/ws` work is per-client; stale
   headless/MCP sockets are real load (BUG-060).
 - **Never assume a vendor default, in either direction, and it is not a C-only trap.** Vendor headers

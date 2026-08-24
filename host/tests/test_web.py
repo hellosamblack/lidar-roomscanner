@@ -6135,7 +6135,12 @@ def test_broadcaster_ticks_browser_metric_right_after_the_point_cloud_send():
     pc_block = body[body.index('if ui.display == "point_cloud":'):
                     body.index('# SLAM mode (web Phase 4)')]
     assert pc_block.count("metrics.tick_browser(now)") == 1
-    assert (pc_block.index("_broadcast_bytes(_engaged_clients(state, now), last_pc_bytes)")
+    # The send is now `_broadcast_bytes(writable, last_pc_bytes)` -- #217 put
+    # `writable_clients()` between `_engaged_clients()` and the send so a
+    # backed-up client loses the frame instead of queueing it. Match on
+    # `last_pc_bytes` rather than the whole call text so the ordering this test
+    # exists to pin survives the next change to how the recipient set is built.
+    assert (pc_block.index("_broadcast_bytes(writable, last_pc_bytes)")
             < pc_block.index("metrics.tick_browser(now)"))
     # And it must NOT appear in the slam/detailed branches.
     for marker, stop in [('if ui.display == "slam" and slam is not None:', "# IR_IMAGE"),
@@ -6164,6 +6169,13 @@ def test_ws_flow_counters_shape():
         "mesh_ack_timeouts_total": 1,
         "latest_mesh_bytes": 4,
         "thin_clients": 0,
+        # #217. Both 0 here: these clients are bare `object()`s whose transport
+        # cannot be resolved, and `ws_backlog_bytes` returns None for those --
+        # which is also the assertion that an unmeasurable client contributes
+        # nothing rather than raising (a `WeakKeyDictionary` cannot even hold
+        # an `object()`, and this call used to die on it).
+        "backpressure_drops": 0,
+        "backlog_bytes_max": 0,
     }
 
 
