@@ -95,4 +95,8 @@ def train_splat_lazy(model_dir, image_dir, out_ply, *, preset: SplatPreset, log,
                        scale_reg=preset.scale_reg, cull_opacity=preset.cull_opacity,
                        cull_radius_factor=preset.cull_radius_factor,
                        depth_lambda=preset.depth_lambda, depth_model=preset.depth_model,
+                       rgb_gain_compensation=preset.rgb_gain_compensation,
+                       rgb_gain_lr=preset.rgb_gain_lr,
+                       rgb_gain_regularization=preset.rgb_gain_regularization,
+                       rgb_gain_max_stops=preset.rgb_gain_max_stops,
                        log=log, progress=progress)

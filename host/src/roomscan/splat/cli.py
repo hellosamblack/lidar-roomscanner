@@ -23,7 +23,8 @@ from .sidecar import list_splats
 _PRESET_OVERRIDES = ("fps", "max_frames", "long_edge", "matcher", "sequential_overlap",
                      "sh_degree", "max_gaussians", "iters", "min_opacity", "opacity_reg",
                      "scale_reg", "cull_opacity", "cull_radius_factor", "depth_lambda",
-                     "depth_model")
+                     "depth_model", "rgb_gain_compensation", "rgb_gain_lr",
+                     "rgb_gain_regularization", "rgb_gain_max_stops")
 
 # Global-progress weights per phase so a single bar advances monotonically across the
 # three stages (COLMAP dominates wall time on CPU; training on GPU). base = cumulative.
@@ -143,6 +144,16 @@ def main(argv=None) -> int:
                    help="monocular depth-prior weight (0=off; anchors gaussians to surfaces)")
     b.add_argument("--depth-model", dest="depth_model",
                    help="HF depth model id for the depth prior (preset default)")
+    b.add_argument("--rgb-gain-compensation", action="store_true", default=None,
+                   help="enable cross-frame RGB gain compensation")
+    b.add_argument("--no-rgb-gain-compensation", action="store_false", dest="rgb_gain_compensation",
+                   help="disable cross-frame RGB gain compensation")
+    b.add_argument("--rgb-gain-lr", type=float, dest="rgb_gain_lr",
+                   help="learning rate for view log-gains (preset default)")
+    b.add_argument("--rgb-gain-regularization", type=float, dest="rgb_gain_regularization",
+                   help="regularization penalty on centered log-gains (preset default)")
+    b.add_argument("--rgb-gain-max-stops", type=float, dest="rgb_gain_max_stops",
+                   help="maximum gain compensation in stops (preset default)")
     b.set_defaults(func=_cmd_build)
 
     ls = sub.add_parser("list", help="list built splats")

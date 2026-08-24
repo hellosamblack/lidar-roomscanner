@@ -61,6 +61,12 @@ class SplatPreset:
     # to a plausible surface, collapsing the translucent floater volume. 0 = off.
     depth_lambda: float = 0.0
     depth_model: str = "depth-anything/Depth-Anything-V2-Small-hf"
+    # Cross-frame RGB gain compensation (issue #160). Adjusts per-view multiplicative
+    # exposure/white-balance gain under a zero-mean gauge constraint across views.
+    rgb_gain_compensation: bool = False
+    rgb_gain_lr: float = 1e-2
+    rgb_gain_regularization: float = 1e-3
+    rgb_gain_max_stops: float = 1.0
     note: str = "rough room reconstruction from phone video (no ToF fusion)"
 
     # `note` documents intent, it does not change the geometry -- excluded from
@@ -86,7 +92,15 @@ class SplatPreset:
             return cls()
 
     def fingerprint(self) -> str:
+        excluded = set(self._NON_RECONSTRUCTION_FIELDS)
+        if not self.rgb_gain_compensation:
+            excluded.update({"rgb_gain_compensation", "rgb_gain_lr",
+                             "rgb_gain_regularization", "rgb_gain_max_stops"})
         payload = {k: v for k, v in dataclasses.asdict(self).items()
-                   if k not in self._NON_RECONSTRUCTION_FIELDS}
+                   if k not in excluded}
         return hashlib.sha256(json.dumps(payload, sort_keys=True,
                                          separators=(",", ":")).encode()).hexdigest()[:16]
+
+
+SplatConfig = SplatPreset
+

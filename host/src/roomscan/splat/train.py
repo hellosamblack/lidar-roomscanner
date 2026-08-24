@@ -21,6 +21,25 @@ import numpy as np
 SH_C0 = 0.28209479177387814   # Y_0^0, the constant SH basis -- rgb<->dc conversion
 
 
+def compute_centered_log_gains(log_gains, max_stops: float = 1.0):
+    """Gauge-center log-gains per channel across views, clamp to +/-max_stops, and exponentiate.
+
+    Args:
+        log_gains: (num_views, 3) tensor of raw unconstrained log-gains.
+        max_stops: Maximum gain compensation in stops (e.g. 1.0 -> factor [0.5, 2.0]).
+
+    Returns:
+        centered: (num_views, 3) centered log-gains with zero mean per channel across views.
+        gains: (num_views, 3) effective multiplicative gains clamped to [2^-max_stops, 2^max_stops].
+    """
+    import torch
+    centered = log_gains - log_gains.mean(dim=0, keepdim=True)
+    max_log = max_stops * math.log(2.0)
+    clamped = centered.clamp(-max_log, max_log)
+    gains = torch.exp(clamped)
+    return centered, gains
+
+
 def _rgb_to_sh_dc(rgb01: np.ndarray) -> np.ndarray:
     return (rgb01 - 0.5) / SH_C0
 
@@ -102,7 +121,6 @@ def _ssim(a, b, window):
     version without the clamp drove the loss UP and produced a floaters-only
     "galaxy" (BUG-094). Inputs are ``(1, 3, H, W)``.
     """
-    import torch
     import torch.nn.functional as F
     mu_a = F.conv2d(a, window, padding=5, groups=3)
     mu_b = F.conv2d(b, window, padding=5, groups=3)
@@ -168,6 +186,8 @@ def train_splat(model_dir: str | Path, image_dir: str | Path, out_ply: str | Pat
                 min_opacity: float = 0.05, opacity_reg: float = 0.01, scale_reg: float = 0.02,
                 cull_opacity: float = 0.12, cull_radius_factor: float = 3.0,
                 depth_lambda: float = 0.0, depth_model: str = "depth-anything/Depth-Anything-V2-Small-hf",
+                rgb_gain_compensation: bool = False, rgb_gain_lr: float = 1e-2,
+                rgb_gain_regularization: float = 1e-3, rgb_gain_max_stops: float = 1.0,
                 log=lambda m: None, progress=lambda f: None) -> dict:
     """Optimise a splat and write ``out_ply``. Returns a stats dict."""
     import torch
@@ -193,6 +213,13 @@ def train_splat(model_dir: str | Path, image_dir: str | Path, out_ply: str | Pat
     optimizers = {k: torch.optim.Adam([{"params": params[k], "lr": lr, "name": k}], eps=1e-15)
                   for k, lr in lrs.items()}
 
+    if rgb_gain_compensation:
+        log_gains = torch.zeros((len(views), 3), requires_grad=True, device=device)
+        gain_optimizer = torch.optim.Adam([log_gains], lr=rgb_gain_lr)
+    else:
+        log_gains = None
+        gain_optimizer = None
+
     strategy = gsplat.MCMCStrategy(cap_max=max_gaussians, refine_stop_iter=int(iters * 0.9),
                                    min_opacity=min_opacity, verbose=False)
     strategy.check_sanity(params, optimizers)
@@ -209,7 +236,8 @@ def train_splat(model_dir: str | Path, image_dir: str | Path, out_ply: str | Pat
     render_mode = "RGB+ED" if depth_lambda > 0 else "RGB"
 
     for step in range(iters):
-        v = views[torch.randint(len(views), (1,)).item()]
+        view_idx = torch.randint(len(views), (1,)).item()
+        v = views[view_idx]
         gt = gts[v["image_path"]].to(device)          # (H,W,3)
         viewmat = torch.from_numpy(v["viewmat"]).to(device)[None]
         K = torch.from_numpy(v["K"]).to(device)[None]
@@ -225,6 +253,10 @@ def train_splat(model_dir: str | Path, image_dir: str | Path, out_ply: str | Pat
         # which stalls convergence -- half of BUG-094.
         pred = render[0][..., :3]
 
+        if rgb_gain_compensation:
+            centered, gains = compute_centered_log_gains(log_gains, rgb_gain_max_stops)
+            pred = pred * gains[view_idx]
+
         l1 = (pred - gt).abs().mean()
         ssim = _ssim(pred.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None], ssim_window)
         loss = 0.8 * l1 + 0.2 * (1.0 - ssim)
@@ -236,6 +268,8 @@ def train_splat(model_dir: str | Path, image_dir: str | Path, out_ply: str | Pat
         # surfaces. Strengths are preset knobs (anti-snowglobe tuning).
         loss = loss + opacity_reg * torch.sigmoid(params["opacities"]).mean() \
                     + scale_reg * torch.exp(params["scales"]).mean()
+        if rgb_gain_compensation:
+            loss = loss + rgb_gain_regularization * (centered ** 2).mean()
         loss.backward()
 
         # Exponentially decay the means LR init->1% over the run (standard 3DGS).
@@ -245,6 +279,9 @@ def train_splat(model_dir: str | Path, image_dir: str | Path, out_ply: str | Pat
         for opt in optimizers.values():
             opt.step()
             opt.zero_grad(set_to_none=True)
+        if gain_optimizer is not None:
+            gain_optimizer.step()
+            gain_optimizer.zero_grad(set_to_none=True)
         # gsplat's canonical order: densify/relocate + inject MCMC noise AFTER the
         # optimizer step (its own example omits step_pre_backward for MCMC).
         strategy.step_post_backward(params, optimizers, state, step, info, lr=cur_means_lr)
@@ -274,6 +311,18 @@ def train_splat(model_dir: str | Path, image_dir: str | Path, out_ply: str | Pat
     log(f"[train] culled {n_trained - n_final} floaters "
         f"({100 * (n_trained - n_final) / max(1, n_trained):.0f}%), kept {n_final}")
     _export_ply(params, out_ply)
+
+    gain_stats = None
+    if rgb_gain_compensation and log_gains is not None:
+        with torch.no_grad():
+            _, final_gains = compute_centered_log_gains(log_gains, rgb_gain_max_stops)
+            fg = final_gains.detach().cpu().numpy()
+            gain_stats = {
+                "min": [round(float(x), 4) for x in fg.min(axis=0)],
+                "max": [round(float(x), 4) for x in fg.max(axis=0)],
+                "mean": [round(float(x), 4) for x in fg.mean(axis=0)],
+            }
+
     # Peak memory this run: VRAM (the 8 GB ceiling) from CUDA, and host RSS from
     # getrusage (ru_maxrss is KiB on Linux). Reported so every build shows its real
     # headroom -- the OOM-confidence number, and what the resources panel echoes.
@@ -282,11 +331,17 @@ def train_splat(model_dir: str | Path, image_dir: str | Path, out_ply: str | Pat
     peak_rss_gib = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20, 2)
     log(f"[train] done: {n_final} gaussians -> {Path(out_ply).name} "
         f"(peak vram {peak_vram_gib} GiB, peak rss {peak_rss_gib} GiB)")
-    return {"gaussians": int(n_final), "gaussians_trained": int(n_trained),
-            "iters": int(iters), "views": len(views),
-            "sh_degree": int(sh_degree), "scene_scale": round(scene_scale, 3),
-            "final_loss": round(float(loss.item()), 4),
-            "peak_vram_gib": peak_vram_gib, "peak_rss_gib": peak_rss_gib}
+    stats = {"gaussians": int(n_final), "gaussians_trained": int(n_trained),
+             "iters": int(iters), "views": len(views),
+             "sh_degree": int(sh_degree), "scene_scale": round(scene_scale, 3),
+             "final_loss": round(float(loss.item()), 4),
+             "peak_vram_gib": peak_vram_gib, "peak_rss_gib": peak_rss_gib}
+    if gain_stats is not None:
+        stats["rgb_gain_stats"] = gain_stats
+        stats["rgb_gain_min"] = gain_stats["min"]
+        stats["rgb_gain_max"] = gain_stats["max"]
+        stats["rgb_gain_mean"] = gain_stats["mean"]
+    return stats
 
 
 def _export_ply(params, out_ply: str | Path) -> None:
