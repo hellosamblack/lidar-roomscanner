@@ -1,0 +1,23 @@
+{
+  "session-end-guard": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": ".agents/hooks/session-end-guard.sh"
+      }
+    ]
+  },
+  "orch-edit-count": {
+    "PostToolUse": [
+      {
+        "matcher": "replace_file_content|write_to_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".agents/hooks/orch-edit-count.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
