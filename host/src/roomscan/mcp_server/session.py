@@ -52,12 +52,42 @@ def _env_seconds(name: str, default: float) -> float:
 
 # Idle TTLs for the warm browser singleton (issue #219). Two stages because the two
 # costs recover at different prices -- see `_IdleReapMixin`.
-BROWSER_PARK_S = _env_seconds("ROOMSCAN_MCP_BROWSER_PARK_S", 180.0)
-BROWSER_STOP_S = _env_seconds("ROOMSCAN_MCP_BROWSER_STOP_S", 900.0)
-# Settle applied when restoring a parked page, matching the cold-load settle the
-# `ui_*` tools use. A restore that returns before Three.js has a context reads as a
-# blank page, which is the exact failure this feature must not introduce.
-BROWSER_RESTORE_SETTLE_S = _env_seconds("ROOMSCAN_MCP_BROWSER_RESTORE_SETTLE_S", 8.0)
+#
+# These are deliberately LONG (owner, 2026-08-24). The failure being prevented is a
+# browser that outlives the conversation and burns ~11 cores for DAYS; against that,
+# 30 minutes is already a ~99.9% reduction. Anything shorter starts costing a real
+# working session -- a coding session can easily go half an hour between UI checks,
+# and the reaper must never be the reason a `ui_eval` is slow. Trading a large slice
+# of the remaining benefit for "it is never in the way" is the right trade here,
+# because the residual burn is bounded and the interruption is not.
+BROWSER_PARK_S = _env_seconds("ROOMSCAN_MCP_BROWSER_PARK_S", 1800.0)     # 30 min
+BROWSER_STOP_S = _env_seconds("ROOMSCAN_MCP_BROWSER_STOP_S", 14400.0)    # 4 h
+# Upper bound on a restore, NOT a fixed sleep. The restore waits on a real readiness
+# predicate (`RESTORE_READY_JS`) and returns as soon as it holds; this is only the
+# give-up point, after which we proceed anyway rather than fail the caller's call.
+# Measured: the app is genuinely live ~1.8 s after navigation, so the blind 8 s sleep
+# this replaced was ~4.5x longer than needed and was most of what made parking
+# noticeable at all.
+BROWSER_RESTORE_TIMEOUT_S = _env_seconds("ROOMSCAN_MCP_BROWSER_RESTORE_TIMEOUT_S", 15.0)
+
+# Readiness gate for a restored page. Degrades safely on a page that is not the
+# roomscan UI: each app-specific clause is skipped when its element is absent, so an
+# arbitrary URL (or `about:blank`) gates on `readyState` alone.
+#
+# Measured first-true times on this host, three consecutive restores:
+#   readyState complete 0.83-0.89 | canvas w>0 0.89-1.29 | hud-view-fps > 0 1.68-1.84
+# `hud-view-fps` going positive is the strongest of these -- it means the render loop
+# has produced frames, not merely that the DOM exists. Do NOT try to gate on canvas
+# PIXELS: `readPixels` after a frame reads uniform on this context
+# (`preserveDrawingBuffer` is off), so that check never goes true and would burn the
+# full timeout on every restore.
+RESTORE_READY_JS = (
+    "document.readyState === 'complete'"
+    " && (() => { const c = document.querySelector('canvas');"
+    "             return !c || c.width > 0; })()"
+    " && (() => { const e = document.getElementById('hud-view-fps');"
+    "             return !e || parseFloat(e.textContent) > 0; })()"
+)
 
 
 # --- rig (/ws to roomscan-web) ----------------------------------------------
@@ -272,7 +302,7 @@ class _IdleReapMixin:
 
     park_after_s: float = BROWSER_PARK_S
     stop_after_s: float = BROWSER_STOP_S
-    restore_settle_s: float = BROWSER_RESTORE_SETTLE_S
+    restore_timeout_s: float = BROWSER_RESTORE_TIMEOUT_S
     reap_tick_s: float = 15.0
 
     def _idle_init(self) -> None:
@@ -328,6 +358,7 @@ class _IdleReapMixin:
             "busy": self._busy,
             "park_after_s": self.park_after_s,
             "stop_after_s": self.stop_after_s,
+            "restore_timeout_s": self.restore_timeout_s,
             "parks": self.park_count,
             "stops": self.stop_count,
             "restores": self.restore_count,
@@ -398,10 +429,20 @@ class _IdleReapMixin:
         self._parked_url = None
         t0 = time.monotonic()
         await self._navigate_raw(target)
-        if self.restore_settle_s:
-            await asyncio.sleep(self.restore_settle_s)
+        # Wait on the page telling us it is ready, not on a clock. The blind sleep
+        # this replaced was ~4.5x the measured readiness time and was most of the
+        # cost of parking; more importantly a fixed sleep is the wrong SHAPE, since
+        # it is simultaneously too long on a fast restore and no guarantee at all on
+        # a slow one. `ready=False` means the gate timed out and we proceeded anyway
+        # -- the caller gets a page that may still be settling, but never a hang.
+        ready = True
+        if self.restore_timeout_s:
+            r = await self._wait_for_impl(RESTORE_READY_JS,
+                                          timeout_s=self.restore_timeout_s)
+            ready = bool(r.get("ok"))
         self.restore_count += 1
-        self.last_restore = {"url": target, "took_s": round(time.monotonic() - t0, 2)}
+        self.last_restore = {"url": target, "took_s": round(time.monotonic() - t0, 2),
+                             "ready": ready}
 
     # -- public interface (subclasses supply the `_impl`s)
     async def start(self, width: int | None = None, height: int | None = None) -> None:

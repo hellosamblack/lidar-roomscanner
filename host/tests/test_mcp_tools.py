@@ -1480,7 +1480,7 @@ def _fake_browser(**attrs):
     from roomscan.mcp_server.session import BLANK_URL, _IdleReapMixin
 
     class _Fake(_IdleReapMixin):
-        restore_settle_s = 0.0            # no 8 s sleep in tests
+        restore_timeout_s = 0.0           # skip the readiness gate in tests
         reap_tick_s = 0.01
 
         def __init__(self):
@@ -1940,3 +1940,92 @@ def test_a_successful_park_clears_a_stale_park_error():
 
     assert s.parked is True
     assert s.last_park_error is None, "a park that worked must not leave a stale error"
+
+
+def test_the_reap_ttls_are_long_enough_not_to_interrupt_a_working_session():
+    """Owner call (2026-08-24): the reaper must never be why a `ui_eval` is slow.
+
+    Pinned deliberately. The failure being prevented is a browser burning ~11 cores
+    for DAYS, so 30 min is already a ~99.9% reduction; shorter starts costing real
+    sessions, which can easily go half an hour between UI checks. Anyone shortening
+    these should have to change this test and think about that trade.
+    """
+    from roomscan.mcp_server import session as S
+
+    assert S.BROWSER_PARK_S == 1800.0
+    assert S.BROWSER_STOP_S == 14400.0
+    assert S.BROWSER_STOP_S > S.BROWSER_PARK_S, "stop must not pre-empt park"
+
+
+def test_restore_waits_on_a_readiness_predicate_not_a_clock():
+    """A fixed sleep is the wrong shape: too long on a fast restore, and no guarantee
+    at all on a slow one. Measured readiness is ~1.8 s against the old blind 8 s."""
+    import asyncio
+
+    from roomscan.mcp_server.session import RESTORE_READY_JS
+
+    s = _fake_browser(park_after_s=1.0, stop_after_s=0.0)
+    s.restore_timeout_s = 15.0
+    waited: list[tuple[str, float]] = []
+
+    async def record_wait(predicate_js, timeout_s=15.0, poll_s=0.25):
+        waited.append((predicate_js, timeout_s))
+        return {"ok": True, "waited_s": 1.8}
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+        s._wait_for_impl = record_wait
+        s._last_used -= 5.0
+        await s._reap_once()
+        return await s.evaluate("document.title")
+
+    r = asyncio.run(scenario())
+
+    assert r["value"] == "http://localhost:8000/"
+    assert waited and waited[0][0] == RESTORE_READY_JS, (
+        f"restore must gate on the readiness predicate; waited on {waited!r}")
+    assert waited[0][1] == 15.0
+    assert s.last_restore["ready"] is True
+
+
+def test_a_restore_that_times_out_proceeds_and_says_so():
+    """The gate is a give-up point, not a hang. The caller still gets its call --
+    but `ready: False` records that the page may still have been settling."""
+    import asyncio
+
+    s = _fake_browser(park_after_s=1.0, stop_after_s=0.0)
+    s.restore_timeout_s = 0.05
+
+    async def never_ready(predicate_js, timeout_s=15.0, poll_s=0.25):
+        return {"ok": False, "timeout_s": timeout_s}
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+        s._wait_for_impl = never_ready
+        s._last_used -= 5.0
+        await s._reap_once()
+        return await s.evaluate("document.title")
+
+    r = asyncio.run(scenario())
+
+    assert r["value"] == "http://localhost:8000/", "a timed-out gate must not fail the call"
+    assert s.last_restore["ready"] is False
+    assert s.restore_count == 1
+
+
+def test_the_readiness_predicate_degrades_on_a_page_without_the_app():
+    """Each app-specific clause is skipped when its element is absent.
+
+    If the predicate threw or read false on a non-roomscan page, every restore of
+    such a page would burn the entire timeout. Checked structurally here and
+    executed for real in `browser_reap_probe.py`.
+    """
+    from roomscan.mcp_server.session import RESTORE_READY_JS
+
+    assert "!c ||" in RESTORE_READY_JS, "canvas clause must pass when there is no canvas"
+    assert "!e ||" in RESTORE_READY_JS, "fps clause must pass when the HUD is absent"
+    assert "readyState === 'complete'" in RESTORE_READY_JS
+    # Guard the measured trap: gating on pixels never goes true on this context.
+    assert "readPixels" not in RESTORE_READY_JS, (
+        "readPixels reads uniform with preserveDrawingBuffer off -- gating on it "
+        "would burn the full timeout on every restore")

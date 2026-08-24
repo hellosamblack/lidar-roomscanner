@@ -120,18 +120,42 @@ costs recover at different prices:
 
 | stage | default | env var | effect |
 |---|---|---|---|
-| park | 180 s idle | `ROOMSCAN_MCP_BROWSER_PARK_S` | navigate to `about:blank` — drops the WebGL burn and the `/ws` clients, keeps the process warm |
-| stop | 900 s idle | `ROOMSCAN_MCP_BROWSER_STOP_S` | full teardown, process and profile gone |
+| park | **30 min** idle | `ROOMSCAN_MCP_BROWSER_PARK_S` | navigate to `about:blank` — drops the WebGL burn and the `/ws` clients, keeps the process warm |
+| stop | **4 h** idle | `ROOMSCAN_MCP_BROWSER_STOP_S` | full teardown, process and profile gone |
 
-`0` disables either stage. Restoring a parked page costs a navigation plus
-`ROOMSCAN_MCP_BROWSER_RESTORE_SETTLE_S` (default 8 s, matching the cold-load settle).
+`0` disables either stage.
+
+**The TTLs are deliberately long (owner, 2026-08-24): the reaper must never be why a
+`ui_eval` is slow.** The failure being prevented is a browser that outlives the
+conversation and burns ~11 cores for *days*; against that, 30 minutes is already a
+~99.9% reduction, while anything shorter starts costing a real working session — a
+coding session can easily go half an hour between UI checks. The residual burn is
+bounded; the interruption would not be. `test_the_reap_ttls_are_long_enough_not_to_
+interrupt_a_working_session` pins both values so shortening them has to be deliberate.
+
+Restoring a parked page **waits on a readiness predicate, not a clock**
+(`RESTORE_READY_JS`): `readyState === 'complete'`, plus a non-zero-width canvas and a
+positive `#hud-view-fps` *when those elements exist*, so an arbitrary URL or
+`about:blank` gates on `readyState` alone. `ROOMSCAN_MCP_BROWSER_RESTORE_TIMEOUT_S`
+(default 15 s) is the give-up point, not a sleep — on timeout the call proceeds anyway
+and `last_restore.ready` is `false`.
+
+That replaced a blind 8 s sleep. Measured first-true times over three consecutive
+restores: `readyState` 0.83–0.89 s, canvas width 0.89–1.29 s, **`hud-view-fps` > 0
+1.68–1.84 s** — so the sleep was ~4.5× longer than the page actually needed, and was
+most of what made parking noticeable at all. A fixed sleep is also the wrong *shape*:
+simultaneously too long on a fast restore and no guarantee at all on a slow one.
+
+> Do **not** try to gate on canvas pixels. `readPixels` reads uniform on this context
+> (`preserveDrawingBuffer` is off), so the check never goes true and would burn the
+> entire timeout on every restore. Measured, not assumed.
 
 Measured on a real browser against the live UI, both backends:
 
 | backend | CPU loaded | CPU parked | restore | stop |
 |---|---|---|---|---|
-| `PlaywrightSession` (production) | 1248.8% | 0.7% (−100%) | identical page in 9.1 s | 0 surviving chrome pids |
-| `CdpSession` (fallback) | 1146.2% | 12.5% (−99%) | identical page in 8.2 s | 0 surviving chrome pids |
+| `PlaywrightSession` (production) | 1250.2% | 1.8% (−100%) | identical page in **1.7 s** | 0 surviving chrome pids |
+| `CdpSession` (fallback) | 1178.7% | 11.7% (−99%) | identical page in **1.7 s** | 0 surviving chrome pids |
 
 "Identical page" is `document.title` **and** canvas `1600x1000`, both matching what the
 pre-park page reported; `/ws` sockets owned by the browser went **2 → 0** on park.
@@ -171,6 +195,14 @@ That second one is also why a park failure is *recorded* (`last_park_error` in
 `ui_browser_status()`) rather than swallowed. The original `except Exception: return`
 hid a 100%-failure rate behind a browser that merely looked like it had gone quiet and
 stopped on schedule.
+
+A third trap, in the *probe* rather than the feature: **every `ui_*`-shaped call
+un-parks the browser**, because restore lives in `start()` and everything funnels
+through it. So a check inserted before the parked-CPU measurement silently restores the
+thing it is about to measure. That happened — a readiness-predicate check placed one
+line too early reported a "1% reduction" against a real 100%. When measuring a state
+that your own observation destroys, order the probe so the measurement comes first, and
+distrust a suspiciously null result before believing it.
 
 ### Ranging control is effect-verified, not fire-and-forget
 

@@ -35,10 +35,11 @@ ARGS = _ap.parse_args()
 
 os.environ["ROOMSCAN_MCP_BROWSER_PARK_S"] = ARGS.park
 os.environ["ROOMSCAN_MCP_BROWSER_STOP_S"] = ARGS.stop
-os.environ["ROOMSCAN_MCP_BROWSER_RESTORE_SETTLE_S"] = "8"
+os.environ["ROOMSCAN_MCP_BROWSER_RESTORE_TIMEOUT_S"] = "15"
 
 sys.path.insert(0, "src")
 from roomscan.mcp_server import session as S  # noqa: E402
+from roomscan.mcp_server.session import BLANK_URL  # noqa: E402
 
 PAGE = ARGS.url
 
@@ -122,6 +123,16 @@ async def main():
         "return c ? c.width+'x'+c.height : 'no-canvas';})()")
     print(f"  took {time.monotonic()-t0:.1f}s  title={title2['value']!r} "
           f"canvas={canvas2['value']!r}  restores={b.restore_count}")
+    print(f"  last_restore={b.last_restore}")
+
+    # Readiness gate must be TRUE on about:blank -- not throw, not read false --
+    # or every restore of a non-app page would burn the whole timeout. Checked HERE,
+    # after the restore: `_evaluate_impl` goes through `start()`, so running it while
+    # parked would silently restore the browser and corrupt the parked-CPU number
+    # above. (It did, on the first version of this probe: 1% "reduction".)
+    await b._navigate_raw(BLANK_URL)
+    blank_ready = await b._evaluate_impl(S.RESTORE_READY_JS)
+    print(f"  readiness predicate on about:blank -> {blank_ready}")
     ok_restore = title2["value"] == title["value"] and canvas2["value"] == canvas["value"]
     print(f"  RESTORE MATCHES ORIGINAL PAGE: {ok_restore}")
 
