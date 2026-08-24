@@ -4128,6 +4128,7 @@ class SessionController:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._started = False
         # Source generation (issue #101 step 1): bumped on every live/replay
         # source switch (`switch_to_live`/`switch_to_replay` -- NOT `seek`/
         # `restart`, which stay on the same capture). Read by `_broadcaster`
@@ -4171,6 +4172,7 @@ class SessionController:
         return self.live_label
 
     def start(self) -> None:
+        self._started = True
         self.pacer.interval = speed_to_interval(self.speed_fps) if self.mode == "replay" else 0.0
         self._spawn()
 
@@ -4314,7 +4316,8 @@ class SessionController:
             # thing the new generation's consumers see.
             self.generation += 1
             self._drain_slot()
-            self._spawn()
+            if self._started:
+                self._spawn()
             self.bus.publish(f"loaded capture {os.path.basename(self.replay_path)}")
 
     def switch_to_live(self) -> None:
@@ -4340,7 +4343,8 @@ class SessionController:
             self.pacer.paused.clear()
             self.generation += 1        # see switch_to_replay's comment
             self._drain_slot()
-            self._spawn()
+            if self._started:
+                self._spawn()
             self.bus.publish("switched to live device")
 
     def seek(self, frac: float) -> None:
@@ -4371,7 +4375,9 @@ class SessionController:
             self._seek_offset = off
             self._seek_prefix = prefix
             self.pacer.paused.clear()
-            self._spawn()
+            self._drain_slot()
+            if self._started:
+                self._spawn()
 
     def restart(self) -> None:
         """Rewind to frame 0 -- a seek to 0.0 by another name, and the same
@@ -4384,7 +4390,9 @@ class SessionController:
             self._seek_prefix = b""
             self._seek_offset = 0
             self.pacer.paused.clear()
-            self._spawn()
+            self._drain_slot()
+            if self._started:
+                self._spawn()
 
     # ---- lightweight transport (no reader restart) ----
 
@@ -4555,6 +4563,7 @@ class SessionController:
         return {"name": src.name, "bytes": size + freed, "sidecars": removed}
 
     def close(self) -> None:
+        self._started = False
         self._stop_reader()
         try:
             self.recorder.close()
