@@ -427,47 +427,35 @@ void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts) {
     g_cdc_dtr = now;
 }
 
-/* Pump the CDC FIFO out. Bounded by TWO independent deadlines, not one total-send budget,
- * because a dead reader and a slow-but-alive one are different failures with different
- * cheapest bounds:
+/* Pump the CDC FIFO out. Bounded by a sub-millisecond no-progress deadline (RS_CDC_STALL_US = 1000 us),
+ * aborting immediately if disconnected or stalled, returning false without blocking the main loop
+ * while preserving tud_task() / ETH_Process() pump reentrancy.
  *
- *   - NO-PROGRESS (RS_CDC_STALL_MS = 2 ms): tracks bytes actually accepted by
- *     tud_cdc_write() and resets on every acceptance; trips only once NO bytes have been
- *     accepted for the whole window, i.e. "FIFO full and host not draining AT ALL" -- a
- *     dead reader. HAL_GetTick() has 1 ms resolution, so 1 ms is not a reliably
- *     distinguishable interval from this call's own jitter (a tick can roll over
- *     immediately after the deadline is (re)armed); 2 ms is the smallest bound that stays
- *     robust to that. A dead reader now aborts in ~2 ms instead of the pre-#198 ~100 ms.
+ *   - DISCONNECTED: checked upfront and on each iteration via tud_cdc_connected(); aborts immediately (0 ms).
+ *   - NO-PROGRESS (RS_CDC_STALL_US = 1000 us): tracks bytes actually accepted by tud_cdc_write()
+ *     and resets on every acceptance using the microsecond hardware timer (TIM2, rs_time_us()); trips
+ *     if no progress is made within 1 ms when the FIFO is full.
  *
- *   - TOTAL-SEND (RS_CDC_TOTAL_MS = 100 ms, the pre-#198 bound, kept as an outer cap):
- *     the no-progress deadline alone does NOT bound a slow-but-alive consumer. Linux
- *     cdc_acm drains the device FIFO into the tty buffer at line rate; if the host
- *     application then reads that tty buffer slowly, IN polling resumes in small bursts as
- *     buffer space frees, so tud_cdc_write_available() keeps going nonzero every couple of
- *     ms and the no-progress deadline keeps getting reset -- unbounded total stall on a
- *     14.8 KB payload against a trickling-but-technically-draining reader. The 100 ms
- *     outer cap re-bounds that case at the same worst case this loop had before #198,
- *     and is generous enough that a healthy line-rate link (pushing 14.8 KB in ~10 ms of
- *     write-drain-write) never approaches it.
- *
- * Net effect: a dead reader aborts in ~2 ms (was ~100 ms); a pathologically slow-but-alive
- * one still aborts within ~100 ms, same as before #198; a healthy reader trips neither.
- * Returns false on either deadline or a mid-frame host attach (frame aborted: the host
- * decoder counts one CRC failure/resync and we set DROPPED on the next frame). */
-#define RS_CDC_STALL_MS 2u
-#define RS_CDC_TOTAL_MS 100u
+ * Returns false on disconnect, stall timeout, or mid-frame host attach (frame aborted: the host decoder
+ * counts one CRC failure/resync and we set DROPPED on the next frame). */
+#define RS_CDC_STALL_US 1000u
 
 static bool rs_cdc_send(const uint8_t *p, uint32_t n) {
-    uint32_t t0 = HAL_GetTick();
-    uint32_t t_last_progress = t0;
+    if (!tud_cdc_connected()) {
+        return false;
+    }
+    uint64_t t_last_progress = rs_time_us();
     while (n) {
+        if (!tud_cdc_connected()) {
+            return false;
+        }
         uint32_t avail = tud_cdc_write_available();
         if (avail) {
             uint32_t k = MIN(avail, n);
             tud_cdc_write(p, k);
             p += k;
             n -= k;
-            t_last_progress = HAL_GetTick();
+            t_last_progress = rs_time_us();
         }
         tud_task(); ETH_Process();
         if (g_cdc_connect_evt) {
@@ -477,10 +465,7 @@ static bool rs_cdc_send(const uint8_t *p, uint32_t n) {
              * minus the wasted bytes, and the DROPPED flag on the next frame says so. */
             return false;
         }
-        if ((HAL_GetTick() - t_last_progress) > RS_CDC_STALL_MS) {
-            return false;
-        }
-        if ((HAL_GetTick() - t0) > RS_CDC_TOTAL_MS) {
+        if ((rs_time_us() - t_last_progress) >= RS_CDC_STALL_US) {
             return false;
         }
     }
@@ -497,9 +482,7 @@ static bool rs_cdc_send(const uint8_t *p, uint32_t n) {
  *     when Ethernet has a claimed target AND the applied FPS is above 60 --
  *     see rs_active_data_route() -- so an open-but-not-draining CDC endpoint
  *     can never inject rs_cdc_send()'s stall into the Ethernet acquisition
- *     path at high rate: RS_CDC_STALL_MS (2 ms) against a dead reader,
- *     RS_CDC_TOTAL_MS (100 ms, the pre-#198 bound, still the outer cap) against
- *     a slow-but-alive one.
+ *     path at high rate: RS_CDC_STALL_US (1 ms) against a dead or stalled reader.
  *   - ACKs (rs_send_ack/rs_send_ack_ranging_config) always pin to the
  *     COMMAND's own originating transport (rs_pending_cmd_t.transport,
  *     Task 4), independent of the isolation rule above -- a CDC-issued
@@ -598,7 +581,7 @@ static void rs_send_frame_cdc(uint8_t stream_id, uint32_t seq, uint8_t flags, co
 
     if ((!cdc_allowed || !tud_cdc_connected()) && (!eth_allowed || !ETH_IsUp())) {
         /* no reachable host on an allowed transport: don't burn rs_cdc_send's stall
-         * budget (up to RS_CDC_TOTAL_MS x 3 calls, unchanged from pre-#198) per frame */
+         * budget per frame */
         pending_dropped = 1;
         return;
     }
@@ -929,18 +912,14 @@ static int rs_wait_frame_ready_svc(uint32_t timeout_ms) {
  *
  * Backpressure honesty: the RX side never blocks (tud_cdc_available()/tud_cdc_read()
  * are non-blocking), but the TX responses ride the same best-effort rs_cdc_send policy
- * as every DATA frame -- each of its calls stalls at most RS_CDC_STALL_MS (2 ms, #198)
- * against a dead reader, or up to RS_CDC_TOTAL_MS (100 ms, unchanged pre-#198 bound,
- * kept as the outer cap) against a slow-but-alive one that keeps trickling FIFO space
- * free without ever fully draining. Worst case per dispatched command: against a dead
- * reader an ACK is 3 rs_cdc_send calls (header/payload/tail, up to ~6 ms of stall);
- * SEND_CALIB adds a CALIB frame first (up to ~12 ms total) -- against a slow-but-alive
- * one those figures are the pre-#198 ~300 ms / ~600 ms instead. With the dispatch cap
- * below (2 per poll), one poll's command handling is bounded at roughly ~24 ms of stall
- * against a dead reader, ~1.2 s against a slow-but-alive one (same as pre-#198) -- a
- * bounded acquisition hiccup either way, never a deadlock, and identical in kind to what
- * a wedged host already costs the RAW send path. A healthy host drains fast enough that
- * none of these limits are approached (measured: no fps change at ~28 fps).
+ * as every DATA frame -- each of its calls stalls at most RS_CDC_STALL_US (1 ms, #198)
+ * against a dead or stalled reader. Worst case per dispatched command: against a dead
+ * reader an ACK is 3 rs_cdc_send calls (header/payload/tail, <= ~3 ms of stall);
+ * SEND_CALIB adds a CALIB frame first (<= ~6 ms total). With the dispatch cap below
+ * (2 per poll), one poll's command handling is bounded at roughly <= ~12 ms of stall
+ * against a dead reader -- a bounded acquisition hiccup, never a deadlock, and
+ * identical in kind to what a wedged host already costs the RAW send path. A healthy host
+ * drains fast enough that none of these limits are approached (measured: no fps change at ~28 fps).
  *
  * RX accumulation: a small flat buffer (commands are 44 or 48 B depending on shape -- see
  * rs_protocol.h's RS_CMD_FRAME_SIZE_LEGACY/_MANUAL; a handful fit comfortably) with
@@ -1474,9 +1453,8 @@ static int rs_boot_bringup(vl53l9_device_t *p_dev, uint8_t *out_calib_data,
 /* ACK sender: builds the 12-byte (cmd, result, applied) payload and sends an RS_FRAME_ACK
  * with header seq = the echoed command token (per docs/protocol.md, NOT a frame counter).
  * Best-effort like every other CDC send on this link -- no retry/queue if the host is gone
- * or stalls (bounded at ~6 ms worst case against a dead reader -- 3 rs_cdc_send calls x
- * RS_CDC_STALL_MS -- or ~300 ms against a slow-but-alive one, 3 calls x RS_CDC_TOTAL_MS,
- * unchanged from pre-#198; see the channel block comment above), and RS_FLAG_DROPPED does
+ * or stalls (bounded at <= ~3 ms worst case against a dead reader -- 3 rs_cdc_send calls x
+ * RS_CDC_STALL_US; see the channel block comment above), and RS_FLAG_DROPPED does
  * not apply to control frames (always flags=0).
  * Lives inside the !CONF_TRANSFORM_ONBOARD guard because only the raw-only loop has a
  * command channel; the dual-stream golden loop would leave it unused.
