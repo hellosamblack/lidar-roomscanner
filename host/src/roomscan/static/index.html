@@ -434,11 +434,79 @@
         .sensor-cap--val { font-size: 0.72rem; color: var(--text-main); font-weight: 700; }
         .sensor-spark { display: block; width: 100%; height: 26px; margin: 0 0 2px 0; }
         .sensor-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 4px; }
+        .sensor-actions #sensor-mag-cal { grid-column: span 2; }
         /* Narrow horizontal padding: at two per 200px row, 8px each side was
            enough to break "Reset Heading" onto a second line. */
         .sensor-btn { pointer-events: auto !important; padding: 5px 3px; font-size: 0.68rem; white-space: nowrap; }
         .sensor-btn:disabled { opacity: 0.35; cursor: not-allowed; }
         .sensor-btn--secondary { border-style: dashed; }
+
+        /* 2x2 grid for primary sensor metrics (Roll, Tilt, Heading, Fusion) — Issue #125 */
+        .sensor-metric-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+            margin: 4px 0 2px;
+        }
+        .sensor-metric-tile {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 6px;
+            padding: 4px 6px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            min-width: 0;
+        }
+        .sensor-metric-header {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 4px;
+            min-width: 0;
+        }
+        .sensor-metric-header .sensor-label-input {
+            width: 48px;
+            padding: 0 2px;
+            font-size: 0.72rem;
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        .sensor-label-text {
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            font-weight: 500;
+            white-space: nowrap;
+        }
+        .sensor-metric-val {
+            font-size: 0.72rem;
+            font-weight: 700;
+            color: var(--text-main);
+            white-space: nowrap;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+        .sensor-metric-bar {
+            height: 4px;
+            border-radius: 2px;
+            background: rgba(255, 255, 255, 0.08);
+            overflow: hidden;
+            margin: 2px 0;
+        }
+        .sensor-metric-stats {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.60rem;
+            color: var(--text-muted);
+            line-height: 1;
+            font-variant-numeric: tabular-nums;
+        }
+        .sensor-stat-jit, .sensor-stat-peak {
+            white-space: nowrap;
+        }
+        .sensor-stat-peak {
+            opacity: 0.8;
+        }
         /* Elevation row: value · bare hPa · Δ datum toggle, right-aligned as a
            single unit so the row still reads label-left / value-right. */
         .sensor-elev { display: inline-flex; align-items: center; gap: 6px; }
@@ -1633,24 +1701,78 @@
                      vertical, `pitch_deg` is the boresight's tilt from horizontal,
                      `yaw_deg` is absolute magnetic heading -- see web.py's
                      `orientation_view` World branch. -->
-                <div class="hud-row"><span><input id="orient-label-0" class="sensor-label-input" maxlength="24" value="Roll" title="Rename this axis"></span><span class="hud-val" id="orient-val-0">—</span></div>
-                <div class="hud-row"><span><input id="orient-label-1" class="sensor-label-input" maxlength="24" value="Tilt" title="Rename this axis"></span><span class="hud-val" id="orient-val-1">—</span></div>
-                <div class="hud-row"><span><input id="orient-label-2" class="sensor-label-input" maxlength="24" value="Heading" title="Rename this axis"></span><span class="hud-val" id="orient-val-2">—</span></div>
+                <div class="sensor-metric-grid" id="sensor-metric-grid">
+                    <!-- Tile 0: Roll -->
+                    <div class="sensor-metric-tile" id="sensor-tile-roll">
+                        <div class="sensor-metric-header">
+                            <input id="orient-label-0" class="sensor-label-input" maxlength="24" value="Roll" title="Rename this axis">
+                            <span class="hud-val sensor-metric-val" id="orient-val-0">—</span>
+                        </div>
+                        <div class="hud-bar sensor-metric-bar" title="Roll metric progress bar">
+                            <div class="hud-bar__fill" id="sensor-bar-roll"></div>
+                        </div>
+                        <div class="sensor-metric-stats" title="Jitter (p95) and worst-case peak jitter">
+                            <span class="sensor-stat-jit" id="sensor-jit-roll">jit: —</span>
+                            <span class="sensor-stat-peak" id="sensor-peak-roll">pk: —</span>
+                        </div>
+                    </div>
+
+                    <!-- Tile 1: Tilt -->
+                    <div class="sensor-metric-tile" id="sensor-tile-tilt">
+                        <div class="sensor-metric-header">
+                            <input id="orient-label-1" class="sensor-label-input" maxlength="24" value="Tilt" title="Rename this axis">
+                            <span class="hud-val sensor-metric-val" id="orient-val-1">—</span>
+                        </div>
+                        <div class="hud-bar sensor-metric-bar" title="Tilt metric progress bar">
+                            <div class="hud-bar__fill" id="sensor-bar-tilt"></div>
+                        </div>
+                        <div class="sensor-metric-stats" title="Jitter (p95) and worst-case peak jitter">
+                            <span class="sensor-stat-jit" id="sensor-jit-tilt">jit: —</span>
+                            <span class="sensor-stat-peak" id="sensor-peak-tilt">pk: —</span>
+                        </div>
+                    </div>
+
+                    <!-- Tile 2: Heading -->
+                    <div class="sensor-metric-tile" id="sensor-tile-heading">
+                        <div class="sensor-metric-header">
+                            <input id="orient-label-2" class="sensor-label-input" maxlength="24" value="Heading" title="Rename this axis">
+                            <span class="hud-val sensor-metric-val" id="orient-val-2">—</span>
+                        </div>
+                        <div class="hud-bar sensor-metric-bar" title="Heading metric progress bar">
+                            <div class="hud-bar__fill" id="sensor-bar-heading"></div>
+                        </div>
+                        <div class="sensor-metric-stats" title="Jitter (p95) and worst-case peak jitter">
+                            <span class="sensor-stat-jit" id="sensor-jit-heading">jit: —</span>
+                            <span class="sensor-stat-peak" id="sensor-peak-heading">pk: —</span>
+                        </div>
+                    </div>
+
+                    <!-- Tile 3: Fusion -->
+                    <div class="sensor-metric-tile" id="sensor-tile-fusion">
+                        <div class="sensor-metric-header">
+                            <span class="sensor-label-text" title="Magnetometer yaw-fusion state (YawFusion.status)">Fusion</span>
+                            <span class="sensor-state is-off sensor-metric-val" id="sensor-fusion" title="Magnetometer yaw-fusion state">Off</span>
+                        </div>
+                        <div class="hud-bar sensor-metric-bar" title="Fusion stability progress bar">
+                            <div class="hud-bar__fill" id="sensor-bar-fusion"></div>
+                        </div>
+                        <div class="sensor-metric-stats" title="Fusion jitter and worst-case peak">
+                            <span class="sensor-stat-jit" id="sensor-jit-fusion">jit: —</span>
+                            <span class="sensor-stat-peak" id="sensor-peak-fusion">pk: —</span>
+                        </div>
+                    </div>
+                </div>
                 <div id="orient-singularity-warn" class="hud-warn hidden">⚠ Near singularity — values unreliable</div>
                 <div id="orient-world-warn" class="hud-warn hidden">⚠ World mode invalid</div>
 
-                <!-- Magnetometer/heading state and the two actions that change it,
-                     together (they were three blocks apart). The help line under
-                     it (owner ask, 2026-07-31) turns the fusion_key the server
-                     already sends into what's wrong and how to fix it -- filled
+                <!-- Magnetometer/heading state and the actions that change it.
+                     The help line under it (owner ask, 2026-07-31) turns the fusion_key
+                     the server already sends into what's wrong and how to fix it -- filled
                      client-side, no protocol change, see FUSION_HELP below. -->
-                <div class="hud-row">
-                    <span title="Magnetometer yaw-fusion state (YawFusion.status)">Fusion</span>
-                    <span class="sensor-state is-off" id="sensor-fusion">Off</span>
-                </div>
                 <div id="sensor-fusion-help" class="hud-note hidden"></div>
                 <div class="sensor-actions">
                     <button id="sensor-reset-heading" class="sensor-btn" title="Reset heading fusion — snaps to magnetometer on next valid sample">Reset Heading</button>
+                    <button id="btn-reset-sensor-stats" class="sensor-btn" title="Reset sensor peak jitter and worst-case statistics">Reset Stats</button>
                     <!-- Enabled by magcal.js once the modal is wired, so a broken
                          module graph leaves a disabled button rather than a dead one. -->
                     <button id="sensor-mag-cal" class="sensor-btn sensor-btn--secondary" disabled title="Magnetometer calibration: sweep coverage + quality">Calibrate Mag</button>

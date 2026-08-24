@@ -56,8 +56,7 @@ def _js_object_keys(js: str, var_name: str) -> set:
 # Collapse headers are exempt from the tooltip rule: the header's entire visible
 # content IS the panel name, so a `title` could only repeat it. Every other
 # button is a verb whose effect is not fully carried by its label.
-_HEADER_CLASSES = ("control-group__header", "log-console__header",
-                   "ir-card__header")
+_HEADER_CLASSES = ("control-group__header", "log-console__header", "ir-card__header")
 
 
 def _is_exempt(tag: str) -> bool:
@@ -74,7 +73,8 @@ def test_every_button_has_a_tooltip():
     keep, and those are the ones review forgets.
     """
     missing = [
-        tag for tag in re.findall(r"<button\b[^>]*>", _index())
+        tag
+        for tag in re.findall(r"<button\b[^>]*>", _index())
         if "title=" not in tag and not _is_exempt(tag)
     ]
     assert not missing, (
@@ -91,11 +91,12 @@ def test_every_toggle_label_has_a_tooltip():
     means it appears over a 14 px square and nowhere else.
     """
     missing = [
-        tag for tag in re.findall(r"<label\b[^>]*>", _index())
+        tag
+        for tag in re.findall(r"<label\b[^>]*>", _index())
         if "toggle" in tag and "title=" not in tag
     ]
-    assert not missing, (
-        "toggle labels without a title= tooltip:\n  " + "\n  ".join(missing)
+    assert not missing, "toggle labels without a title= tooltip:\n  " + "\n  ".join(
+        missing
     )
 
 
@@ -116,11 +117,14 @@ def test_no_duplicate_element_ids():
     assert not dupes, f"duplicate id= attributes in index.html: {dupes}"
 
 
-@pytest.mark.parametrize("selector", [
-    ".log-console__body",
-    ".sensor-block-val",
-    ".jitter-table",
-])
+@pytest.mark.parametrize(
+    "selector",
+    [
+        ".log-console__body",
+        ".sensor-block-val",
+        ".jitter-table",
+    ],
+)
 def test_readonly_text_sinks_opt_back_into_selection(selector):
     """`body { user-select: none }` made every diagnostic uncopyable.
 
@@ -133,11 +137,14 @@ def test_readonly_text_sinks_opt_back_into_selection(selector):
     assert "user-select: none" in css, "the body rule this test is about is gone"
     rule = re.search(
         r"([^{}]*\buser-select:\s*text\b[^{}]*)|"
-        r"([^{}]*)\{[^{}]*user-select:\s*text", css)
+        r"([^{}]*)\{[^{}]*user-select:\s*text",
+        css,
+    )
     assert rule is not None, "no user-select: text rule at all"
     # The selector must appear in a rule block that grants text selection.
     granting = [
-        m.group(1) for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", css)
+        m.group(1)
+        for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", css)
         if "user-select: text" in m.group(2)
     ]
     assert any(selector in sel for sel in granting), (
@@ -197,9 +204,12 @@ def test_sidepane_hierarchy_font_size_strictly_decreases_by_level():
         sel: float(_rule_decl(css, sel, "font-size").removesuffix("rem"))
         for sel in (_HEADER_SEL, _SUBGROUP_SEL, _FIELD_SEL, _SUBFIELD_SEL)
     }
-    assert sizes[_HEADER_SEL] > sizes[_SUBGROUP_SEL] > sizes[_FIELD_SEL] > sizes[_SUBFIELD_SEL], (
-        f"sidepane level font-sizes are not strictly decreasing: {sizes}"
-    )
+    assert (
+        sizes[_HEADER_SEL]
+        > sizes[_SUBGROUP_SEL]
+        > sizes[_FIELD_SEL]
+        > sizes[_SUBFIELD_SEL]
+    ), f"sidepane level font-sizes are not strictly decreasing: {sizes}"
 
 
 def test_sidepane_subgroup_summary_outweighs_the_field_label_it_contains():
@@ -245,7 +255,8 @@ def test_camera_pose_nested_labels_carry_the_subordinate_sub_class(label):
     and "See-Through" (the BUG-093 complaint, restated one level down)."""
     html = _index()
     view_camera = re.search(
-        r'data-subgroup-id="view-camera".*?</details>', html, re.DOTALL)
+        r'data-subgroup-id="view-camera".*?</details>', html, re.DOTALL
+    )
     assert view_camera is not None, "could not locate the Camera & Pose subgroup"
     body = view_camera.group(0)
     m = re.search(r'<div class="([^"]*)">' + re.escape(label), body)
@@ -263,7 +274,8 @@ def test_camera_pose_group_labels_do_not_carry_the_sub_class():
     section collapses back to one indistinguishable level."""
     html = _index()
     view_camera = re.search(
-        r'data-subgroup-id="view-camera".*?</details>', html, re.DOTALL)
+        r'data-subgroup-id="view-camera".*?</details>', html, re.DOTALL
+    )
     assert view_camera is not None
     body = view_camera.group(0)
     for label in ("View Mode", "See-Through"):
@@ -326,14 +338,20 @@ def test_detailed_build_has_an_always_visible_progress_status():
     """
     html = _index()
     for element_id in (
-        "detailed-build-status", "detailed-build-title", "detailed-build-progress",
-        "detailed-build-bar", "detailed-build-time", "detailed-build-detail",
-        "detailed-resource-gpu", "detailed-resource-cpu", "detailed-resource-ram",
+        "detailed-build-status",
+        "detailed-build-title",
+        "detailed-build-progress",
+        "detailed-build-bar",
+        "detailed-build-time",
+        "detailed-build-detail",
+        "detailed-resource-gpu",
+        "detailed-resource-cpu",
+        "detailed-resource-ram",
         "detailed-resource-vram",
     ):
         assert f'id="{element_id}"' in html
     assert 'role="progressbar"' in html
-    assert 'detailed-build__resources' in html
+    assert "detailed-build__resources" in html
 
 
 # ---------------------------------------------------------------------------
@@ -351,8 +369,12 @@ DEVICE_JS = STATIC / "devicemodel.js"
 
 def _js_number_array(js: str, name: str) -> list:
     """Numbers of `export const <name> = [ ... ];` in devicemodel.js."""
-    m = re.search(r"export const " + re.escape(name) + r"\s*=\s*\[(.*?)\];", js, re.DOTALL)
-    assert m is not None, f"could not find `export const {name} = [...]` in devicemodel.js"
+    m = re.search(
+        r"export const " + re.escape(name) + r"\s*=\s*\[(.*?)\];", js, re.DOTALL
+    )
+    assert m is not None, (
+        f"could not find `export const {name} = [...]` in devicemodel.js"
+    )
     return [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", m.group(1))]
 
 
@@ -378,8 +400,10 @@ def test_device_dims_m_are_the_real_block_in_metres():
     js = DEVICE_JS.read_text(encoding="utf-8")
     m = re.search(r"export const DEVICE_DIMS_M\s*=\s*\{(.*?)\};", js, re.DOTALL)
     assert m is not None, "could not find `export const DEVICE_DIMS_M = {...}`"
-    vals = {k: eval(v) for k, v in                      # noqa: S307 - literal arithmetic
-            re.findall(r"([xyz])\s*:\s*([-\d.*\s]+?)\s*[,}]", m.group(1) + "}")}
+    vals = {
+        k: eval(v)
+        for k, v in re.findall(r"([xyz])\s*:\s*([-\d.*\s]+?)\s*[,}]", m.group(1) + "}")  # noqa: S307 - literal arithmetic
+    }
     assert vals["x"] == pytest.approx(0.1397, abs=1e-4)
     assert vals["y"] == pytest.approx(0.0762, abs=1e-4)
     assert vals["z"] == pytest.approx(0.0635, abs=1e-4)
@@ -387,7 +411,9 @@ def test_device_dims_m_are_the_real_block_in_metres():
     # so a future tweak to one cannot silently reshape the other.
     d = _js_dims(js)
     ratios = [d[k] / vals[k] for k in "xyz"]
-    assert max(ratios) - min(ratios) < 1e-2, f"DEVICE_DIMS/DEVICE_DIMS_M not uniform: {ratios}"
+    assert max(ratios) - min(ratios) < 1e-2, (
+        f"DEVICE_DIMS/DEVICE_DIMS_M not uniform: {ratios}"
+    )
 
 
 def test_the_map_marker_is_drawn_at_the_devices_real_metric_size():
@@ -409,10 +435,16 @@ def test_aperture_scales_with_the_block_it_is_drawn_on():
     so the real-size scanner would have rendered as mostly lens."""
     js = DEVICE_JS.read_text(encoding="utf-8")
     assert re.search(r"export const APERTURE_R_FRAC\s*=", js)
-    body = js[js.index("export function createDeviceMesh"):]
-    body = body[:body.index("\nexport function", 1)] if "\nexport function" in body[1:] else body
+    body = js[js.index("export function createDeviceMesh") :]
+    body = (
+        body[: body.index("\nexport function", 1)]
+        if "\nexport function" in body[1:]
+        else body
+    )
     assert "APERTURE_R_FRAC * dims.x" in body
-    assert "CircleGeometry(APERTURE_R," not in body, "aperture still hard-coded to shell units"
+    assert "CircleGeometry(APERTURE_R," not in body, (
+        "aperture still hard-coded to shell units"
+    )
 
 
 def test_device_bands_are_half_grey_quarter_white_quarter_blue():
@@ -449,14 +481,13 @@ def test_mount_rotation_stands_the_device_upright_at_the_owners_attitude():
 
     from roomscan import sensors
 
-    mount = np.array(_js_number_array(DEVICE_JS.read_text(encoding="utf-8"),
-                                      "MOUNT_ROTATION")).reshape(3, 3)
+    mount = np.array(
+        _js_number_array(DEVICE_JS.read_text(encoding="utf-8"), "MOUNT_ROTATION")
+    ).reshape(3, 3)
 
     # Body -> SFLP world (X=North, Y=West, Z=Up) for "held normally":
     # boresight (body +Z) aimed North and level; body +X pointing at the floor.
-    r = np.array([[0.0, 0.0, 1.0],
-                  [0.0, 1.0, 0.0],
-                  [-1.0, 0.0, 0.0]])
+    r = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]])
     assert np.linalg.det(r) == pytest.approx(1.0)
 
     # It really is the owner's reported attitude, by the server's own functions.
@@ -465,14 +496,15 @@ def test_mount_rotation_stands_the_device_upright_at_the_owners_attitude():
     assert abs(sensors.triad_roll_deg(down_body)) == pytest.approx(180.0, abs=1e-9)
 
     design_to_world = r @ mount
-    top = design_to_world @ np.array([1.0, 0.0, 0.0])       # the device's top
-    camera = design_to_world @ np.array([0.0, 0.0, 1.0])    # the blue/camera face
+    top = design_to_world @ np.array([1.0, 0.0, 0.0])  # the device's top
+    camera = design_to_world @ np.array([0.0, 0.0, 1.0])  # the blue/camera face
     assert top == pytest.approx([0.0, 0.0, 1.0], abs=1e-9), (
         "the device's top must point at the ceiling when it is held the right "
-        f"way up; MOUNT_ROTATION put it at {top}")
+        f"way up; MOUNT_ROTATION put it at {top}"
+    )
     assert camera[2] == pytest.approx(0.0, abs=1e-9), (
-        "pitch 0 means the camera face is horizontal; got a Z component of "
-        f"{camera[2]}")
+        f"pitch 0 means the camera face is horizontal; got a Z component of {camera[2]}"
+    )
     # ...and the rotation must be about the boresight, or the camera face moves.
     assert mount[2, 2] == pytest.approx(1.0)
 
@@ -489,8 +521,9 @@ def test_body_to_cv_is_the_transpose_of_the_servers_t_cv_to_body():
 
     from roomscan import sensors
 
-    body_to_cv = np.array(_js_number_array(DEVICE_JS.read_text(encoding="utf-8"),
-                                           "BODY_TO_CV")).reshape(3, 3)
+    body_to_cv = np.array(
+        _js_number_array(DEVICE_JS.read_text(encoding="utf-8"), "BODY_TO_CV")
+    ).reshape(3, 3)
     assert body_to_cv == pytest.approx(sensors.T_CV_TO_BODY.T)
 
 
@@ -599,7 +632,8 @@ def test_world_follow_tracks_target_without_snapping_camera():
     # The World+follow branch in slam.js must not hand the server's nose-camera
     # eye/center to setFollowTarget -- that framing belongs to FPV/Mirror only.
     world_follow_block = re.search(
-        r"view_mode\s*===\s*'world'[^;]*\{\s*\n\s*sceneApi\.(\w+)\(", slam)
+        r"view_mode\s*===\s*'world'[^;]*\{\s*\n\s*sceneApi\.(\w+)\(", slam
+    )
     assert world_follow_block is not None, (
         "could not locate the World+follow branch in slam.js's `slam` handler"
     )
@@ -620,8 +654,12 @@ def test_follow_toggle_lives_in_the_view_card():
     )
     view_card = re.search(
         r'data-card-id="view">.*?data-subgroup-id="view-camera"(.*?)</details>',
-        html, re.DOTALL)
-    assert view_card is not None, "could not locate the View card's Camera & Pose sub-area"
+        html,
+        re.DOTALL,
+    )
+    assert view_card is not None, (
+        "could not locate the View card's Camera & Pose sub-area"
+    )
     assert 'id="chk-slam-follow"' in view_card.group(1), (
         "chk-slam-follow must be inside the View card's Camera & Pose sub-area"
     )
@@ -636,10 +674,11 @@ def test_slam_hud_shows_the_compute_device():
     HUD readout."""
     html = _index()
     assert 'id="slam-device"' in html
-    assert re.search(r'<div class="hud-row"[^>]*title="[^"]+"[^>]*>\s*'
-                      r'<span>Device</span><span class="hud-val" id="slam-device">', html), (
-        "the Device HUD row must carry a title tooltip"
-    )
+    assert re.search(
+        r'<div class="hud-row"[^>]*title="[^"]+"[^>]*>\s*'
+        r'<span>Device</span><span class="hud-val" id="slam-device">',
+        html,
+    ), "the Device HUD row must carry a title tooltip"
     slam = (STATIC / "slam.js").read_text(encoding="utf-8")
     assert "slam-device" in slam and "m.device" in slam
 
@@ -650,10 +689,17 @@ def test_slam_hud_shows_the_compute_device():
 # ---------------------------------------------------------------------------
 
 _SLAM_STAGE_TIMING_IDS = (
-    "slam-backend", "slam-throughput", "slam-overwritten",
-    "slam-gpu-util", "slam-gpu-vram",
-    "slam-raycast-ms", "slam-icp-ms", "slam-integrate-ms",
-    "slam-mesh-extract-ms", "slam-mesh-prep-ms", "slam-mesh-pack-ms",
+    "slam-backend",
+    "slam-throughput",
+    "slam-overwritten",
+    "slam-gpu-util",
+    "slam-gpu-vram",
+    "slam-raycast-ms",
+    "slam-icp-ms",
+    "slam-integrate-ms",
+    "slam-mesh-extract-ms",
+    "slam-mesh-prep-ms",
+    "slam-mesh-pack-ms",
     "slam-mesh-bytes",
 )
 
@@ -664,7 +710,9 @@ def _row_title(html: str, element_id: str) -> str:
     ("VRAM", "Backend") with an unrelated row elsewhere on the page."""
     m = re.search(
         r'<div class="hud-row" title="([^"]+)"[^>]*>\s*<span>[^<]*</span>'
-        r'<span class="hud-val" id="' + re.escape(element_id) + r'"', html)
+        r'<span class="hud-val" id="' + re.escape(element_id) + r'"',
+        html,
+    )
     return m.group(1) if m else None
 
 
@@ -690,7 +738,9 @@ def test_slam_hud_new_ids_are_unique_and_present_in_slam_js():
     html = _index()
     slam = (STATIC / "slam.js").read_text(encoding="utf-8")
     for element_id in _SLAM_STAGE_TIMING_IDS:
-        assert html.count(f'id="{element_id}"') == 1, f"{element_id} missing or duplicated"
+        assert html.count(f'id="{element_id}"') == 1, (
+            f"{element_id} missing or duplicated"
+        )
         assert element_id in slam, f"{element_id} is not referenced from slam.js"
 
 
@@ -705,7 +755,7 @@ def test_overwritten_frame_readout_is_distinct_from_tracking_lost():
     """
     html = _index()
     assert 'id="slam-track"' in html and 'id="slam-overwritten"' in html
-    assert "slam-track" != "slam-overwritten"   # trivially true; documents the intent
+    assert "slam-track" != "slam-overwritten"  # trivially true; documents the intent
 
     over_title = _row_title(html, "slam-overwritten")
     assert over_title is not None
@@ -713,8 +763,12 @@ def test_overwritten_frame_readout_is_distinct_from_tracking_lost():
     assert "tracking" in over_title.lower() and "lost" in over_title.lower()
 
     slam = (STATIC / "slam.js").read_text(encoding="utf-8")
-    assert "classList.toggle('lost'" in slam, "Tracking row must still drive the 'lost' class"
-    assert "classList.toggle('warn'" in slam, "Overwritten row must drive its own 'warn' class"
+    assert "classList.toggle('lost'" in slam, (
+        "Tracking row must still drive the 'lost' class"
+    )
+    assert "classList.toggle('warn'" in slam, (
+        "Overwritten row must drive its own 'warn' class"
+    )
 
     # The two classes must resolve to different colours, not just different names.
     lost_rule = re.search(r"\.hud-val\.lost\s*\{([^}]*)\}", html)
@@ -754,7 +808,9 @@ def test_gpu_scope_is_never_presented_as_plain_device_wide_decoration():
     assert "device-wide" in vram_title.lower()
 
     slam = (STATIC / "slam.js").read_text(encoding="utf-8")
-    assert "scopeLabel" in slam, "the scope must be rendered into the visible label, not just the tooltip"
+    assert "scopeLabel" in slam, (
+        "the scope must be rendered into the visible label, not just the tooltip"
+    )
 
 
 def test_every_fusion_status_has_a_label_and_a_remedy():
@@ -770,24 +826,46 @@ def test_every_fusion_status_has_a_label_and_a_remedy():
 
     from roomscan import web
 
-    src = (Path(__file__).parent.parent / "src" / "roomscan" / "sensors.py").read_text(encoding="utf-8")
+    src = (Path(__file__).parent.parent / "src" / "roomscan" / "sensors.py").read_text(
+        encoding="utf-8"
+    )
     tree = ast.parse(src)
-    cls = next(n for n in ast.walk(tree)
-               if isinstance(n, ast.ClassDef) and n.name == "YawFusion")
-    statuses = {n.value for n in ast.walk(cls)
-                if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                and (n.value in ("init", "active") or n.value.startswith("gated:"))}
-    assert "gated:no-field" in statuses, "AST scan found no statuses -- the check is broken"
+    cls = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "YawFusion"
+    )
+    statuses = {
+        n.value
+        for n in ast.walk(cls)
+        if isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and (n.value in ("init", "active") or n.value.startswith("gated:"))
+    }
+    assert "gated:no-field" in statuses, (
+        "AST scan found no statuses -- the check is broken"
+    )
 
-    help_keys = set(re.findall(r"^\s*'?([a-z:-]+)'?\s*:",
-                               re.search(r"const FUSION_HELP = \{(.*?)\n\};",
-                                         (STATIC / "sensors.js").read_text(encoding="utf-8"),
-                                         re.DOTALL).group(1), re.MULTILINE))
+    help_keys = set(
+        re.findall(
+            r"^\s*'?([a-z:-]+)'?\s*:",
+            re.search(
+                r"const FUSION_HELP = \{(.*?)\n\};",
+                (STATIC / "sensors.js").read_text(encoding="utf-8"),
+                re.DOTALL,
+            ).group(1),
+            re.MULTILINE,
+        )
+    )
     missing_label = statuses - set(web._FUSION_LABELS)
     # "active" is the working state and deliberately has no remedy line.
     missing_help = statuses - help_keys - {"active"}
-    assert not missing_label, f"YawFusion statuses with no HUD label: {sorted(missing_label)}"
-    assert not missing_help, f"YawFusion statuses with no remedy line: {sorted(missing_help)}"
+    assert not missing_label, (
+        f"YawFusion statuses with no HUD label: {sorted(missing_label)}"
+    )
+    assert not missing_help, (
+        f"YawFusion statuses with no remedy line: {sorted(missing_help)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -809,8 +887,10 @@ def test_ranging_profile_selector_replaces_the_old_usecase_control():
     entirely (plan Task 10 item 4)."""
     html = _index()
     assert 'id="seg-usecase"' not in html
-    assert 'data-uc=' not in html
-    seg = re.search(r'<div class="segmented" id="seg-ranging-profile">(.*?)</div>', html, re.DOTALL)
+    assert "data-uc=" not in html
+    seg = re.search(
+        r'<div class="segmented" id="seg-ranging-profile">(.*?)</div>', html, re.DOTALL
+    )
     assert seg is not None, "seg-ranging-profile not found"
     profiles_present = set(re.findall(r'data-profile="([^"]+)"', seg.group(1)))
     assert profiles_present == {"stability", "precision", "high_framerate", "manual"}
@@ -822,8 +902,14 @@ def test_every_new_ranging_input_has_a_tooltip():
     need the same coverage (plan Task 10 item 9: "a `title` on EVERY new
     control")."""
     html = _index()
-    ids = ("sl-manual-fps", "num-manual-fps", "sl-manual-exposure", "num-manual-exposure",
-          "sl-imu-env-rate", "num-imu-env-rate")
+    ids = (
+        "sl-manual-fps",
+        "num-manual-fps",
+        "sl-manual-exposure",
+        "num-manual-exposure",
+        "sl-imu-env-rate",
+        "num-imu-env-rate",
+    )
     missing = []
     for element_id in ids:
         m = re.search(r'<input\b[^>]*\bid="' + re.escape(element_id) + r'"[^>]*>', html)
@@ -845,11 +931,14 @@ def _input_attrs(html: str, element_id: str) -> dict:
     return attrs
 
 
-@pytest.mark.parametrize("slider_id, number_id", [
-    ("sl-manual-fps", "num-manual-fps"),
-    ("sl-manual-exposure", "num-manual-exposure"),
-    ("sl-imu-env-rate", "num-imu-env-rate"),
-])
+@pytest.mark.parametrize(
+    "slider_id, number_id",
+    [
+        ("sl-manual-fps", "num-manual-fps"),
+        ("sl-manual-exposure", "num-manual-exposure"),
+        ("sl-imu-env-rate", "num-imu-env-rate"),
+    ],
+)
 def test_manual_paired_inputs_agree_with_each_other(slider_id, number_id):
     """The range and number half of each paired input must share the same
     min/max/step, or the two widgets would silently accept different values
@@ -938,9 +1027,9 @@ def test_device_card_reachable_from_squircle_rail():
     the squircle rail's permanent map of every panel (it starts collapsed,
     same as before this change)."""
     html = _index()
-    assert re.search(r'<div class="control-group card collapsed" data-card-id="device">', html), (
-        "the Device card must still exist, collapsed by default"
-    )
+    assert re.search(
+        r'<div class="control-group card collapsed" data-card-id="device">', html
+    ), "the Device card must still exist, collapsed by default"
     js = LAYOUT_JS.read_text(encoding="utf-8")
     icon_keys = _js_object_keys(js, "CARD_ICONS")
     title_keys = _js_object_keys(js, "CARD_TITLES")
@@ -954,11 +1043,14 @@ def test_ranging_and_imu_env_pending_disable_their_own_controls_only():
     js = (STATIC / "controls.js").read_text(encoding="utf-8")
     assert "rangingPending" in js and "imuEnvPending" in js
     # The IMU/env controls must never be gated on the ranging pending flag.
-    imu_block = js[js.index("segImuEnvMode?.addEventListener"):js.index("hub.on('ranging'")]
+    imu_block = js[
+        js.index("segImuEnvMode?.addEventListener") : js.index("hub.on('ranging'")
+    ]
     assert "rangingPending" not in imu_block
 
 
 # --- 2026-08-05: use-case presets, fps grey-out, number-input focus guard ------
+
 
 def _controls() -> str:
     return (STATIC / "controls.js").read_text(encoding="utf-8")
@@ -968,14 +1060,20 @@ def test_fps_ceiling_table_in_js_matches_the_python_measured_table():
     """controls.js mirrors profiles._MEASURED_CEILING_FPS so the fps grey-out can
     track the exposure live while editing. The two must not drift."""
     import sys
+
     sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
     from roomscan import profiles
+
     js = _controls()
     m = re.search(r"CEILING_FPS_TABLE\s*=\s*\[(.*?)\]\s*;", js, re.DOTALL)
     assert m is not None, "CEILING_FPS_TABLE not found in controls.js"
-    pairs = [(int(a), int(b)) for a, b in re.findall(r"\[\s*(\d+)\s*,\s*(\d+)\s*\]", m.group(1))]
+    pairs = [
+        (int(a), int(b))
+        for a, b in re.findall(r"\[\s*(\d+)\s*,\s*(\d+)\s*\]", m.group(1))
+    ]
     assert pairs == list(profiles._MEASURED_CEILING_FPS), (
-        "controls.js CEILING_FPS_TABLE has drifted from profiles._MEASURED_CEILING_FPS")
+        "controls.js CEILING_FPS_TABLE has drifted from profiles._MEASURED_CEILING_FPS"
+    )
 
 
 def test_manual_number_fields_have_a_focus_edit_guard():
@@ -990,7 +1088,13 @@ def test_manual_number_fields_have_a_focus_edit_guard():
 
 def test_fps_cap_and_blurb_elements_present():
     html = _index()
-    for el_id in ("ranging-blurb", "fps-cap", "fps-cap-ok", "fps-cap-no", "fps-cap-note"):
+    for el_id in (
+        "ranging-blurb",
+        "fps-cap",
+        "fps-cap-ok",
+        "fps-cap-no",
+        "fps-cap-note",
+    ):
         assert f'id="{el_id}"' in html, f"missing #{el_id} in index.html"
 
 
@@ -1014,21 +1118,27 @@ def test_oscillate_amplitude_slider_disabled_unless_oscillate_is_the_active_mode
     selected, which is exactly the state the issue reports as "stays
     interactive when oscillate is off"."""
     js = _controls()
-    m = re.search(r"const worldOnly = .+?slOrbitAmplitude\.disabled\s*=\s*(.+?);", js, re.DOTALL)
+    m = re.search(
+        r"const worldOnly = .+?slOrbitAmplitude\.disabled\s*=\s*(.+?);", js, re.DOTALL
+    )
     assert m is not None, "no disabled binding found for slOrbitAmplitude"
     block, expr = m.group(0), m.group(1)
     # Must not be the bare worldOnly expression the pre-#107 code used --
     # that is satisfied in World with Continuous selected, exactly the state
     # the issue reports as "stays interactive when oscillate is off".
     assert expr.strip() != "!worldOnly", (
-        "amplitude slider is still gated on worldOnly alone (issue #107 regression)")
+        "amplitude slider is still gated on worldOnly alone (issue #107 regression)"
+    )
     # Must reference orbit_mode (the only signal that distinguishes
     # Continuous from Oscillate), directly or via a variable defined in the
     # same block, and must still require World -- a locked view has nothing
     # to swing either.
-    assert "orbit_mode" in block, f"amplitude disabled-binding does not gate on orbit_mode: {expr!r}"
+    assert "orbit_mode" in block, (
+        f"amplitude disabled-binding does not gate on orbit_mode: {expr!r}"
+    )
     assert "worldOnly" in expr or re.search(r"=\s*worldOnly\b", block), (
-        f"amplitude disabled-binding dropped the World-only gate: {expr!r}")
+        f"amplitude disabled-binding dropped the World-only gate: {expr!r}"
+    )
 
 
 def test_oscillate_reversal_maps_each_threshold_to_the_opposite_travel_direction():
@@ -1053,19 +1163,30 @@ def test_oscillate_reversal_maps_each_threshold_to_the_opposite_travel_direction
     verified there. Reintroducing the swap makes this fail.
     """
     js = (STATIC / "scene.js").read_text(encoding="utf-8")
-    pos = re.search(r"if\s*\(\s*oscUnwrappedDeg\s*>=\s*n\s*\)\s*oscDir\s*=\s*(-?1)\s*;", js)
-    neg = re.search(r"if\s*\(\s*oscUnwrappedDeg\s*<=\s*-\s*n\s*\)\s*oscDir\s*=\s*(-?1)\s*;", js)
-    assert pos is not None, "no `oscUnwrappedDeg >= n` reversal branch found in scene.js"
-    assert neg is not None, "no `oscUnwrappedDeg <= -n` reversal branch found in scene.js"
+    pos = re.search(
+        r"if\s*\(\s*oscUnwrappedDeg\s*>=\s*n\s*\)\s*oscDir\s*=\s*(-?1)\s*;", js
+    )
+    neg = re.search(
+        r"if\s*\(\s*oscUnwrappedDeg\s*<=\s*-\s*n\s*\)\s*oscDir\s*=\s*(-?1)\s*;", js
+    )
+    assert pos is not None, (
+        "no `oscUnwrappedDeg >= n` reversal branch found in scene.js"
+    )
+    assert neg is not None, (
+        "no `oscUnwrappedDeg <= -n` reversal branch found in scene.js"
+    )
     assert pos.group(1) != neg.group(1), (
         "both oscillate thresholds select the same direction, so the wave can never "
-        f"turn around: >=n -> {pos.group(1)}, <=-n -> {neg.group(1)}")
+        f"turn around: >=n -> {pos.group(1)}, <=-n -> {neg.group(1)}"
+    )
     assert pos.group(1) == "1", (
         "crossing +n must select oscDir=+1 (positive autoRotateSpeed decreases the "
-        f"azimuth, sending the wave back down); got {pos.group(1)}")
+        f"azimuth, sending the wave back down); got {pos.group(1)}"
+    )
     assert neg.group(1) == "-1", (
         "crossing -n must select oscDir=-1 (negative autoRotateSpeed increases the "
-        f"azimuth, sending the wave back up); got {neg.group(1)}")
+        f"azimuth, sending the wave back up); got {neg.group(1)}"
+    )
 
 
 def test_profile_blurbs_carry_no_hardcoded_consequence_numbers():
@@ -1075,7 +1196,9 @@ def test_profile_blurbs_carry_no_hardcoded_consequence_numbers():
     js = _controls()
     m = re.search(r"PROFILE_BLURBS\s*=\s*\{(.*?)\n\s*\};", js, re.DOTALL)
     assert m is not None
-    assert not re.search(r"\d", m.group(1)), "PROFILE_BLURBS contains a digit (stale-prone)"
+    assert not re.search(r"\d", m.group(1)), (
+        "PROFILE_BLURBS contains a digit (stale-prone)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1088,8 +1211,20 @@ def test_profile_blurbs_carry_no_hardcoded_consequence_numbers():
 # ---------------------------------------------------------------------------
 
 _VOID_TAGS = {
-    "area", "base", "br", "col", "embed", "hr", "img", "input",
-    "link", "meta", "param", "source", "track", "wbr",
+    "area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "param",
+    "source",
+    "track",
+    "wbr",
 }
 
 
@@ -1101,9 +1236,9 @@ class _AncestryParser(HTMLParser):
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.stack = []            # [(tag, {attr: value}), ...], root first
-        self.first_stack = {}      # id -> stack snapshot (incl. itself) at first sight
-        self.id_counts = {}        # id -> number of elements carrying it
+        self.stack = []  # [(tag, {attr: value}), ...], root first
+        self.first_stack = {}  # id -> stack snapshot (incl. itself) at first sight
+        self.id_counts = {}  # id -> number of elements carrying it
 
     def _seen(self, tag, attrs_dict):
         eid = attrs_dict.get("id")
@@ -1198,8 +1333,13 @@ def test_the_old_capture_card_id_is_gone():
 # ---------------------------------------------------------------------------
 
 _TRANSPORT_CONTROL_IDS = (
-    "btn-golive", "btn-playpause", "btn-transport-restart",
-    "seg-speed", "chk-loop", "seek", "pos-status",
+    "btn-golive",
+    "btn-playpause",
+    "btn-transport-restart",
+    "seg-speed",
+    "chk-loop",
+    "seek",
+    "pos-status",
 )
 
 
@@ -1207,8 +1347,11 @@ def test_transport_controls_appear_exactly_once():
     """Sanity companion to `test_no_duplicate_element_ids`: the move must not
     have left a stale second copy of any transport control id behind."""
     parser = _parsed_index()
-    dupes = {i: parser.id_counts.get(i, 0) for i in _TRANSPORT_CONTROL_IDS
-              if parser.id_counts.get(i, 0) != 1}
+    dupes = {
+        i: parser.id_counts.get(i, 0)
+        for i in _TRANSPORT_CONTROL_IDS
+        if parser.id_counts.get(i, 0) != 1
+    }
     assert not dupes, f"transport control ids not appearing exactly once: {dupes}"
 
 
@@ -1224,10 +1367,16 @@ def test_transport_controls_are_not_nested_in_a_sidebar_or_card():
         stack = parser.first_stack[element_id]
         ancestors = stack[:-1]
         card_ancestors = [tag for tag, attrs in ancestors if "data-card-id" in attrs]
-        sidebar_ids = [attrs.get("id") for _tag, attrs in ancestors
-                       if attrs.get("id") in ("primary-bar", "secondary-bar")]
+        sidebar_ids = [
+            attrs.get("id")
+            for _tag, attrs in ancestors
+            if attrs.get("id") in ("primary-bar", "secondary-bar")
+        ]
         if card_ancestors or sidebar_ids:
-            bad[element_id] = {"card_ancestors": card_ancestors, "sidebar_ids": sidebar_ids}
+            bad[element_id] = {
+                "card_ancestors": card_ancestors,
+                "sidebar_ids": sidebar_ids,
+            }
     assert not bad, f"transport controls still coupled to sidebar/card chrome: {bad}"
 
 
@@ -1367,7 +1516,9 @@ def test_playback_panel_max_width_has_no_literal_px_ceiling():
     assert max_width_decl is not None, "no `max-width:` declaration in .playback-panel"
     expr = max_width_decl.group(1).strip()
     m = re.match(r"min\((.*)\)$", expr)
-    assert m is not None, f"expected .playback-panel max-width to be a min(...) expression, got {expr!r}"
+    assert m is not None, (
+        f"expected .playback-panel max-width to be a min(...) expression, got {expr!r}"
+    )
     terms = _top_level_comma_split(m.group(1))
     assert terms, "min(...) parsed with no terms -- test is broken"
     literal_px_terms = [t for t in terms if not t.startswith("calc(")]
@@ -1440,7 +1591,9 @@ def test_pos_status_is_non_shrinking_and_always_shows_its_full_text():
     assert rule is not None, "no `.playback-panel #pos-status` rule found"
     body = rule.group(1)
     flex_decl = re.search(r"flex:\s*([^;]+);", body)
-    assert flex_decl is not None, "no `flex:` declaration on `.playback-panel #pos-status`"
+    assert flex_decl is not None, (
+        "no `flex:` declaration on `.playback-panel #pos-status`"
+    )
     parts = flex_decl.group(1).split()
     assert parts == ["0", "0", "auto"] or flex_decl.group(1).strip() == "none", (
         f"#pos-status must be non-shrinking (`flex: 0 0 auto` / `none`) so it "
@@ -1485,7 +1638,9 @@ def test_seek_input_overrides_the_global_width_100pct_inside_the_panel():
         "the actual mechanism behind every #123 truncation report"
     )
     flex_decl = re.search(r"flex:\s*([^;]+);", body)
-    assert flex_decl is not None, "no `flex:` declaration on the seek input inside the panel"
+    assert flex_decl is not None, (
+        "no `flex:` declaration on the seek input inside the panel"
+    )
     grow, shrink, basis = flex_decl.group(1).split()
     assert float(grow) > 0 and float(shrink) > 0, (
         "the seek input must be the row's elastic element (nonzero grow AND "
@@ -1578,7 +1733,7 @@ def test_wasd_nav_derives_movement_from_the_camera_world_matrix():
     # OrbitControls' own API, fine for oscillate; it must not also be reused
     # to derive WASD's forward/right, which is a different, camera-space
     # question extractBasis answers directly).
-    nav_block = js[js.index("WASD free-camera"):js.index("--- real-time view mode")]
+    nav_block = js[js.index("WASD free-camera") : js.index("--- real-time view mode")]
     assert "getAzimuthalAngle" not in nav_block
 
 
@@ -1588,9 +1743,9 @@ def test_wasd_movement_is_scaled_by_dt_and_shift_boosts_speed():
     the `frameDelta` comment above `animate`). Shift is the idiomatic "move
     faster" modifier."""
     js = _scene_js()
-    assert re.search(r"navStep\.copy\(navMove\)\.multiplyScalar\(speed\s*\*\s*dt\)", js), (
-        "WASD movement must be multiplied by dt for frame-rate independence"
-    )
+    assert re.search(
+        r"navStep\.copy\(navMove\)\.multiplyScalar\(speed\s*\*\s*dt\)", js
+    ), "WASD movement must be multiplied by dt for frame-rate independence"
     assert re.search(r"shiftDown\s*\?\s*MOVE_SPEED_FAST_MULT", js), (
         "held Shift must boost the base fly speed"
     )
@@ -1602,8 +1757,10 @@ def test_wasd_nav_coexists_with_world_follow_by_gating_trackTarget():
     surprising pairing is for a keypress to suspend the follow-pan and for
     releasing every key to hand it straight back on the next pose."""
     js = _scene_js()
-    m = re.search(r"function trackTarget\(pos\)\s*\{\s*\n(?:.*\n)*?\s*if\s*\(([^)]*)\)\s*return;",
-                  js)
+    m = re.search(
+        r"function trackTarget\(pos\)\s*\{\s*\n(?:.*\n)*?\s*if\s*\(([^)]*)\)\s*return;",
+        js,
+    )
     assert m is not None, "could not find trackTarget's early-return guard"
     assert "manualFlightActive" in m.group(1), (
         "trackTarget must gate on manualFlightActive so a WASD keypress "
@@ -1627,9 +1784,9 @@ def test_wasd_nav_wired_into_the_render_loop():
     picks up the new camera+target pair in the same tick (see the
     `trackTarget`-style comment on `applyManualFlight`)."""
     js = _scene_js()
-    assert re.search(
-        r"applyManualFlight\(dt\);\s*\n\s*controls\.update\(dt\);", js
-    ), "applyManualFlight must be called immediately before controls.update(dt) in animate()"
+    assert re.search(r"applyManualFlight\(dt\);\s*\n\s*controls\.update\(dt\);", js), (
+        "applyManualFlight must be called immediately before controls.update(dt) in animate()"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1661,7 +1818,9 @@ def test_browser_js_drives_the_focus_policy_off_the_state_echo_not_a_click():
 
     # The call must live textually inside the `hub.on('state', ...)` handler,
     # not off some other event (a click, a `captures`/`session` echo).
-    m = re.search(r"hub\.on\('state',\s*\(msg\)\s*=>\s*\{(.*?)\n    \}\);", js, re.DOTALL)
+    m = re.search(
+        r"hub\.on\('state',\s*\(msg\)\s*=>\s*\{(.*?)\n    \}\);", js, re.DOTALL
+    )
     assert m is not None, "could not find browser.js's hub.on('state', ...) handler"
     state_handler_body = m.group(1)
     assert "focusOnEnteringView" in state_handler_body, (
@@ -1679,7 +1838,9 @@ def test_focus_on_entering_view_is_edge_triggered_not_reasserted_every_echo():
     card a moment after arriving."""
     js = BROWSER_JS.read_text(encoding="utf-8")
 
-    m = re.search(r"function focusOnEnteringView\(([^)]*)\)\s*\{(.*?)\n    \}", js, re.DOTALL)
+    m = re.search(
+        r"function focusOnEnteringView\(([^)]*)\)\s*\{(.*?)\n    \}", js, re.DOTALL
+    )
     assert m is not None, "focusOnEnteringView() not found in browser.js"
     params, body = m.group(1), m.group(2)
 
@@ -1718,3 +1879,59 @@ def test_captures_browser_data_card_id_still_matches_the_focus_target():
     js = BROWSER_JS.read_text(encoding="utf-8")
     assert "focusOnEnteringView" in js
     assert "'browser'" in js
+
+
+# ---------------------------------------------------------------------------
+# Issue #125 -- Compact side-rail layout with progress-bar metrics.
+# ---------------------------------------------------------------------------
+
+
+def test_reset_sensor_stats_button_exists_and_has_tooltip():
+    """Issue #125: #btn-reset-sensor-stats exists in index.html with a descriptive title."""
+    html = _index()
+    m = re.search(r'<button\b[^>]*\bid="btn-reset-sensor-stats"[^>]*>', html)
+    assert m is not None, "#btn-reset-sensor-stats not found in index.html"
+    tag = m.group(0)
+    assert "title=" in tag, "#btn-reset-sensor-stats missing title attribute"
+    title_m = re.search(r'title="([^"]+)"', tag)
+    assert title_m is not None
+    assert len(title_m.group(1).strip()) > 5, "title attribute should be descriptive"
+
+    # Must be wired in sensors.js
+    sensors_js = (STATIC / "sensors.js").read_text(encoding="utf-8")
+    assert "btn-reset-sensor-stats" in sensors_js
+    assert "reset_stats" in sensors_js
+
+
+def test_sensor_metric_grid_and_progress_bars_exist():
+    """Issue #125: 2x2 grid container, metric tiles, progress bars, and peak stats exist."""
+    html = _index()
+    assert 'class="sensor-metric-grid"' in html or 'id="sensor-metric-grid"' in html
+    for tile_id in (
+        "sensor-tile-roll",
+        "sensor-tile-tilt",
+        "sensor-tile-heading",
+        "sensor-tile-fusion",
+    ):
+        assert f'id="{tile_id}"' in html, f"missing sensor metric tile #{tile_id}"
+    for bar_id in (
+        "sensor-bar-roll",
+        "sensor-bar-tilt",
+        "sensor-bar-heading",
+        "sensor-bar-fusion",
+    ):
+        assert f'id="{bar_id}"' in html, f"missing progress bar #{bar_id}"
+    for jit_id in (
+        "sensor-jit-roll",
+        "sensor-jit-tilt",
+        "sensor-jit-heading",
+        "sensor-jit-fusion",
+    ):
+        assert f'id="{jit_id}"' in html, f"missing jitter element #{jit_id}"
+    for peak_id in (
+        "sensor-peak-roll",
+        "sensor-peak-tilt",
+        "sensor-peak-heading",
+        "sensor-peak-fusion",
+    ):
+        assert f'id="{peak_id}"' in html, f"missing peak stat element #{peak_id}"

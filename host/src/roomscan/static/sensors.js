@@ -275,6 +275,25 @@ export function createSensors(hub) {
     };
     const labelInputs = [$('orient-label-0'), $('orient-label-1'), $('orient-label-2')];
     const valEls = [$('orient-val-0'), $('orient-val-1'), $('orient-val-2')];
+    const barRoll = $('sensor-bar-roll');
+    const barTilt = $('sensor-bar-tilt');
+    const barHeading = $('sensor-bar-heading');
+    const barFusion = $('sensor-bar-fusion');
+    const jitRollEl = $('sensor-jit-roll');
+    const jitTiltEl = $('sensor-jit-tilt');
+    const jitHeadingEl = $('sensor-jit-heading');
+    const jitFusionEl = $('sensor-jit-fusion');
+    const peakRollEl = $('sensor-peak-roll');
+    const peakTiltEl = $('sensor-peak-tilt');
+    const peakHeadingEl = $('sensor-peak-heading');
+    const peakFusionEl = $('sensor-peak-fusion');
+    const resetStatsBtn = $('btn-reset-sensor-stats');
+    const peakJitter = {
+        roll: null,
+        tilt: null,
+        heading: null,
+        fusion: null,
+    };
     const singularityWarn = $('orient-singularity-warn');
     const worldWarn = $('orient-world-warn');
     const yawOffsetVal = $('orient-yaw-offset');
@@ -291,6 +310,20 @@ export function createSensors(hub) {
     if (resetBtn) {
         resetBtn.addEventListener('click', () => {
             hub.send({ type: 'reset_fusion' });
+        });
+    }
+
+    if (resetStatsBtn) {
+        resetStatsBtn.addEventListener('click', () => {
+            peakJitter.roll = null;
+            peakJitter.tilt = null;
+            peakJitter.heading = null;
+            peakJitter.fusion = null;
+            if (peakRollEl) peakRollEl.textContent = 'pk: —';
+            if (peakTiltEl) peakTiltEl.textContent = 'pk: —';
+            if (peakHeadingEl) peakHeadingEl.textContent = 'pk: —';
+            if (peakFusionEl) peakFusionEl.textContent = 'pk: —';
+            try { hub.send({ type: 'reset_stats' }); } catch (e) {}
         });
     }
 
@@ -367,6 +400,22 @@ export function createSensors(hub) {
         if (fusionHelpEl) { fusionHelpEl.textContent = ''; fusionHelpEl.className = 'hud-note hidden'; }
         if (singularityWarn) singularityWarn.classList.add('hidden');
         if (worldWarn) worldWarn.classList.add('hidden');
+        peakJitter.roll = null;
+        peakJitter.tilt = null;
+        peakJitter.heading = null;
+        peakJitter.fusion = null;
+        if (barRoll) barRoll.style.width = '0%';
+        if (barTilt) barTilt.style.width = '0%';
+        if (barHeading) barHeading.style.width = '0%';
+        if (barFusion) barFusion.style.width = '0%';
+        if (jitRollEl) jitRollEl.textContent = 'jit: —';
+        if (jitTiltEl) jitTiltEl.textContent = 'jit: —';
+        if (jitHeadingEl) jitHeadingEl.textContent = 'jit: —';
+        if (jitFusionEl) jitFusionEl.textContent = 'jit: —';
+        if (peakRollEl) peakRollEl.textContent = 'pk: —';
+        if (peakTiltEl) peakTiltEl.textContent = 'pk: —';
+        if (peakHeadingEl) peakHeadingEl.textContent = 'pk: —';
+        if (peakFusionEl) peakFusionEl.textContent = 'pk: —';
         window.__gotSensor = false;
     }
     hub.on('stream_reset', clearForNewStream);
@@ -543,6 +592,52 @@ export function createSensors(hub) {
                     input.value = labels[i];
                 }
             });
+
+            // Sensor metric progress bars (Issue #125)
+            if (barRoll && typeof ov.roll_deg === 'number') {
+                const pct = Math.max(0, Math.min(100, ((ov.roll_deg + 180) / 360) * 100));
+                barRoll.style.width = pct.toFixed(0) + '%';
+            }
+            if (barTilt && typeof ov.pitch_deg === 'number') {
+                const pct = Math.max(0, Math.min(100, ((ov.pitch_deg + 90) / 180) * 100));
+                barTilt.style.width = pct.toFixed(0) + '%';
+            }
+            if (barHeading && typeof msg.heading === 'number') {
+                const pct = Math.max(0, Math.min(100, (((msg.heading % 360 + 360) % 360) / 360) * 100));
+                barHeading.style.width = pct.toFixed(0) + '%';
+            }
+            if (barFusion) {
+                const isAct = msg.fusion_key === 'active';
+                barFusion.style.width = isAct ? '100%' : (msg.fusion_key?.startsWith('gated') ? '50%' : '0%');
+                barFusion.classList.toggle('is-warn', Boolean(msg.fusion_key?.startsWith('gated')));
+            }
+
+            // Inline jitter and worst-case peak stats
+            const rollP95 = j.roll?.p95_deg;
+            if (typeof rollP95 === 'number') {
+                peakJitter.roll = peakJitter.roll === null ? rollP95 : Math.max(peakJitter.roll, rollP95);
+                if (jitRollEl) jitRollEl.textContent = 'jit: ' + rollP95.toFixed(3);
+                if (peakRollEl) peakRollEl.textContent = 'pk: ' + peakJitter.roll.toFixed(3);
+            }
+            const pitchP95 = j.pitch?.p95_deg;
+            if (typeof pitchP95 === 'number') {
+                peakJitter.tilt = peakJitter.tilt === null ? pitchP95 : Math.max(peakJitter.tilt, pitchP95);
+                if (jitTiltEl) jitTiltEl.textContent = 'jit: ' + pitchP95.toFixed(3);
+                if (peakTiltEl) peakTiltEl.textContent = 'pk: ' + peakJitter.tilt.toFixed(3);
+            }
+            const headingP95 = j.heading?.p95_deg ?? j.yaw?.p95_deg;
+            if (typeof headingP95 === 'number') {
+                peakJitter.heading = peakJitter.heading === null ? headingP95 : Math.max(peakJitter.heading, headingP95);
+                if (jitHeadingEl) jitHeadingEl.textContent = 'jit: ' + headingP95.toFixed(3);
+                if (peakHeadingEl) peakHeadingEl.textContent = 'pk: ' + peakJitter.heading.toFixed(3);
+            }
+            const orientP95 = j.orientation?.p95_deg;
+            if (typeof orientP95 === 'number') {
+                peakJitter.fusion = peakJitter.fusion === null ? orientP95 : Math.max(peakJitter.fusion, orientP95);
+                if (jitFusionEl) jitFusionEl.textContent = 'jit: ' + orientP95.toFixed(3);
+                if (peakFusionEl) peakFusionEl.textContent = 'pk: ' + peakJitter.fusion.toFixed(3);
+            }
+
             if (singularityWarn) {
                 const margin = ov.singularity_margin_deg;
                 singularityWarn.classList.toggle('hidden', !ov.near_singularity);
