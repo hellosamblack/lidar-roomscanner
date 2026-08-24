@@ -3256,7 +3256,8 @@ class SlamRunner:
 
     # ---- feed (reader thread) + poll (broadcaster) --------------------------
     def submit(self, depth, quat, pressure, reflectance=None, confidence=None,
-               imu_rate_hz=None, imu_raw=None, quat_offset_us=None) -> None:
+               imu_rate_hz=None, imu_raw=None, quat_offset_us=None,
+               t_device_us=None) -> None:
         """Forward the newest frame to the worker (latest-wins drop). No-op when
         inactive or when there is no orientation prior yet (SLAM needs the quat;
         without it the mapper loses tracking immediately -- see the 07-08
@@ -3264,9 +3265,8 @@ class SlamRunner:
 
         `imu_raw` (the latest stream-11 batch) powers the accelerometer ZUPT
         (BUG-069) when `[slam] zupt_enabled` is set; it is a no-op otherwise, so
-        passing it always is harmless. `quat_offset_us` is None on the live path
-        (stream 13 is not decoded in the live reader), so the quat-phase lever is
-        offline/Detailed-only -- see mapper.step.
+        passing it always is harmless. `quat_offset_us` (#181) is the phase lead
+        from stream 13 when available. `t_device_us` is the device timestamp.
 
         Called from the READER thread (BUG-060), so it must never block on
         anything slow: the first frame after arming kicks an async build and is
@@ -3293,7 +3293,8 @@ class SlamRunner:
                                      daemon=True).start()
                 return
         worker.submit(depth, quat, pressure, reflectance=reflectance, confidence=confidence,
-                      imu_rate_hz=imu_rate_hz, imu_raw=imu_raw, quat_offset_us=quat_offset_us)
+                      imu_rate_hz=imu_rate_hz, imu_raw=imu_raw, quat_offset_us=quat_offset_us,
+                      t_device_us=t_device_us)
 
     def poll(self, wall_mode: str) -> tuple[dict | None, bytes | None]:
         """Latest (`slam` message, MESH bytes-or-None). MESH is emitted only when
@@ -3996,14 +3997,38 @@ def make_slam_feed(state):
         depth = outputs.get("depth")
         if depth is None:
             return
-        sensor = state.sensor_state
-        env = sensor.latest_env()
-        slam.submit(depth, sensor.fused_quat(),
+        sensor = getattr(state, "sensor_state", None)
+        if sensor is None:
+            return
+        env_fn = getattr(sensor, "latest_env", None)
+        env = env_fn() if env_fn is not None else None
+        raw_fn = getattr(sensor, "latest_imu_raw", None)
+        imu_raw = raw_fn() if raw_fn is not None else None
+
+        # Timestamped quaternion alignment (#155 / #181):
+        # Query the orientation at the frame-ready edge when available.
+        # Fall back to fused_quat() / latest_quat().
+        quat = None
+        quat_at_frame = getattr(sensor, "quat_at_frame_ready", None)
+        if quat_at_frame is not None:
+            quat = quat_at_frame()
+        if quat is None:
+            fused_fn = getattr(sensor, "fused_quat", None)
+            quat = fused_fn() if fused_fn is not None else getattr(sensor, "latest_quat", lambda: None)()
+
+        offset_fn = getattr(sensor, "latest_quat_offset_us", None)
+        offset_us = offset_fn() if offset_fn is not None else None
+
+        t_us = getattr(header, "t_us", None)
+
+        slam.submit(depth, quat,
                     env.pressure_pa if env is not None else None,
                     reflectance=outputs.get("reflectance"),
                     confidence=outputs.get("confidence"),
                     imu_rate_hz=_applied_imu_env_rate_hz(state),
-                    imu_raw=sensor.latest_imu_raw())
+                    imu_raw=imu_raw,
+                    quat_offset_us=offset_us,
+                    t_device_us=t_us)
     return _feed
 
 

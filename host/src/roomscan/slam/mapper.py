@@ -518,7 +518,7 @@ class Mapper:
 
     def step(self, depth_mm: np.ndarray, quat, pressure_pa=None,
              reflectance=None, confidence=None,
-             imu_raw=None, quat_offset_us=None) -> FrameStep:
+             imu_raw=None, quat_offset_us=None, t_device_us=None) -> FrameStep:
         t0 = self._clock()
         depth_mm = self._gate_confidence(depth_mm, confidence)
         # +7.76 ms quat-phase compensation (BUG-031/067), applied FIRST so the

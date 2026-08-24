@@ -307,3 +307,76 @@ def test_remote_worker_frames_processed_counts_pose_responses():
     th.join(timeout=2)
     assert rw.frames_processed > 0
     assert rw.frames_submitted >= rw.frames_processed
+
+
+# ---- timing aux / timestamped quat / imu_raw (#181) ------------------------
+
+def test_remote_worker_submit_includes_timing_aux_and_phase_offset():
+    rw = RemoteSlamWorker(W, H, addr="127.0.0.1:1")
+    depth = np.full((H, W), 500.0, np.float32)
+    quat = np.array([1.0, 0.0, 0.0, 0.0], np.float32)
+    rw.submit(depth, quat, 101325.0, quat_offset_us=7760.0, t_device_us=500_000.0)
+    assert rw._in_slot["quat_offset_us"] == 7760.0
+    assert rw._in_slot["t_device_us"] == 500_000.0
+
+
+def test_remote_worker_submit_serializes_imu_raw_batch():
+    from roomscan.protocol import ImuRawBatch
+    rw = RemoteSlamWorker(W, H, addr="127.0.0.1:1")
+    depth = np.full((H, W), 500.0, np.float32)
+    quat = np.array([1.0, 0.0, 0.0, 0.0], np.float32)
+    batch = ImuRawBatch(
+        gyro_dps=np.array([[0.1, 0.2, 0.3]], dtype=np.float64),
+        gyro_cnt=np.array([0], dtype=np.uint8),
+        accel_g=np.array([[0.0, 0.0, 1.0]], dtype=np.float64),
+        accel_cnt=np.array([0], dtype=np.uint8),
+        gravity_g=np.array([[0.0, 0.0, 1.0]], dtype=np.float64),
+        gravity_cnt=np.array([0], dtype=np.uint8),
+        gbias_dps=np.array([[0.01, 0.01, 0.01]], dtype=np.float64),
+        gbias_cnt=np.array([0], dtype=np.uint8),
+        timestamp_ticks=np.array([1000], dtype=np.uint32),
+        timestamp_cnt=np.array([0], dtype=np.uint8),
+        n_records=5,
+        tick_us=21.7,
+    )
+    rw.submit(depth, quat, None, imu_raw=batch)
+    assert "imu_raw_gyro_dps" in rw._in_slot
+    assert "imu_raw_accel_g" in rw._in_slot
+    np.testing.assert_allclose(rw._in_slot["imu_raw_gyro_dps"], [[0.1, 0.2, 0.3]])
+    np.testing.assert_allclose(rw._in_slot["imu_raw_accel_g"], [[0.0, 0.0, 1.0]])
+
+
+def test_remote_worker_service_forwards_timing_and_imu_raw():
+    from roomscan.protocol import ImuRawBatch
+    port, lsock, th, srv = _serve_on_ephemeral(device="CPU:0")
+    rw = RemoteSlamWorker(W, H, addr=f"127.0.0.1:{port}", fov_h=55.0, fov_v=42.0)
+    assert rw.connect() is True
+    rw.start()
+    depth = np.full((H, W), 500.0, np.float32)
+    quat = np.array([1.0, 0.0, 0.0, 0.0], np.float32)
+    batch = ImuRawBatch(
+        gyro_dps=np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
+        gyro_cnt=np.array([0], dtype=np.uint8),
+        accel_g=np.array([[0.0, 0.0, 1.0]], dtype=np.float64),
+        accel_cnt=np.array([0], dtype=np.uint8),
+        gravity_g=np.array([[0.0, 0.0, 1.0]], dtype=np.float64),
+        gravity_cnt=np.array([0], dtype=np.uint8),
+        gbias_dps=np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
+        gbias_cnt=np.array([0], dtype=np.uint8),
+        timestamp_ticks=np.array([1000], dtype=np.uint32),
+        timestamp_cnt=np.array([0], dtype=np.uint8),
+        n_records=5,
+        tick_us=21.7,
+    )
+    for _ in range(200):
+        rw.submit(depth, quat, 101325.0, imu_raw=batch, quat_offset_us=7760.0, t_device_us=123456.0)
+        time.sleep(0.01)
+        got = rw.latest()
+        if got is not None:
+            break
+    rw.stop()
+    lsock.close()
+    th.join(timeout=2)
+    assert got is not None
+    assert rw.frames_processed > 0
+

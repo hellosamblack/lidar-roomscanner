@@ -18,6 +18,8 @@ re-exports `slerp` from here, not the other way round, so a future live consumer
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -104,6 +106,14 @@ class TimestampedQuaternionBuffer:
     def __len__(self) -> int:
         return len(self._samples)
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, TimestampedQuaternionBuffer):
+            return False
+        return (list(self._samples) == list(other._samples)
+                and self._last_raw == other._last_raw
+                and self.max_span_ticks == other.max_span_ticks
+                and self._samples.maxlen == other._samples.maxlen)
+
     def clear(self) -> None:
         self._samples.clear()
         self._last_raw = None
@@ -148,3 +158,192 @@ class TimestampedQuaternionBuffer:
                     return None
                 return slerp(lo_q, hi_q, (t - lo_t) / span)
         return None
+
+
+def interpolate_quaternion_at(
+    buffer_or_samples: TimestampedQuaternionBuffer | Sequence[tuple[float, Any]],
+    target_ticks: float,
+    max_span_ticks: float | None = None,
+) -> tuple[float, float, float, float] | None:
+    """Query orientation at target LSM tick, interpolating between bracketing samples.
+
+    Accepts either a `TimestampedQuaternionBuffer` or a sequence of `(ticks, quat)`
+    pairs. Returns None if the target is outside the bracket or separated by more
+    than `max_span_ticks`."""
+    if isinstance(buffer_or_samples, TimestampedQuaternionBuffer):
+        return buffer_or_samples.at(target_ticks)
+    buf = TimestampedQuaternionBuffer(
+        capacity=max(64, len(buffer_or_samples)), max_span_ticks=max_span_ticks
+    )
+    for ticks, quat in buffer_or_samples:
+        buf.add(ticks, quat)
+    return buf.at(target_ticks)
+
+
+@dataclass(frozen=True)
+class PairedGroupFrame:
+    header: Any
+    outputs: dict[str, Any]
+    quat: tuple[float, float, float, float] | None
+    pressure_pa: float | None = None
+    imu_raw: Any = None
+    imu_sync: Any = None
+    quat_offset_us: float | None = None
+    t_device_us: int | float | None = None
+
+
+class LiveGroupAggregator:
+    """Pairs streaming depth frames with matching group sensor data in wire order (#181).
+
+    On the wire, depth (stream 0/1) arrives before the group's orientation (stream 9),
+    env (stream 10), raw IMU (stream 11), and sync (stream 13). LiveGroupAggregator
+    holds the pending depth frame until the group's sensor frames arrive (or the next
+    group begins), guaranteeing depth frames pair with their matching group quaternion
+    rather than lagging by a full frame.
+
+    When `apply_quat_phase` is enabled and stream 13 is present, queries
+    `TimestampedQuaternionBuffer` at `sync.frame_ready_ticks()` to interpolate the
+    orientation at the exact frame-ready edge.
+    """
+
+    def __init__(self, capacity: int = 64, max_span_ticks: float | None = None,
+                 apply_quat_phase: bool = False, tick_us: float = 21.7):
+        self.quat_buf = TimestampedQuaternionBuffer(capacity=capacity, max_span_ticks=max_span_ticks)
+        self.apply_quat_phase = bool(apply_quat_phase)
+        self.tick_us = float(tick_us)
+        self._pending_depth: tuple[Any, dict[str, Any]] | None = None
+        self._pending_seq: int | None = None
+        self._latest_quat: tuple[float, float, float, float] | None = None
+        self._latest_env_pa: float | None = None
+        self._latest_raw: Any = None
+        self._latest_sync: Any = None
+        self._group_quats: dict[int, tuple[float, float, float, float]] = {}
+        self._group_envs: dict[int, float] = {}
+        self._group_raws: dict[int, Any] = {}
+        self._group_syncs: dict[int, Any] = {}
+
+    def clear(self) -> None:
+        self.quat_buf.clear()
+        self._pending_depth = None
+        self._pending_seq = None
+        self._latest_quat = None
+        self._latest_env_pa = None
+        self._latest_raw = None
+        self._latest_sync = None
+        self._group_quats.clear()
+        self._group_envs.clear()
+        self._group_raws.clear()
+        self._group_syncs.clear()
+
+    def add_quat(self, seq: int, quat: Any) -> None:
+        q = _valid_quat(quat)
+        if q is not None:
+            self._latest_quat = q
+            self._group_quats[seq] = q
+            sync = self._group_syncs.get(seq)
+            if sync is not None and getattr(sync, "valid", False) and getattr(sync, "quat_mid_ticks", None):
+                self.quat_buf.add(sync.quat_mid_ticks, q)
+
+    def add_env_pressure(self, seq: int, pressure_pa: float | None) -> None:
+        if pressure_pa is not None:
+            self._latest_env_pa = float(pressure_pa)
+            self._group_envs[seq] = float(pressure_pa)
+
+    def add_imu_raw(self, seq: int, imu_raw: Any) -> None:
+        if imu_raw is not None:
+            self._latest_raw = imu_raw
+            self._group_raws[seq] = imu_raw
+
+    def add_sync(self, seq: int, sync: Any) -> PairedGroupFrame | None:
+        if sync is None:
+            return None
+        self._latest_sync = sync
+        self._group_syncs[seq] = sync
+        if getattr(sync, "valid", False) and getattr(sync, "quat_mid_ticks", None):
+            q = self._group_quats.get(seq, self._latest_quat)
+            if q is not None:
+                self.quat_buf.add(sync.quat_mid_ticks, q)
+        if self._pending_depth is not None and self._pending_seq == seq:
+            return self._finalize_pending(seq)
+        return None
+
+    def add_depth(self, header: Any, outputs: dict[str, Any]) -> PairedGroupFrame | None:
+        seq = getattr(header, "seq", None)
+        emitted = None
+        if self._pending_depth is not None and self._pending_seq != seq:
+            emitted = self._finalize_pending(self._pending_seq)
+        self._pending_depth = (header, outputs)
+        self._pending_seq = seq
+        return emitted
+
+    def flush(self) -> PairedGroupFrame | None:
+        if self._pending_depth is not None:
+            return self._finalize_pending(self._pending_seq)
+        return None
+
+    def _finalize_pending(self, seq: int | None) -> PairedGroupFrame:
+        header, outputs = self._pending_depth
+        self._pending_depth = None
+        self._pending_seq = None
+
+        sync = self._group_syncs.pop(seq, self._latest_sync) if seq is not None else self._latest_sync
+        group_q = self._group_quats.pop(seq, self._latest_quat) if seq is not None else self._latest_quat
+        pressure = self._group_envs.pop(seq, self._latest_env_pa) if seq is not None else self._latest_env_pa
+        raw = self._group_raws.pop(seq, self._latest_raw) if seq is not None else self._latest_raw
+
+        # Prune old group entries
+        if seq is not None:
+            for d in (self._group_quats, self._group_envs, self._group_raws, self._group_syncs):
+                for old_k in [k for k in d if k < seq - 10]:
+                    d.pop(old_k, None)
+
+        quat = None
+        offset_us = None
+        if sync is not None and getattr(sync, "valid", False):
+            offset_fn = getattr(sync, "quat_offset_us", None)
+            if offset_fn is not None:
+                offset_us = offset_fn(self.tick_us)
+            if self.apply_quat_phase:
+                target_fn = getattr(sync, "frame_ready_ticks", None)
+                if target_fn is not None:
+                    target_ticks = target_fn(self.tick_us)
+                    quat = self.quat_buf.at(target_ticks)
+        if quat is None:
+            quat = group_q
+
+        t_us = getattr(header, "t_us", None)
+        return PairedGroupFrame(
+            header=header,
+            outputs=outputs,
+            quat=quat,
+            pressure_pa=pressure,
+            imu_raw=raw,
+            imu_sync=sync,
+            quat_offset_us=offset_us,
+            t_device_us=t_us,
+        )
+
+    def feed_frame(self, frame: Any, outputs: dict[str, Any] | None = None) -> PairedGroupFrame | None:
+        """Process one protocol Frame or transformed outputs."""
+        hdr = getattr(frame, "header", frame)
+        sid = getattr(hdr, "stream_id", None)
+        seq = getattr(hdr, "seq", 0)
+        from .protocol import StreamId, decode_env, decode_imu_quat, decode_imu_raw, decode_imu_sync
+        if sid in (StreamId.RAW_3DMD, StreamId.DEPTH_ZF32) or outputs is not None:
+            if outputs is not None:
+                return self.add_depth(hdr, outputs)
+            return None
+        elif sid == StreamId.IMU_QUAT:
+            q = decode_imu_quat(frame.payload)
+            self.add_quat(seq, q)
+        elif sid == StreamId.ENV:
+            p, _mag, _t = decode_env(frame.payload)
+            self.add_env_pressure(seq, p)
+        elif sid == StreamId.IMU_RAW:
+            batch = decode_imu_raw(frame.payload, self.tick_us)
+            self.add_imu_raw(seq, batch)
+        elif sid == StreamId.IMU_SYNC:
+            sync = decode_imu_sync(frame.payload)
+            return self.add_sync(seq, sync)
+        return None
+

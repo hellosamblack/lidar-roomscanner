@@ -19,14 +19,17 @@ from .protocol import (
     Frame,
     FrameType,
     ImuRawBatch,
+    ImuSync,
     StreamId,
     decode_env,
     decode_imu_cal,
     decode_imu_quat,
     decode_imu_raw,
+    decode_imu_sync,
     is_valid_env,
     is_valid_mag,
 )
+from .sensor_time import TimestampedQuaternionBuffer
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,9 @@ class SensorState:
         self._pressure_spark = deque(maxlen=env_spark_depth)
         self._temp_spark = deque(maxlen=env_spark_depth)
         self._last_spark_t: int | None = None
+        # stream 13: the frame's FRAME_READY edge on the LSM's own clock (#155 / #181).
+        self._imu_sync: ImuSync | None = None
+        self._quat_buf = TimestampedQuaternionBuffer(capacity=64)
 
     def feed(self, frame: Frame) -> None:
         if frame.header.frame_type != FrameType.DATA:
@@ -74,6 +80,9 @@ class SensorState:
                 self._quat = q
                 if self._fusion is not None and self._raw_mag is not None:
                     self._fusion.update(q, self._raw_mag, frame.header.t_us)
+                if (self._imu_sync is not None and self._imu_sync.valid
+                        and self._imu_sync.quat_mid_ticks):
+                    self._quat_buf.add(self._imu_sync.quat_mid_ticks, q)
         elif sid == StreamId.ENV:
             pressure, mag, temp = decode_env(frame.payload)
             if is_valid_env(pressure, mag, temp):
@@ -103,6 +112,16 @@ class SensorState:
             cal = decode_imu_cal(frame.payload)
             with self._lock:
                 self._imu_tick_us = cal.tick_us
+        elif sid == StreamId.IMU_SYNC:
+            try:
+                sync = decode_imu_sync(frame.payload)
+            except Exception:
+                sync = None
+            if sync is not None and sync.valid:
+                with self._lock:
+                    self._imu_sync = sync
+                    if sync.quat_n and sync.quat_mid_ticks and self._quat is not None:
+                        self._quat_buf.add(sync.quat_mid_ticks, self._quat)
 
     @property
     def imu_tick_us(self) -> float:
@@ -160,12 +179,40 @@ class SensorState:
             self._pressure_spark.clear()
             self._temp_spark.clear()
             self._last_spark_t = None
+            self._imu_sync = None
+            self._quat_buf.clear()
             # Inlined rather than calling `reset_fusion()`: `self._lock` is not
             # reentrant and this whole reset must be one atomic step.
             if self._fusion is not None:
                 self._fusion.reset()
             if self._imu_fusion is not None:
                 self._imu_fusion.reset()
+
+    def latest_imu_sync(self) -> ImuSync | None:
+        """Newest stream-13 sync sample, or None if the device isn't sending them."""
+        with self._lock:
+            return self._imu_sync
+
+    def latest_quat_offset_us(self) -> float | None:
+        """How far the paired quaternion's instant sits AFTER the frame-ready edge, in µs."""
+        with self._lock:
+            if self._imu_sync is None or not self._imu_sync.valid:
+                return None
+            return self._imu_sync.quat_offset_us(self._imu_tick_us)
+
+    def quat_at_frame_ready(self, sync: ImuSync | None = None) -> tuple[float, float, float, float] | None:
+        """Orientation at the frame-ready edge, interpolated via TimestampedQuaternionBuffer."""
+        with self._lock:
+            s = sync if sync is not None else self._imu_sync
+            if s is None or not s.valid or not s.quat_mid_ticks:
+                return None
+            target_ticks = s.frame_ready_ticks(self._imu_tick_us)
+            return self._quat_buf.at(target_ticks)
+
+    def quat_at_ticks(self, ticks: float) -> tuple[float, float, float, float] | None:
+        """Orientation at raw LSM tick, interpolated via TimestampedQuaternionBuffer."""
+        with self._lock:
+            return self._quat_buf.at(ticks)
 
     def latest_imu_raw(self) -> ImuRawBatch | None:
         """Newest stream-11 raw-FIFO batch, or None if the device isn't sending them."""

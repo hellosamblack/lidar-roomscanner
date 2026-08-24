@@ -79,19 +79,19 @@ class RemoteSlamWorker:
             return False
 
     def submit(self, depth, quat, pressure, reflectance=None, confidence=None,
-               imu_rate_hz=None, imu_raw=None, quat_offset_us=None) -> None:
+               imu_rate_hz=None, imu_raw=None, quat_offset_us=None,
+               t_device_us=None) -> None:
         """`imu_rate_hz` (Task 8): carried in the message so the container's
         own Mapper rescales `baro_tau_frames` identically to the local
         backend (see `SlamService.serve_client`). Omitted from the message
         entirely when `None`, so an older service (that never looks for the
         key) is unaffected -- same shape as reflectance/confidence above.
 
-        `imu_raw`/`quat_offset_us` (BUG-069/067 levers) are accepted so this
-        matches `SlamWorker.submit`'s signature, but NOT yet forwarded over the
-        wire -- the ZUPT/quat-phase levers are local/offline only. A remote
-        backend simply runs without them (both default off), so this is a
-        graceful no-op, not a silent bug; wiring them into the service message
-        is a follow-up if the remote backend ever needs them."""
+        `t_device_us`/`quat_offset_us` (#181): carried in the message when
+        provided so remote SLAM receives exact frame/group timing and phase offset.
+
+        `imu_raw`: serialized when present so the remote Mapper can evaluate
+        ZUPT stationarity and gyro rollback."""
         with self._in_lock:
             self._fid += 1
             msg = {"fid": self._fid,
@@ -105,6 +105,24 @@ class RemoteSlamWorker:
                 msg["confidence"] = np.asarray(confidence, np.float32)
             if imu_rate_hz is not None:
                 msg["imu_rate_hz"] = float(imu_rate_hz)
+            if quat_offset_us is not None:
+                msg["quat_offset_us"] = float(quat_offset_us)
+            if t_device_us is not None:
+                msg["t_device_us"] = float(t_device_us)
+            if imu_raw is not None:
+                if hasattr(imu_raw, "gyro_dps") and hasattr(imu_raw, "accel_g"):
+                    msg["imu_raw_gyro_dps"] = np.asarray(imu_raw.gyro_dps, np.float64)
+                    msg["imu_raw_accel_g"] = np.asarray(imu_raw.accel_g, np.float64)
+                    if hasattr(imu_raw, "gravity_g") and imu_raw.gravity_g is not None:
+                        msg["imu_raw_gravity_g"] = np.asarray(imu_raw.gravity_g, np.float64)
+                    if hasattr(imu_raw, "gbias_dps") and imu_raw.gbias_dps is not None:
+                        msg["imu_raw_gbias_dps"] = np.asarray(imu_raw.gbias_dps, np.float64)
+                    if hasattr(imu_raw, "timestamp_ticks") and imu_raw.timestamp_ticks is not None:
+                        msg["imu_raw_timestamp_ticks"] = np.asarray(imu_raw.timestamp_ticks, np.uint32)
+                    if hasattr(imu_raw, "tick_us") and imu_raw.tick_us is not None:
+                        msg["imu_raw_tick_us"] = float(imu_raw.tick_us)
+                    if hasattr(imu_raw, "n_records") and imu_raw.n_records is not None:
+                        msg["imu_raw_n_records"] = int(imu_raw.n_records)
             self._frames_submitted += 1
             if self._in_slot is not None:
                 self._frames_overwritten += 1

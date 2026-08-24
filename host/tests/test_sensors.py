@@ -891,3 +891,31 @@ def test_bug082_2_capture_replay_no_false_anomaly_gates():
 
     assert anomaly_count == 0, f"Expected 0 anomaly gates in BUG-082-2 replay, got {anomaly_count}"
 
+
+def test_state_feeds_imu_sync_and_interpolates_frame_ready_quat():
+    st = SensorState()
+    # Group 1 quat + sync
+    st.feed(_frame(StreamId.IMU_QUAT, struct.pack("<4f", 1.0, 0.0, 0.0, 0.0)))
+    payload1 = struct.pack("<IIIIHHBB", 1000, 100, 200, 1000, 50, 16, 1, 0)
+    st.feed(_frame(StreamId.IMU_SYNC, payload1))
+
+    assert st.latest_imu_sync() is not None
+    assert st.latest_imu_sync().quat_mid_ticks == 1000
+    assert st.latest_quat_offset_us() is not None
+
+    # Group 2 quat + sync (10 deg yaw)
+    q2 = _axis_angle_quat((0, 0, 1), 10.0)
+    st.feed(_frame(StreamId.IMU_QUAT, struct.pack("<4f", *q2)))
+    payload2 = struct.pack("<IIIIHHBB", 1505, 100, 200, 2000, 50, 16, 1, 0)
+    st.feed(_frame(StreamId.IMU_SYNC, payload2))
+
+    interp_q = st.quat_at_frame_ready()
+    assert interp_q is not None
+    assert 4.0 <= quat_yaw_deg(interp_q) <= 6.0
+
+    st.reset_source()
+    assert st.latest_imu_sync() is None
+    assert st.latest_quat_offset_us() is None
+    assert st.quat_at_frame_ready() is None
+
+

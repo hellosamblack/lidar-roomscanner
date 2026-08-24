@@ -18,6 +18,7 @@ import socket
 import struct
 import threading
 import time
+from concurrent.futures import Future as _CFuture
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 import pathlib
@@ -33,6 +34,13 @@ from roomscan.deproject import Deprojector
 from roomscan.ir_image import reflectance_to_rgb
 from roomscan.logbus import LogBus
 from roomscan.metrics import MetricsRegistry, MetricsSnapshot, StreamRate
+from roomscan.thin_render import (
+    THIN_HEADER,
+    THIN_HEIGHT,
+    THIN_WIDTH,
+    ThinRenderUnavailable,
+    ThinRenderer,
+)
 from roomscan.pipeline import TransformStage
 from roomscan.protocol import (
     CommandCode,
@@ -5742,6 +5750,32 @@ def test_slam_feed_tolerates_a_frame_with_no_depth():
     assert submitted == []
 
 
+def test_slam_feed_uses_quat_at_frame_ready_and_t_device_us():
+    interp_quat = (0.707, 0.0, 0.0, 0.707)
+    fallback_quat = (1.0, 0.0, 0.0, 0.0)
+    submitted = []
+    slam = SimpleNamespace(submit=lambda *a, **k: submitted.append((a, k)))
+    state = SimpleNamespace(
+        ui_state=SimpleNamespace(display="slam"),
+        slam_runner=slam,
+        sensor_state=SimpleNamespace(
+            quat_at_frame_ready=lambda: interp_quat,
+            latest_quat_offset_us=lambda: 7760.0,
+            fused_quat=lambda: fallback_quat,
+            latest_env=lambda: SimpleNamespace(pressure_pa=101325.0),
+            latest_imu_raw=lambda: "raw",
+        ),
+    )
+    feed = web.make_slam_feed(state)
+    outputs = {"depth": np.zeros((4, 4), np.float32)}
+    feed(SimpleNamespace(seq=42, t_us=123456), outputs)
+    assert len(submitted) == 1
+    (depth, quat, pressure), kw = submitted[0]
+    assert quat == interp_quat
+    assert kw["quat_offset_us"] == 7760.0
+    assert kw["t_device_us"] == 123456
+
+
 # --- Task 8: applied IMU/env rate reaches the SLAM submission ---------------
 
 def test_applied_imu_env_rate_prefers_decoupled_readback():
@@ -7086,16 +7120,6 @@ def test_handle_inbound_set_imu_env_rate_dispatches():
 # ==========================================================================
 # `/ws-thin` thin-client endpoint + mDNS advertisement (#194)
 # ==========================================================================
-
-from concurrent.futures import Future as _CFuture
-
-from roomscan.thin_render import (
-    THIN_HEADER,
-    THIN_HEIGHT,
-    THIN_WIDTH,
-    ThinRenderUnavailable,
-    ThinRenderer,
-)
 
 
 # --- fakes ----------------------------------------------------------------

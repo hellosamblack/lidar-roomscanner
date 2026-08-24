@@ -22,7 +22,10 @@ import pytest
 
 from roomscan.sensor_time import (
     TICK_MASK,
+    LiveGroupAggregator,
+    PairedGroupFrame,
     TimestampedQuaternionBuffer,
+    interpolate_quaternion_at,
     signed_tick_delta,
     slerp,
 )
@@ -205,3 +208,133 @@ def test_clear_resets():
     assert len(buf) == 0
     assert buf.at(100) is None
     assert buf.add(50, _quat_z(1.0))         # earlier tick OK after clear
+
+
+# --- interpolate_quaternion_at helper --------------------------------------------------
+
+def test_interpolate_quaternion_at_buffer():
+    buf = TimestampedQuaternionBuffer()
+    buf.add(1000, _quat_z(0.0))
+    buf.add(2000, _quat_z(10.0))
+    q = interpolate_quaternion_at(buf, 1500)
+    assert q is not None
+    assert _angle_deg(q, _quat_z(5.0)) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_interpolate_quaternion_at_samples_sequence():
+    samples = [(1000.0, _quat_z(0.0)), (2000.0, _quat_z(10.0))]
+    q = interpolate_quaternion_at(samples, 1250.0)
+    assert q is not None
+    assert _angle_deg(q, _quat_z(2.5)) == pytest.approx(0.0, abs=1e-6)
+
+
+# --- LiveGroupAggregator (live streaming pairing / exact-group association #181) ------
+
+class _FakeHeader:
+    def __init__(self, seq: int, t_us: int, stream_id: int = 1):
+        self.seq = seq
+        self.t_us = t_us
+        self.stream_id = stream_id
+
+
+class _FakeSync:
+    def __init__(self, lsm_ticks: int, quat_mid_ticks: int, latch_delay_us: int = 100,
+                 quat_n: int = 16, valid: bool = True):
+        self.lsm_ticks = lsm_ticks
+        self.quat_mid_ticks = quat_mid_ticks
+        self.latch_delay_us = latch_delay_us
+        self.quat_n = quat_n
+        self.valid = valid
+
+    def frame_ready_ticks(self, tick_us: float) -> float:
+        return self.lsm_ticks - self.latch_delay_us / tick_us
+
+    def quat_offset_us(self, tick_us: float) -> float:
+        return (signed_tick_delta(self.lsm_ticks, self.quat_mid_ticks) + self.latch_delay_us / tick_us) * tick_us
+
+
+def test_live_group_aggregator_pairs_exact_group_quats_and_sync():
+    """Depth frame N must pair with group N's quaternion and sync, not lag by 1 frame."""
+    agg = LiveGroupAggregator(tick_us=20.0, apply_quat_phase=False)
+    hdr1 = _FakeHeader(seq=1, t_us=100_000)
+    outputs1 = {"depth": np.zeros((4, 4), dtype=np.float32)}
+
+    # Group 1 depth arrives
+    assert agg.add_depth(hdr1, outputs1) is None  # held pending matching group sensors
+
+    # Group 1 sensors arrive
+    agg.add_quat(1, _quat_z(10.0))
+    agg.add_env_pressure(1, 101325.0)
+    agg.add_imu_raw(1, "raw_batch_1")
+    sync1 = _FakeSync(lsm_ticks=1000, quat_mid_ticks=1050)
+    emitted = agg.add_sync(1, sync1)
+
+    assert isinstance(emitted, PairedGroupFrame)
+    assert emitted.header.seq == 1
+    assert emitted.outputs is outputs1
+    assert emitted.quat is not None
+    assert _angle_deg(emitted.quat, _quat_z(10.0)) == pytest.approx(0.0, abs=1e-6)
+    assert emitted.pressure_pa == 101325.0
+    assert emitted.imu_raw == "raw_batch_1"
+    assert emitted.imu_sync is sync1
+    assert emitted.t_device_us == 100_000
+
+
+def test_live_group_aggregator_applies_quat_phase_slerp_when_enabled():
+    """With apply_quat_phase=True, orientation at frame_ready_ticks is bracketed
+    by group N-1 and group N quat_mid_ticks and interpolated via SLERP."""
+    agg = LiveGroupAggregator(tick_us=20.0, apply_quat_phase=True)
+
+    # Seed group 1 quat in the buffer
+    agg.add_quat(1, _quat_z(0.0))
+    sync1 = _FakeSync(lsm_ticks=1000, quat_mid_ticks=1000)
+    agg.add_sync(1, sync1)
+
+    # Group 2 arrives: depth frame_ready at tick 1500 (lsm 1505, latch 100 us / 20 = 5 ticks)
+    hdr2 = _FakeHeader(seq=2, t_us=133_333)
+    outputs2 = {"depth": np.ones((4, 4), dtype=np.float32)}
+    agg.add_depth(hdr2, outputs2)
+
+    # Group 2 sensors: quat midpoint at tick 2000 with 10 degrees yaw
+    agg.add_quat(2, _quat_z(10.0))
+    sync2 = _FakeSync(lsm_ticks=1505, quat_mid_ticks=2000, latch_delay_us=100)
+    emitted = agg.add_sync(2, sync2)
+
+    assert emitted is not None
+    # frame_ready_ticks = 1505 - 5 = 1500 (midpoint between 1000 and 2000 -> 5.0 deg)
+    assert emitted.quat is not None
+    assert _angle_deg(emitted.quat, _quat_z(5.0)) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_live_group_aggregator_flushes_on_next_depth_when_sync_missing():
+    """When stream 13 is absent or dropped, arrival of the next depth frame flushes
+    the previous pending frame with its group quaternion."""
+    agg = LiveGroupAggregator(apply_quat_phase=False)
+    hdr1 = _FakeHeader(seq=1, t_us=100_000)
+    outputs1 = {"depth": np.zeros((2, 2))}
+    agg.add_depth(hdr1, outputs1)
+    agg.add_quat(1, _quat_z(15.0))
+
+    hdr2 = _FakeHeader(seq=2, t_us=133_333)
+    outputs2 = {"depth": np.ones((2, 2))}
+    emitted1 = agg.add_depth(hdr2, outputs2)
+
+    assert emitted1 is not None
+    assert emitted1.header.seq == 1
+    assert emitted1.quat is not None
+    assert _angle_deg(emitted1.quat, _quat_z(15.0)) == pytest.approx(0.0, abs=1e-6)
+
+    # Final flush gets frame 2
+    emitted2 = agg.flush()
+    assert emitted2 is not None
+    assert emitted2.header.seq == 2
+
+
+def test_live_group_aggregator_clear_resets():
+    agg = LiveGroupAggregator()
+    agg.add_depth(_FakeHeader(seq=1, t_us=1000), {"depth": 1})
+    agg.add_quat(1, _quat_z(5.0))
+    agg.clear()
+    assert agg.flush() is None
+    assert len(agg.quat_buf) == 0
+

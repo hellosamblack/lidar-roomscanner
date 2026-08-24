@@ -53,15 +53,43 @@ class SlamService:
             pressure = msg.get("pressure")
             refl = msg.get("reflectance")
             conf = msg.get("confidence")
-            # Task 8 step 2: forward the client's applied IMU/env rate through
-            # to the SAME SlamWorker.submit()/run_once() path the local
-            # backend uses, so local and remote backends rescale
-            # `baro_tau_frames` identically. Absent (older client) -> None,
-            # which Mapper.set_imu_rate_hz treats as a no-op.
+            imu_rate_hz = msg.get("imu_rate_hz")
+            quat_offset_us = msg.get("quat_offset_us")
+            t_device_us = msg.get("t_device_us")
+
+            imu_raw = None
+            if "imu_raw_gyro_dps" in msg and "imu_raw_accel_g" in msg:
+                from ..protocol import ImuRawBatch
+                gyro_dps = np.asarray(msg["imu_raw_gyro_dps"], np.float64)
+                accel_g = np.asarray(msg["imu_raw_accel_g"], np.float64)
+                gravity_g = np.asarray(msg.get("imu_raw_gravity_g", np.zeros((0, 3), dtype=np.float64)), np.float64)
+                gbias_dps = np.asarray(msg.get("imu_raw_gbias_dps", np.zeros((0, 3), dtype=np.float64)), np.float64)
+                timestamp_ticks = np.asarray(msg.get("imu_raw_timestamp_ticks", np.zeros(0, dtype=np.uint32)), np.uint32)
+                imu_raw = ImuRawBatch(
+                    gyro_dps=gyro_dps,
+                    gyro_cnt=np.zeros(len(gyro_dps), dtype=np.uint8),
+                    accel_g=accel_g,
+                    accel_cnt=np.zeros(len(accel_g), dtype=np.uint8),
+                    gravity_g=gravity_g,
+                    gravity_cnt=np.zeros(len(gravity_g), dtype=np.uint8),
+                    gbias_dps=gbias_dps,
+                    gbias_cnt=np.zeros(len(gbias_dps), dtype=np.uint8),
+                    timestamp_ticks=timestamp_ticks,
+                    timestamp_cnt=np.zeros(len(timestamp_ticks), dtype=np.uint8),
+                    n_records=int(msg.get("imu_raw_n_records", 0)),
+                    tick_us=float(msg.get("imu_raw_tick_us", 21.7)),
+                )
+
+            # Task 8 step 2 + #181: forward rate, phase offset, timing, and imu_raw
+            # through to the SAME SlamWorker.submit()/run_once() path the local
+            # backend uses.
             worker.submit(depth, quat, pressure,
                           reflectance=None if refl is None else np.asarray(refl, np.float32),
                           confidence=None if conf is None else np.asarray(conf, np.float32),
-                          imu_rate_hz=msg.get("imu_rate_hz"))
+                          imu_rate_hz=imu_rate_hz,
+                          imu_raw=imu_raw,
+                          quat_offset_us=quat_offset_us,
+                          t_device_us=t_device_us)
             worker.run_once()
             mesh, _traj, step = worker.latest()
 
