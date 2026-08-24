@@ -124,6 +124,9 @@ TAG_RULES: dict[str, tuple[str, str, str]] = {
     # written lowercase -- a mixed-case keyword silently never fires.
     "sd-card": (r"\bmicrosd card\b", "the Raspberry Pi, a card reader and a screen", "venue"),
     "terminal": (r"terminal window", "a terminal you can leave open", "venue"),
+    "bridge-power": (r"unplug the bridge(?: box'?s)? power cable|bridge(?: box'?s)? power cable"
+                     r"|power[\s-]cycl(?:e|ing) the (?:pi )?bridge",
+                     "the bridge power cable within reach", "venue"),
     "mode-change": (r"ranging mode", "a ranging-mode change Claude makes and undoes", "body"),
     "viewer-down": (r"stop the live viewer", "the live viewer stopped", "body"),
     "reflash": (r"load the experimental software|experimental software onto the scanner",
@@ -135,7 +138,7 @@ TAG_RULES: dict[str, tuple[str, str, str]] = {
 # Anything here means the sitting needs the rig present and powered, even when the
 # runbook never spells out a power-up step (#142's recording is started by Claude).
 RIG_TAGS = frozenset({"rig-power", "rig-on", "handheld", "metal-free", "blank-wall",
-                      "walk-loop", "still-surface", "sd-card"})
+                      "walk-loop", "still-surface", "sd-card", "bridge-power"})
 
 # Most specific first: an issue's venue is the first of these it needs. Two issues with
 # the same venue can share one setup, which is the whole point of the page.
@@ -149,6 +152,7 @@ VENUES: tuple[tuple[str, str], ...] = (
     ("still-surface", "A table or shelf it can sit on undisturbed"),
     ("usb-cable", "At the computer, with the scanner's second USB cable"),
     ("terminal", "At the computer, in a terminal"),
+    ("bridge-power", "At the rig, with the bridge power cable within reach"),
     ("rig-on", "Wherever the scanner already is"),
     ("no-hardware", "Anywhere — nothing physical"),
 )
@@ -156,7 +160,7 @@ VENUES: tuple[tuple[str, str], ...] = (
 # Venue ordering within a sitting: props-free work first, the fiddly staging last.
 VENUE_ORDER = {tag: i for i, tag in enumerate(
     ("rig-on", "metal-free", "walk-loop", "still-surface", "blank-wall",
-     "usb-cable", "terminal", "sd-card", "no-hardware"))}
+     "usb-cable", "terminal", "bridge-power", "sd-card", "no-hardware"))}
 
 # sitting key -> (heading, why these belong together, sort rank)
 SITTINGS: dict[str, tuple[str, str, int]] = {

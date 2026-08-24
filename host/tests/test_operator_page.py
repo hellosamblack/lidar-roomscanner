@@ -195,6 +195,26 @@ def test_reflash_and_viewer_down_are_exclusive():
     assert _sitting_for(rb) == "rig-exclusive"
 
 
+def test_bridge_power_vocabulary_sets_venue_and_rig_live():
+    """#210's power cut runbook asks to unplug the bridge box's power cable.
+
+    It needs the rig sitting with the bridge power cable within reach, not a desk sitting.
+    """
+    rb = parse_runbook(_runbook(
+        210, "Power-loss resilience drill",
+        "- The scanner and Pi bridge, powered up as usual.\n"
+        "- About **10 minutes**.",
+        "1. [You] Unplug the bridge box's power cable from the battery pack.\n"
+        "2. [You] Wait 10 seconds, then plug the bridge box's power cable back in.\n"
+        "3. [Claude] I will check the bridge status.",
+    ))
+    assert "bridge-power" in rb["tags"]
+    assert _sitting_for(rb) == "rig-live"
+    venue, label = _venue(rb)
+    assert venue == "bridge-power"
+    assert "bridge power cable" in label
+
+
 # ------------------------------------------------------------------------ clustering
 
 

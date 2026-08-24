@@ -240,12 +240,15 @@ def test_the_static_scene_trap_is_covered(library_text):
 
 
 def test_the_bridge_ordering_trap_keeps_its_order(library_text):
-    """Out of order the FileHub claims its port as WAN and the board never links."""
-    block = next(b for b in _FENCED.findall(library_text) if "Unplug" in b)
-    order = [i for i in (block.find("Unplug"), block.find("Power-cycle"),
-                         block.find("Bridge Mode"), block.find("Plug the network cable back"))]
+    """The Pi bridge recovery sequence power-cycles the bridge and checks the Bridge modal."""
+    block = next(b for b in _FENCED.findall(library_text) if "Power-cycle the Pi bridge" in b)
+    order = [i for i in (block.find("Power-cycle the Pi bridge"),
+                         block.find("Bridge chip"),
+                         block.find("bridge redone"))]
     assert all(i >= 0 for i in order), block
-    assert order == sorted(order), "the four bridge steps are out of order"
+    assert order == sorted(order), "the bridge steps are out of order"
+    assert "roomscan-bridge.local" in block
+    assert "Bridge Mode" not in library_text
 
 
 # --------------------------------------------------------------------------------
@@ -279,7 +282,7 @@ def test_result_headings_are_identical_everywhere(skill_text):
 # --------------------------------------------------------------------------------
 
 def test_mcp_tools_cited_by_the_skill_are_registered(skill_text, library_text, tool_names):
-    cited = set(re.findall(r"`((?:rig|capture|ui|slam|operator)_[a-z_]+)\(", skill_text + library_text))
+    cited = set(re.findall(r"`((?:rig|capture|ui|slam|operator|bridge)_[a-z_]+)\(", skill_text + library_text))
     assert cited, "the skill should name the tools it drives"
     missing = cited - tool_names
     assert not missing, f"skill cites unregistered MCP tools: {sorted(missing)}"

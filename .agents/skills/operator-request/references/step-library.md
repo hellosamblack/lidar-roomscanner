@@ -27,28 +27,27 @@ Use when the rig may be off, or at the start of any session after it has been id
 2. [You] Look at the small square **network socket** on the scanner board where the flat cable
    plugs in. There should be a **steady green light** next to it, and usually a second blinking
    one. That means it is talking to the network.
-   - **No green light?** The cable is loose, or the battery pack is not in the right mode — go to
+   - **No green light?** The cable is loose, or the bridge is not up — go to
      "Fix the bridge" below.
 3. [You] Tell me "**powered up**" and wait — I will check whether it has appeared on the network.
 ```
 
-### S2 — Fix the bridge (the ordering trap)
+### S2 — Fix the bridge
 
 Use **only** when S1 shows no link, or when I tell you the scanner is not on the network. This is
 the single most common first-connection-of-the-day failure.
 
-> **The order matters and cannot be shortcut.** If the network cable is plugged in while the
-> battery pack boots, it decides that socket is its *uplink* rather than its *output*, and the
-> scanner will never get a connection. Running the repair script on its own does not fix that — the
-> pack has to be restarted with the cable out.
+> **Why this happens.** The Pi bridge may have lost Wi-Fi connection, hung, or missed the
+> scanner's DHCP window. Power-cycling the Pi bridge restarts the bridge services and re-establishes
+> the network link.
 
 ```
-1. [You] **Unplug** the flat network cable from the battery pack.
-2. [You] **Power-cycle the battery pack** — hold its power button until it switches off, wait five
-   seconds, switch it back on. Wait until its lights stop changing (about 30 seconds).
-3. [You] In the app's top bar, click **Bridge Mode**. (I can also run this for you — say the word.)
-4. [You] **Plug the network cable back in.**
-5. [You] Tell me "**bridge redone**" and wait — I will check for the scanner on the network.
+1. [You] **Power-cycle the Pi bridge** — unplug the bridge box's power cable from the battery pack,
+   wait five seconds, and plug it back in. Wait for its status lights to settle (about 30 seconds).
+2. [You] In the app's top bar, click the **Bridge chip** to open the Bridge modal and check that it
+   shows connected (`roomscan-bridge.local`). (I can also check the bridge status for you — say the word.)
+3. [You] Check that the flat network cable between the scanner and the bridge is plugged in securely.
+4. [You] Tell me "**bridge redone**" and wait — I will check for the scanner on the network.
 ```
 
 ### S3 — Confirm the scanner is on the network
