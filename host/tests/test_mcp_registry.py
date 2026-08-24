@@ -92,6 +92,7 @@ EXCLUDED: dict[str, str] = {
     "migrate_issues.py": "one-shot: migrated BUGS.md/bugs/ + ROADMAP.md's tracker sections "
                           "to GitHub Issues (2026-08-10) + strip-prefixes title cleanup; "
                           "not an ongoing agent capability",
+    "rerun_export.py": "offline capture replay into Rerun .rrd observability recordings",
 }
 
 CONSOLE_EXPOSED = {"roomscan-web": ("rig_up",), "roomscan-ctl": ("rig_command",),
