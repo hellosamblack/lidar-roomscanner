@@ -449,11 +449,11 @@ When you need a specific branch name or pre-made symlinks, create it yourself in
 
 ```bash
 git -C . worktree add .claude/worktrees/issue-NNN-<slug> -b issue-NNN main
-ln -s ../../../captures .claude/worktrees/issue-NNN-<slug>/captures
-ln -s "$PWD/host/transform/build" .claude/worktrees/issue-NNN-<slug>/host/transform/build
+(cd .claude/worktrees/issue-NNN-<slug> && ./host/tools/worktree_setup.sh)
+# (Or manually: ln -s ../../../captures ... && ln -s "$PWD/host/transform/build" ...)
 ```
 
-Both symlinks matter. Without `host/transform/build`, 15 tests skip as "native transform DLL not
+Both symlinks matter. `host/tools/worktree_setup.sh` handles both symlinks and environment verification automatically. Without `host/transform/build`, 15 tests skip as "native transform DLL not
 built" — which reads as a regression against the 0-skips rule rather than a setup gap. Firmware
 worktrees need two more junctions; see the `worktree-subagent-gotchas` memory rather than guessing.
 
