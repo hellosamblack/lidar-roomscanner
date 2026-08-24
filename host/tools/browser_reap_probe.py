@@ -31,6 +31,9 @@ _ap.add_argument("--park", default="12", help="park TTL, seconds")
 _ap.add_argument("--stop", default="45", help="stop TTL, seconds")
 _ap.add_argument("--port", type=int, default=9222, help="CDP debug port (--cdp only)")
 _ap.add_argument("--url", default="http://localhost:8000/")
+_ap.add_argument("--orphans", action="store_true",
+                 help="instead: verify the #221 orphan sweep with real "
+                      "processes, a real SIGKILL and real reparenting")
 ARGS = _ap.parse_args()
 
 os.environ["ROOMSCAN_MCP_BROWSER_PARK_S"] = ARGS.park
@@ -148,4 +151,91 @@ async def main():
     print("\nfinal status:", b.status())
 
 
-asyncio.run(main())
+async def orphans():
+    """#221: prove the sweep reaps a REAL orphan and spares a REAL live-owned browser.
+
+    Uses real processes and a real SIGKILL rather than a mocked process table, because
+    the property under test -- that POSIX reparents a child instead of killing it -- is
+    exactly what a fake would elide (the #219 lesson).
+    """
+    import subprocess
+
+    import psutil
+
+    from roomscan.mcp_server import browser_reap
+
+    CHROME = "/usr/bin/google-chrome"
+
+    def spawn_fake_server_with_browser(tag):
+        code = (
+            "import subprocess,sys,time,tempfile;"
+            "prof=tempfile.mkdtemp(prefix='roomscan-mcp-chrome-');"
+            f"p=subprocess.Popen(['{CHROME}','--headless=new','--no-sandbox',"
+            "'--disable-dev-shm-usage','--user-data-dir='+prof,'about:blank'],"
+            "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);"
+            "print(p.pid,flush=True);"
+            "time.sleep(600)"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", code, f"roomscan.mcp_server::{tag}"],
+            stdout=subprocess.PIPE, text=True)
+        return proc, int(proc.stdout.readline().strip())
+
+    def alive(pid):
+        try:
+            return psutil.Process(pid).is_running()
+        except psutil.NoSuchProcess:
+            return False
+
+    print("=== case 1: SIGKILLed server -> its browser is an orphan the sweep must reap")
+    srv, chrome = spawn_fake_server_with_browser("orphan")
+    await asyncio.sleep(2)
+    os.kill(srv.pid, 9); srv.wait()
+    await asyncio.sleep(1)
+    print(f"  after SIGKILL: chrome alive={alive(chrome)}  (reparented, still burning)")
+    assert alive(chrome), "precondition: chrome should outlive its parent"
+    r = browser_reap.sweep_orphaned_browsers()
+    await asyncio.sleep(1)
+    print(f"  sweep killed={r['killed_count']} kept={r['kept_count']} -> "
+          f"chrome alive={alive(chrome)}")
+    assert not alive(chrome), "FAIL: orphan not reaped"
+    print("  PASS\n")
+
+    print("=== case 2: a LIVE server's browser must be left alone")
+    srv2, chrome2 = spawn_fake_server_with_browser("live-owner")
+    await asyncio.sleep(2)
+    r2 = browser_reap.sweep_orphaned_browsers()
+    await asyncio.sleep(1)
+    print(f"  sweep killed={r2['killed_count']} kept={r2['kept_count']} -> "
+          f"chrome alive={alive(chrome2)}")
+    assert alive(chrome2), "FAIL: swept a browser owned by a LIVE server"
+    assert r2["killed_count"] == 0, f"FAIL: killed {r2['killed']}"
+    print("  PASS\n")
+    srv2.kill(); srv2.wait()
+    await asyncio.sleep(1)
+    browser_reap.sweep_orphaned_browsers()
+
+    print("=== case 3: pdeathsig takes Chrome down with its parent, no handler needed")
+    code = (
+        "import subprocess,sys,time,tempfile;"
+        "sys.path.insert(0,'src');"
+        "from roomscan.mcp_server import browser_reap;"
+        "prof=tempfile.mkdtemp(prefix='roomscan-mcp-chrome-');"
+        f"p=subprocess.Popen(['{CHROME}','--headless=new','--no-sandbox',"
+        "'--disable-dev-shm-usage','--user-data-dir='+prof,'about:blank'],"
+        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,"
+        "preexec_fn=browser_reap.pdeathsig);"
+        "print(p.pid,flush=True);time.sleep(600)"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", code, "roomscan.mcp_server::pd"],
+                            stdout=subprocess.PIPE, text=True, cwd=os.getcwd())
+    cpid = int(proc.stdout.readline().strip())
+    await asyncio.sleep(2)
+    os.kill(proc.pid, 9); proc.wait()
+    await asyncio.sleep(2)
+    print(f"  after parent SIGKILL: chrome alive={alive(cpid)}")
+    assert not alive(cpid), "FAIL: pdeathsig did not take the child down"
+    print("  PASS")
+
+
+asyncio.run(orphans() if ARGS.orphans else main())

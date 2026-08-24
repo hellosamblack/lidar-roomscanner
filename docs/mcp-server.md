@@ -196,6 +196,38 @@ That second one is also why a park failure is *recorded* (`last_park_error` in
 hid a 100%-failure rate behind a browser that merely looked like it had gone quiet and
 stopped on schedule.
 
+#### The browser does not die with its server (#221)
+
+The idle reaper lives *inside* the MCP server process, so a server that is killed or
+crashes leaves its browser immortal **with no reaper at all** — POSIX reparents children,
+it does not kill them. Verified: a Chrome whose parent was `SIGKILL`ed kept running and
+kept burning. Restarting a server to pick up new code is one way to trigger this, which
+made the #219 fix itself a way to leak a browser. Four servers dating from Aug 20–23 were
+found still holding playwright driver children.
+
+`browser_reap.py` closes it with two mechanisms, because neither covers every exit path:
+
+| mechanism | covers | how |
+|---|---|---|
+| `pdeathsig()` (`PR_SET_PDEATHSIG`) | even `SIGKILL` of the server | kernel kills our Chrome; needs no cooperation from the dying process |
+| `install_exit_cleanup()` | normal exit, `SIGTERM` | `atexit` + a chained `SIGTERM` handler — Python does **not** run `atexit` on `SIGTERM`, the default disposition just terminates |
+| `sweep_orphaned_browsers()` at startup | crash, `SIGKILL`, lost power | kills our browser trees with no live owning server |
+
+**Ownership is the entire safety argument.** Several agent sessions share this box, so the
+sweep walks ancestors and spares anything still owned by a live `roomscan.mcp_server`, and
+only ever recognises browsers by paths this project created (`roomscan-mcp-chrome-*`, or a
+playwright driver in our venv) — never the user's ordinary Chrome. It walks ancestors
+rather than testing `ppid == 1`, because an orphan here is reparented to the systemd user
+subreaper, not to init, so a naive check would miss every one.
+
+Verified live with real processes, a real `SIGKILL` and real reparenting
+(`browser_reap_probe.py --orphans`): orphan reaped, live-owned browser spared
+(`killed=0 kept=13`), `pdeathsig` takes Chrome down with its parent.
+
+> Restarting an MCP server is safe and needs no manual cleanup: Claude Code respawns a
+> killed stdio server transparently on the next tool call (verified by killing this
+> session's own — the replacement came up with the new code and the call succeeded).
+
 A third trap, in the *probe* rather than the feature: **every `ui_*`-shaped call
 un-parks the browser**, because restore lives in `start()` and everything funnels
 through it. So a check inserted before the parked-CPU measurement silently restores the

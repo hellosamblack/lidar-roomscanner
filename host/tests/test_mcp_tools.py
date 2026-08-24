@@ -2029,3 +2029,122 @@ def test_the_readiness_predicate_degrades_on_a_page_without_the_app():
     assert "readPixels" not in RESTORE_READY_JS, (
         "readPixels reads uniform with preserveDrawingBuffer off -- gating on it "
         "would burn the full timeout on every restore")
+
+
+# --- orphaned browser sweep (#221) -------------------------------------------
+#
+# The #219 reaper lives INSIDE the MCP server process, so a killed or crashed server
+# leaves its browser immortal with no reaper at all -- POSIX reparents children, it
+# does not kill them. Verified live: a Chrome whose parent was SIGKILLed kept running
+# and kept burning. Restarting a server to pick up new code is one way to cause it,
+# which made the #219 fix itself a way to leak a browser.
+#
+# The whole safety argument is OWNERSHIP: several agent sessions share this box, so
+# the sweep must never touch a browser a live server still owns, and must never match
+# the user's ordinary Chrome. These pin that; the live end-to-end (real SIGKILL, real
+# reparenting) is `tools/browser_reap_probe.py --orphans`.
+
+class _FakeProc:
+    def __init__(self, pid, cmd, parent=None, running=True):
+        self.pid = pid
+        self._cmd = cmd
+        self._parent = parent
+        self._running = running
+
+    def cmdline(self):
+        return self._cmd.split()
+
+    def parent(self):
+        return self._parent
+
+    def is_running(self):
+        return self._running
+
+
+def test_a_browser_owned_by_a_live_server_is_never_swept():
+    """The load-bearing case: other agent sessions are working on this box."""
+    from roomscan.mcp_server.browser_reap import _owner_is_alive
+
+    server = _FakeProc(100, "python -m roomscan.mcp_server")
+    driver = _FakeProc(101, "node playwright/driver/cli.js", parent=server)
+    chrome = _FakeProc(102, "chrome --user-data-dir=/tmp/roomscan-mcp-chrome-x", parent=driver)
+
+    assert _owner_is_alive(chrome, self_pid=999) is True
+
+
+def test_a_browser_with_no_live_server_ancestor_is_an_orphan():
+    from roomscan.mcp_server.browser_reap import _owner_is_alive
+
+    init = _FakeProc(1, "/sbin/init")
+    chrome = _FakeProc(102, "chrome --user-data-dir=/tmp/roomscan-mcp-chrome-x", parent=init)
+
+    assert _owner_is_alive(chrome, self_pid=999) is False
+
+
+def test_the_current_process_counts_as_an_owner():
+    """A server sweeping at startup must not kill the browser it is about to use."""
+    from roomscan.mcp_server.browser_reap import _owner_is_alive
+
+    me = _FakeProc(555, "python -c something-that-does-not-say-the-mark")
+    chrome = _FakeProc(556, "chrome --user-data-dir=/tmp/roomscan-mcp-chrome-x", parent=me)
+
+    assert _owner_is_alive(chrome, self_pid=555) is True
+
+
+def test_the_ownership_walk_terminates_on_a_parent_cycle():
+    """A pid-reuse race can present as a cycle; the walk must not spin forever."""
+    from roomscan.mcp_server.browser_reap import _owner_is_alive
+
+    a = _FakeProc(10, "a")
+    b = _FakeProc(11, "b", parent=a)
+    a._parent = b                          # cycle
+
+    assert _owner_is_alive(b, self_pid=999) is False
+
+
+def test_the_sweep_only_matches_browsers_this_project_created():
+    """It must never match the user's own Chrome, or another project's playwright."""
+    from roomscan.mcp_server import browser_reap as B
+
+    class _FakePsutil:
+        @staticmethod
+        def process_iter(_attrs=None):
+            return [
+                _FakeProc(1, "/opt/google/chrome/chrome --user-data-dir=/home/sam/.config/google-chrome"),
+                _FakeProc(2, "/opt/google/chrome/chrome --profile-directory=Default"),
+                _FakeProc(3, "node /other/project/node_modules/playwright/driver/cli.js"),
+                _FakeProc(4, "chrome --user-data-dir=/tmp/roomscan-mcp-chrome-abc"),
+            ]
+
+    matched = {p.pid for p in B._candidates(_FakePsutil)}
+    assert 4 in matched, "our own profile prefix must match"
+    assert 1 not in matched and 2 not in matched, (
+        "the user's ordinary Chrome must never be a sweep candidate")
+    # A foreign playwright driver DOES match the path marker -- that is deliberate and
+    # safe, because ownership decides the kill and a foreign driver has no
+    # roomscan.mcp_server ancestor... but it means the ownership check is not optional.
+    assert 3 in matched
+
+
+def test_sweep_reports_what_it_did_rather_than_only_succeeding():
+    """A sweep that killed nothing because its matcher broke must be distinguishable
+    from a clean box."""
+    from roomscan.mcp_server.browser_reap import sweep_orphaned_browsers
+
+    r = sweep_orphaned_browsers()
+    assert r["ok"] is True
+    for key in ("killed", "kept", "killed_count", "kept_count"):
+        assert key in r, f"sweep report is missing {key}"
+
+
+def test_pdeathsig_is_installed_on_the_chrome_we_spawn():
+    """The only cleanup that survives the parent being SIGKILLed, since it needs no
+    cooperation from the dying process."""
+    import inspect
+
+    from roomscan.mcp_server import session
+
+    src = inspect.getsource(session.CdpSession._start_impl)
+    assert "preexec_fn=browser_reap.pdeathsig" in src, (
+        "CdpSession must spawn Chrome with PR_SET_PDEATHSIG so a SIGKILLed server "
+        "cannot leak it")

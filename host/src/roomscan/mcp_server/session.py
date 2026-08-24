@@ -29,6 +29,7 @@ import tempfile
 import time
 import urllib.request
 
+from . import browser_reap
 from .paths import WEB_PAGE, WEB_WS
 
 CHROME_CANDIDATES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
@@ -576,7 +577,10 @@ class CdpSession(_IdleReapMixin):
                     [self._find_chrome(), *CHROME_FLAGS,
                      f"--remote-debugging-port={self.port}",
                      f"--user-data-dir={self._profile}", "about:blank"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    # #221: the kernel kills this Chrome if we die, even on SIGKILL --
+                    # the only cleanup that needs no cooperation from the dying process.
+                    preexec_fn=browser_reap.pdeathsig)
             ws_url = await asyncio.to_thread(self._cdp_target)
             # `ping_interval=None`: no keepalive on the CDP socket. `websockets`
             # defaults to a 20 s ping with a 20 s pong deadline, and Chrome cannot
