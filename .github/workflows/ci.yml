@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -11,7 +12,7 @@ concurrency:
 
 jobs:
   host-tests:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
       - name: Checkout repository
@@ -26,11 +27,10 @@ jobs:
       - name: Install mtools + expect (test_pi_bridge_build; test_web bridge-mode tests)
         run: sudo apt-get update && sudo apt-get install -y mtools expect
 
-      - name: Configure C shim (host/transform)
-        run: cmake -S host/transform -B host/transform/build
-
       - name: Build C shim
-        run: cmake --build host/transform/build
+        run: |
+          cmake -S host/transform -B host/transform/build
+          cmake --build host/transform/build
 
       - name: Install host package (dev, web, mcp extras)
         run: pip install -e "host/[dev,web,mcp]"
@@ -49,21 +49,20 @@ jobs:
           echo "---- skip summary ----"
           grep -Eo '[0-9]+ skipped' /tmp/pytest-output.log || echo "0 skipped"
 
-  shim-macos:
+  macos-c-shim:
     runs-on: macos-latest
     timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure C shim (host/transform)
-        run: cmake -S host/transform -B host/transform/build
-
       - name: Build C shim
-        run: cmake --build host/transform/build
+        run: |
+          cmake -S host/transform -B host/transform/build
+          cmake --build host/transform/build
 
-  firmware:
-    runs-on: ubuntu-24.04
+  firmware-build:
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Checkout repository
@@ -80,7 +79,7 @@ jobs:
 
       - name: Build (Release preset)
         working-directory: firmware/scanner-stream
-        run: cmake --build build/Release
+        run: cmake --build --preset Release
 
       - name: Report firmware size
         working-directory: firmware/scanner-stream
