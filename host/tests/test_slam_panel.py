@@ -115,11 +115,11 @@ def test_submit_forwards_reflectance_and_confidence_to_mapper_step(monkeypatch):
     orig_step = Mapper.step
 
     def spy_step(self, depth, quat, pressure_pa=None, reflectance=None, confidence=None,
-                 imu_raw=None, quat_offset_us=None):
+                 *args, **kwargs):
         seen["reflectance"] = reflectance
         seen["confidence"] = confidence
         return orig_step(self, depth, quat, pressure_pa, reflectance=reflectance,
-                         confidence=confidence, imu_raw=imu_raw, quat_offset_us=quat_offset_us)
+                         confidence=confidence, *args, **kwargs)
 
     monkeypatch.setattr(Mapper, "step", spy_step)
     w = SlamWorker(W, H, voxel_size=0.02)

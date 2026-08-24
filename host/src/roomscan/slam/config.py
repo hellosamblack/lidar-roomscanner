@@ -114,9 +114,19 @@ class SlamConfig:
     adapt_rot_cond_cap: float = 100.0
     fov_h: float = 55.0
     fov_v: float = 42.0
+    # Confidence weighting / rejection policy for ToF point clouds (Issue #153).
+    # Options: "reject" (zero depth below min_confidence), "weight" (pass normalized
+    # confidence [0, 1] to ICP normal equations), "both" (gate below min_confidence
+    # and weight remaining points).
+    confidence_weight_mode: str = "reject"
     # Task 13 (data-quality): reflectance color + noise reduction, tuned against
     # captures/phase6_motion_ref.bin -- see task-quality-report.md.
     min_confidence: float = 20.0
+    # Maximum admissible depth (metres) for SLAM cloud construction. Deprojector
+    # admits up to 10 m, but TSDF map integration caps at 5.0 m, so points in the
+    # 5-10 m band must be clamped/masked so they don't steer ICP against a model
+    # that structurally cannot contain them (Issue #153 / admission design §B).
+    max_depth_m: float = 5.0
     weight_threshold: float = 3.0
     # Stationarity hold: freeze the pose when the ICP translation is incoherent
     # jitter (device effectively still) so the estimate doesn't random-walk on
@@ -335,7 +345,9 @@ class SlamConfig:
             "adapt_max_rmse": self.adapt_max_rmse,
             "adapt_max_corr_deg": self.adapt_max_corr_deg,
             "adapt_rot_cond_cap": self.adapt_rot_cond_cap,
+            "confidence_weight_mode": self.confidence_weight_mode,
             "min_confidence": self.min_confidence,
+            "max_depth_m": self.max_depth_m,
             "weight_threshold": self.weight_threshold,
             "baro_authority": self.baro_authority,
             "baro_tau_frames": self.baro_tau_frames,

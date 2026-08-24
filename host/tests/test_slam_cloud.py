@@ -26,3 +26,14 @@ def test_source_cloud_attaches_intensity():
     got = pc.point["intensity"].numpy()
     assert got.shape == (2, 1) and got.dtype == np.float32
     assert np.allclose(got.ravel(), [0.25, 0.75])
+
+
+def test_source_cloud_sanitizes_nan_intensity():
+    pts = np.ones((1, 3, 3), dtype=np.float64)
+    valid = np.array([[True, True, True]])
+    inten = np.array([[0.5, np.nan, 0.8]], dtype=np.float64)
+    pc = source_cloud(pts, valid, inten)
+    got = pc.point["intensity"].numpy()
+    assert got.shape == (3, 1) and got.dtype == np.float32
+    assert np.allclose(got.ravel(), [0.5, 0.0, 0.8])
+

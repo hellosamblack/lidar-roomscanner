@@ -282,11 +282,14 @@ class RegistrationResult:
 
 def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: np.ndarray,
                      t0: np.ndarray, max_dist: float, max_iter: int,
+                     weights: np.ndarray | None = None,
                      tol: float = 1e-7,
                      device: str | o3d.core.Device = "CPU:0",
                      cond_cap: float = _COND_CAP) -> tuple[np.ndarray, float, float, int, bool]:
     """Iterated closest-point, translation-only, point-to-plane. `rotated_src`
     is the source cloud with the (held-fixed) prior rotation already applied.
+    `weights` (optional (N,) float array) applies per-point diagonal weights
+    W to normal equations `A^T W A dt = A^T W b` (Issue #153).
     Returns (t, fitness, rmse, inliers, singular) -- fitness/rmse mirror Open3D's ICP
     result semantics (fitness = matched_fraction, rmse = RMS of the
     point-to-plane residual among matches); singular=True means the normal
@@ -322,10 +325,16 @@ def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: 
         p = query[matched]
         r = np.einsum("ij,ij->i", n, p - q)             # point-to-plane residual
         fitness = n_valid / n_source
-        rmse = float(np.sqrt(np.mean(r ** 2)))
-
-        a = n.T @ n                                       # 3x3 normal equations
-        b = -(n * r[:, None]).sum(axis=0)
+        if weights is not None:
+            w = weights[matched]
+            w_sum = float(w.sum())
+            rmse = float(np.sqrt(np.sum(w * (r ** 2)) / w_sum)) if w_sum > 0.0 else float(np.sqrt(np.mean(r ** 2)))
+            a = (n * w[:, None]).T @ n                   # weighted 3x3 normal equations
+            b = -(n * (w * r)[:, None]).sum(axis=0)
+        else:
+            rmse = float(np.sqrt(np.mean(r ** 2)))
+            a = n.T @ n                                       # 3x3 normal equations
+            b = -(n * r[:, None]).sum(axis=0)
         dt, _cond = _solve_translation_step(a, b, cond_cap)
         if dt is None:
             return t, fitness, rmse, n_valid, True
@@ -338,6 +347,7 @@ def _translation_icp(rotated_src: np.ndarray, tgt_pts: np.ndarray, tgt_normals: 
 def _soft_prior_icp(src_pts: np.ndarray, tgt_pts: np.ndarray, tgt_normals: np.ndarray,
                     R0: np.ndarray, t0: np.ndarray, rot_prior_weight: float,
                     max_dist: float, max_iter: int,
+                    weights: np.ndarray | None = None,
                     tol: float = 1e-7,
                     device: str | o3d.core.Device = "CPU:0",
                     cond_cap: float = _COND_CAP
@@ -345,6 +355,8 @@ def _soft_prior_icp(src_pts: np.ndarray, tgt_pts: np.ndarray, tgt_normals: np.nd
     """Iterated closest-point, full 6-DoF point-to-plane, with the rotation held
     near the IMU prior `R0` by a soft Tikhonov prior (see `_solve_soft_prior_step`).
     `src_pts` is the RAW source cloud (unrotated); `R0`/`t0` are the prior pose.
+    `weights` (optional (N,) float array) applies per-point diagonal weights W
+    to normal equations `A^T W A xi = A^T W b` (Issue #153).
     Returns (R, t, fitness, rmse, inliers, singular).
 
     This is BUG-067's fix: `_translation_icp` freezes rotation at `R0` and can only
@@ -378,14 +390,21 @@ def _soft_prior_icp(src_pts: np.ndarray, tgt_pts: np.ndarray, tgt_normals: np.nd
         p = query[matched]
         r = np.einsum("ij,ij->i", n, p - q)             # point-to-plane residual
         fitness = n_valid / n_source
-        rmse = float(np.sqrt(np.mean(r ** 2)))
 
         # Jacobian rows [ (p x n)^T , n^T ] for the world-frame increment
         # xi = [omega; dt] applied about the origin: p -> exp([omega]x) p + dt.
         cxn = np.cross(p, n)
         J = np.concatenate([cxn, n], axis=1)            # (m, 6)
-        A = J.T @ J                                     # 6x6 normal equations
-        b = -(J * r[:, None]).sum(axis=0)
+        if weights is not None:
+            w = weights[matched]
+            w_sum = float(w.sum())
+            rmse = float(np.sqrt(np.sum(w * (r ** 2)) / w_sum)) if w_sum > 0.0 else float(np.sqrt(np.mean(r ** 2)))
+            A = (J * w[:, None]).T @ J                   # weighted 6x6 normal equations
+            b = -(J * (w * r)[:, None]).sum(axis=0)
+        else:
+            rmse = float(np.sqrt(np.mean(r ** 2)))
+            A = J.T @ J                                  # 6x6 normal equations
+            b = -(J * r[:, None]).sum(axis=0)
         phi = _so3_log(R @ R0.T)                        # current deviation from the prior
         xi, _cond = _solve_soft_prior_step(A, b, phi, rot_prior_weight, cond_cap)
         if xi is None:
@@ -420,6 +439,10 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
     if mode not in ("translation", "6dof", "adaptive", "soft_prior"):
         raise ValueError(f"unknown mode {mode!r}")
     init_pose = np.asarray(init_pose, dtype=np.float64)
+
+    weights: np.ndarray | None = None
+    if "intensity" in source.point:
+        weights = source.point["intensity"].cpu().numpy().astype(np.float64, copy=False).reshape(-1)
 
     if mode == "adaptive":
         # LiDAR-primary, IMU-gated (owner: "the LiDAR is our primary source of
@@ -466,7 +489,7 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
         rotated_src = (R @ src_pts.T).T
         t, fitness, rmse, inliers, singular = _translation_icp(
             rotated_src, tgt_pts, tgt_normals, init_pose[:3, 3], max_dist, max_iter,
-            device=device, cond_cap=cond_cap)
+            weights=weights, device=device, cond_cap=cond_cap)
         if singular:
             return RegistrationResult(pose=init_pose.copy(), fitness=0.0,
                                       rmse=float("inf"), ok=False, inliers=inliers,
@@ -485,7 +508,7 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
         tgt_normals = target.point.normals.cpu().numpy().astype(np.float64, copy=False)
         R, t, fitness, rmse, inliers, singular = _soft_prior_icp(
             src_pts, tgt_pts, tgt_normals, R0, init_pose[:3, 3], rot_prior_weight,
-            max_dist, max_iter, device=device, cond_cap=cond_cap)
+            max_dist, max_iter, weights=weights, device=device, cond_cap=cond_cap)
         if singular:
             return RegistrationResult(pose=init_pose.copy(), fitness=0.0,
                                       rmse=float("inf"), ok=False, source="soft_prior",

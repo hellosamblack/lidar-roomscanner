@@ -611,3 +611,73 @@ def test_translation_icp_is_exactly_equivariant_under_a_rigid_graft():
     assert np.allclose(grafted.pose[:3, 3], R @ baseline.pose[:3, 3], atol=1e-5)
     assert np.linalg.norm(grafted.pose[:3, 3]) == pytest.approx(
         np.linalg.norm(baseline.pose[:3, 3]), abs=1e-6)
+
+
+# ---- Issue #153: confidence-weighted ICP solve ----------------------------
+
+
+def test_weighted_vs_unweighted_icp_translation_solve():
+    """Issue #153: per-point confidence weights in normal equations allow
+    high-confidence points to dominate the solve while suppressing outliers."""
+    target = _plane_cloud(n=30, curvature=0.8)
+    tgt_pts = target.point.positions.numpy()
+    shift = np.array([0.03, -0.02, 0.04], dtype=np.float32)
+
+    # Inliers shifted by true offset
+    inliers = tgt_pts + shift
+    # Corrupted points with additional bias
+    bias = np.array([0.15, -0.15, 0.10], dtype=np.float32)
+    corrupted = inliers + bias
+
+    # Half points are inliers, half are corrupted outliers
+    n_inliers = len(inliers)
+    n_outliers = len(corrupted)
+    all_pts = np.vstack([inliers, corrupted])
+
+    # Unweighted source (outliers have equal say)
+    src_unweighted = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
+    src_unweighted.point.positions = o3d.core.Tensor(all_pts)
+    res_unweighted = register(src_unweighted, target, np.eye(4), mode="translation", max_dist=0.3)
+
+    # Weighted source: inliers weight=1.0, outliers weight=0.0
+    weights = np.concatenate([np.ones(n_inliers, dtype=np.float32),
+                              np.zeros(n_outliers, dtype=np.float32)])[:, None]
+    src_weighted = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
+    src_weighted.point.positions = o3d.core.Tensor(all_pts)
+    src_weighted.point["intensity"] = o3d.core.Tensor(weights)
+    res_weighted = register(src_weighted, target, np.eye(4), mode="translation", max_dist=0.3)
+
+    err_unweighted = float(np.linalg.norm(res_unweighted.pose[:3, 3] - (-shift)))
+    err_weighted = float(np.linalg.norm(res_weighted.pose[:3, 3] - (-shift)))
+
+    # Weighted solve must accurately recover true translation while unweighted is pulled by bias
+    assert res_weighted.ok
+    assert err_weighted < 0.005
+    assert err_unweighted > 0.03
+    assert err_weighted < err_unweighted / 5.0
+
+
+def test_weighted_soft_prior_icp_solve():
+    """Issue #153: weighted soft_prior solve correctly weights normal equations."""
+    target = _corner_cloud()
+    tgt_pts = target.point.positions.numpy()
+    shift = np.array([0.02, -0.01, 0.03], dtype=np.float32)
+
+    inliers = tgt_pts + shift
+    corrupted = inliers + np.array([0.10, 0.10, -0.10], dtype=np.float32)
+
+    n_inliers = len(inliers)
+    n_outliers = len(corrupted)
+    all_pts = np.vstack([inliers, corrupted])
+
+    weights = np.concatenate([np.ones(n_inliers, dtype=np.float32),
+                              np.zeros(n_outliers, dtype=np.float32)])[:, None]
+    src_weighted = o3d.t.geometry.PointCloud(o3d.core.Device("CPU:0"))
+    src_weighted.point.positions = o3d.core.Tensor(all_pts)
+    src_weighted.point["intensity"] = o3d.core.Tensor(weights)
+
+    res_weighted = register(src_weighted, target, np.eye(4), mode="soft_prior", max_dist=0.3)
+    assert res_weighted.ok
+    err_weighted = float(np.linalg.norm(res_weighted.pose[:3, 3] - (-shift)))
+    assert err_weighted < 0.01
+

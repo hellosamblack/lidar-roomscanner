@@ -1229,3 +1229,82 @@ def test_displacement_gate_tracking_state_and_lost_frame_handling():
     assert m._total_integrations == 1
     assert np.allclose(m._last_integrated_pose, pose1)
 
+
+# ---- Issue #153: confidence guard rails, depth clamping & weighting -------
+
+
+def test_flat_confidence_guard_rail_logs_warning(caplog):
+    """Guard rail: when confidence is uniformly flat around ~54 (std < 1e-4, mean in [50, 60]),
+    log a warning naming VL53L9_TRANSFORM_LIGHT on the first valid confidence frame.
+    Subsequent frames or normal confidence should not log repeated/spurious warnings."""
+    import logging
+    m = Mapper(W, H, voxel_size=0.02)
+    flat_conf = np.full((H, W), 54.0, dtype=np.float32)
+
+    with caplog.at_level(logging.WARNING):
+        m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0, confidence=flat_conf)
+        assert any("Confidence plane appears flat (~54) - verify VL53L9_TRANSFORM_LIGHT build macro is 0" in record.message
+                   for record in caplog.records)
+        assert m._confidence_checked is True
+
+        caplog.clear()
+        # Second frame with flat confidence should not re-warn
+        m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0, confidence=flat_conf)
+        assert not any("Confidence plane appears flat" in record.message for record in caplog.records)
+
+    # Clean mapper with varied confidence (e.g. real data) must not log warning
+    m2 = Mapper(W, H, voxel_size=0.02)
+    varied_conf = np.linspace(20.0, 100.0, H * W, dtype=np.float32).reshape(H, W)
+    with caplog.at_level(logging.WARNING):
+        m2.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0, confidence=varied_conf)
+        assert not any("Confidence plane appears flat" in record.message for record in caplog.records)
+        assert m2._confidence_checked is True
+
+
+def test_depth_max_range_clamping():
+    """Depth beyond max_depth_m (default 5.0 m) is zeroed so points in the 5-10 m band
+    do not steer ICP against a TSDF map capped at depth_max."""
+    m = Mapper(W, H, voxel_size=0.02, max_depth_m=3.0)
+    depth = np.full((H, W), 2000.0, dtype=np.float32)
+    depth[:10, :] = 4000.0  # beyond 3.0 m
+
+    gated = m._gate_confidence(depth, confidence=None)
+    assert np.all(gated[:10, :] == 0.0)
+    assert np.all(gated[10:, :] == 2000.0)
+
+    # Frame with all depth > max_depth_m should result in tracking lost (< _MIN_VALID_POINTS)
+    m_far = Mapper(W, H, voxel_size=0.02, max_depth_m=3.0)
+    step = m_far.step(np.full((H, W), 4000.0, dtype=np.float32), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert step.tracking_lost
+
+
+def test_confidence_weight_mode_reject_vs_weight_vs_both():
+    """Confidence weight mode selects between hard zeroing (reject), ICP weighting (weight),
+    or both."""
+    conf = np.full((H, W), 10.0, dtype=np.float32)
+    conf[:20, :] = 50.0  # high confidence in top half, low (< 20.0) in bottom half
+    depth = np.full((H, W), 1000.0, dtype=np.float32)
+
+    # Mode: reject (default) -> bottom half zeroed
+    m_reject = Mapper(W, H, voxel_size=0.02, confidence_weight_mode="reject", min_confidence=20.0)
+    gated_reject = m_reject._gate_confidence(depth, conf)
+    assert np.all(gated_reject[:20, :] == 1000.0)
+    assert np.all(gated_reject[20:, :] == 0.0)
+
+    # Mode: weight -> depth untouched by min_confidence, points passed to ICP with weights
+    m_weight = Mapper(W, H, voxel_size=0.02, confidence_weight_mode="weight", min_confidence=20.0)
+    gated_weight = m_weight._gate_confidence(depth, conf)
+    assert np.all(gated_weight == 1000.0)
+
+    # Mode: both -> bottom half zeroed by min_confidence
+    m_both = Mapper(W, H, voxel_size=0.02, confidence_weight_mode="both", min_confidence=20.0)
+    gated_both = m_both._gate_confidence(depth, conf)
+    assert np.all(gated_both[:20, :] == 1000.0)
+    assert np.all(gated_both[20:, :] == 0.0)
+
+
+def test_unknown_confidence_weight_mode_raises():
+    with pytest.raises(ValueError, match="unknown confidence_weight_mode"):
+        Mapper(W, H, confidence_weight_mode="invalid_mode")
+
+

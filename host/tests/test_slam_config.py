@@ -17,7 +17,9 @@ def test_defaults():
     assert c.max_rmse == 0.05
     assert c.fov_h == 55.0
     assert c.fov_v == 42.0
+    assert c.confidence_weight_mode == "reject"
     assert c.min_confidence == 20.0
+    assert c.max_depth_m == 5.0
     assert c.weight_threshold == 3.0
     assert c.device == "CPU:0"
 
@@ -208,4 +210,36 @@ def test_displacement_gate_defaults_and_load(tmp_path):
     assert cfg.min_angular_displacement_rad == 0.08
     assert cfg.mapper_kwargs()["min_linear_displacement_m"] == 0.05
     assert cfg.mapper_kwargs()["min_angular_displacement_rad"] == 0.08
+
+
+# ---- Issue #153: confidence weighting policy and depth max clamping -------
+
+def test_confidence_and_max_depth_defaults_and_load(tmp_path):
+    """Confidence policy and max depth default to 'reject', 20.0, and 5.0 m.
+    When set in [slam] table of roomscan.toml, they load and flow into mapper_kwargs.
+    """
+    cfg_default = SlamConfig()
+    assert cfg_default.confidence_weight_mode == "reject"
+    assert cfg_default.min_confidence == 20.0
+    assert cfg_default.max_depth_m == 5.0
+    assert cfg_default.mapper_kwargs()["confidence_weight_mode"] == "reject"
+    assert cfg_default.mapper_kwargs()["min_confidence"] == 20.0
+    assert cfg_default.mapper_kwargs()["max_depth_m"] == 5.0
+
+    p = tmp_path / "roomscan.toml"
+    p.write_text(
+        "[slam]\n"
+        'confidence_weight_mode = "weight"\n'
+        "min_confidence = 35.0\n"
+        "max_depth_m = 4.0\n",
+        encoding="utf-8",
+    )
+    cfg = SlamConfig.load(p)
+    assert cfg.confidence_weight_mode == "weight"
+    assert cfg.min_confidence == 35.0
+    assert cfg.max_depth_m == 4.0
+    assert cfg.mapper_kwargs()["confidence_weight_mode"] == "weight"
+    assert cfg.mapper_kwargs()["min_confidence"] == 35.0
+    assert cfg.mapper_kwargs()["max_depth_m"] == 4.0
+
 

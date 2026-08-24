@@ -20,6 +20,7 @@ def source_cloud(pts_hw3: np.ndarray, valid: np.ndarray,
     pc = o3d.t.geometry.PointCloud(dev)
     pc.point.positions = o3d.core.Tensor(xyz, device=dev)
     if intensity is not None:
-        inten = intensity.reshape(-1)[mask].astype(np.float32, copy=False)[:, None]
+        inten = np.asarray(intensity, dtype=np.float32).reshape(-1)[mask]
+        inten = np.where(np.isfinite(inten), inten, 0.0).astype(np.float32, copy=False)[:, None]
         pc.point["intensity"] = o3d.core.Tensor(inten, device=dev)
     return pc

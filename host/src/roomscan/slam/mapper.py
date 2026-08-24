@@ -15,6 +15,7 @@ the shipped translation solve is already all-numpy, so a host index is
 bit-identical output for less wall time (2026-08-02 CUDA ICP study)."""
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 
@@ -150,7 +151,9 @@ class Mapper:
                  max_iter: int = 6,
                  adapt_min_fitness: float = 0.6, adapt_max_rmse: float = 0.03,
                  adapt_max_corr_deg: float = 20.0, adapt_rot_cond_cap: float = 100.0,
+                 confidence_weight_mode: str = "reject",
                  min_confidence: float | None = _DEFAULT_MIN_CONFIDENCE,
+                 max_depth_m: float = 5.0,
                  weight_threshold: float = 3.0,
                  device: str | o3d.core.Device = "CPU:0",
                  icp_device: str | o3d.core.Device | None = "CPU:0",
@@ -172,11 +175,16 @@ class Mapper:
                  min_linear_displacement_m: float = 0.0,
                  min_angular_displacement_rad: float = 0.0,
                  clock=time.perf_counter):
+        if confidence_weight_mode not in ("reject", "weight", "both"):
+            raise ValueError(f"unknown confidence_weight_mode {confidence_weight_mode!r}")
         self.width, self.height = width, height
         self.icp_mode = icp_mode
         self.baro_authority = baro_authority
         self.baro_tau_frames = baro_tau_frames
+        self.confidence_weight_mode = confidence_weight_mode
         self.min_confidence = min_confidence
+        self.max_depth_m = float(max_depth_m)
+        self._confidence_checked: bool = False
         self.min_linear_displacement_m = float(min_linear_displacement_m)
         self.min_angular_displacement_rad = float(min_angular_displacement_rad)
         self._last_integrated_pose: np.ndarray | None = None
@@ -500,19 +508,37 @@ class Mapper:
             return False
         return abs(baro_height_m(pressure_pa, ref)) > self.baro_reject_m
 
+    def _check_confidence_distribution(self, confidence: np.ndarray | None) -> None:
+        if confidence is None or self._confidence_checked:
+            return
+        conf = np.asarray(confidence, dtype=np.float64)
+        valid = conf[np.isfinite(conf)]
+        if valid.size == 0:
+            return
+        self._confidence_checked = True
+        std = float(np.std(valid))
+        mean = float(np.mean(valid))
+        if std < 1e-4 and 50.0 <= mean <= 60.0:
+            logging.getLogger(__name__).warning(
+                "Confidence plane appears flat (~54) - verify VL53L9_TRANSFORM_LIGHT build macro is 0"
+            )
+
     def _gate_confidence(self, depth_mm: np.ndarray, confidence: np.ndarray | None) -> np.ndarray:
-        """Invalidate (zero) depth pixels whose confidence is below
-        `min_confidence` -- higher confidence = better (verified on the real
-        capture: values range ~0-460, median ~75; see task-quality-report.md
-        for the chosen threshold). A no-op when no confidence was supplied or
-        gating is disabled (`min_confidence=None`), so existing callers that
-        never pass `confidence` see byte-identical depth. NaN confidence
-        fails the `>=` comparison (False), so unknown-confidence pixels are
-        also invalidated rather than trusted."""
-        if confidence is None or self.min_confidence is None:
-            return depth_mm
-        mask = np.asarray(confidence) >= self.min_confidence
-        return np.where(mask, depth_mm, 0.0).astype(np.float32)
+        """Process depth map: clamp/mask points beyond `max_depth_m` (so the 5-10 m
+        band does not steer ICP against a TSDF model capped at depth_max), and apply
+        confidence gating according to `confidence_weight_mode`.
+
+        In 'reject' and 'both' modes, invalidate (zero) depth pixels whose
+        confidence is below `min_confidence` or NaN. In 'weight' mode, confidence
+        is used as ICP weights rather than a hard zeroing gate."""
+        depth = np.asarray(depth_mm, dtype=np.float32).copy()
+        if self.max_depth_m > 0.0:
+            depth[depth > self.max_depth_m * 1000.0] = 0.0
+        if self.confidence_weight_mode in ("reject", "both"):
+            if confidence is not None and self.min_confidence is not None:
+                mask = np.asarray(confidence) >= self.min_confidence
+                depth = np.where(mask, depth, 0.0).astype(np.float32)
+        return depth
 
     @staticmethod
     def _reflectance_color(reflectance: np.ndarray) -> np.ndarray:
@@ -527,6 +553,7 @@ class Mapper:
              reflectance=None, confidence=None,
              imu_raw=None, quat_offset_us=None, t_device_us=None) -> FrameStep:
         t0 = self._clock()
+        self._check_confidence_distribution(confidence)
         depth_mm = self._gate_confidence(depth_mm, confidence)
         # +7.76 ms quat-phase compensation (BUG-031/067), applied FIRST so the
         # spike gate, rot_delta, smoothing and the pose all use the frame-instant
@@ -597,7 +624,17 @@ class Mapper:
         elif not self._bootstrapped:
             pose = T_pred                                   # bootstrap: accept prior
         else:
-            src = source_cloud(pts, valid, device=self._device)
+            intensity = None
+            if confidence is not None and self.confidence_weight_mode in ("weight", "both"):
+                conf_arr = np.asarray(confidence, dtype=np.float32)
+                conf_clean = np.where(np.isfinite(conf_arr), np.maximum(0.0, conf_arr), 0.0)
+                max_val = float(np.max(conf_clean)) if conf_clean.size > 0 else 0.0
+                if max_val > 1.0:
+                    scale = 255.0 if max_val <= 255.0 else max_val
+                    intensity = np.clip(conf_clean / scale, 0.0, 1.0)
+                else:
+                    intensity = np.clip(conf_clean, 0.0, 1.0)
+            src = source_cloud(pts, valid, intensity=intensity, device=self._device)
             # Bound raycast to the current view frustum (Task 9.5 Lever 1):
             # the current depth frame at the predicted pose is our best
             # estimate of which voxel blocks the live camera can see, so pass
