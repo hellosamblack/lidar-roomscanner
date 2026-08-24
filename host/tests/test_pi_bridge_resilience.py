@@ -12,6 +12,7 @@ from __future__ import annotations
 import configparser
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -262,7 +263,7 @@ def _install_text() -> str:
 def test_harden_storage_is_defined_and_called_from_main():
     text = _install_text()
     assert "harden_storage()" in text
-    main_body = text.split("main() {", 1)[1].split("\nmain \"$@\"", 1)[0]
+    main_body = text.split("main() {", 1)[1].split("\n}", 1)[0]
     assert "harden_storage" in main_body, \
         "harden_storage is defined but never called from main()"
     # Must run after the tool it depends on is actually installed on disk.
@@ -308,6 +309,103 @@ def test_masked_units_are_not_in_required_units():
     required_block = text.split("REQUIRED_UNITS=(", 1)[1].split(")", 1)[0]
     assert "dphys-swapfile" not in required_block
     assert "rsyslog" not in required_block
+
+
+# ---------------------------------------------------------------------------
+# install.sh cmdline resilience args (issue #213)
+# ---------------------------------------------------------------------------
+
+def _extract_install_resilience_args() -> tuple[str, ...]:
+    text = _install_text()
+    match = re.search(r"RESILIENCE_CMDLINE_ARGS=\(\s*([^)]+)\s*\)", text)
+    assert match, "RESILIENCE_CMDLINE_ARGS array not found in install.sh"
+    raw = match.group(1).split()
+    return tuple(a.strip('"\'') for a in raw if a.strip())
+
+
+def _run_install_ensure_cmdline(cmdline_path: Path | None) -> subprocess.CompletedProcess:
+    env_str = f"CMDLINE_FILE='{cmdline_path}'" if cmdline_path is not None else ""
+    script = (
+        f"source {PAYLOAD / 'install.sh'}\n"
+        f"{env_str} ensure_cmdline_args\n"
+    )
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+
+def test_install_sh_resilience_args_match_build_image():
+    """Guard against divergence: install.sh and build_image.py must declare the
+    exact same kernel cmdline resilience arguments (issue #213)."""
+    from_install = _extract_install_resilience_args()
+    assert from_install == bi.RESILIENCE_CMDLINE_ARGS
+
+
+def test_ensure_cmdline_args_is_defined_and_called_from_main():
+    text = _install_text()
+    assert "ensure_cmdline_args()" in text
+    main_body = text.split("main() {", 1)[1].split("\n}", 1)[0]
+    assert "ensure_cmdline_args" in main_body, \
+        "ensure_cmdline_args is defined but never called from main()"
+    idx_harden = main_body.index("harden_storage")
+    idx_cmdline = main_body.index("ensure_cmdline_args")
+    assert idx_cmdline > idx_harden, \
+        "ensure_cmdline_args should be called in main() next to harden_storage"
+
+
+def test_install_ensure_cmdline_args_appends_missing_args(tmp_path):
+    cmdline = tmp_path / "cmdline.txt"
+    cmdline.write_text(REAL_CMDLINE + "\n")
+    r = _run_install_ensure_cmdline(cmdline)
+    assert r.returncode == 0, r.stderr
+    content = cmdline.read_text()
+    assert content.endswith("\n")
+    assert content.count("\n") == 1
+    for arg in bi.RESILIENCE_CMDLINE_ARGS:
+        assert arg in content.split()
+    assert content.startswith(REAL_CMDLINE)
+
+
+def test_install_ensure_cmdline_args_is_idempotent(tmp_path):
+    cmdline = tmp_path / "cmdline.txt"
+    cmdline.write_text(REAL_CMDLINE + "\n")
+    _run_install_ensure_cmdline(cmdline)
+    after_first = cmdline.read_text()
+    _run_install_ensure_cmdline(cmdline)
+    after_second = cmdline.read_text()
+    assert after_first == after_second
+    for arg in bi.RESILIENCE_CMDLINE_ARGS:
+        assert after_second.split().count(arg) == 1
+
+
+def test_install_ensure_cmdline_args_handles_partial_overlap(tmp_path):
+    cmdline = tmp_path / "cmdline.txt"
+    cmdline.write_text(CMDLINE_WITH_PARTIAL_OVERLAP + "\n")
+    r = _run_install_ensure_cmdline(cmdline)
+    assert r.returncode == 0, r.stderr
+    content = cmdline.read_text()
+    assert content.split().count("fsck.repair=yes") == 1
+    assert "fsck.mode=force" in content.split()
+
+
+def test_install_ensure_cmdline_args_never_invents_missing_file(tmp_path):
+    nonexistent = tmp_path / "nonexistent" / "cmdline.txt"
+    r = _run_install_ensure_cmdline(nonexistent)
+    assert r.returncode == 0, r.stderr
+    assert not nonexistent.exists()
+
+
+def test_install_ensure_cmdline_args_refuses_empty_and_multiline(tmp_path):
+    empty = tmp_path / "empty_cmdline.txt"
+    empty.write_text("")
+    r = _run_install_ensure_cmdline(empty)
+    assert r.returncode == 0
+    assert empty.read_text() == ""
+
+    multiline = tmp_path / "multi_cmdline.txt"
+    multi_content = REAL_CMDLINE + "\nextra=1\n"
+    multiline.write_text(multi_content)
+    r = _run_install_ensure_cmdline(multiline)
+    assert r.returncode == 0
+    assert multiline.read_text() == multi_content
 
 
 # ---------------------------------------------------------------------------
