@@ -215,6 +215,22 @@ in the repo. The evidence for every one is in `docs/roadmap-history.md`.
   looked healthy throughout, because inbound traffic is destination-IP-pinned by ARP; only the
   reply path was ever at risk. Fixed with an explicit `route-metric` + `never-default` profile
   rather than trusting NM to leave WiFi as primary.
+- **A test fake is defined by what it omits, and async/transport bugs live in exactly those
+  omissions.** #219 shipped 16 mutation-checked unit tests against a fake browser backend, all
+  green; the *first* live run found two 100 %-reproducible defects neither could ever have seen.
+  The fake's teardown had **no `await`**, so a task cancelling itself had nowhere to land the
+  `CancelledError` — in production that half-tore-down the browser, freeing most of the process
+  tree while leaving the liveness flag set. And the fake had **no socket**, so it could not
+  observe that `websockets`' default 20 s keepalive ping *closes a healthy connection* when the
+  peer is merely CPU-starved (Chrome cannot pong while SwiftShader saturates a dozen cores), which
+  made every park fail. Mutation testing does not cover this — it only perturbs code the fake
+  already reaches. For anything touching a native handle, a socket, a subprocess or a background
+  task, budget one live probe against the real thing and keep it as a script
+  (`host/tools/browser_reap_probe.py`) so a dependency bump can re-run it. Two corollaries:
+  **cancel with an `asyncio.current_task()` guard** whenever a task can reach its own cleanup
+  path, and treat a **silent `except: return`** in a reaper/retry loop as a defect — the bare
+  version here hid a 100 % park-failure rate behind a browser that merely looked like it had gone
+  quiet on schedule.
 - **Some failures abort the process instead of raising — you cannot handle those, only make
   them unreachable.** Open3D/Filament's `OffscreenRenderer` kills the interpreter outright
   (`utils::PreconditionPanic`, `terminate called`) on a *second* instance in one process, and

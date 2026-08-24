@@ -9,12 +9,20 @@ keeps one `/ws` connection open and `CdpSession` keeps one browser warm.
 implementation is the raw-CDP plumbing lifted from `host/tools/web_ui_shot.py`,
 which is proven to render Three.js under SwiftShader on this GPU-less host; a
 Playwright backend can replace it without any tool signature changing.
+
+"Warm" cannot mean "forever", though: the page is a software-rasterized WebGL scene,
+and an abandoned browser burned 11 cores for days before anyone noticed (issue #219).
+`_IdleReapMixin` gives both backends a reset-on-interaction idle TTL -- park to
+`about:blank`, then stop -- and owns the public `goto`/`evaluate`/`wait_for`/
+`screenshot` so no operation can escape that bookkeeping.
 """
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -28,6 +36,29 @@ CHROME_CANDIDATES = ("google-chrome", "google-chrome-stable", "chromium", "chrom
 CHROME_FLAGS = ("--headless=new", "--enable-unsafe-swiftshader", "--use-gl=angle",
                 "--use-angle=swiftshader", "--no-sandbox", "--disable-dev-shm-usage")
 
+BLANK_URL = "about:blank"
+
+
+def _env_seconds(name: str, default: float) -> float:
+    """Non-negative seconds from `name`, falling back to `default`. `0` disables."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return default
+
+
+# Idle TTLs for the warm browser singleton (issue #219). Two stages because the two
+# costs recover at different prices -- see `_IdleReapMixin`.
+BROWSER_PARK_S = _env_seconds("ROOMSCAN_MCP_BROWSER_PARK_S", 180.0)
+BROWSER_STOP_S = _env_seconds("ROOMSCAN_MCP_BROWSER_STOP_S", 900.0)
+# Settle applied when restoring a parked page, matching the cold-load settle the
+# `ui_*` tools use. A restore that returns before Three.js has a context reads as a
+# blank page, which is the exact failure this feature must not introduce.
+BROWSER_RESTORE_SETTLE_S = _env_seconds("ROOMSCAN_MCP_BROWSER_RESTORE_SETTLE_S", 8.0)
+
 
 # --- rig (/ws to roomscan-web) ----------------------------------------------
 
@@ -38,6 +69,14 @@ class RigSession:
     §Invariants: the client never holds optimistic state), so this caches only what
     the server last broadcast and never derives anything from it.
     """
+
+    # NOTE (#220): these sockets take the `websockets` keepalive DEFAULT -- a 20 s
+    # ping with a 20 s pong deadline, which closes a healthy connection when the peer
+    # is merely CPU-starved. That is what killed `CdpSession`'s CDP socket in #219.
+    # Here it is masked only by the stream's constant traffic; a >20 s GIL stall in
+    # roomscan-web (BUG-052/BUG-063 territory) would drop every MCP client and present
+    # as "the tools lost the rig". Left as the default deliberately for now, tracked
+    # in #220 -- do not "fix" it here without the reproduction that issue asks for.
 
     def __init__(self, url: str = WEB_WS) -> None:
         self.url = url
@@ -196,9 +235,224 @@ class RigSession:
         return self.latest.get(expect)
 
 
+# --- browser idle reaping ----------------------------------------------------
+
+class _IdleReapMixin:
+    """Reset-on-interaction idle TTL for a warm browser singleton (issue #219).
+
+    Keeping one browser alive across tool calls is the point of exposing the UI loop
+    over MCP (module docstring) -- but nothing ever closed it, and the page it sits on
+    is a Three.js scene software-rasterized by SwiftShader on this GPU-less host. A
+    session that ran one `ui_screenshot` and moved on left that running forever:
+    measured 2026-08-24, two abandoned browsers from two other agent sessions were
+    burning 1115% and 750% CPU -- 18.6 of 26 cores -- next to a `roomscan-web` using
+    27.7%. They also each held `/ws` clients open, which is real per-client server
+    work (BUG-060). The browser outlives the *conversation*, so nothing else was ever
+    going to reclaim them.
+
+    Two stages, because the two costs recover at different prices:
+
+    * **Park** (`BROWSER_PARK_S`): navigate to `about:blank`. Kills the WebGL burn and
+      drops the `/ws` client, but keeps the process warm, so the next call pays a
+      navigation rather than a cold launch. `self.url` deliberately keeps pointing at
+      the parked page -- it is still the page this session is logically on.
+    * **Stop** (`BROWSER_STOP_S`): full teardown, process and profile gone.
+
+    The trap this is built around: a parked browser must never let `ui_eval` quietly
+    evaluate against `about:blank` and hand back `null` for every selector. A blank
+    read that looks like a successful read is the failure mode this repo keeps paying
+    for. So restore happens in `start()` -- the one choke point every interface method
+    already funnels through -- and is *counted*, so a caller can tell it happened.
+
+    Subclasses implement `_start_impl`/`_stop_impl`/`_goto_impl`/`_evaluate_impl`/
+    `_wait_for_impl`/`_screenshot_impl`/`_navigate_raw`/`_alive`. The public methods
+    live here so no operation can escape the idle bookkeeping, and any method added
+    later inherits it by being written as an `_impl`.
+    """
+
+    park_after_s: float = BROWSER_PARK_S
+    stop_after_s: float = BROWSER_STOP_S
+    restore_settle_s: float = BROWSER_RESTORE_SETTLE_S
+    reap_tick_s: float = 15.0
+
+    def _idle_init(self) -> None:
+        self._last_used: float = time.monotonic()
+        self._parked_url: str | None = None
+        self._reaper: asyncio.Task | None = None
+        self._busy: int = 0
+        self.park_count: int = 0
+        self.stop_count: int = 0
+        self.restore_count: int = 0
+        self.last_park_error: str | None = None
+        self.last_restore: dict | None = None
+
+    # -- clock
+    def touch(self) -> None:
+        self._last_used = time.monotonic()
+
+    @property
+    def idle_s(self) -> float:
+        return time.monotonic() - self._last_used
+
+    @property
+    def parked(self) -> bool:
+        return self._parked_url is not None
+
+    @contextlib.asynccontextmanager
+    async def _in_use(self):
+        """Hold off the reaper for the duration of an operation, and reset the clock.
+
+        The counter matters as much as the timestamp: `ui_wait_for` can legitimately
+        block longer than the park TTL, and parking a page out from under a
+        `wait_for_function` would fail the wait for a reason the caller cannot see.
+        Re-entrant because `diag_tail` goes through `evaluate`.
+        """
+        self._busy += 1
+        self.touch()
+        try:
+            yield
+        finally:
+            self._busy -= 1
+            self.touch()
+
+    def _cancel_park(self) -> None:
+        """Forget a pending restore, for a caller that is about to navigate anyway."""
+        self._parked_url = None
+
+    def status(self) -> dict:
+        return {
+            "alive": self._alive(),
+            "url": self.url,
+            "parked": self.parked,
+            "idle_s": round(self.idle_s, 1),
+            "busy": self._busy,
+            "park_after_s": self.park_after_s,
+            "stop_after_s": self.stop_after_s,
+            "parks": self.park_count,
+            "stops": self.stop_count,
+            "restores": self.restore_count,
+            "last_restore": self.last_restore,
+            "last_park_error": self.last_park_error,
+            "backend": type(self).__name__,
+        }
+
+    # -- reaper
+    def _ensure_reaper(self) -> None:
+        if self.park_after_s <= 0 and self.stop_after_s <= 0:
+            return
+        if not self._alive():
+            return  # nothing to reap yet
+        if self._reaper is not None and not self._reaper.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop (sync test/context); reaping is best-effort
+        self._reaper = loop.create_task(self._reap_loop())
+
+    async def _reap_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.reap_tick_s)
+                await self._reap_once()
+                if not self._alive():
+                    return  # nothing left to reap; `start()` spawns a fresh reaper
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A reaper crash must never take down the server -- but it must not be
+            # invisible either, or the browser silently reverts to immortal.
+            self.last_park_error = f"reaper died: {type(exc).__name__}: {exc}"
+
+    async def _reap_once(self) -> None:
+        if self._busy or not self._alive():
+            return
+        idle = self.idle_s
+        if self.stop_after_s > 0 and idle >= self.stop_after_s:
+            try:
+                await self.stop()
+            finally:
+                self.stop_count += 1
+            return
+        if (self.park_after_s > 0 and idle >= self.park_after_s
+                and not self.parked and self.url and self.url != BLANK_URL):
+            target = self.url
+            try:
+                await self._navigate_raw(BLANK_URL)
+            except Exception as exc:
+                # Leave it unparked -- the stop stage is the backstop -- but RECORD
+                # why. A bare `return` here hid a total park failure on the CDP
+                # backend behind a browser that merely looked idle-stopped later.
+                self.last_park_error = f"{type(exc).__name__}: {exc}"
+                return
+            self.last_park_error = None
+            self._parked_url = target
+            self.park_count += 1
+
+    async def _restore_if_parked(self) -> None:
+        target = self._parked_url
+        if target is None:
+            return
+        # Cleared first: a restore that throws must not leave the session looping on a
+        # page it can never reach.
+        self._parked_url = None
+        t0 = time.monotonic()
+        await self._navigate_raw(target)
+        if self.restore_settle_s:
+            await asyncio.sleep(self.restore_settle_s)
+        self.restore_count += 1
+        self.last_restore = {"url": target, "took_s": round(time.monotonic() - t0, 2)}
+
+    # -- public interface (subclasses supply the `_impl`s)
+    async def start(self, width: int | None = None, height: int | None = None) -> None:
+        self.touch()
+        await self._start_impl(width, height)
+        self._ensure_reaper()
+        await self._restore_if_parked()
+
+    async def stop(self) -> None:
+        reaper, self._reaper = self._reaper, None
+        if reaper is not None and reaper is not asyncio.current_task():
+            # NOT when the reaper is what called us: cancelling the running task
+            # raises CancelledError at the next await INSIDE `_stop_impl`, which
+            # tears the browser down halfway. Measured on the live probe before this
+            # guard: `stop_count` incremented, most of the tree exited, but
+            # `PlaywrightSession._page` was never cleared and a chrome process
+            # survived -- so `_alive()` stayed True and the session was wedged with
+            # no browser behind it. `_reap_loop` returns on its own once `_alive()`
+            # goes False, so there is nothing to cancel in that path.
+            reaper.cancel()
+        self._parked_url = None
+        await self._stop_impl()
+
+    async def goto(self, url: str = WEB_PAGE, settle: float = 8.0) -> None:
+        async with self._in_use():
+            self._cancel_park()  # about to navigate; a restore first would be wasted
+            await self._goto_impl(url, settle)
+
+    async def evaluate(self, expression: str, await_promise: bool = True) -> dict:
+        async with self._in_use():
+            return await self._evaluate_impl(expression, await_promise)
+
+    async def wait_for(self, predicate_js: str, timeout_s: float = 15.0,
+                       poll_s: float = 0.25) -> dict:
+        async with self._in_use():
+            return await self._wait_for_impl(predicate_js, timeout_s, poll_s)
+
+    async def screenshot(self) -> bytes:
+        async with self._in_use():
+            return await self._screenshot_impl()
+
+    async def diag_tail(self, chars: int = 900) -> str:
+        r = await self.evaluate(
+            "(document.getElementById('log-lines')||{}).innerText || 'no-log-console'",
+            await_promise=False)
+        return (r.get("value") or "")[-chars:]
+
+
 # --- browser (CDP to headless Chrome) ---------------------------------------
 
-class CdpSession:
+class CdpSession(_IdleReapMixin):
     """A headless Chrome kept alive across tool calls, driven over raw CDP.
 
     Lifted from `host/tools/web_ui_shot.py`, which launched and tore down a browser
@@ -215,6 +469,14 @@ class CdpSession:
         # Last explicitly-requested size, re-applied by every call including
         # argless internal ones (see `start()`).
         self._size: tuple[int, int] = (1600, 1000)
+        self._idle_init()
+
+    def _alive(self) -> bool:
+        return self._ws is not None and self._proc is not None and self._proc.poll() is None
+
+    async def _navigate_raw(self, url: str) -> None:
+        """Navigate without touching `self.url` or the idle bookkeeping (park/restore)."""
+        await self.cmd("Page.navigate", {"url": url})
 
     # -- lifecycle
     def _find_chrome(self) -> str:
@@ -239,7 +501,7 @@ class CdpSession:
             time.sleep(0.25)
         raise RuntimeError(f"no CDP page target on port {self.port} within {timeout_s}s")
 
-    async def start(self, width: int | None = None, height: int | None = None) -> None:
+    async def _start_impl(self, width: int | None = None, height: int | None = None) -> None:
         """Ensure the browser is up, then (re)apply the current viewport size.
 
         The browser is a singleton kept warm across tool calls (module docstring),
@@ -275,7 +537,17 @@ class CdpSession:
                      f"--user-data-dir={self._profile}", "about:blank"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             ws_url = await asyncio.to_thread(self._cdp_target)
-            self._ws = await websockets.connect(ws_url, max_size=None)
+            # `ping_interval=None`: no keepalive on the CDP socket. `websockets`
+            # defaults to a 20 s ping with a 20 s pong deadline, and Chrome cannot
+            # answer it while SwiftShader is saturating a dozen cores rendering the
+            # live scene -- so the CLIENT tears down a perfectly good connection
+            # with `1011 keepalive ping timeout`. Found via #219: the idle reaper's
+            # park navigation failed every time on this backend while the same call
+            # succeeded when issued by hand on a quiet page. Pre-existing, not new
+            # -- it silently killed any CdpSession left idle ~20 s on a busy page.
+            # Keepalive buys nothing here anyway: Chrome is our own subprocess, so
+            # `self._proc.poll()` is the liveness signal that actually matters.
+            self._ws = await websockets.connect(ws_url, max_size=None, ping_interval=None)
             await self.cmd("Page.enable")
             await self.cmd("Runtime.enable")
             await self._disable_http_cache()
@@ -301,7 +573,7 @@ class CdpSession:
         except Exception:
             pass
 
-    async def stop(self) -> None:
+    async def _stop_impl(self) -> None:
         if self._ws is not None:
             try:
                 await self._ws.close()
@@ -332,13 +604,13 @@ class CdpSession:
                 return msg.get("result", {})
 
     # -- interface
-    async def goto(self, url: str = WEB_PAGE, settle: float = 8.0) -> None:
+    async def _goto_impl(self, url: str = WEB_PAGE, settle: float = 8.0) -> None:
         await self.start()
         await self.cmd("Page.navigate", {"url": url})
         self.url = url
         await asyncio.sleep(settle)
 
-    async def evaluate(self, expression: str, await_promise: bool = True) -> dict:
+    async def _evaluate_impl(self, expression: str, await_promise: bool = True) -> dict:
         await self.start()
         r = await self.cmd("Runtime.evaluate",
                            {"expression": expression, "awaitPromise": await_promise,
@@ -349,21 +621,21 @@ class CdpSession:
                     "detail": (exc.get("exception") or {}).get("description")}
         return {"ok": True, "value": (r.get("result") or {}).get("value")}
 
-    async def wait_for(self, predicate_js: str, timeout_s: float = 15.0,
-                       poll_s: float = 0.25) -> dict:
+    async def _wait_for_impl(self, predicate_js: str, timeout_s: float = 15.0,
+                             poll_s: float = 0.25) -> dict:
         """Poll `predicate_js` until truthy. Replaces sleep-and-hope."""
         await self.start()
         deadline = time.monotonic() + timeout_s
         last: dict = {}
         while time.monotonic() < deadline:
-            last = await self.evaluate(f"!!({predicate_js})")
+            last = await self._evaluate_impl(f"!!({predicate_js})")
             if last.get("ok") and last.get("value"):
                 return {"ok": True, "waited_s": round(
                     timeout_s - (deadline - time.monotonic()), 2)}
             await asyncio.sleep(poll_s)
         return {"ok": False, "timeout_s": timeout_s, "last": last}
 
-    async def screenshot(self) -> bytes:
+    async def _screenshot_impl(self) -> bytes:
         await self.start()
         r = await self.cmd("Page.captureScreenshot", {"format": "png"})
         data = r.get("data")
@@ -371,14 +643,8 @@ class CdpSession:
             raise RuntimeError("screenshot returned no data")
         return base64.b64decode(data)
 
-    async def diag_tail(self, chars: int = 900) -> str:
-        r = await self.evaluate(
-            "(document.getElementById('log-lines')||{}).innerText || 'no-log-console'",
-            await_promise=False)
-        return (r.get("value") or "")[-chars:]
 
-
-class PlaywrightSession:
+class PlaywrightSession(_IdleReapMixin):
     """Same interface as `CdpSession`, backed by Playwright.
 
     Preferred because waiting is native: `wait_for_function` is driven by the page's
@@ -398,8 +664,16 @@ class PlaywrightSession:
         # Last explicitly-requested size, re-applied by every call including
         # argless internal ones (see `start()`).
         self._size: tuple[int, int] = (1600, 1000)
+        self._idle_init()
 
-    async def start(self, width: int | None = None, height: int | None = None) -> None:
+    def _alive(self) -> bool:
+        return self._page is not None
+
+    async def _navigate_raw(self, url: str) -> None:
+        """Navigate without touching `self.url` or the idle bookkeeping (park/restore)."""
+        await self._page.goto(url)
+
+    async def _start_impl(self, width: int | None = None, height: int | None = None) -> None:
         """Ensure the page is up, then (re)apply the current viewport size.
 
         Same fix as `CdpSession.start` (issue #168): the browser/page is a
@@ -441,7 +715,7 @@ class PlaywrightSession:
             await self._page.set_viewport_size(
                 {"width": self._size[0], "height": self._size[1]})
 
-    async def stop(self) -> None:
+    async def _stop_impl(self) -> None:
         for closer in (getattr(self._browser, "close", None),
                        getattr(self._pw, "stop", None)):
             if closer:
@@ -452,14 +726,14 @@ class PlaywrightSession:
         self._pw = self._browser = self._page = None
         self.url = None
 
-    async def goto(self, url: str = WEB_PAGE, settle: float = 8.0) -> None:
+    async def _goto_impl(self, url: str = WEB_PAGE, settle: float = 8.0) -> None:
         await self.start()
         await self._page.goto(url)
         self.url = url
         if settle:
             await asyncio.sleep(settle)
 
-    async def evaluate(self, expression: str, await_promise: bool = True) -> dict:
+    async def _evaluate_impl(self, expression: str, await_promise: bool = True) -> dict:
         await self.start()
         try:
             # Wrap so a bare expression and a function body both work, matching CDP.
@@ -467,8 +741,8 @@ class PlaywrightSession:
         except Exception as exc:
             return {"ok": False, "exception": str(exc).splitlines()[0], "detail": str(exc)[:600]}
 
-    async def wait_for(self, predicate_js: str, timeout_s: float = 15.0,
-                       poll_s: float = 0.25) -> dict:
+    async def _wait_for_impl(self, predicate_js: str, timeout_s: float = 15.0,
+                             poll_s: float = 0.25) -> dict:
         await self.start()
         t0 = time.monotonic()
         try:
@@ -479,14 +753,9 @@ class PlaywrightSession:
                     "last": {"ok": False, "exception": str(exc).splitlines()[0]}}
         return {"ok": True, "waited_s": round(time.monotonic() - t0, 2)}
 
-    async def screenshot(self) -> bytes:
+    async def _screenshot_impl(self) -> bytes:
         await self.start()
         return await self._page.screenshot()
-
-    async def diag_tail(self, chars: int = 900) -> str:
-        r = await self.evaluate(
-            "(document.getElementById('log-lines')||{}).innerText || 'no-log-console'")
-        return (r.get("value") or "")[-chars:]
 
 
 def _make_browser():

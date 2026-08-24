@@ -1455,3 +1455,488 @@ def test_unit_helpers_parse_systemctl_output(monkeypatch):
     monkeypatch.setattr(T.subprocess, "run", boom)
     assert T._unit_loaded() is False
     assert T._unit_active() is False
+
+
+# --- browser idle reaping (#219) ---------------------------------------------
+#
+# The `ui_*` browser is kept warm across tool calls on purpose, but nothing ever
+# closed it, and the page it sits on is a Three.js scene software-rasterized by
+# SwiftShader. Measured 2026-08-24: two abandoned browsers from two other agent
+# sessions were burning 1115% and 750% CPU -- 18.6 of 26 cores -- one with 96 h of
+# accumulated CPU time, next to a `roomscan-web` using 27.7%. `_IdleReapMixin` parks
+# the page to about:blank on an idle timer and then stops the browser.
+#
+# The failure mode these must rule out is NOT "it failed to reap" -- that one is
+# loud. It is "it reaped and then quietly served the blank page", which returns
+# `null` for every selector and reads exactly like a successful evaluate.
+
+def _fake_browser(**attrs):
+    """A minimal `_IdleReapMixin` backend whose page content is observable.
+
+    `_evaluate_impl` answers from whatever page is actually loaded, so a test can
+    tell a restored page apart from a parked one by the VALUE it gets back, rather
+    than by re-reading the flag the code under test just set.
+    """
+    from roomscan.mcp_server.session import BLANK_URL, _IdleReapMixin
+
+    class _Fake(_IdleReapMixin):
+        restore_settle_s = 0.0            # no 8 s sleep in tests
+        reap_tick_s = 0.01
+
+        def __init__(self):
+            self.url = None
+            self.page = BLANK_URL         # what the browser is REALLY showing
+            self.alive = True
+            self.navigations: list[str] = []
+            self.stopped = 0
+            self._idle_init()
+
+        def _alive(self):
+            return self.alive
+
+        async def _navigate_raw(self, url):
+            self.navigations.append(url)
+            self.page = url
+
+        async def _start_impl(self, width=None, height=None):
+            self.alive = True
+
+        async def _stop_impl(self):
+            self.stopped += 1
+            self.alive = False
+            self.page = None
+            self.url = None
+
+        async def _goto_impl(self, url, settle=8.0):
+            await self.start()
+            await self._navigate_raw(url)
+            self.url = url
+
+        async def _evaluate_impl(self, expression, await_promise=True):
+            await self.start()
+            # A blank page has no app on it -- the silent-wrong-answer case.
+            return {"ok": True, "value": None if self.page == BLANK_URL else self.page}
+
+        async def _wait_for_impl(self, predicate_js, timeout_s=15.0, poll_s=0.25):
+            await self.start()
+            return {"ok": True, "waited_s": 0.0}
+
+        async def _screenshot_impl(self):
+            await self.start()
+            return b"png:" + (self.page or "none").encode()
+
+    s = _Fake()
+    for k, v in attrs.items():
+        setattr(s, k, v)
+    return s
+
+
+def test_idle_browser_parks_to_about_blank_but_keeps_its_url():
+    """Parking must drop the WebGL page without forgetting where it was.
+
+    `self.url` stays pointing at the real page: it is still the page this session
+    is logically on, and `ui_screenshot`'s `browser.url is None` cold-path check
+    keys off it. Only `_parked_url` records that a restore is owed.
+    """
+    import asyncio
+
+    from roomscan.mcp_server.session import BLANK_URL
+
+    s = _fake_browser(park_after_s=1.0, stop_after_s=0.0)
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+        s._last_used -= 5.0               # pretend 5 s of idle
+        await s._reap_once()
+
+    asyncio.run(scenario())
+
+    assert s.page == BLANK_URL, "the parked browser must not still be on the live page"
+    assert s.parked is True
+    assert s.url == "http://localhost:8000/", "park must not forget the page it left"
+    assert s.park_count == 1
+
+
+def test_a_parked_browser_restores_before_evaluating_instead_of_reading_a_blank_page():
+    """The acceptance test with teeth: a restored evaluate sees the REAL page.
+
+    Asserting on the returned value, not on `parked` going False -- a read-back of
+    the flag the restore just cleared would pass even if the navigation never
+    happened, which is the `sceneOpacity` getter mistake (#106).
+    """
+    import asyncio
+
+    s = _fake_browser(park_after_s=1.0, stop_after_s=0.0)
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+        s._last_used -= 5.0
+        await s._reap_once()
+        assert s.parked is True
+        return await s.evaluate("document.title")
+
+    r = asyncio.run(scenario())
+
+    assert r["value"] == "http://localhost:8000/", (
+        f"evaluate on a parked browser must restore the page first, got {r!r}")
+    assert s.restore_count == 1
+    assert s.last_restore["url"] == "http://localhost:8000/"
+
+
+def test_any_interaction_resets_the_idle_clock():
+    """An in-use browser is never reaped -- that is what "TTL" has to mean here."""
+    import asyncio
+
+    s = _fake_browser(park_after_s=1.0, stop_after_s=2.0)
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+        s._last_used -= 5.0               # old enough to be reaped...
+        await s.evaluate("1")             # ...but this call resets the clock
+        await s._reap_once()
+
+    asyncio.run(scenario())
+
+    assert s.parked is False, "a browser used a moment ago must not be parked"
+    assert s.stopped == 0
+    assert s.park_count == 0
+
+
+def test_a_long_wait_for_is_not_parked_out_from_under_itself():
+    """`ui_wait_for` can legitimately block past the park TTL.
+
+    The timestamp alone is not enough: a wait that outlives `park_after_s` would be
+    parked mid-flight and fail for a reason its caller cannot see. The busy counter
+    is what makes that impossible.
+    """
+    import asyncio
+
+    s = _fake_browser(park_after_s=1.0, stop_after_s=0.0)
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+
+        async def slow_wait(predicate_js, timeout_s=15.0, poll_s=0.25):
+            s._last_used -= 5.0           # this wait has outlived the park TTL
+            await s._reap_once()          # reaper ticks mid-wait
+            return {"ok": True, "waited_s": 5.0}
+
+        s._wait_for_impl = slow_wait
+        return await s.wait_for("window.ready")
+
+    r = asyncio.run(scenario())
+
+    assert r["ok"] is True
+    assert s.parked is False, "the reaper must not park a browser with an operation in flight"
+
+
+def test_idle_browser_stops_after_the_longer_ttl():
+    import asyncio
+
+    s = _fake_browser(park_after_s=1.0, stop_after_s=2.0)
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+        s._last_used -= 5.0
+        await s._reap_once()
+
+    asyncio.run(scenario())
+
+    assert s.stopped == 1
+    assert s.alive is False
+    assert s.stop_count == 1
+    assert s.parked is False, "a stopped browser owes no restore"
+
+
+def test_goto_cancels_a_pending_restore_rather_than_paying_for_it():
+    """A caller about to navigate must not first be charged an 8 s restore settle."""
+    import asyncio
+
+    from roomscan.mcp_server.session import BLANK_URL
+
+    s = _fake_browser(park_after_s=1.0, stop_after_s=0.0)
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+        s._last_used -= 5.0
+        await s._reap_once()
+        s.navigations.clear()
+        await s.goto("http://localhost:8000/?x=1")
+
+    asyncio.run(scenario())
+
+    assert s.navigations == ["http://localhost:8000/?x=1"], (
+        f"goto must navigate once, not restore-then-navigate; got {s.navigations!r}")
+    assert s.restore_count == 0
+    assert s.page != BLANK_URL
+
+
+def test_a_failed_restore_does_not_leave_the_session_looping_on_it():
+    """Clearing `_parked_url` before navigating: a page we can never reach must not
+    make every subsequent call retry it forever."""
+    import asyncio
+
+    s = _fake_browser(park_after_s=1.0, stop_after_s=0.0)
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+        s._last_used -= 5.0
+        await s._reap_once()
+
+        async def boom(url):
+            raise RuntimeError("navigation failed")
+
+        s._navigate_raw = boom
+        try:
+            await s.evaluate("1")
+        except RuntimeError:
+            pass
+        return s.parked
+
+    assert asyncio.run(scenario()) is False
+
+
+def test_a_failed_park_leaves_the_browser_usable():
+    """Parking is an optimisation; the stop stage is the real backstop."""
+    import asyncio
+
+    s = _fake_browser(park_after_s=1.0, stop_after_s=0.0)
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+
+        async def boom(url):
+            raise RuntimeError("navigation failed")
+
+        s._navigate_raw = boom
+        s._last_used -= 5.0
+        await s._reap_once()
+
+    asyncio.run(scenario())
+
+    assert s.parked is False, "a park that never happened must not owe a restore"
+    assert s.park_count == 0
+    assert s.url == "http://localhost:8000/"
+
+
+def test_zero_ttl_disables_reaping():
+    """The env vars must be able to turn this off outright on a machine with a GPU."""
+    import asyncio
+
+    s = _fake_browser(park_after_s=0.0, stop_after_s=0.0)
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+        s._last_used -= 100000.0
+        await s._reap_once()
+
+    asyncio.run(scenario())
+
+    assert s.parked is False
+    assert s.stopped == 0
+
+
+def test_env_seconds_rejects_junk_and_clamps_negatives():
+    from roomscan.mcp_server.session import _env_seconds
+
+    import os as _os
+    for raw, expected in (("30", 30.0), ("", 9.0), ("  ", 9.0), ("junk", 9.0),
+                          ("-5", 0.0), ("0", 0.0)):
+        _os.environ["ROOMSCAN_TEST_TTL"] = raw
+        assert _env_seconds("ROOMSCAN_TEST_TTL", 9.0) == expected, raw
+    del _os.environ["ROOMSCAN_TEST_TTL"]
+    assert _env_seconds("ROOMSCAN_TEST_TTL", 9.0) == 9.0
+
+
+def test_both_browser_backends_share_one_reaping_implementation():
+    """One implementation, not two -- a backend that defined its own `goto` would
+    silently opt out of the idle bookkeeping."""
+    from roomscan.mcp_server.session import (CdpSession, PlaywrightSession,
+                                             _IdleReapMixin)
+
+    for cls in (CdpSession, PlaywrightSession):
+        assert issubclass(cls, _IdleReapMixin)
+        for name in ("goto", "evaluate", "wait_for", "screenshot", "start", "stop"):
+            assert name not in vars(cls), (
+                f"{cls.__name__}.{name} overrides the mixin and escapes idle "
+                f"bookkeeping; implement it as _{name}_impl instead")
+            assert f"_{name}_impl" in vars(cls) or name in ("start", "stop"), name
+
+
+def test_ui_eval_reports_a_restore_instead_of_hiding_it(monkeypatch):
+    """A silent 8 s restore looks like a slow page; the caller has to be told."""
+    import asyncio
+
+    from roomscan.mcp_server import tools_ui
+
+    s = _fake_browser(park_after_s=1.0, stop_after_s=0.0)
+    monkeypatch.setattr(tools_ui, "browser", s)
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+        s._last_used -= 5.0
+        await s._reap_once()
+        return await tools_ui.ui_eval("document.title")
+
+    r = asyncio.run(scenario())
+
+    assert r["value"] == "http://localhost:8000/"
+    assert r["restored"]["url"] == "http://localhost:8000/"
+
+
+def test_ui_browser_status_reports_the_reap_state():
+    import asyncio
+
+    from roomscan.mcp_server import tools_ui
+
+    # stop TTL well clear of the idle we simulate, so this exercises the PARK stage
+    # rather than tripping straight through to stop.
+    s = _fake_browser(park_after_s=1.0, stop_after_s=100.0)
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+        s._last_used -= 5.0
+        await s._reap_once()
+        return s.status()
+
+    st = asyncio.run(scenario())
+
+    assert st["parked"] is True
+    assert st["url"] == "http://localhost:8000/"
+    assert st["park_after_s"] == 1.0 and st["stop_after_s"] == 100.0
+    assert st["parks"] == 1
+    assert st["idle_s"] >= 5.0
+
+
+def test_the_reaper_completes_a_teardown_it_triggers_itself():
+    """Regression: `stop()` used to cancel the task that called it.
+
+    `_reap_once` -> `stop()` -> `self._reaper.cancel()` raises CancelledError at the
+    next await INSIDE `_stop_impl`, halfway through teardown. The fake backends above
+    never caught it because their `_stop_impl` has no await point and the other tests
+    call `_reap_once()` directly instead of going through the reaper task. The live
+    probe did: `stops` incremented and most of the chrome tree exited, but `_page`
+    was never cleared, so `_alive()` stayed True with no working browser behind it.
+
+    So this drives the real `_reap_loop` task and puts an await in the middle of
+    teardown, which is the only shape that reproduces it.
+    """
+    import asyncio
+
+    s = _fake_browser(park_after_s=0.0, stop_after_s=0.05)
+    s.teardown_finished = False
+
+    async def slow_stop():
+        await asyncio.sleep(0.02)         # the await the cancellation landed on
+        s.stopped += 1
+        s.alive = False
+        s.page = None
+        s.url = None
+        s.teardown_finished = True
+
+    s._stop_impl = slow_stop
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+        s._ensure_reaper()
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if not s.alive:
+                break
+
+    asyncio.run(scenario())
+
+    assert s.teardown_finished is True, (
+        "the reaper cancelled its own teardown midway; stop() must not cancel the "
+        "task that called it")
+    assert s.alive is False
+    assert s.stop_count == 1
+
+
+def test_cdp_socket_disables_the_websockets_keepalive(monkeypatch):
+    """`websockets` kills its own CDP connection on a busy page.
+
+    The client defaults to a 20 s keepalive ping with a 20 s pong deadline, and Chrome
+    cannot answer it while SwiftShader saturates a dozen cores rendering the live
+    scene -- so the CLIENT closes a healthy connection with `1011 keepalive ping
+    timeout`. Pre-existing; #219's reaper only made it visible, because the park
+    navigation is the first CDP command this backend ever issues after ~20 s of idle
+    on a loaded page. Every park attempt failed while the identical call succeeded by
+    hand on a quiet page.
+
+    Keepalive buys nothing here: Chrome is our own subprocess and `_proc.poll()` is
+    the liveness signal that matters.
+    """
+    import asyncio
+
+    import websockets
+
+    from roomscan.mcp_server.session import CdpSession
+
+    seen: dict = {}
+
+    async def fake_connect(url, **kwargs):
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(websockets, "connect", fake_connect)
+
+    s = CdpSession()
+    s._proc = SimpleNamespace(poll=lambda: None)   # already "launched"
+    monkeypatch.setattr(s, "_cdp_target", lambda *a, **k: "ws://localhost:9222/x")
+
+    async def fake_cmd(method, params=None):
+        return {}
+
+    s.cmd = fake_cmd                      # type: ignore[method-assign]
+    asyncio.run(s.start())
+
+    assert "ping_interval" in seen and seen["ping_interval"] is None, (
+        "the CDP socket must disable the websockets keepalive, else a busy page "
+        f"gets its own connection torn down; connect kwargs were {seen!r}")
+
+
+def test_a_failed_park_is_recorded_not_swallowed():
+    """A silent `except: return` hid a TOTAL park failure on the CDP backend.
+
+    The browser merely looked like it had gone quiet and stopped on schedule, so
+    nothing about the observable behaviour said "parking never once worked". The
+    reason has to survive into `status()`.
+    """
+    import asyncio
+
+    s = _fake_browser(park_after_s=1.0, stop_after_s=0.0)
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+
+        async def boom(url):
+            raise RuntimeError("keepalive ping timeout")
+
+        s._navigate_raw = boom
+        s._last_used -= 5.0
+        await s._reap_once()
+
+    asyncio.run(scenario())
+
+    assert s.parked is False
+    assert "keepalive ping timeout" in (s.last_park_error or ""), (
+        f"a park failure must be recorded, got {s.last_park_error!r}")
+    assert "keepalive" in (s.status()["last_park_error"] or "")
+
+
+def test_a_successful_park_clears_a_stale_park_error():
+    import asyncio
+
+    s = _fake_browser(park_after_s=1.0, stop_after_s=0.0)
+    s.last_park_error = "RuntimeError: something old"
+
+    async def scenario():
+        await s.goto("http://localhost:8000/")
+        s._last_used -= 5.0
+        await s._reap_once()
+
+    asyncio.run(scenario())
+
+    assert s.parked is True
+    assert s.last_park_error is None, "a park that worked must not leave a stale error"

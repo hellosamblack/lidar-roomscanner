@@ -63,6 +63,10 @@ EXCLUDED: dict[str, str] = {
     # Would break the client-never-competitor invariant: these bind the device
     # stream, which roomscan-web owns. Recording goes through rig_record().
     "capture.py": "binds the device stream directly; use rig_record() instead",
+    # Must own its browser: the MCP server's browser singleton is what it tests.
+    "browser_reap_probe.py": ("live bench for the #219 idle reaper; needs its OWN "
+                              "browser, since the MCP server's singleton is the "
+                              "subject under test"),
     "check_udp.py": "binds the device UDP stream; would starve a live roomscan-web",
     "bench_commands.py": "binds the device CDC stream; rare hardware bench",
     # Scratch tier: hardcoded IPs / Windows paths, superseded by the tools above.

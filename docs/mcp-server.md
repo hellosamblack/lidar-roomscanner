@@ -87,7 +87,7 @@ in-process call meanwhile.
 | `rig_ws_probe(seconds?, url?)` | splits "nothing rendered" into server-computing / transport-delivering / payload-well-formed. Acks every mesh (`/ws-mesh` is credit-gated, so a silent client sees one mesh then a 1-per-5-s trickle) and re-parses one MESH with `slam.js`'s exact layout — `slack_bytes != 0` means packer and reader have drifted. Keep `seconds` small: connection count is a performance variable here (BUG-060/061) |
 | `rig_thin_probe(frames?, url?, out_dir?, orbit_yaw?, modes?, record?, timeout?, format?, fps?, width?, height?, quality?, v2?, credits?, max_frame_bytes?, telemetry_interval?)` | what `/ws-thin` is actually drawing, as PNGs — stands in for the CrowPanel thin client (#194). Decodes `THIN_FRAME` (`<IHH` header, tag 1, `w*h*2` RGB565 bytes) and, after negotiating via `thin_hello` (`format="jpeg"` etc., #197), `THIN_FRAME_JPEG` (`<IHHII` header, tag 2 — `tag, w, h, seq, payload_len`, #202 — baseline 4:2:0 JFIF payload) into `results/thin_probe/<timestamp>/*.png`; with a hello requested, `ok` additionally requires the ack arrived AND the recorded frame tags match the negotiated format (`hello.degraded` reports a jpeg→raw downgrade), served at `/results/…`. `measured_fps` and `measured_mbps` cover the initial decoded receive batch and are timestamped before per-frame statistics and PNG writes, so the probe's observability cost cannot throttle the credit loop and then masquerade as server/network latency. `v2=True` sends the CrowPanel spec's proto-2 hello (`accept` list + `credits` 1–8 + `max_frame_bytes`) and auto-grants a `thin_ready` per consumed frame, exercising credit flow control end to end — watch the per-client `tx_fps`/`tx_bytes_per_s`/`dropped` telemetry vs the rig-internal `fps` (#202). **The observable is pixels:** `thin_orbit` is scored by `orbit.changed_frac` against `orbit.control_changed_frac` — the same measure on two consecutive frames with no command — so scene motion is subtracted by construction and a null can't be explained away (the #106 lesson); `moved_pixels` needs ≥10% of pixels changed *and* 3× the control. `thin_mode` is confirmed by the server's own `thin_telemetry`, then requires a frame → `modes_with_frames`; a confirmed mode with no frame is a finding (the loop sends nothing for a stale/empty generation-tagged stash, #101). Check `distinct_colors` before believing a frame — a failed render is a uniform buffer. `record=False` by default: `thin_record` starts a REAL capture. `width`/`height` accept **160**/320/480 — 160 is the #216 thumbnail tier for a small preview pane (measured ~1.47 KB/frame vs ~5.9 KB at 480 on the same scene), and a non-listed size snaps to the nearest, ties going to the cheaper tier. `telemetry_interval` (#216) requests a `thin_telemetry` cadence in seconds (server clamps [0.05, 1.0]; the IR grid rides that message, so it is the thermal feed's frame rate). **Judge it by `telemetry_hz`, measured from arrival times — not by the ack**, which only echoes the negotiated number: a re-phasing bug in the server's gate delivered 8.0 Hz against a correct `0.1` ack until the rate was measured on a real socket. It is additionally capped by `fps`, since telemetry is built once per render tick. Server down / `thin_client_limit` / `thin_render_unavailable` come back in `server_error`, never as an exception |
 
-**ui_\*** — headless Chrome, held open across calls.
+**ui_\*** — headless Chrome, held open across calls but **reaped when idle**.
 
 | tool | notes |
 |---|---|
@@ -95,11 +95,82 @@ in-process call meanwhile.
 | `ui_eval(js)` | JS result as JSON; JS errors come back as `ok=false` |
 | `ui_wait_for(predicate_js)` | wait on a real condition instead of sleeping |
 | `ui_reset(relaunch?)` | clean page between scenarios -- server state persists |
+| `ui_browser_status()` | liveness, current page, and idle-reap counters -- tells "parked/gone" apart from "the page is broken" |
 
 Useful readouts: `#pos-status` ("frame N / total", replay only), `#hud-view-fps`,
 `#hud-device-fps`, `#record-status`, `#ir-frame`, `#slam-frames`. Element ids live in
 `host/src/roomscan/static/index.html`. `window.__diag` is the page's *logging sink
 function*, not a state object -- read what it logged via `ui_screenshot`'s tail.
+
+#### The browser is warm, not immortal (#219)
+
+Keeping one browser across tool calls is the whole reason this loop is worth exposing
+over MCP -- but the page it sits on is a Three.js scene software-rasterized by
+SwiftShader, and nothing used to close it. A session that ran one `ui_screenshot` and
+moved on left that burning until a human noticed: measured 2026-08-24, two abandoned
+browsers from two other agent sessions were at **1115% and 750% CPU — 18.6 of 26
+cores**, next to a `roomscan-web` using 27.7%, one of them 96 h of accumulated CPU
+time. They also each held two `/ws` clients open, which is per-client server work
+(BUG-060). The browser outlives the *conversation*, so nothing else was going to
+reclaim it.
+
+Any `ui_*` call resets the idle clock (and an in-flight call is never reaped -- a
+`ui_wait_for` may legitimately block past the park TTL). Two stages, because the two
+costs recover at different prices:
+
+| stage | default | env var | effect |
+|---|---|---|---|
+| park | 180 s idle | `ROOMSCAN_MCP_BROWSER_PARK_S` | navigate to `about:blank` — drops the WebGL burn and the `/ws` clients, keeps the process warm |
+| stop | 900 s idle | `ROOMSCAN_MCP_BROWSER_STOP_S` | full teardown, process and profile gone |
+
+`0` disables either stage. Restoring a parked page costs a navigation plus
+`ROOMSCAN_MCP_BROWSER_RESTORE_SETTLE_S` (default 8 s, matching the cold-load settle).
+
+Measured on a real browser against the live UI, both backends:
+
+| backend | CPU loaded | CPU parked | restore | stop |
+|---|---|---|---|---|
+| `PlaywrightSession` (production) | 1248.8% | 0.7% (−100%) | identical page in 9.1 s | 0 surviving chrome pids |
+| `CdpSession` (fallback) | 1146.2% | 12.5% (−99%) | identical page in 8.2 s | 0 surviving chrome pids |
+
+"Identical page" is `document.title` **and** canvas `1600x1000`, both matching what the
+pre-park page reported; `/ws` sockets owned by the browser went **2 → 0** on park.
+
+Those numbers come from `host/tools/browser_reap_probe.py` (`--cdp` for the fallback
+backend) — re-run it after a Chrome, Playwright or `websockets` bump. It is
+deliberately not an MCP tool: it has to own its browser, and the server's browser
+singleton is the subject under test.
+
+Parking is transparent but not silent: the restore happens in `start()`, the one choke
+point every operation funnels through, so `ui_eval` can never evaluate against
+`about:blank` and hand back `null` for every selector — and when a restore does happen,
+`ui_eval` reports `restored` and `ui_screenshot` prints `restored=` in its text block.
+A blank read that looks like a successful read is the failure this feature had to avoid
+introducing, so **assert on a value from the page, never on `parked` going False** —
+that flag is a read-back of what the restore just set (the `sceneOpacity` mistake,
+#106).
+
+Two traps worth keeping, **both found by the live probe and invisible to the unit
+tests** — the fakes have no await point in teardown and no real socket:
+
+- `stop()` must not cancel the reaper task when the reaper is what called it. Doing so
+  raises `CancelledError` at the next await *inside* the teardown, which
+  half-tears-down the browser: `stop_count` incremented and most of the tree exited
+  while `_page` stayed set, so `_alive()` read True with no working browser behind it.
+- **`websockets` will kill its own CDP connection on a busy page.** The client defaults
+  to a 20 s keepalive ping with a 20 s pong deadline, and Chrome cannot answer while
+  SwiftShader saturates a dozen cores, so the *client* closes a healthy socket with
+  `1011 keepalive ping timeout`. `CdpSession` now connects with `ping_interval=None`;
+  Chrome is our own subprocess, so `_proc.poll()` is the liveness signal that matters.
+  This was **pre-existing** — any `CdpSession` left idle ~20 s on a loaded page lost
+  its connection — and the reaper only made it visible, because the park navigation is
+  the first CDP command that backend issues after a long idle. Symptom to recognise:
+  every park failed while the identical call succeeded by hand on a quiet page.
+
+That second one is also why a park failure is *recorded* (`last_park_error` in
+`ui_browser_status()`) rather than swallowed. The original `except Exception: return`
+hid a 100%-failure rate behind a browser that merely looked like it had gone quiet and
+stopped on schedule.
 
 ### Ranging control is effect-verified, not fire-and-forget
 
