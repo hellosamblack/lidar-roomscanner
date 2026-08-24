@@ -179,6 +179,13 @@ class SlamConfig:
     # 2026-08-05-crazySLAM.bin's entire 8.6 m of vertical "translation". 0 disables.
     # See mapper._apply_baro_z / _baro_is_outlier.
     baro_reject_m: float = 50.0
+    # Minimum linear displacement (metres) since the last integrated frame
+    # required to admit a new frame into the TSDF map. 0.0 disables linear gating
+    # (integrates every tracked frame). See docs/superpowers/specs/2026-08-19-slam-integration-admission-design.md
+    min_linear_displacement_m: float = 0.0
+    # Minimum angular displacement (radians) since the last integrated frame
+    # required to admit a new frame into the TSDF map. 0.0 disables angular gating.
+    min_angular_displacement_rad: float = 0.0
     # Compute device for the Open3D tensor pipeline (TsdfMap/pinhole/
     # source_cloud/register). "CPU:0" today -- the installed Open3D 0.19
     # build here has no CUDA support -- but "CUDA:0" (or any other
@@ -333,6 +340,8 @@ class SlamConfig:
             "baro_authority": self.baro_authority,
             "baro_tau_frames": self.baro_tau_frames,
             "baro_reject_m": self.baro_reject_m,
+            "min_linear_displacement_m": self.min_linear_displacement_m,
+            "min_angular_displacement_rad": self.min_angular_displacement_rad,
             "stationary_hold": self.stationary_hold,
             "stationary_window": self.stationary_window,
             "stationary_coherence": self.stationary_coherence,

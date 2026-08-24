@@ -169,12 +169,19 @@ class Mapper:
                  zupt_coherence: float = 0.5,
                  imu_spike_deg: float = 0.0,
                  baro_reject_m: float = 50.0,
+                 min_linear_displacement_m: float = 0.0,
+                 min_angular_displacement_rad: float = 0.0,
                  clock=time.perf_counter):
         self.width, self.height = width, height
         self.icp_mode = icp_mode
         self.baro_authority = baro_authority
         self.baro_tau_frames = baro_tau_frames
         self.min_confidence = min_confidence
+        self.min_linear_displacement_m = float(min_linear_displacement_m)
+        self.min_angular_displacement_rad = float(min_angular_displacement_rad)
+        self._last_integrated_pose: np.ndarray | None = None
+        self._gated_integrations: int = 0
+        self._total_integrations: int = 0
         # IMU spike pre-gate ceiling, deg of inter-frame SFLP rotation. Above
         # this the quat is treated as a glitch and the last good orientation is
         # held as the prior (see step()). DEFAULT 0 = DISABLED: this is a
@@ -676,16 +683,39 @@ class Mapper:
 
         integrate_ms = 0.0
         if not lost:
-            # Map + tracking prior use the TRUE ICP pose -- accuracy is
-            # unaffected by the stationarity gate (see the `held` comment).
-            # Timed, but see FrameStep.integrate_ms's docstring: on CUDA this
-            # is usually a DISPATCH-time lower bound, not the kernel's actual
-            # completion time, because `integrate()` doesn't always force a
-            # device->host sync (only `_check_saturation`'s pre-warning reads
-            # and `_check_rehash_headroom`'s every-25th-call read do).
-            t_integrate0 = self._clock()
-            self._tsdf.integrate(depth_mm, self._intr, np.linalg.inv(pose), color=color)
-            integrate_ms = (self._clock() - t_integrate0) * 1000.0
+            # Displacement gate (Issue #149 / admission design §A): integrate
+            # iff linear displacement >= min_linear_displacement_m OR angular
+            # displacement >= min_angular_displacement_rad from the last
+            # integrated pose. 0.0 disables the respective gate.
+            if self._last_integrated_pose is None:
+                should_integrate = True
+            elif self.min_linear_displacement_m <= 0.0 and self.min_angular_displacement_rad <= 0.0:
+                should_integrate = True
+            else:
+                lin_disp = float(np.linalg.norm(pose[:3, 3] - self._last_integrated_pose[:3, 3]))
+                R_rel = pose[:3, :3] @ self._last_integrated_pose[:3, :3].T
+                trace = np.clip((np.trace(R_rel) - 1.0) / 2.0, -1.0, 1.0)
+                ang_disp = float(np.arccos(trace))
+                lin_pass = self.min_linear_displacement_m > 0.0 and lin_disp >= self.min_linear_displacement_m
+                ang_pass = self.min_angular_displacement_rad > 0.0 and ang_disp >= self.min_angular_displacement_rad
+                should_integrate = lin_pass or ang_pass
+
+            if should_integrate:
+                # Map + tracking prior use the TRUE ICP pose -- accuracy is
+                # unaffected by the stationarity gate (see the `held` comment).
+                # Timed, but see FrameStep.integrate_ms's docstring: on CUDA this
+                # is usually a DISPATCH-time lower bound, not the kernel's actual
+                # completion time, because `integrate()` doesn't always force a
+                # device->host sync (only `_check_saturation`'s pre-warning reads
+                # and `_check_rehash_headroom`'s every-25th-call read do).
+                t_integrate0 = self._clock()
+                self._tsdf.integrate(depth_mm, self._intr, np.linalg.inv(pose), color=color)
+                integrate_ms = (self._clock() - t_integrate0) * 1000.0
+                self._last_integrated_pose = pose.copy()
+                self._total_integrations += 1
+            else:
+                self._gated_integrations += 1
+
             self._t_prev = pose[:3, 3].copy()
             self._bootstrapped = True
         else:

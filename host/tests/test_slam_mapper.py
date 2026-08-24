@@ -1,4 +1,5 @@
 import math
+import types
 
 import numpy as np
 import open3d as o3d
@@ -979,8 +980,6 @@ def test_the_four_stationary_knobs_are_inert_when_the_hold_is_off():
 
 # ---- BUG-069 accel ZUPT + BUG-031/067 quat-phase: plumbing through Mapper.step
 
-import types
-
 
 def _batch(accel_g=None, gyro_dps=None, gbias_dps=None):
     """A minimal stand-in for protocol.ImuRawBatch: Mapper reads the fields by
@@ -1093,3 +1092,140 @@ def test_interpolated_frames_skip_the_fixed_rollback_but_keep_zupt():
                quat_offset_us=None)
     assert m.quat_phase_count == 0
     assert m.zupt_count > 0
+
+
+# ---- Issue #149: displacement keyframe gating -----------------------------
+
+def test_displacement_gate_defaults_disabled_integrates_every_frame():
+    """Displacement thresholds default to 0.0 (disabled). Every non-lost frame
+    integrates into the TSDF map, incrementing _total_integrations."""
+    m = Mapper(W, H, voxel_size=0.02)
+    assert m.min_linear_displacement_m == 0.0
+    assert m.min_angular_displacement_rad == 0.0
+    assert m._last_integrated_pose is None
+    assert m._gated_integrations == 0
+    assert m._total_integrations == 0
+
+    for _ in range(4):
+        step = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+        assert not step.tracking_lost
+        assert step.integrate_ms > 0.0
+
+    assert m._total_integrations == 4
+    assert m._gated_integrations == 0
+    assert m._last_integrated_pose is not None
+
+
+def test_displacement_gate_linear_skips_subthreshold_and_integrates_above_threshold():
+    """Linear displacement gate skips integration for sub-threshold motion
+    and integrates when cumulative linear displacement from _last_integrated_pose
+    meets or exceeds min_linear_displacement_m."""
+    q = (0.70710678, 0.0, 0.70710678, 0.0)
+    m = Mapper(W, H, voxel_size=0.02, icp_mode="translation",
+               min_linear_displacement_m=0.05, min_angular_displacement_rad=0.0)
+
+    # Frame 1: bootstrap always integrates
+    s1 = m.step(_textured_wall(1.20), q, 101325.0)
+    assert not s1.tracking_lost
+    assert s1.integrate_ms > 0.0
+    assert m._total_integrations == 1
+    assert m._gated_integrations == 0
+    pose1 = m._last_integrated_pose.copy()
+
+    # Frame 2: static sensor (0 displacement) -> gated
+    s2 = m.step(_textured_wall(1.20), q, 101325.0)
+    assert not s2.tracking_lost
+    assert s2.integrate_ms == 0.0
+    assert m._total_integrations == 1
+    assert m._gated_integrations == 1
+    assert np.allclose(m._last_integrated_pose, pose1)
+
+    # Frame 3: wall moves closer by 2 cm (~0.02 m translation < 0.05 m) -> gated
+    s3 = m.step(_textured_wall(1.18), q, 101325.0)
+    assert not s3.tracking_lost
+    assert s3.integrate_ms == 0.0
+    assert m._total_integrations == 1
+    assert m._gated_integrations == 2
+    assert np.allclose(m._last_integrated_pose, pose1)
+
+    # Frame 4: wall moves closer by another 5 cm (total ~0.07 m from pose1 >= 0.05 m) -> integrates
+    s4 = m.step(_textured_wall(1.13), q, 101325.0)
+    assert not s4.tracking_lost
+    assert s4.integrate_ms > 0.0
+    assert m._total_integrations == 2
+    assert m._gated_integrations == 2
+    assert not np.allclose(m._last_integrated_pose, pose1)
+    pose4 = m._last_integrated_pose.copy()
+
+    # Frame 5: wall moves by 1 cm from pose4 (< 0.05 m) -> gated
+    s5 = m.step(_textured_wall(1.12), q, 101325.0)
+    assert not s5.tracking_lost
+    assert s5.integrate_ms == 0.0
+    assert m._total_integrations == 2
+    assert m._gated_integrations == 3
+    assert np.allclose(m._last_integrated_pose, pose4)
+
+
+def test_displacement_gate_angular_skips_subthreshold_and_integrates_above_threshold():
+    """Angular displacement gate skips integration for sub-threshold rotation
+    and integrates when angular displacement meets or exceeds min_angular_displacement_rad."""
+    m = Mapper(W, H, voxel_size=0.02,
+               min_linear_displacement_m=0.0, min_angular_displacement_rad=0.05)
+
+    # Frame 1: bootstrap
+    q0 = (1.0, 0.0, 0.0, 0.0)
+    s1 = m.step(_wall(1.0), q0, 101325.0)
+    assert not s1.tracking_lost
+    assert m._total_integrations == 1
+    assert m._gated_integrations == 0
+    pose1 = m._last_integrated_pose.copy()
+
+    # Frame 2: ~1 deg rotation (~0.0175 rad < 0.05 rad) -> gated
+    q_small = (float(np.cos(np.radians(0.5))), 0.0, float(np.sin(np.radians(0.5))), 0.0)
+    s2 = m.step(_wall(1.0), q_small, 101325.0)
+    assert not s2.tracking_lost
+    assert s2.integrate_ms == 0.0
+    assert m._total_integrations == 1
+    assert m._gated_integrations == 1
+    assert np.allclose(m._last_integrated_pose, pose1)
+
+    # Frame 3: ~4 deg rotation (~0.0698 rad >= 0.05 rad) -> integrates
+    q_large = (float(np.cos(np.radians(2.0))), 0.0, float(np.sin(np.radians(2.0))), 0.0)
+    s3 = m.step(_wall(1.0), q_large, 101325.0)
+    assert not s3.tracking_lost
+    assert s3.integrate_ms > 0.0
+    assert m._total_integrations == 2
+    assert m._gated_integrations == 1
+    assert not np.allclose(m._last_integrated_pose, pose1)
+
+
+def test_displacement_gate_tracking_state_and_lost_frame_handling():
+    """Gated frames maintain full tracking state (_t_prev, trajectory, _bootstrapped).
+    Tracking-lost frames do not count as gated integrations and leave _last_integrated_pose intact."""
+    m = Mapper(W, H, voxel_size=0.02,
+               min_linear_displacement_m=0.05, min_angular_displacement_rad=0.05)
+
+    # Frame 1: valid bootstrap
+    s1 = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert not s1.tracking_lost
+    assert m._bootstrapped is True
+    assert m._total_integrations == 1
+    assert len(m.trajectory) == 1
+    pose1 = m._last_integrated_pose.copy()
+
+    # Frame 2: static -> gated, but tracking advances
+    s2 = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert not s2.tracking_lost
+    assert m._gated_integrations == 1
+    assert m._total_integrations == 1
+    assert len(m.trajectory) == 2
+    assert m._bootstrapped is True
+
+    # Frame 3: lost frame (all zeros) -> tracking lost, neither integrates nor increments gated
+    s3 = m.step(np.zeros((H, W), dtype=np.float32), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert s3.tracking_lost is True
+    assert m.tracking_lost_count == 1
+    assert m._gated_integrations == 1
+    assert m._total_integrations == 1
+    assert np.allclose(m._last_integrated_pose, pose1)
+

@@ -182,3 +182,30 @@ def test_icp_device_default_and_load(tmp_path):
     cfg = SlamConfig.load(p)
     assert cfg.icp_device == "CUDA:0"
     assert cfg.mapper_kwargs()["icp_device"] == "CUDA:0"
+
+
+# ---- Issue #149: displacement keyframe gating -----------------------------
+
+def test_displacement_gate_defaults_and_load(tmp_path):
+    """Displacement thresholds default to 0.0 (disabled, integrates every frame).
+    When set in [slam] table of roomscan.toml, they load and flow into mapper_kwargs.
+    """
+    cfg_default = SlamConfig()
+    assert cfg_default.min_linear_displacement_m == 0.0
+    assert cfg_default.min_angular_displacement_rad == 0.0
+    assert cfg_default.mapper_kwargs()["min_linear_displacement_m"] == 0.0
+    assert cfg_default.mapper_kwargs()["min_angular_displacement_rad"] == 0.0
+
+    p = tmp_path / "roomscan.toml"
+    p.write_text(
+        "[slam]\n"
+        "min_linear_displacement_m = 0.05\n"
+        "min_angular_displacement_rad = 0.08\n",
+        encoding="utf-8",
+    )
+    cfg = SlamConfig.load(p)
+    assert cfg.min_linear_displacement_m == 0.05
+    assert cfg.min_angular_displacement_rad == 0.08
+    assert cfg.mapper_kwargs()["min_linear_displacement_m"] == 0.05
+    assert cfg.mapper_kwargs()["min_angular_displacement_rad"] == 0.08
+
