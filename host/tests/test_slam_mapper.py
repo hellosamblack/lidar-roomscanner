@@ -1308,3 +1308,81 @@ def test_unknown_confidence_weight_mode_raises():
         Mapper(W, H, confidence_weight_mode="invalid_mode")
 
 
+# ---- Issue #152: per-frame working-memory time budget monitor ---------------
+
+def test_frame_step_stage_timing_fields():
+    """Stage timing fields (t_tracking_ms, t_icp_ms, t_integrate_ms, t_raycast_ms,
+    total_step_ms, budget_breached) are populated on FrameStep and match the
+    underlying measurements.
+    """
+    m = Mapper(W, H, voxel_size=0.02, frame_time_budget_ms=33.3)
+
+    # Frame 1: bootstrap
+    step1 = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert not step1.tracking_lost
+    assert step1.t_tracking_ms >= 0.0
+    assert step1.t_raycast_ms == 0.0
+    assert step1.t_icp_ms == 0.0
+    assert step1.t_integrate_ms >= 0.0
+    assert step1.total_step_ms >= 0.0
+    assert step1.t_integrate_ms == step1.integrate_ms
+    assert step1.total_step_ms == step1.slam_ms
+    assert step1.budget_breached is False
+
+    # Frame 2: tracked
+    step2 = m.step(_textured_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert not step2.tracking_lost
+    assert step2.t_tracking_ms >= 0.0
+    assert step2.t_raycast_ms == step2.raycast_ms
+    assert step2.t_icp_ms == step2.icp_ms
+    assert step2.t_integrate_ms == step2.integrate_ms
+    assert step2.total_step_ms == step2.slam_ms
+
+    # Frame 3: tracking lost
+    step3 = m.step(np.zeros((H, W), dtype=np.float32), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert step3.tracking_lost
+    assert step3.t_tracking_ms >= 0.0
+    assert step3.t_raycast_ms == 0.0
+    assert step3.t_icp_ms == 0.0
+    assert step3.t_integrate_ms == 0.0
+    assert step3.total_step_ms >= 0.0
+
+
+def test_budget_breach_detection_and_counter(monkeypatch):
+    """When a frame step's wall time exceeds frame_time_budget_ms, budget_breached
+    is marked True on FrameStep and _budget_breach_count increments.
+    """
+    import time as _time
+
+    m = Mapper(W, H, voxel_size=0.02, frame_time_budget_ms=20.0)
+    assert m.budget_breach_count == 0
+    assert m._budget_breach_count == 0
+
+    # Bootstrap frame (within budget)
+    step1 = m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert step1.budget_breached is False
+    assert m.budget_breach_count == 0
+
+    # Inject artificial latency in raycast stage to exceed 20 ms budget
+    real_raycast = m._tsdf.raycast
+
+    def _slow_raycast(*a, **kw):
+        _time.sleep(0.03)  # 30 ms > 20 ms budget
+        return real_raycast(*a, **kw)
+
+    monkeypatch.setattr(m._tsdf, "raycast", _slow_raycast)
+
+    step2 = m.step(_textured_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert step2.total_step_ms >= 25.0
+    assert step2.budget_breached is True
+    assert m.budget_breach_count == 1
+    assert m._budget_breach_count == 1
+
+    # Second slow frame increments breach count again
+    step3 = m.step(_textured_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert step3.budget_breached is True
+    assert m.budget_breach_count == 2
+    assert m._budget_breach_count == 2
+
+
+

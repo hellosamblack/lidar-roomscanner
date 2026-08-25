@@ -137,6 +137,13 @@ class FrameStep:
     # frames; defaults preserve remote workers and older test constructors.
     inliers: int = 0
     source_points: int = 0
+    # Working-memory time budget instrumentation (Issue #152 / admission design §C).
+    t_tracking_ms: float = 0.0
+    t_icp_ms: float = 0.0
+    t_integrate_ms: float = 0.0
+    t_raycast_ms: float = 0.0
+    total_step_ms: float = 0.0
+    budget_breached: bool = False
 
 
 class Mapper:
@@ -174,6 +181,7 @@ class Mapper:
                  baro_reject_m: float = 50.0,
                  min_linear_displacement_m: float = 0.0,
                  min_angular_displacement_rad: float = 0.0,
+                 frame_time_budget_ms: float = 33.3,
                  clock=time.perf_counter):
         if confidence_weight_mode not in ("reject", "weight", "both"):
             raise ValueError(f"unknown confidence_weight_mode {confidence_weight_mode!r}")
@@ -190,6 +198,8 @@ class Mapper:
         self._last_integrated_pose: np.ndarray | None = None
         self._gated_integrations: int = 0
         self._total_integrations: int = 0
+        self.frame_time_budget_ms = float(frame_time_budget_ms)
+        self._budget_breach_count: int = 0
         # IMU spike pre-gate ceiling, deg of inter-frame SFLP rotation. Above
         # this the quat is treated as a glitch and the last good orientation is
         # held as the prior (see step()). DEFAULT 0 = DISABLED: this is a
@@ -355,6 +365,11 @@ class Mapper:
         dataclass/kwarg that silently failed to apply reports "no difference",
         which is also what a correctly-equivalent change reports."""
         return str(self._icp_device)
+
+    @property
+    def budget_breach_count(self) -> int:
+        """Total number of frame steps that exceeded frame_time_budget_ms."""
+        return self._budget_breach_count
 
     @property
     def _register_device(self) -> o3d.core.Device:
@@ -553,6 +568,7 @@ class Mapper:
              reflectance=None, confidence=None,
              imu_raw=None, quat_offset_us=None, t_device_us=None) -> FrameStep:
         t0 = self._clock()
+        t_tracking0 = self._clock()
         self._check_confidence_distribution(confidence)
         depth_mm = self._gate_confidence(depth_mm, confidence)
         # +7.76 ms quat-phase compensation (BUG-031/067), applied FIRST so the
@@ -617,12 +633,15 @@ class Mapper:
         fitness = rmse = 0.0
         inliers = source_points = 0
         raycast_ms = icp_ms = 0.0
+        t_tracking_ms = 0.0
 
         if n_valid < _MIN_VALID_POINTS:
             lost = True
             pose = T_pred
+            t_tracking_ms = (self._clock() - t_tracking0) * 1000.0
         elif not self._bootstrapped:
             pose = T_pred                                   # bootstrap: accept prior
+            t_tracking_ms = (self._clock() - t_tracking0) * 1000.0
         else:
             intensity = None
             if confidence is not None and self.confidence_weight_mode in ("weight", "both"):
@@ -635,6 +654,7 @@ class Mapper:
                 else:
                     intensity = np.clip(conf_clean, 0.0, 1.0)
             src = source_cloud(pts, valid, intensity=intensity, device=self._device)
+            t_tracking_ms = (self._clock() - t_tracking0) * 1000.0
             # Bound raycast to the current view frustum (Task 9.5 Lever 1):
             # the current depth frame at the predicted pose is our best
             # estimate of which voxel blocks the live camera can see, so pass
@@ -773,14 +793,25 @@ class Mapper:
         self.trajectory.append(report_pose.copy())
         self.lost_flags.append(bool(lost))
         self._sample_block_usage()
-        slam_ms = (self._clock() - t0) * 1000.0
+        total_step_ms = (self._clock() - t0) * 1000.0
+        slam_ms = total_step_ms
+        budget_breached = False
+        if total_step_ms > self.frame_time_budget_ms:
+            budget_breached = True
+            self._budget_breach_count += 1
         return FrameStep(pose=report_pose, fitness=fitness, rmse=rmse,
                          tracking_lost=lost, slam_ms=slam_ms,
                          blocks_used=self._blocks_used,
                          blocks_capacity=self._blocks_capacity,
                          blocks_configured=self._tsdf.block_count or None,
                          raycast_ms=raycast_ms, icp_ms=icp_ms, integrate_ms=integrate_ms,
-                         inliers=inliers, source_points=source_points)
+                         inliers=inliers, source_points=source_points,
+                         t_tracking_ms=t_tracking_ms,
+                         t_icp_ms=icp_ms,
+                         t_integrate_ms=integrate_ms,
+                         t_raycast_ms=raycast_ms,
+                         total_step_ms=total_step_ms,
+                         budget_breached=budget_breached)
 
     def _sample_block_usage(self) -> None:
         """Refresh the cached TSDF occupancy, at most every

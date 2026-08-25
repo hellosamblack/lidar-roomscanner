@@ -21,6 +21,7 @@ def test_defaults():
     assert c.min_confidence == 20.0
     assert c.max_depth_m == 5.0
     assert c.weight_threshold == 3.0
+    assert c.frame_time_budget_ms == 33.3
     assert c.device == "CPU:0"
 
 
@@ -241,5 +242,27 @@ def test_confidence_and_max_depth_defaults_and_load(tmp_path):
     assert cfg.mapper_kwargs()["confidence_weight_mode"] == "weight"
     assert cfg.mapper_kwargs()["min_confidence"] == 35.0
     assert cfg.mapper_kwargs()["max_depth_m"] == 4.0
+
+
+# ---- Issue #152: per-frame working-memory time budget ----------------------
+
+def test_frame_time_budget_defaults_and_load(tmp_path):
+    """Working-memory per-frame time budget defaults to 33.3 ms (~30 Hz).
+    When set in [slam] table of roomscan.toml, it loads and flows into mapper_kwargs.
+    """
+    cfg_default = SlamConfig()
+    assert cfg_default.frame_time_budget_ms == 33.3
+    assert cfg_default.mapper_kwargs()["frame_time_budget_ms"] == 33.3
+
+    p = tmp_path / "roomscan.toml"
+    p.write_text(
+        "[slam]\n"
+        "frame_time_budget_ms = 25.0\n",
+        encoding="utf-8",
+    )
+    cfg = SlamConfig.load(p)
+    assert cfg.frame_time_budget_ms == 25.0
+    assert cfg.mapper_kwargs()["frame_time_budget_ms"] == 25.0
+
 
 

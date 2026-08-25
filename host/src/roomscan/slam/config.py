@@ -196,6 +196,11 @@ class SlamConfig:
     # Minimum angular displacement (radians) since the last integrated frame
     # required to admit a new frame into the TSDF map. 0.0 disables angular gating.
     min_angular_displacement_rad: float = 0.0
+    # Working-memory per-frame time budget monitor (Issue #152 / admission design §C).
+    # Target wall time ceiling in ms for a single SLAM frame step (~30 Hz -> 33.3 ms).
+    # A step exceeding this budget marks budget_breached=True on FrameStep and increments
+    # Mapper._budget_breach_count for observability.
+    frame_time_budget_ms: float = 33.3
     # Compute device for the Open3D tensor pipeline (TsdfMap/pinhole/
     # source_cloud/register). "CPU:0" today -- the installed Open3D 0.19
     # build here has no CUDA support -- but "CUDA:0" (or any other
@@ -354,6 +359,7 @@ class SlamConfig:
             "baro_reject_m": self.baro_reject_m,
             "min_linear_displacement_m": self.min_linear_displacement_m,
             "min_angular_displacement_rad": self.min_angular_displacement_rad,
+            "frame_time_budget_ms": self.frame_time_budget_ms,
             "stationary_hold": self.stationary_hold,
             "stationary_window": self.stationary_window,
             "stationary_coherence": self.stationary_coherence,
