@@ -4877,7 +4877,7 @@ def test_swap_handlers_do_not_reset_slam_after_the_swap():
     controller's no-reader window. Source-level, mirroring
     `test_broadcaster_no_longer_feeds_slam`'s style: a behavioural test would
     have to win a race to observe the violation."""
-    src = pathlib.Path(web.__file__).read_text()
+    src = pathlib.Path(web._ws_broadcaster_mod.__file__).read_text()
     switch_away = src[src.index("if switch_away:"):src.index("def _unlink_all")]
     load_capture = src[src.index('elif mtype == "load_capture" and ctrl is not None:'):
                        src.index('elif mtype == "go_live" and ctrl is not None:')]
@@ -5854,7 +5854,7 @@ def test_broadcaster_no_longer_feeds_slam():
     """The feed moved to the reader thread. If it comes back to the broadcaster,
     reconstruction rate silently becomes a function of event-loop health again
     -- which is what held Live SLAM at 5.0 fps against a 30.3 Hz stream."""
-    src = pathlib.Path(web.__file__).read_text()
+    src = pathlib.Path(web._ws_broadcaster_mod.__file__).read_text()
     body = src[src.index("async def _broadcaster()"):]
     assert "slam.submit(" not in body
     assert "slam.poll(" in body          # the poll side legitimately stays
@@ -6135,8 +6135,8 @@ def test_ws_mesh_ack_advances_straight_to_a_newer_cached_mesh():
 def test_broadcaster_sends_slam_and_detailed_pose_before_caching_mesh():
     """BUG-061 A2: pose JSON must never sit behind mesh bytes in the same
     tick. Source-level, mirroring `test_broadcaster_no_longer_feeds_slam`."""
-    src = pathlib.Path(web.__file__).read_text()
-    body = src[src.index("async def _broadcaster()"):src.index('@app.websocket("/ws")')]
+    src = pathlib.Path(web._ws_broadcaster_mod.__file__).read_text()
+    body = src[src.index("async def _broadcaster()"):src.index('async def websocket_endpoint')]
 
     slam_block = body[body.index('if ui.display == "slam" and slam is not None'):
                       body.index("# IR_IMAGE on its own slower cadence")]
@@ -6153,8 +6153,8 @@ def test_broadcaster_no_longer_broadcasts_mesh_on_ws():
     """MESH (tag 3) moved to `/ws-mesh` entirely (BUG-061 A3) -- if
     `_broadcast_bytes` ever gets called with mesh bytes again on the main
     socket, pose is back to sitting behind a multi-MB payload."""
-    src = pathlib.Path(web.__file__).read_text()
-    body = src[src.index("async def _broadcaster()"):src.index('@app.websocket("/ws")')]
+    src = pathlib.Path(web._ws_broadcaster_mod.__file__).read_text()
+    body = src[src.index("async def _broadcaster()"):src.index('async def websocket_endpoint')]
     assert "_broadcast_bytes(clients, mesh_bytes)" not in body
 
 
@@ -6164,8 +6164,8 @@ def test_broadcaster_ticks_browser_metric_right_after_the_point_cloud_send():
     also fire in `slam`/`detailed` display (that's what `render_fps`
     already does, and over-counts there -- see `tick_browser`'s
     docstring)."""
-    src = pathlib.Path(web.__file__).read_text()
-    body = src[src.index("async def _broadcaster()"):src.index('@app.websocket("/ws")')]
+    src = pathlib.Path(web._ws_broadcaster_mod.__file__).read_text()
+    body = src[src.index("async def _broadcaster()"):src.index('async def websocket_endpoint')]
     pc_block = body[body.index('if ui.display == "point_cloud":'):
                     body.index('# SLAM mode (web Phase 4)')]
     assert pc_block.count("metrics.tick_browser(now)") == 1
@@ -6224,7 +6224,7 @@ def test_ws_flow_counters_is_getattr_safe_on_a_bare_state():
 
 
 def test_broadcaster_metrics_attach_ws_counters_beside_transport():
-    src = pathlib.Path(web.__file__).read_text()
+    src = pathlib.Path(web._ws_broadcaster_mod.__file__).read_text()
     body = src[src.index("async def _broadcaster()"):]
     chunk = body[body.index('msg["transport"] = transport_counters(state)'):]
     assert 'msg["ws"] = ws_flow_counters(state)' in chunk[:200]
@@ -8985,6 +8985,6 @@ def test_thin_sensor_stash_is_cleared_by_the_generation_barrier():
     """The #101 barrier must drop orientation with everything else -- a
     live<->replay switch must not leave a stale heading on the panel."""
     import pathlib
-    src = pathlib.Path(web.__file__).read_text()
+    src = pathlib.Path(web._ws_broadcaster_mod.__file__).read_text()
     barrier = src.split("state.thin_latest_pc = None", 1)[1][:400]
     assert "state.thin_latest_sensor = None" in barrier

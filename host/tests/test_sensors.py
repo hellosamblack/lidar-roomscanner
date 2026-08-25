@@ -620,9 +620,9 @@ def test_triad_roll_zero_when_up_ref_points_true_up():
 # `graft_yaw_error_deg` (pure yaw between two attitudes).
 _ZYX_YAW_DISPLAY_CALLERS = {
     # (module, enclosing function) -> why it is allowed
-    ("web.py", "orientation_view"): "renders the 'zyx' decomposition mode itself",
-    ("web.py", "update"): "JitterTracker: reports the displayed decomposition's own frame-to-frame change",
-    ("web.py", "build_sensor_message"): "orientation_raw.yaw_deg -- the raw ZYX readout in the diagnostics drawer",
+    ("session.py", "orientation_view"): "renders the 'zyx' decomposition mode itself",
+    ("session.py", "update"): "JitterTracker: reports the displayed decomposition's own frame-to-frame change",
+    ("session.py", "build_sensor_message"): "orientation_raw.yaw_deg -- the raw ZYX readout in the diagnostics drawer",
     # panel.py is deprecated legacy (see CLAUDE.md). This one is a display
     # baseline for its "reset orientation" button, not a live estimator, but it
     # is the same class and should move to `yaw_twist_deg` if panel.py is ever
