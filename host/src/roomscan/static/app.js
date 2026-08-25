@@ -22,6 +22,7 @@ import { createAdmin } from './admin.js';
 import { createCommStatus } from './comm-status.js';
 import { createIdle } from './idle.js';
 import { createSpotlight } from './spotlight.js';
+import { createFloorplan } from './floorplan.js';
 
 const D = (m, l) => { try { window.__diag && window.__diag('app.js: ' + m, l); } catch (e) {} };
 D('composition root loaded');
@@ -63,6 +64,7 @@ createMagcal(hub, sceneApi);
 // the same reason magcal.js does -- pausing render while occluded/unused is
 // pure waste -- see idle.js's own comment for the shared-flag interaction.
 window.__idle = createIdle(hub, sceneApi);   // diagnostics only, see scene.js's `controls` comment
+window.__floorplan = createFloorplan(hub, sceneApi);
 // Presentation-only: cursor-follow edge highlight on the chrome cards. No hub,
 // no server state — pure DOM, so it's constructed last and wired to nothing.
 createSpotlight();

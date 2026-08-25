@@ -825,6 +825,20 @@
         .segmented button:disabled:hover { opacity: 0.35; cursor: default; background: transparent; }
         .segmented button.active:disabled { background: var(--accent); opacity: 0.35; }
 
+        button.active {
+            background: linear-gradient(180deg, rgba(251, 191, 36, 0.35), rgba(245, 158, 11, 0.08)), var(--accent);
+            color: #0b0c10; font-weight: 700;
+            box-shadow: 0 0 10px rgba(245, 158, 11, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+        }
+
+        .floorplan-readout {
+            display: flex; flex-direction: column; gap: 4px;
+            padding: 6px 8px; border-radius: 4px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            margin-top: 4px;
+        }
+
         /* generic hide utility (shared by the transport block + IR card) */
         .hidden { display: none !important; }
 
@@ -2256,6 +2270,22 @@
                             </div>
                             <div class="field-label">Threshold <span class="hud-val" id="surface-threshold-val">4.0%</span></div>
                             <input type="range" class="slider" id="sl-surface-threshold" min="0.5" max="15.0" step="0.5" value="4.0" title="Maximum depth gap to connect adjacent zones">
+                        </div>
+                    </div>
+                </details>
+
+                <!-- Floorplan & Measurement sub-area -->
+                <details class="control-subgroup" data-subgroup-id="view-floorplan" open>
+                    <summary><span>Floorplan &amp; Measurement</span><span class="chevron">&#9662;</span></summary>
+                    <div class="control-subgroup__body">
+                        <div class="btn-row">
+                            <button id="btn-view-floorplan" title="Top-down 2D floorplan view with grid and dimension measurements">Floorplan View</button>
+                            <button id="btn-measure-tool" title="Toggle interactive point-to-point measurement tool">Measure Tool</button>
+                        </div>
+                        <div id="measure-readout" class="floorplan-readout">
+                            <div class="hud-row" title="Distance between the two measured points in metres"><span>Measured Distance</span><span class="hud-val" id="measure-distance-val">—</span></div>
+                            <div class="hud-row" title="Estimated room bounding box dimensions (width × depth) in metres"><span>Room Dimensions</span><span class="hud-val" id="floorplan-dimensions">—</span></div>
+                            <div class="hud-note" id="measure-status-note">Click two points in scene to measure distance</div>
                         </div>
                     </div>
                 </details>

@@ -1935,3 +1935,55 @@ def test_sensor_metric_grid_and_progress_bars_exist():
         "sensor-peak-fusion",
     ):
         assert f'id="{peak_id}"' in html, f"missing peak stat element #{peak_id}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #124 -- Floorplan view with dimensions and measure tool.
+# ---------------------------------------------------------------------------
+
+
+def test_floorplan_view_button_and_measure_tool_button_exist_with_tooltips():
+    """Issue #124: #btn-view-floorplan and #btn-measure-tool exist in index.html with descriptive titles."""
+    html = _index()
+    for btn_id in ("btn-view-floorplan", "btn-measure-tool"):
+        m = re.search(r'<button\b[^>]*\bid="' + re.escape(btn_id) + r'"[^>]*>', html)
+        assert m is not None, f"#{btn_id} not found in index.html"
+        tag = m.group(0)
+        assert "title=" in tag, f"#{btn_id} missing title attribute"
+        title_m = re.search(r'title="([^"]+)"', tag)
+        assert title_m is not None
+        assert len(title_m.group(1).strip()) > 5, (
+            f"#{btn_id} title should be descriptive"
+        )
+
+    # Both buttons must be wired in floorplan.js
+    floorplan_js = (STATIC / "floorplan.js").read_text(encoding="utf-8")
+    assert "btn-view-floorplan" in floorplan_js
+    assert "btn-measure-tool" in floorplan_js
+
+
+def test_floorplan_measure_readout_and_dimensions_exist_with_tooltips():
+    """Issue #124: #measure-readout, #measure-distance-val, #floorplan-dimensions exist with tooltips."""
+    html = _index()
+    assert 'id="measure-readout"' in html, "missing #measure-readout container"
+    assert 'id="measure-distance-val"' in html, "missing #measure-distance-val readout"
+    assert 'id="floorplan-dimensions"' in html, "missing #floorplan-dimensions readout"
+
+    for readout_id in ("measure-distance-val", "floorplan-dimensions"):
+        title = _row_title(html, readout_id)
+        assert title is not None, f"HUD row for #{readout_id} missing title= tooltip"
+        assert len(title.strip()) > 5, (
+            f"HUD row tooltip for #{readout_id} should be descriptive"
+        )
+
+    floorplan_js = (STATIC / "floorplan.js").read_text(encoding="utf-8")
+    assert "measure-distance-val" in floorplan_js
+    assert "floorplan-dimensions" in floorplan_js
+
+
+def test_floorplan_module_is_imported_and_instantiated_in_app_js():
+    """Issue #124: floorplan.js is imported and instantiated in app.js composition root."""
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "createFloorplan" in app_js
+    assert "window.__floorplan" in app_js
+    assert (STATIC / "floorplan.js").exists()
