@@ -267,6 +267,14 @@ in the repo. The evidence for every one is in `docs/roadmap-history.md`.
   when it "passed", it was attributing the win to the shared component, not voiding the result.
   A null voids only what it does not share; write down what each control arm retains vs inverts
   before reading its verdict, and shape the arms so every pairwise gate answers one named component.
+- **Isolating a GIL-holding call into a subprocess buys nothing until *every* heavy call on the
+  path crosses the boundary** (#223, E2): moving the mapper out but returning meshes as arrays left
+  `prepare_packet`/`pack_mesh` in the web process — tick_share 0.91, 100 ms stalls, barely better
+  than in-process 0.79; shipping finished MESH packets from the service reached 0.974 / 25 ms.
+  Measure each hop with timestamps: that is how the frame-behind-mesh socket queue (170–207 ms),
+  the `bytearray` zero-fill under the GIL, and the missing prep governor were found. Study + PoC:
+  `docs/superpowers/specs/2026-08-27-rust-migration-feasibility.md` — the answer to "should the
+  host be Rust/C++" is recorded there; do not re-derive it.
 - **A permission denial's error message does not tell you why — verify a permission-scope fix
   live before trusting it.** Two successive "fixes" to `fleet_run.py`'s Bash allowlist were each
   wrong, guessed from a denial's tool name rather than tested: a directory-only rule

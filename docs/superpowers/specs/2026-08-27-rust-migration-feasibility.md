@@ -295,6 +295,22 @@ yaw/bearing/twist bugs, the clock split, the unit split, the ENV sentinel, the m
 Not caught: BUG-026 (frames not encoded), BUG-082 (`NewType` arithmetic erases to float), BUG-044/062
 (default args / kwarg subsets — the Rust-only class). Strict set so far: `domain.py`, `sensor_time.py`.
 
+**E2 result (2026-08-27, #223): pass — in `mesh_format="packet"` mode only.** Live rig replay
+(`slam_stall_profile --mode live`, CUDA:0, 1800 frames, 2 runs each): in-process worker tick_share
+0.79 / worst stall 97–107 ms / starved 21 %; remote service with meshes as arrays (prep still in the
+web process) 0.91 / 89–121 ms / 9 %; remote service shipping finished MESH packets **0.974 / 24–27 ms /
+2.6 %**, pose hop p95 ≈2.5 ms, web-process CPU 631 % → 4 %. Submit→visible pose age is ~72 ms on both
+backends (mapper step p95 ≈50 ms + latest-wins wait), i.e. no regression and not the IPC's to fix. Three
+things the design missed and the per-hop breakdown found: frames queued in the socket behind each 36 MB
+mesh (fixed with a frame credit), `bytearray(36 MB)` zero-filling under the GIL (→ `np.empty`), and the
+in-service MeshPrep needing the same 12 MB/s governor. Margin is thin (0.974 vs 0.97);
+`roomSweepFull20260730.bin` not yet run. Full write-up `host/tools/spikes/e2_results.md`. Not yet
+productised: `SlamRunner` still runs in-process — follow-up issue.
+
+**E3: skipped.** E2 passed, so by the program's own rule the Rust ICP front-end spike does not run.
+Rust's only unique runtime argument (GIL-free front-end) is closed architecturally; its correctness
+argument is served by E1. The decision stands: stay Python.
+
 E1 and E2 are cheap (days), answer the primary motivation (correctness) and the only measured runtime
 problem (GIL) respectively, and both are killable. E3 runs only if E2 fails.
 
