@@ -144,6 +144,12 @@ class FrameStep:
     t_raycast_ms: float = 0.0
     total_step_ms: float = 0.0
     budget_breached: bool = False
+    # E2 (#223): the `t_device_us` this step was called with, echoed back so a
+    # consumer holding several submitted frames in flight (a latest-wins slot,
+    # a remote service) can say WHICH frame this pose answers -- the pose-age
+    # measurement in `slam_stall_profile --mode live` keys on it. None when the
+    # caller supplied none, exactly as before.
+    t_device_us: float | None = None
 
 
 class Mapper:
@@ -811,7 +817,8 @@ class Mapper:
                          t_integrate_ms=integrate_ms,
                          t_raycast_ms=raycast_ms,
                          total_step_ms=total_step_ms,
-                         budget_breached=budget_breached)
+                         budget_breached=budget_breached,
+                         t_device_us=None if t_device_us is None else float(t_device_us))
 
     def _sample_block_usage(self) -> None:
         """Refresh the cached TSDF occupancy, at most every

@@ -783,7 +783,9 @@ def slam_rerender(capture: str, voxel_size: float = 0.0, block_count: int = 0,
 @mcp.tool()
 def slam_stall_profile(capture: str, frames: int = 1500, device: str = "",
                        decimate: bool = False, mesh_every: int = 5,
-                       block_count: int = 0, timeout_s: float = 1800.0) -> dict:
+                       block_count: int = 0, mode: str = "serial",
+                       backend: str = "local", mesh_format: str = "arrays",
+                       timeout_s: float = 1800.0) -> dict:
     """Find which live-SLAM stage freezes the server, and for how long (BUG-060).
 
     Replays a capture through the real pipeline (Mapper.step -> mapper.mesh() ->
@@ -803,7 +805,20 @@ def slam_stall_profile(capture: str, frames: int = 1500, device: str = "",
     binds the device, so it is safe beside a live `roomscan-web` -- though both
     will be slower while it runs.
 
-    Wraps `host/tools/slam_stall_profile.py::profile_capture()`.
+    `mode="live"` (E2, #223) runs the THREADED roomscan-web shape instead --
+    reader-fed latest-wins worker, MeshPrep thread, a polling broadcaster --
+    at the capture's own cadence, and reports the broadcaster's `tick_share`,
+    `worst_stall_ms`, `pose_age_ms` (submit -> pose visible, includes compute)
+    and `pose_transport_ms` (age minus the step's own compute). `backend=
+    "remote"` spawns `python -m roomscan.slam.service` as a subprocess and
+    drives it through RemoteSlamWorker (`ipc_ms` breaks the path down;
+    `service` reports its CPU/RSS); `mesh_format="packet"` moves
+    prepare_packet/pack_mesh into that subprocess too, "arrays" keeps them
+    here. Measured 2026-08-27: local 0.79 tick share / 100 ms stalls; remote
+    packet 0.97 / 27 ms. See host/tools/spikes/e2_results.md.
+
+    Wraps `host/tools/slam_stall_profile.py::profile_capture()` /
+    `profile_live()`.
     """
     import json
 
@@ -818,6 +833,8 @@ def slam_stall_profile(capture: str, frames: int = 1500, device: str = "",
         cmd += ["--block-count", str(block_count)]
     if decimate:
         cmd += ["--decimate"]
+    if mode == "live":
+        cmd += ["--mode", "live", "--backend", backend, "--mesh-format", mesh_format]
     try:
         proc = subprocess.run(cmd, cwd=str(REPO), timeout=timeout_s,
                               capture_output=True, text=True)
