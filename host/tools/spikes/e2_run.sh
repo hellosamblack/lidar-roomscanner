@@ -2,14 +2,17 @@
 # E2 spike runner (Refs #223): runs slam_stall_profile.py from this worktree with
 # the main checkout's venv, writing JSON to $1 and a headline summary to stdout.
 #   e2_run.sh <out.json> [profiler args...]
+# E2_CAPTURE / E2_FRAMES (#224) pick the capture and frame count; the defaults
+# are the E2 configuration (coffeeRoomCircuitNoMnt, 1800 frames). 0 = all.
 set -u
 WT="$(cd "$(dirname "$0")/../../.." && pwd)"
 PY=/home/sam/git/personal/lidar-roomscanner/host/.venv/bin/python
-CAP=/home/sam/git/personal/lidar-roomscanner/captures/coffeeRoomCircuitNoMnt.bin
+CAP="${E2_CAPTURE:-/home/sam/git/personal/lidar-roomscanner/captures/coffeeRoomCircuitNoMnt.bin}"
+FRAMES="${E2_FRAMES:-1800}"
 OUT="$1"; shift
 export PYTHONPATH="$WT/host/src"
 export ROOMSCAN_TRANSFORM_DLL=/home/sam/git/personal/lidar-roomscanner/host/transform/build/libroomscan_transform.so
-"$PY" "$WT/host/tools/slam_stall_profile.py" "$CAP" --frames 1800 --device CUDA:0 --json "$@" \
+"$PY" "$WT/host/tools/slam_stall_profile.py" "$CAP" --frames "$FRAMES" --device CUDA:0 --json "$@" \
   > "$OUT" 2> "${OUT%.json}.err"
 rc=$?
 echo "rc=$rc"

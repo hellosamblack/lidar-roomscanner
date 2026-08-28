@@ -343,3 +343,225 @@ def test_client_acks_mesh_only_when_consumer_takes_it():
     rw.stop()
     lsock.close()
     th.join(timeout=2)
+
+
+# ---- full-mesh request + set_view (#224, productised packet mode) ----------------
+
+def test_service_answers_mesh_request_with_full_res_arrays_after_a_map_exists():
+    """Packet-mode Save: the client never holds a mesh, so it asks. The reply
+    must be `mesh_full` with the SAME req_id and real arrays -- and it must be
+    `empty` (not silent) before any frame has integrated."""
+    srv = SlamService(device="CPU:0", fov_h=55.0, fov_v=42.0)
+    port, lsock, th = _serve(srv)
+    cli = socket.create_connection(("127.0.0.1", port))
+    cli.settimeout(20)
+    wire.send_message(cli, wire.hello_message(cfg={}, width=W, height=H,
+                                              mesh_format=wire.MESH_FORMAT_PACKET))
+    _recv_until(cli, wire.HELLO)
+    # Before any frame: an honest empty reply, not a hang.
+    wire.send_message(cli, wire.mesh_request_message(7))
+    reply, _ = _recv_until(cli, wire.MESH_FULL)
+    assert reply["req_id"] == 7 and reply["empty"] is True and "mesh_v" not in reply
+    # Drive frames until the service has published a mesh (a packet arrives).
+    got_packet = False
+    for fid in range(1, 60):
+        wire.send_message(cli, _frame(fid))
+        _pose, others = _recv_until(cli, wire.POSE)
+        if any(wire.message_type(m) == wire.MESH for m in others):
+            got_packet = True
+            break
+        time.sleep(0.02)
+    assert got_packet
+    wire.send_message(cli, wire.mesh_request_message(8))
+    reply, _ = _recv_until(cli, wire.MESH_FULL)
+    assert reply["req_id"] == 8 and reply["empty"] is False
+    # A synthetic flat frame can legitimately extract to few/no triangles;
+    # what is pinned here is that the reply carries the service's OWN latest
+    # mesh, array for array, not that the synthetic map is interesting.
+    assert reply["mesh_v"].shape[1] == 3 and reply["mesh_t"].shape[1] == 3
+    own = srv._last_worker.latest()[0]
+    assert len(reply["mesh_v"]) == len(own.vertex["positions"])
+    m = wire.arrays_to_mesh(reply)
+    assert len(m.vertex["positions"]) == len(reply["mesh_v"])
+    cli.close()
+    lsock.close()
+    th.join(timeout=5)
+
+
+def test_service_set_view_changes_the_wall_mode_the_next_prep_uses(monkeypatch):
+    """`set_view` must reach the in-service MeshPrep's `submit(wall_mode=)`."""
+    import roomscan.slam.service as service_mod
+    seen = []
+
+    class _SpyPrep:
+        prep_ms = pack_ms = 0.0
+        def __init__(self, *a, **k): pass
+        def start(self): pass
+        def stop(self): pass
+        def submit(self, mesh, *, mesh_seq, glow_origin, wall_mode):
+            seen.append((mesh_seq, wall_mode))
+        def latest(self): return None
+
+    monkeypatch.setattr(service_mod.SlamService, "_make_meshprep",
+                        lambda self: (_SpyPrep(), 0.0))
+    srv = SlamService(device="CPU:0", fov_h=55.0, fov_v=42.0)
+    port, lsock, th = _serve(srv)
+    cli = socket.create_connection(("127.0.0.1", port))
+    cli.settimeout(20)
+    wire.send_message(cli, wire.hello_message(cfg={}, width=W, height=H,
+                                              mesh_format=wire.MESH_FORMAT_PACKET,
+                                              wall_mode="split"))
+    _recv_until(cli, wire.HELLO)
+    wire.send_message(cli, wire.set_view_message("solid"))
+    for fid in range(1, 40):
+        wire.send_message(cli, _frame(fid))
+        _recv_until(cli, wire.POSE)
+        if seen:
+            break
+    assert seen and seen[0][1] == "solid"
+    cli.close()
+    lsock.close()
+    th.join(timeout=5)
+
+
+def _fake_packet_service(full_mesh=True):
+    """A v2 packet-mode service double: hello, one pose per frame, a tiny MESH
+    packet on fid 1, and `mesh_full` replies (arrays or `empty`) on request.
+    `seen["conn"]` lets a test simulate the service dying."""
+    lsock = socket.socket()
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(1)
+    port = lsock.getsockname()[1]
+    seen = {"requests": [], "views": [], "conn": None}
+
+    def loop():
+        conn, _ = lsock.accept()
+        seen["conn"] = conn
+        try:
+            while True:
+                req = wire.recv_message(conn)
+                if req is None:
+                    break
+                typ = wire.message_type(req)
+                if typ == wire.HELLO:
+                    wire.send_message(conn, wire.hello_reply(
+                        device="CPU:0", mesh_format=wire.MESH_FORMAT_PACKET))
+                elif typ == wire.MESH_REQUEST:
+                    seen["requests"].append(req["req_id"])
+                    if full_mesh:
+                        import open3d as o3d
+                        m = o3d.t.geometry.TriangleMesh()
+                        m.vertex["positions"] = o3d.core.Tensor(
+                            np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], np.float32))
+                        m.triangle["indices"] = o3d.core.Tensor(np.array([[0, 1, 2]], np.int32))
+                        wire.send_message(conn, wire.mesh_full_message(req["req_id"], 1, m))
+                    else:
+                        wire.send_message(conn, wire.mesh_full_message(req["req_id"], 0, None))
+                elif typ == wire.SET_VIEW:
+                    seen["views"].append(req["wall_mode"])
+                elif typ == wire.MESH_ACK:
+                    pass
+                else:
+                    wire.send_message(conn, wire.pose_message(
+                        req["fid"], np.eye(4, dtype=np.float32), 0.9, 0.01, False, 1.0, 0,
+                        device="CPU:0"))
+                    if req["fid"] == 1:
+                        wire.send_message(conn, wire.mesh_packet_message(
+                            1, b"\x05" + bytes(35), source_vertex_count=3,
+                            sent_vertex_count=3, prep_ms=1.0, pack_ms=0.5))
+        except OSError:
+            pass
+        finally:
+            conn.close()
+    th = threading.Thread(target=loop, daemon=True)
+    th.start()
+    return port, lsock, th, seen
+
+
+def test_client_fetch_mesh_round_trips_and_reports_empty_as_none():
+    from roomscan.slam.remote import RemoteSlamWorker
+    port, lsock, th, seen = _fake_packet_service(full_mesh=True)
+    rw = RemoteSlamWorker(W, H, addr=f"127.0.0.1:{port}", mesh_format=wire.MESH_FORMAT_PACKET)
+    assert rw.connect()
+    rw.start()
+    assert rw.has_mesh is False
+    m = rw.fetch_mesh(timeout=5.0)
+    assert m is not None and len(m.vertex["positions"]) == 3
+    assert seen["requests"] == [1]
+    rw.stop()
+    lsock.close()
+    th.join(timeout=2)
+
+    port, lsock, th, seen = _fake_packet_service(full_mesh=False)
+    rw = RemoteSlamWorker(W, H, addr=f"127.0.0.1:{port}", mesh_format=wire.MESH_FORMAT_PACKET)
+    assert rw.connect()
+    rw.start()
+    assert rw.fetch_mesh(timeout=5.0) is None
+    rw.stop()
+    lsock.close()
+    th.join(timeout=2)
+
+
+def test_client_packet_mode_has_mesh_wall_mode_push_and_liveness():
+    from roomscan.slam.remote import RemoteSlamWorker
+    port, lsock, th, seen = _fake_packet_service()
+    rw = RemoteSlamWorker(W, H, addr=f"127.0.0.1:{port}", mesh_format=wire.MESH_FORMAT_PACKET,
+                          wall_mode="split")
+    assert rw.connect()
+    rw.start()
+    assert rw.alive is True
+    depth = np.full((H, W), 500.0, np.float32)
+    quat = np.array([1.0, 0.0, 0.0, 0.0], np.float32)
+    rw.submit(depth, quat, None)
+    t0 = time.monotonic()
+    got = None
+    while got is None and time.monotonic() - t0 < 3:
+        got = rw.latest_packet()
+        time.sleep(0.01)
+    assert got is not None and len(got[0]) == 36 and got[1]["mesh_seq"] == 1
+    assert rw.has_mesh is True
+    # latest() carries NO mesh in packet mode -- the packet was the mesh.
+    mesh, traj, _step = rw.latest()
+    assert mesh is None and len(traj) >= 1
+    # wall_mode: unchanged -> nothing sent; changed -> one set_view.
+    rw.set_wall_mode("split")
+    rw.set_wall_mode("solid")
+    rw.set_wall_mode("solid")
+    t0 = time.monotonic()
+    while not seen["views"] and time.monotonic() - t0 < 2:
+        time.sleep(0.01)
+    assert seen["views"] == ["solid"]
+    # The service dies: the client must say so, without stop() being called.
+    seen["conn"].shutdown(socket.SHUT_RDWR)
+    t0 = time.monotonic()
+    while rw.alive and time.monotonic() - t0 < 3:
+        time.sleep(0.01)
+    assert rw.alive is False
+    assert rw.fetch_mesh(timeout=1.0) is None       # does not hang on a dead service
+    rw.stop()
+    assert rw.alive is False
+    lsock.close()
+    th.join(timeout=2)
+
+
+def test_client_trajectory_is_not_copied_per_pose():
+    """E2 residual: `list(trajectory)` per pose was O(n) under the GIL. The
+    published trajectory is the worker's own append-only list."""
+    from roomscan.slam.remote import RemoteSlamWorker
+    port, lsock, th, seen = _fake_v2_service()
+    rw = RemoteSlamWorker(W, H, addr=f"127.0.0.1:{port}")
+    assert rw.connect()
+    rw.start()
+    depth = np.full((H, W), 500.0, np.float32)
+    quat = np.array([1.0, 0.0, 0.0, 0.0], np.float32)
+    for _ in range(3):
+        rw.submit(depth, quat, None)
+        t0 = time.monotonic()
+        n = rw.frames_processed
+        while rw.frames_processed == n and time.monotonic() - t0 < 2:
+            time.sleep(0.005)
+    _m, traj, _s = rw.latest()
+    assert traj is rw._trajectory and len(traj) == rw.frames_processed
+    rw.stop()
+    lsock.close()
+    th.join(timeout=2)

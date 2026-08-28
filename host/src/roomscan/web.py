@@ -277,7 +277,11 @@ def main(argv=None) -> int:
     if live_source is not None:
         _dispatch_standby(app.state, int(StandbyLevel.ACTIVE), "startup-wake")
 
-    port = 8000
+    # `ROOMSCAN_WEB_PORT` exists for a SECOND instance beside the systemd
+    # service (#224: measuring a worktree's build against a real browser
+    # while :8000 keeps serving) -- never for moving the primary off :8000,
+    # which the MCP tools, the thin client and the CrowPanel all assume.
+    port = int(os.environ.get("ROOMSCAN_WEB_PORT") or 8000)
     # `_lifespan` advertises this over mDNS and cannot see a local.
     app.state.port = port
     url = f"http://localhost:{port}/static/index.html"

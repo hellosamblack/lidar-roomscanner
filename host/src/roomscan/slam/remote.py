@@ -72,7 +72,14 @@ class RemoteSlamWorker:
         self._last_packet = None           # (bytes, meta) in packet mode
         self._unacked_seq = None           # mesh_seq the consumer has not yet taken
         self._acked_seq = -1
-        self._trajectory = []              # accumulated from pose deltas (no full-traj resend)
+        # Accumulated from the per-frame poses (the service never resends a
+        # full trajectory). Published to `latest()` AS-IS, not copied: the copy
+        # was O(n) per pose under the GIL (1800 poses = 1800 x 128 B every
+        # frame, one of E2's named residuals). The list is append-only and
+        # only this recv thread appends, so a reader that only takes `len()`,
+        # indexes, or iterates (build_slam_message, write_tum) sees a
+        # consistent prefix -- never a torn entry.
+        self._trajectory = []
         self._warned_legacy = False        # one-time warn on a pre-split (untagged) service
 
         # Plan item 2 (2026-08-02): the same submit/overwrite/processed shape
@@ -95,8 +102,74 @@ class RemoteSlamWorker:
         self._payload_bytes = 0
         self._last_source_verts = 0
 
+        # Full-mesh request/reply (#224): `fetch_mesh()` blocks the caller
+        # (Save runs off the event loop, via to_thread) until the recv loop
+        # lands the `mesh_full` with a matching req_id.
+        self._req_lock = threading.Lock()
+        self._req_cv = threading.Condition(self._req_lock)
+        self._req_id = 0
+        self._req_reply: dict | None = None
+        self._sent_wall_mode: str = self._wall_mode
+        # True once the recv loop exits for any reason other than `stop()`:
+        # the service died or dropped us. The runner polls this and rebuilds.
+        self._dead = False
+
         self._threads = []
         self._stop_evt = threading.Event()
+
+    @property
+    def alive(self) -> bool:
+        """False once the socket to the service has closed without `stop()`
+        being called -- the service process died (CUDA OOM, crash) or dropped
+        the connection. The runner treats that as "rebuild me"."""
+        return self._sock is not None and not self._dead
+
+    @property
+    def has_mesh(self) -> bool:
+        """A mesh has arrived on this connection (either format). In packet
+        mode `latest()` never carries one, so this is what "the map exists"
+        means for a remote worker."""
+        return self._meshes_received > 0
+
+    def set_wall_mode(self, wall_mode: str) -> None:
+        """Tell a packet-mode service the wall_mode the UI wants; a no-op
+        when unchanged (called every poll tick)."""
+        wall_mode = str(wall_mode)
+        if wall_mode == self._sent_wall_mode or self._sock is None:
+            return
+        self._sent_wall_mode = wall_mode
+        try:
+            with self._send_lock:
+                wire.send_message(self._sock, wire.set_view_message(wall_mode))
+        except (OSError, AttributeError):
+            pass
+
+    def fetch_mesh(self, timeout: float = 30.0):
+        """Ask the service for its newest full-res mesh and wait for it (#224).
+        Returns an Open3D tensor mesh, or None when the service has no map yet
+        or does not answer within `timeout` (an older service ignores the
+        request). Serialised: one request in flight at a time."""
+        if self._sock is None:
+            return None
+        with self._req_cv:
+            self._req_id += 1
+            req_id = self._req_id
+            self._req_reply = None
+            try:
+                with self._send_lock:
+                    wire.send_message(self._sock, wire.mesh_request_message(req_id))
+            except (OSError, AttributeError):
+                return None
+            deadline = time.monotonic() + float(timeout)
+            while (self._req_reply is None or self._req_reply.get("req_id") != req_id):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or self._dead:
+                    return None
+                self._req_cv.wait(remaining)
+            reply, self._req_reply = self._req_reply, None
+        if reply.get("empty") or "mesh_v" not in reply:
+            return None
+        return wire.arrays_to_mesh(reply)
 
     def connect(self) -> bool:
         try:
@@ -364,6 +437,11 @@ class RemoteSlamWorker:
             if typ == wire.MESH:
                 self._on_mesh(res)
                 continue
+            if typ == wire.MESH_FULL:
+                with self._req_cv:
+                    self._req_reply = res
+                    self._req_cv.notify_all()
+                continue
             # A pose message (tagged) OR a legacy untagged combined message
             # from a service built before the pose/mesh split. The tagged POSE
             # never carries mesh arrays, so an inline "mesh_v" means a legacy
@@ -409,7 +487,13 @@ class RemoteSlamWorker:
             }
             self._trajectory.append(pose)
             with self._out_lock:
-                self._out_slot = (self._last_mesh, list(self._trajectory), step)
+                self._out_slot = (self._last_mesh, self._trajectory, step)
+        # Fell out of the loop: EOF or socket error. Unless we are stopping,
+        # that is the service going away -- flag it and wake any fetch_mesh.
+        if not self._stop_evt.is_set():
+            self._dead = True
+            with self._req_cv:
+                self._req_cv.notify_all()
 
     def stop(self) -> None:
         self._stop_evt.set()
@@ -423,3 +507,4 @@ class RemoteSlamWorker:
             t.join(timeout=1.5)
         self._threads = []
         self._sock = None
+        self._dead = False

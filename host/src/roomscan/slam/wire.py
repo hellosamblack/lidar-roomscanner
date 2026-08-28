@@ -20,6 +20,13 @@ ignore what it does not understand:
   * `mesh` (format "packet") -- the service ran `prepare_packet`+`pack_mesh`
                itself and ships the finished MESH bytes; the client forwards
                them without touching the GIL for prep.
+  * `mesh_request` / `mesh_full` (#224) -- client -> service asks for the
+               newest FULL-RES mesh as arrays (a Save / export needs the map,
+               and in packet mode the client never holds one); the service
+               answers with `mesh_full` carrying the same `req_id`. Not
+               credit-gated: it is a one-shot reply to an explicit request.
+  * `set_view` (#224) -- client -> service: the live wall_mode changed (the UI
+               toggle); packet mode preps the next mesh with it.
 
 `pose` messages now carry every numeric `FrameStep` field (stage timings,
 inlier counts, block gauge, budget flag) plus IPC timestamps, so a remote
@@ -50,6 +57,9 @@ MESH = "mesh"
 HELLO = "hello"
 MESH_ACK = "mesh_ack"
 FRAME = "frame"
+MESH_REQUEST = "mesh_request"
+MESH_FULL = "mesh_full"
+SET_VIEW = "set_view"
 
 MESH_FORMAT_ARRAYS = "arrays"      # raw vertex/triangle/colour arrays (v1)
 MESH_FORMAT_PACKET = "packet"      # finished pack_mesh() bytes (v2)
@@ -202,6 +212,26 @@ def mesh_packet_message(mesh_seq, packed: bytes, *, source_vertex_count: int,
 
 def mesh_ack_message(mesh_seq) -> dict:
     return {"type": MESH_ACK, "mesh_seq": int(mesh_seq)}
+
+
+def mesh_request_message(req_id: int) -> dict:
+    """Client -> service: send the newest full-res mesh as arrays (#224)."""
+    return {"type": MESH_REQUEST, "req_id": int(req_id)}
+
+
+def mesh_full_message(req_id: int, mesh_seq: int, mesh) -> dict:
+    """Service -> client: the reply to `mesh_request`. `mesh` may be None (no
+    map yet): the reply then carries `empty=True` and no arrays, so the client
+    can tell "nothing to save" from a lost reply."""
+    out = {"type": MESH_FULL, "req_id": int(req_id), "mesh_seq": int(mesh_seq),
+           "empty": mesh is None}
+    if mesh is not None:
+        out.update(mesh_to_arrays(mesh))
+    return out
+
+
+def set_view_message(wall_mode: str) -> dict:
+    return {"type": SET_VIEW, "wall_mode": str(wall_mode)}
 
 
 # ---- handshake -----------------------------------------------------------------

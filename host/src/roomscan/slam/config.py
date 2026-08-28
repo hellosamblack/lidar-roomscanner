@@ -260,6 +260,19 @@ class SlamConfig:
     # (GPU WSL container) at remote_addr, falling back to local if unreachable.
     backend: str = "local"
     remote_addr: str = "127.0.0.1:5555"
+    # #224 (E2 productised). `remote_mesh_format="packet"` has the service run
+    # MeshPrep too and ship finished MESH bytes -- the only variant that gets
+    # the web loop to tick_share >= 0.97 (arrays mode: 0.91, prep still in
+    # the web process; see host/tools/spikes/e2_results.md). `remote_spawn`
+    # has the web app spawn `python -m roomscan.slam.service` on `remote_addr`
+    # itself (loopback only) and restart it if it dies, so a CUDA OOM in the
+    # mapper kills the service, not the server (BUG-053). Set it False to
+    # point `remote_addr` at a service you run yourself (the GPU container).
+    # `remote_device` is the spawned service's Open3D device; "" = the same
+    # `preferred_device()` the local worker would use.
+    remote_mesh_format: str = "packet"
+    remote_spawn: bool = True
+    remote_device: str = ""
     # Live-view render cadence (Component A -- off-thread adaptive mesh). The
     # heavy mesh/ribbon/floor upload runs at most `mesh_upload_hz` times/sec on
     # the GUI tick; MeshPrep decimates a packet to ~`live_vertex_budget` verts

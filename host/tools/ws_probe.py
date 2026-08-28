@@ -47,6 +47,7 @@ import collections
 import json
 import struct
 import sys
+import time
 from pathlib import Path
 
 DEFAULT_URL = "ws://localhost:8000"
@@ -118,6 +119,13 @@ async def _probe_ws(url: str, seconds: float, out: dict) -> None:
             out["json_counts"][mtype] += 1
             if mtype == "slam":
                 out["slam"] = {k: data[k] for k in SLAM_KEYS if k in data}
+                # Pose age as the BROWSER would see it: the server stamps `ts`
+                # (wall clock) when it builds the message, so arrival minus
+                # `ts` is the event-loop + socket delay on this host (#224).
+                # Same clock, so this is exact locally and meaningless remote.
+                ts = data.get("ts")
+                if isinstance(ts, (int, float)):
+                    out.setdefault("_slam_ages", []).append(time.time() - float(ts))
             elif mtype == "state":
                 out["state"] = {k: data.get(k) for k in
                                 ("mode", "source", "display", "selected_capture",
@@ -177,6 +185,14 @@ async def probe_async(seconds: float = DEFAULT_SECONDS, url: str = DEFAULT_URL) 
     out["logs"] = out["logs"][-25:]
     out["mesh_rate_hz"] = round(out["meshes"] / seconds, 3) if seconds > 0 else None
     out["slam_msg_hz"] = round(out["json_counts"].get("slam", 0) / seconds, 2) if seconds > 0 else None
+    ages = sorted(out.pop("_slam_ages", []))
+    if ages:
+        def _q(q):
+            return round(ages[min(len(ages) - 1, int(q * len(ages)))] * 1000.0, 1)
+        out["slam_age_ms"] = {"n": len(ages), "p50": _q(0.5), "p95": _q(0.95),
+                              "max": round(ages[-1] * 1000.0, 1)}
+    else:
+        out["slam_age_ms"] = None
     # The three questions, answered. `payload_ok` is None when no mesh arrived,
     # which is a different finding from "a mesh arrived and was malformed".
     dec = out["mesh_decode"]

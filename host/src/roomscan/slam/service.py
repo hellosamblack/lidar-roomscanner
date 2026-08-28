@@ -12,6 +12,10 @@ Wire v2 per-connection protocol (see wire.py):
                                                         the client holds the credit)
   client: mesh_ack                                   -> credit returned; a pending
                                                         (latest) mesh flushes at once
+  client: mesh_request(req_id)                       -> service: mesh_full(req_id,
+                                                        arrays) -- the newest full-res
+                                                        mesh, for Save (#224)
+  client: set_view(wall_mode)                        -> packet mode preps with it
 A v1 client (no hello, cfg on every frame) is still served: the worker is
 built from the first frame's cfg, and meshes flow with an implicit credit that
 is never consumed, i.e. the old unbounded behaviour.
@@ -109,13 +113,16 @@ class SlamService:
         self._mapper_kwargs = mapper_kwargs
         self._last_effective_kwargs = None
         self._last_hello = None            # the most recent client's hello (tests)
+        self._last_worker = None           # the most recent worker built (tests)
         self.last_credit_stats = None       # (sent, replaced, acks) of the last client
 
     def _build_worker(self, w: int, h: int, cfg_json: str | None, mesh_every=None):
         eff_kwargs = _effective_kwargs(self._mapper_kwargs, cfg_json)
         self._last_effective_kwargs = eff_kwargs
-        return SlamWorker(w, h, mesh_every=self._mesh_every if mesh_every is None else mesh_every,
-                          device=self._device, **eff_kwargs)
+        self._last_worker = SlamWorker(
+            w, h, mesh_every=self._mesh_every if mesh_every is None else mesh_every,
+            device=self._device, **eff_kwargs)
+        return self._last_worker
 
     def serve_client(self, conn) -> None:
         try:
@@ -169,6 +176,22 @@ class SlamService:
                 if typ == wire.MESH_ACK:
                     credit.ack()
                     credit.flush(conn)
+                    continue
+
+                if typ == wire.MESH_REQUEST:
+                    # One-shot, not credit-gated: the newest mesh the worker
+                    # has published (full-res -- MeshPrep never touches it),
+                    # or an `empty` reply when there is no map yet. Sent from
+                    # this loop, so a Save costs the frame loop one 36 MB
+                    # sendall (tens of ms) -- a deliberate, rare trade.
+                    latest = worker.latest() if worker is not None else None
+                    full = latest[0] if latest is not None else None
+                    wire.send_message(conn, wire.mesh_full_message(
+                        int(msg.get("req_id", 0)), mesh_seq, full))
+                    continue
+
+                if typ == wire.SET_VIEW:
+                    wall_mode = str(msg.get("wall_mode") or wall_mode)
                     continue
 
                 # A frame (v2 `type: frame`, or v1 untagged with inline cfg).

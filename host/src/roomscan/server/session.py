@@ -3137,6 +3137,15 @@ class SlamRunner:
         # the window before that, and a hand-built runner in tests.
         self._mesh_bytes_per_s = 12_000_000.0
         self._next_mesh_at = 0.0
+        # #224 (E2 productised). With `[slam] backend = "remote"` the worker is
+        # a RemoteSlamWorker; in its default `packet` mesh format the SERVICE
+        # runs MeshPrep and ships finished MESH bytes, so `_meshprep` stays
+        # None here and `poll()` only forwards -- that is the whole point
+        # (tick_share 0.79 -> 0.97, host/tools/spikes/e2_results.md). The
+        # supervisor owns the service subprocess and outlives worker
+        # teardowns (a map reset must not restart a process); `close()` ends it.
+        self._packet_mode = False
+        self._supervisor = None
 
     # ---- lifecycle (inbound thread, via to_thread) --------------------------
     def set_active(self, on: bool) -> None:
@@ -3168,8 +3177,29 @@ class SlamRunner:
         self._last_source_verts = 0
         self._device = None
         self._backend = None
+        self._packet_mode = False
         self._next_mesh_at = 0.0     # a fresh map publishes its first mesh at once
         self._generation += 1        # orphan any build still in flight
+
+    def _ensure_service(self, cfg, device) -> None:
+        """`[slam] backend = "remote"` + `remote_spawn`: make sure the service
+        subprocess is listening before `make_slam_worker` tries to connect --
+        and, when it has died since (poll() tore the worker down), start it
+        again. `make_slam_worker` still falls back to local if this fails, so a
+        broken service degrades to today's behaviour, loudly on the bus."""
+        from ..slam.supervisor import SlamServiceSupervisor
+        if cfg.backend != "remote" or not cfg.remote_spawn:
+            return
+        sup = self._supervisor
+        if sup is None or sup.addr != cfg.remote_addr:
+            if sup is not None:
+                sup.stop()
+            sup = SlamServiceSupervisor(addr=cfg.remote_addr,
+                                        device=cfg.remote_device or str(device),
+                                        publish=self._bus.publish)
+            self._supervisor = sup
+        if not sup.ensure():
+            self._bus.publish("[slam] service did not come up; make_slam_worker will fall back to local")
 
     def _construct(self, width: int, height: int):
         # Mirror panel._maybe_start_slam (panel.py:1539): fov from args, device
@@ -3180,6 +3210,7 @@ class SlamRunner:
         from ..slam.meshprep import MeshPrep
         cfg = SlamConfig.load()
         device = preferred_device()
+        self._ensure_service(cfg, device)
         # BUG-062: this used to hand-pick five `[slam]` keys, so icp_mode,
         # voxel_size, max_iter, max_dist, the quality gates and the stationarity
         # knobs were silently ignored by Live SLAM while the CLI and Detailed
@@ -3190,13 +3221,20 @@ class SlamRunner:
         mapper_kwargs.update(fov_h=self._fov_h, fov_v=self._fov_v, device=device)
         worker = make_slam_worker(width, height, **mapper_kwargs)
         worker.start()
-        # `packer`: serialising the packet is O(map) numpy work and used to
-        # run on the broadcaster, i.e. on the event loop. It belongs to the
-        # prep thread (BUG-060). Decimation stays OFF here -- see MeshPrep.
-        meshprep = MeshPrep(vertex_budget=cfg.live_vertex_budget,
-                            fps_budget_ms=cfg.fps_budget_ms, packer=pack_mesh)
+        # Packet mode (#224): the service preps + packs, so there is no
+        # MeshPrep in this process at all -- `poll()` forwards its bytes.
+        packet_mode = (getattr(worker, "backend", "local") == "remote"
+                       and getattr(worker, "mesh_format", "arrays") == "packet")
+        if packet_mode:
+            meshprep = None
+        else:
+            # `packer`: serialising the packet is O(map) numpy work and used to
+            # run on the broadcaster, i.e. on the event loop. It belongs to the
+            # prep thread (BUG-060). Decimation stays OFF here -- see MeshPrep.
+            meshprep = MeshPrep(vertex_budget=cfg.live_vertex_budget,
+                                fps_budget_ms=cfg.fps_budget_ms, packer=pack_mesh)
+            meshprep.start()
         self._mesh_bytes_per_s = float(cfg.live_mesh_bytes_per_s)
-        meshprep.start()
         # `worker.device`/`worker.backend`: ask the object that was actually
         # built, not the `preferred_device()` guess used to select it (plan
         # item 2 -- see Mapper.device's docstring). For a local worker these
@@ -3213,6 +3251,7 @@ class SlamRunner:
         self._bus.publish(
             f"[slam] worker started, backend={backend} device={reported_device} "
             f"{'icp_device=' + icp_device + ' ' if icp_device else ''}"
+            f"{'mesh_format=packet ' if packet_mode else ''}"
             f"({width}x{height})")
         return worker, meshprep, reported_device, backend
 
@@ -3232,6 +3271,7 @@ class SlamRunner:
                 self._worker, self._meshprep, self._wh = worker, meshprep, (width, height)
                 self._device = device
                 self._backend = backend
+                self._packet_mode = meshprep is None
         if stale:
             for obj in (worker, meshprep):
                 if obj is not None:
@@ -3288,8 +3328,20 @@ class SlamRunner:
         allows another one, and MeshPrep has a packet ready; the `slam` message
         ticks every processed frame."""
         with self._lock:
-            worker, meshprep = self._worker, self._meshprep
-        if worker is None or meshprep is None:
+            worker, meshprep, packet_mode = self._worker, self._meshprep, self._packet_mode
+        if worker is None or (meshprep is None and not packet_mode):
+            return None, None
+        # Remote liveness (#224): the service process died (CUDA OOM -- the
+        # isolation BUG-053 asked for -- or a crash) or dropped us. Tear the
+        # worker down so the next frame rebuilds it; `_ensure_service`
+        # restarts the subprocess on that path. One line on the bus, one
+        # lost map, the server keeps running.
+        if getattr(worker, "backend", "local") == "remote" and not getattr(worker, "alive", True):
+            self._bus.publish("[slam] remote service connection lost; "
+                              "rebuilding the worker on the next frame")
+            with self._lock:
+                if self._worker is worker:
+                    self._teardown_locked()
             return None, None
         res = worker.latest()
         if res is None:
@@ -3312,18 +3364,32 @@ class SlamRunner:
         # map that big changes slowly. This also bounds MeshPrep's GIL cost,
         # since prep only runs on a submitted mesh.
         now = time.monotonic()
-        if mesh is not None and mesh is not self._last_mesh and now >= self._next_mesh_at:
-            self._mesh_seq += 1
-            meshprep.submit(mesh, mesh_seq=self._mesh_seq, glow_origin=None,
-                            wall_mode=wall_mode)
-            self._last_mesh = mesh
         mesh_bytes = None
-        pkt = meshprep.latest()
-        if pkt is not None:
-            self._last_source_verts = pkt.source_vertex_count
-            mesh_bytes = _packed_or_pack(pkt)
-            rate = self._mesh_bytes_per_s
-            self._next_mesh_at = now + (len(mesh_bytes) / rate if rate > 0 else 0.0)
+        if packet_mode:
+            # The service governs its own prep cadence (same byte-rate rule)
+            # and holds at most one mesh in flight; taking the packet returns
+            # its credit. The bytes are a memoryview over the receive buffer
+            # -- no copy here, and nothing reuses that buffer.
+            worker.set_wall_mode(wall_mode)
+            got = worker.latest_packet()
+            if got is not None:
+                mesh_bytes, meta = got
+                self._mesh_seq = int(meta.get("mesh_seq", self._mesh_seq + 1))
+                self._last_source_verts = int(meta.get("source_vertex_count", 0))
+            prep_src = worker
+        else:
+            if mesh is not None and mesh is not self._last_mesh and now >= self._next_mesh_at:
+                self._mesh_seq += 1
+                meshprep.submit(mesh, mesh_seq=self._mesh_seq, glow_origin=None,
+                                wall_mode=wall_mode)
+                self._last_mesh = mesh
+            pkt = meshprep.latest()
+            if pkt is not None:
+                self._last_source_verts = pkt.source_vertex_count
+                mesh_bytes = _packed_or_pack(pkt)
+                rate = self._mesh_bytes_per_s
+                self._next_mesh_at = now + (len(mesh_bytes) / rate if rate > 0 else 0.0)
+            prep_src = meshprep
         frames_integrated = max(0, len(trajectory) - worker.tracking_lost_count)
         resources = (self._resource_sampler.latest()
                      if self._resource_sampler is not None else None)
@@ -3335,9 +3401,9 @@ class SlamRunner:
             frames_processed=getattr(worker, "frames_processed", None),
             frames_overwritten=getattr(worker, "frames_overwritten", None),
             mesh_extract_ms=getattr(worker, "mesh_extract_ms", None),
-            mesh_prep_ms=getattr(meshprep, "prep_ms", None),
-            mesh_pack_ms=getattr(meshprep, "pack_ms", None),
-            mesh_payload_bytes=getattr(meshprep, "payload_bytes", None),
+            mesh_prep_ms=getattr(prep_src, "prep_ms", None),
+            mesh_pack_ms=getattr(prep_src, "pack_ms", None),
+            mesh_payload_bytes=getattr(prep_src, "payload_bytes", None),
             gpu=_slam_gpu_fields(resources))
         return msg, mesh_bytes
 
@@ -3347,6 +3413,8 @@ class SlamRunner:
             worker = self._worker
         if worker is None:
             return False
+        if getattr(worker, "has_mesh", False):      # packet-mode remote (#224)
+            return True
         res = worker.latest()
         return bool(res is not None and res[0] is not None)
 
@@ -3363,9 +3431,15 @@ class SlamRunner:
         if worker is None:
             raise ValueError("SLAM is not running")
         res = worker.latest()
-        if res is None or res[0] is None:
+        if res is None:
             raise ValueError("map is empty (no frames integrated yet)")
         mesh, trajectory, _step = res
+        if mesh is None and hasattr(worker, "fetch_mesh"):
+            # Packet-mode remote (#224): this process never holds a mesh, so
+            # ask the service for its newest full-res one over the wire.
+            mesh = worker.fetch_mesh()
+        if mesh is None:
+            raise ValueError("map is empty (no frames integrated yet)")
         legacy = mesh.cpu().to_legacy() if hasattr(mesh, "to_legacy") else mesh
         if len(legacy.vertices) == 0:
             raise ValueError("map is empty (no vertices)")
@@ -3377,9 +3451,18 @@ class SlamRunner:
         write_tum(str(tum_path), ts, trajectory)
         return len(legacy.vertices)
 
+    @property
+    def service_supervisor(self):
+        """The `SlamServiceSupervisor` owning the spawned service subprocess
+        (None unless `[slam] backend = "remote"` + `remote_spawn`)."""
+        return self._supervisor
+
     def close(self) -> None:
         with self._lock:
             self._teardown_locked()
+            sup, self._supervisor = self._supervisor, None
+        if sup is not None:
+            sup.stop()
 
 
 def _last_tum_pose(path: Path) -> np.ndarray | None:

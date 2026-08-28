@@ -78,6 +78,11 @@ async def _lifespan(app: FastAPI):
     bridge_health_task = getattr(app.state, "bridge_health_task", None)
     if bridge_health_task is not None:
         bridge_health_task.cancel()
+    # Live SLAM: tear the worker down and, with `[slam] backend = "remote"`,
+    # end the spawned service subprocess (#224) -- it holds the CUDA context.
+    slam_runner = getattr(app.state, "slam_runner", None)
+    if slam_runner is not None:
+        await asyncio.to_thread(slam_runner.close)
     detailed = getattr(app.state, "detailed_runner", None)
     if detailed is not None:
         await asyncio.to_thread(detailed.close)
