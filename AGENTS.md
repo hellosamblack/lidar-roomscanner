@@ -274,7 +274,9 @@ in the repo. The evidence for every one is in `docs/roadmap-history.md`.
   Measure each hop with timestamps: that is how the frame-behind-mesh socket queue (170–207 ms),
   the `bytearray` zero-fill under the GIL, and the missing prep governor were found. Study + PoC:
   `docs/superpowers/specs/2026-08-27-rust-migration-feasibility.md` — the answer to "should the
-  host be Rust/C++" is recorded there; do not re-derive it.
+  host be Rust/C++" is recorded there; do not re-derive it. Packet mode is productised as
+  `[slam] backend = "remote"` (#224; roomSweepFull tick_share 0.976 vs 0.736 local, default
+  still `local`).
 - **A permission denial's error message does not tell you why — verify a permission-scope fix
   live before trusting it.** Two successive "fixes" to `fleet_run.py`'s Bash allowlist were each
   wrong, guessed from a denial's tool name rather than tested: a directory-only rule
