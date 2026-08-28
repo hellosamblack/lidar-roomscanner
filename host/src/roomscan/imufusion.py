@@ -69,8 +69,9 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from numpy.typing import NDArray
 
-from .domain import Twist
+from .domain import Quat, QuatLike, Twist
 from .protocol import IMU_RAW_TICK_US, ImuRawBatch
 from .sensors import graft_yaw, graft_yaw_error_deg, quat_mul, quat_to_matrix
 
@@ -192,7 +193,7 @@ def _quat_from_rotvec(rv: np.ndarray) -> tuple[float, float, float, float]:
     return (math.cos(half), float(rv[0]) * s, float(rv[1]) * s, float(rv[2]) * s)
 
 
-def _normalize_quat(q) -> tuple[float, float, float, float]:
+def _normalize_quat(q: QuatLike) -> Quat:
     w, x, y, z = q
     n = math.sqrt(w * w + x * x + y * y + z * z)
     if n < 1e-12:
@@ -328,7 +329,7 @@ class ImuFusion:
         self._quat_ref_rate_hz = float(rate_hz)
         self.tau_yaw_s = self._rate_scaled_tau_yaw_s()
 
-    def update(self, batch: ImuRawBatch, yaw_ref=None) -> None:
+    def update(self, batch: ImuRawBatch, yaw_ref: QuatLike | None = None) -> None:
         """Fold one stream-11 batch in. Never raises on odd input - a short, empty,
         gyro-less or timestamp-less batch degrades (see `status`) instead of crashing,
         because a dropped ToF frame produces exactly those."""
@@ -360,7 +361,7 @@ class ImuFusion:
 
         gated = not self._correct_tilt(gravity, dt_total)
         self._correct_yaw(yaw_ref, dt_total)
-        self._q = _normalize_quat(self._q)
+        self._q = _normalize_quat(self._estimate())
         self.batches += 1
         if dts.size == 0:
             self.status = "degraded:no-gyro"
@@ -372,7 +373,15 @@ class ImuFusion:
             self.status = "active"
 
     # -- internals ----------------------------------------------------------------
-    def _batch_gravity(self, batch: ImuRawBatch) -> np.ndarray | None:
+    def _estimate(self) -> Quat:
+        """`_q` once seeded. The internals below only run after `update` has
+        seeded (it returns early otherwise), so a None here is a programming
+        error, not a data condition -- say so rather than propagate it."""
+        if self._q is None:
+            raise RuntimeError("ImuFusion internals called before the filter was seeded")
+        return self._q
+
+    def _batch_gravity(self, batch: ImuRawBatch) -> NDArray[np.float64] | None:
         """The batch's LAST SFLP gravity vector (body frame, g), or None if absent.
 
         Deliberately NOT the batch mean. The mean is the gravity direction at the batch
@@ -391,7 +400,7 @@ class ImuFusion:
         if batch.gbias_dps.size:
             self._bias_dps = np.asarray(batch.gbias_dps[-1], dtype=np.float64)
 
-    def _seed(self, yaw_ref, gravity: np.ndarray | None) -> bool:
+    def _seed(self, yaw_ref: QuatLike | None, gravity: NDArray[np.float64] | None) -> bool:
         """First-batch initialisation: prefer the stream-9 quaternion (it has yaw), fall
         back to gravity-only (tilt right, yaw arbitrary). Returns False if neither
         is available, leaving the filter unseeded and `fused_quat()` None."""
@@ -403,7 +412,7 @@ class ImuFusion:
             return True
         return False
 
-    def _sample_dts(self, batch: ImuRawBatch) -> np.ndarray:
+    def _sample_dts(self, batch: ImuRawBatch) -> NDArray[np.float64]:
         """Per-gyro-sample dt in seconds, from the LSM's own TIMESTAMP words.
 
         TAG_CNT pairs a gyro word with the timestamp word of the same sample time, but
@@ -451,16 +460,16 @@ class ImuFusion:
         if batch.timestamp_ticks.size:
             self._prev_tick = int(batch.timestamp_ticks[-1])
 
-    def _propagate(self, gyro_dps: np.ndarray, dts: np.ndarray) -> None:
+    def _propagate(self, gyro_dps: NDArray[np.float64], dts: NDArray[np.float64]) -> None:
         """Integrate body-frame rates onto the estimate, one exact small rotation per
         sample. q is body -> world, so the increment right-multiplies."""
         omega = np.radians(np.asarray(gyro_dps, dtype=np.float64) - self._bias_dps)
-        q = self._q
+        q = self._estimate()
         for w_body, dt in zip(omega, dts):
             q = quat_mul(q, _quat_from_rotvec(w_body * dt))
         self._q = _normalize_quat(q)
 
-    def _correct_tilt(self, gravity: np.ndarray | None, dt: float) -> bool:
+    def _correct_tilt(self, gravity: NDArray[np.float64] | None, dt: float) -> bool:
         """Rotate the estimate toward the measured gravity direction. Returns False when
         the correction was skipped (no gravity words, or the magnitude gate tripped).
 
@@ -477,7 +486,8 @@ class ImuFusion:
         if norm < 1e-6 or abs(norm - 1.0) > self.accel_gate_frac:
             return False
         up_meas = gravity / norm
-        up_pred = quat_to_matrix(*self._q).T @ _WORLD_UP
+        q = self._estimate()
+        up_pred = quat_to_matrix(*q).T @ _WORLD_UP
         err = np.cross(up_meas, up_pred)
         s = float(np.linalg.norm(err))
         if s < 1e-12:
@@ -486,10 +496,10 @@ class ImuFusion:
         if float(np.dot(up_meas, up_pred)) < 0.0:      # >90 deg apart
             angle = math.pi - angle
         gain = dt / (self.tau_tilt_s + dt)
-        self._q = quat_mul(self._q, _quat_from_rotvec(err / s * (gain * angle)))
+        self._q = quat_mul(q, _quat_from_rotvec(err / s * (gain * angle)))
         return True
 
-    def _correct_yaw(self, yaw_ref, dt: float) -> None:
+    def _correct_yaw(self, yaw_ref: QuatLike | None, dt: float) -> None:
         """First-order pull of our heading toward the stream-9 / YawFusion heading.
         Uses `graft_yaw`, i.e. a pure world-Z rotation, so tilt is untouched.
 
@@ -506,7 +516,8 @@ class ImuFusion:
         wrong measurement rather than a mistuned gain (BUG-039)."""
         if yaw_ref is None:
             return
-        err: Twist = graft_yaw_error_deg(yaw_ref, self._q)
+        q = self._estimate()
+        err: Twist = graft_yaw_error_deg(yaw_ref, q)
         gain = dt / (self.tau_yaw_s + dt)
         # A scaled twist is still a twist; a scaled Euler yaw never was (BUG-039).
-        self._q = graft_yaw(self._q, Twist(gain * err))
+        self._q = graft_yaw(q, Twist(gain * err))

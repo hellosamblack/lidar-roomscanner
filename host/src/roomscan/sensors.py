@@ -9,11 +9,26 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
+from numpy.typing import NDArray
 
 if TYPE_CHECKING:   # import-only: imufusion imports the quaternion helpers from here
     from .imufusion import ImuFusion
 
-from .domain import Bearing, EulerYaw, LsmTicks, Twist
+from .domain import (
+    CV,
+    Bearing,
+    Body,
+    CvWorld,
+    EulerYaw,
+    LsmTicks,
+    Mat3,
+    Quat,
+    QuatLike,
+    Rotation,
+    Twist,
+    Vec3Like,
+    World,
+)
 from .magcal import MagCalibration
 from .protocol import (
     IMU_RAW_TICK_US,
@@ -57,15 +72,15 @@ class SensorState:
         # tick is actually worth. Starts nominal — recordings made before stream 12 existed
         # never carry one, and nominal is exactly the behaviour they were decoded with.
         self._imu_tick_us: float = IMU_RAW_TICK_US
-        self._quat: tuple[float, float, float, float] | None = None
+        self._quat: Quat | None = None
         self._env: EnvSample | None = None
-        self._pressure = deque(maxlen=history)
-        self._temp = deque(maxlen=history)
+        self._pressure: deque[float] = deque(maxlen=history)
+        self._temp: deque[float] = deque(maxlen=history)
         self._fusion = fusion
         self._raw_mag: tuple[float, float, float] | None = None
         self._spark_interval_us = int(env_spark_interval_s * 1e6)
-        self._pressure_spark = deque(maxlen=env_spark_depth)
-        self._temp_spark = deque(maxlen=env_spark_depth)
+        self._pressure_spark: deque[float] = deque(maxlen=env_spark_depth)
+        self._temp_spark: deque[float] = deque(maxlen=env_spark_depth)
         self._last_spark_t: int | None = None
         # stream 13: the frame's FRAME_READY edge on the LSM's own clock (#155 / #181).
         self._imu_sync: ImuSync | None = None
@@ -201,7 +216,7 @@ class SensorState:
                 return None
             return self._imu_sync.quat_offset_us(self._imu_tick_us)
 
-    def quat_at_frame_ready(self, sync: ImuSync | None = None) -> tuple[float, float, float, float] | None:
+    def quat_at_frame_ready(self, sync: ImuSync | None = None) -> Quat | None:
         """Orientation at the frame-ready edge, interpolated via TimestampedQuaternionBuffer."""
         with self._lock:
             s = sync if sync is not None else self._imu_sync
@@ -210,7 +225,7 @@ class SensorState:
             target_ticks = s.frame_ready_ticks(self._imu_tick_us)
             return self._quat_buf.at(LsmTicks(target_ticks))
 
-    def quat_at_ticks(self, ticks: LsmTicks) -> tuple[float, float, float, float] | None:
+    def quat_at_ticks(self, ticks: LsmTicks) -> Quat | None:
         """Orientation at raw LSM tick, interpolated via TimestampedQuaternionBuffer."""
         with self._lock:
             return self._quat_buf.at(ticks)
@@ -225,11 +240,11 @@ class SensorState:
         with self._lock:
             return list(self._imu_raw_hist)
 
-    def latest_quat(self) -> tuple[float, float, float, float] | None:
+    def latest_quat(self) -> Quat | None:
         with self._lock:
             return self._quat
 
-    def _legacy_quat_locked(self) -> tuple[float, float, float, float] | None:
+    def _legacy_quat_locked(self) -> Quat | None:
         """The pre-stream-11 orientation: YawFusion output if attached and settled,
         else the raw SFLP quaternion. Caller must hold ``self._lock``."""
         if self._fusion is not None:
@@ -238,7 +253,7 @@ class SensorState:
                 return fused
         return self._quat
 
-    def fused_quat(self) -> tuple[float, float, float, float] | None:
+    def fused_quat(self) -> Quat | None:
         """Best available orientation.
 
         Precedence: the optional stream-11 high-rate ``ImuFusion`` (only when one was
@@ -263,19 +278,19 @@ class SensorState:
         with self._lock:
             return self._env
 
-    def pressure_history(self) -> np.ndarray:
+    def pressure_history(self) -> NDArray[np.float64]:
         with self._lock:
             return np.array(self._pressure, dtype=np.float64)
 
-    def temp_history(self) -> np.ndarray:
+    def temp_history(self) -> NDArray[np.float64]:
         with self._lock:
             return np.array(self._temp, dtype=np.float64)
 
-    def pressure_spark_history(self) -> np.ndarray:
+    def pressure_spark_history(self) -> NDArray[np.float64]:
         with self._lock:
             return np.array(self._pressure_spark, dtype=np.float64)
 
-    def temp_spark_history(self) -> np.ndarray:
+    def temp_spark_history(self) -> NDArray[np.float64]:
         with self._lock:
             return np.array(self._temp_spark, dtype=np.float64)
 
@@ -289,9 +304,11 @@ class SensorState:
                 self._imu_fusion.reset()
 
 
-def quat_to_matrix(w: float, x: float, y: float, z: float) -> np.ndarray:
-    """Unit quaternion [w,x,y,z] -> 3x3 rotation matrix. Normalizes defensively."""
-    n = np.sqrt(w * w + x * x + y * y + z * z)
+def quat_to_matrix(w: float, x: float, y: float, z: float) -> Mat3:
+    """Unit quaternion [w,x,y,z] -> 3x3 rotation matrix. Normalizes defensively.
+    Untagged: the frames depend on which quaternion this is (`body_to_world_rotation`
+    tags the stream-9 one)."""
+    n = math.sqrt(w * w + x * x + y * y + z * z)
     if n < 1e-12:
         return np.eye(3)
     w, x, y, z = w / n, x / n, y / n, z / n
@@ -299,10 +316,10 @@ def quat_to_matrix(w: float, x: float, y: float, z: float) -> np.ndarray:
         [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
         [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
         [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
-    ])
+    ], dtype=np.float64)
 
 
-def quat_mul(a, b) -> tuple[float, float, float, float]:
+def quat_mul(a: QuatLike, b: QuatLike) -> Quat:
     """Hamilton product a ⊗ b for [w,x,y,z] quaternions."""
     aw, ax, ay, az = a
     bw, bx, by, bz = b
@@ -319,21 +336,21 @@ def wrap180(deg: float) -> float:
     return (deg + 180.0) % 360.0 - 180.0
 
 
-def quat_yaw_deg(quat) -> EulerYaw:
+def quat_yaw_deg(quat: QuatLike) -> EulerYaw:
     """ZYX yaw of a [w,x,y,z] quaternion, in degrees, [-180, 180). Typed
     `EulerYaw`: display only, never a `Bearing` (BUG-039/048/051)."""
     w, x, y, z = quat
     return EulerYaw(math.degrees(math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))))
 
 
-def quat_pitch_deg(quat) -> float:
+def quat_pitch_deg(quat: QuatLike) -> float:
     """ZYX pitch of a [w,x,y,z] quaternion, in degrees, clamped to [-90, 90]."""
     w, x, y, z = quat
     s = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
     return math.degrees(math.asin(s))
 
 
-def quat_roll_deg(quat) -> float:
+def quat_roll_deg(quat: QuatLike) -> float:
     """ZYX roll (bank about the forward axis) of a [w,x,y,z] quaternion, in
     degrees, [-180, 180). Same Tait-Bryan convention as `quat_yaw_deg`/
     `quat_pitch_deg` (yaw-pitch-roll = Z-Y-X)."""
@@ -354,7 +371,7 @@ def quat_roll_deg(quat) -> float:
 # its singularity out of the way.
 
 
-def quat_yaw_alt_deg(quat) -> float:
+def quat_yaw_alt_deg(quat: QuatLike) -> float:
     """Alternate Tait-Bryan decomposition (R = Rz(a) Rx(b) Ry(c)): the outer
     (Z-ish) component. Paired with `quat_pitch_alt_deg`/`quat_roll_alt_deg`;
     see `quat_pitch_alt_deg` for where this decomposition's gimbal lock sits."""
@@ -362,7 +379,7 @@ def quat_yaw_alt_deg(quat) -> float:
     return math.degrees(math.atan2(-r[0, 1], r[1, 1]))
 
 
-def quat_pitch_alt_deg(quat) -> float:
+def quat_pitch_alt_deg(quat: QuatLike) -> float:
     """Alternate Tait-Bryan decomposition's singular component: the world-Z
     projection of body Y (Right), i.e. `asin(R[2,1])`. Unlike the default
     `quat_pitch_deg` (gimbal lock when body X/Up -> vertical, i.e. the device
@@ -375,13 +392,13 @@ def quat_pitch_alt_deg(quat) -> float:
     return math.degrees(math.asin(s))
 
 
-def quat_roll_alt_deg(quat) -> float:
+def quat_roll_alt_deg(quat: QuatLike) -> float:
     """Alternate Tait-Bryan decomposition: the inner (Y-ish) component."""
     r = quat_to_matrix(*quat)
     return math.degrees(math.atan2(-r[2, 0], r[2, 2]))
 
 
-def boresight_view_deg(quat) -> tuple[float, float, float]:
+def boresight_view_deg(quat: QuatLike) -> tuple[float, float, float]:
     """(azimuth_deg [0,360), elevation_deg [-90,90], roll_deg [-180,180)) of
     the ToF optical axis -- the one decomposition that stays meaningful
     however the device is gripped, because it reports where the SENSOR points
@@ -422,7 +439,7 @@ def boresight_view_deg(quat) -> tuple[float, float, float]:
     return azimuth, elevation, roll
 
 
-def gravity_body_from_imu_raw(batch) -> tuple[float, float, float] | None:
+def gravity_body_from_imu_raw(batch: ImuRawBatch | None) -> tuple[float, float, float] | None:
     """Body-frame DOWN unit vector from the stream-11 SFLP gravity FIFO tag
     (0x17, mean of the batch's samples) -- fixed +-2g scale at 0.061 mg/LSB,
     ~16x finer in tilt than the fp16-encoded SFLP quaternion step
@@ -442,10 +459,11 @@ def gravity_body_from_imu_raw(batch) -> tuple[float, float, float] | None:
     n = float(np.linalg.norm(v))
     if n < 1e-9:
         return None
-    return tuple((-v / n).tolist())
+    down = -v / n
+    return (float(down[0]), float(down[1]), float(down[2]))
 
 
-def tilt_from_down_deg(down_body, axis_body=(0.0, 0.0, 1.0)) -> float:
+def tilt_from_down_deg(down_body: Vec3Like, axis_body: Vec3Like = (0.0, 0.0, 1.0)) -> float:
     """Angle in degrees of `axis_body` (default: the boresight, body +Z) from
     horizontal, given only the body-frame DOWN unit vector: 0=horizontal,
     +90=axis points straight up, -90=straight down. Needs just the 2 DoF of
@@ -456,8 +474,8 @@ def tilt_from_down_deg(down_body, axis_body=(0.0, 0.0, 1.0)) -> float:
     return -math.degrees(math.asin(dot))
 
 
-def triad_roll_deg(down_body, axis_body=(0.0, 0.0, 1.0),
-                    up_ref_body=(1.0, 0.0, 0.0)) -> float | None:
+def triad_roll_deg(down_body: Vec3Like, axis_body: Vec3Like = (0.0, 0.0, 1.0),
+                    up_ref_body: Vec3Like = (1.0, 0.0, 0.0)) -> float | None:
     """Roll of `up_ref_body` (default: body X / the structural Up axis) about
     `axis_body` (default: the boresight), referenced to true vertical --
     computed ENTIRELY from the body-frame down vector: the gravity-only half
@@ -479,7 +497,7 @@ def triad_roll_deg(down_body, axis_body=(0.0, 0.0, 1.0),
     return math.degrees(math.atan2(float(np.dot(cross, axis)), float(np.dot(perp_n, ref_n))))
 
 
-def graft_yaw(quat, delta_deg: Twist) -> tuple[float, float, float, float]:
+def graft_yaw(quat: QuatLike, delta_deg: Twist) -> Quat:
     """Rotate `quat` about the WORLD +Z axis by `delta_deg` (pre-multiply). This
     changes only heading; roll/pitch (tilt) are preserved. Returns a unit quat."""
     a = math.radians(delta_deg) / 2.0
@@ -491,7 +509,7 @@ def graft_yaw(quat, delta_deg: Twist) -> tuple[float, float, float, float]:
     return (w / n, x / n, y / n, z / n)
 
 
-def graft_yaw_error_deg(target, quat) -> Twist:
+def graft_yaw_error_deg(target: QuatLike, quat: QuatLike) -> Twist:
     """Degrees about WORLD +Z that carry `quat` as close as possible to `target`.
 
     The exact inverse of `graft_yaw`: ``graft_yaw(quat, graft_yaw_error_deg(t, quat))``
@@ -522,15 +540,21 @@ def graft_yaw_error_deg(target, quat) -> Twist:
     return Twist(wrap180(math.degrees(2.0 * math.atan2(rel[3], rel[0]))))
 
 
-def _unit_quat(quat) -> tuple[float, float, float, float]:
+def _as_quat(quat: QuatLike) -> Quat:
+    """Any 4-element spelling -> a plain [w,x,y,z] float tuple, NOT normalised."""
     w, x, y, z = (float(c) for c in quat)
+    return (w, x, y, z)
+
+
+def _unit_quat(quat: QuatLike) -> Quat:
+    w, x, y, z = _as_quat(quat)
     n = math.sqrt(w * w + x * x + y * y + z * z)
     if n < 1e-12:
         return (1.0, 0.0, 0.0, 0.0)
     return (w / n, x / n, y / n, z / n)
 
 
-def yaw_twist_deg(quat) -> Twist:
+def yaw_twist_deg(quat: QuatLike) -> Twist:
     """How far `quat` is rotated about **world +Z**, in degrees [-180, 180) --
     the swing-twist twist.
 
@@ -564,10 +588,7 @@ def yaw_twist_deg(quat) -> Twist:
     return Twist(wrap180(math.degrees(2.0 * math.atan2(z, w))))
 
 
-def tilt_compensated_heading(
-    quat: tuple[float, float, float, float],
-    mag_ut: tuple[float, float, float],
-) -> float:
+def tilt_compensated_heading(quat: QuatLike, mag_ut: Vec3Like) -> float:
     """Azimuth in degrees [0,360) of the magnetic field vector **in the quat's
     own world frame**, measured CCW from world +X (`atan2(m_y, m_x)`).
 
@@ -601,7 +622,7 @@ MIN_HORIZONTAL_FIELD_UT = 0.5
 BEARING_SINGULARITY_MARGIN_DEG = 10.0
 
 
-def magnetic_north_bearing_deg(quat, mag_ut) -> Bearing | None:
+def magnetic_north_bearing_deg(quat: QuatLike, mag_ut: Vec3Like) -> Bearing | None:
     """Compass bearing (CW, [-180, 180)) at which magnetic north lies **in the
     frame `quat` is expressed in** -- i.e. how far that frame's +X datum has
     ended up from north. None when the field has no usable horizontal
@@ -628,7 +649,7 @@ def magnetic_north_bearing_deg(quat, mag_ut) -> Bearing | None:
     return Bearing(wrap180(math.degrees(math.atan2(-float(m_world[1]), float(m_world[0])))))
 
 
-def boresight_bearing_deg(quat) -> Bearing | None:
+def boresight_bearing_deg(quat: QuatLike) -> Bearing | None:
     """Compass bearing [0,360) of the ToF optical axis in the frame `quat` is
     expressed in, or None within `BEARING_SINGULARITY_MARGIN_DEG` of vertical
     where a bearing does not exist. `boresight_view_deg`'s azimuth, gated.
@@ -643,7 +664,7 @@ def boresight_bearing_deg(quat) -> Bearing | None:
     return Bearing(azimuth)
 
 
-def absolute_heading(quat, mag_ut) -> Bearing | None:
+def absolute_heading(quat: QuatLike, mag_ut: Vec3Like) -> Bearing | None:
     """Drift-free magnetic compass bearing of the BORESIGHT, in degrees
     [0,360) -- where the sensor is aimed, referenced to magnetic north instead
     of to the SFLP world frame's drifting +X datum. None when either half is
@@ -683,53 +704,78 @@ def absolute_heading(quat, mag_ut) -> Bearing | None:
 # ToF (CV) frame: X=Right, Y=Down, Z=Forward
 # SFLP body frame: X=Up, Y=Right, Z=Forward (when board held vertically, USB down)
 # Thus: X_body = -Y_cv; Y_body = X_cv; Z_body = Z_cv
-T_CV_TO_BODY = np.array([
+T_CV_TO_BODY: Mat3 = np.array([
     [ 0.0, -1.0,  0.0],
     [ 1.0,  0.0,  0.0],
     [ 0.0,  0.0,  1.0]
-])
+], dtype=np.float64)
 
 # SFLP World frame: X=North, Y=West, Z=Up
 # Open3D CV World: X=Right(East), Y=Down(-Up), Z=Forward(North)
 # Thus: X_cv = -Y_world; Y_cv = -Z_world; Z_cv = X_world
-T_WORLD_TO_CV = np.array([
+T_WORLD_TO_CV: Mat3 = np.array([
     [ 0.0, -1.0,  0.0],
     [ 0.0,  0.0, -1.0],
     [ 1.0,  0.0,  0.0]
-])
+], dtype=np.float64)
+
+# The same two matrices, frame-tagged (#225, BUG-026). `Rotation[To, From]`
+# reads "To <- From", so composing them is checked: `R_CVWORLD_FROM_WORLD @
+# R_BODY_FROM_CV` is a Pyright error (World != Body) -- the middle rotation
+# from the quaternion cannot be left out. The bare `T_*` arrays stay for the
+# numpy/Open3D consumers (SLAM, tests); prefer these in new host code.
+R_BODY_FROM_CV: Rotation[Body, CV] = Rotation(T_CV_TO_BODY, Body, CV)
+R_CVWORLD_FROM_WORLD: Rotation[CvWorld, World] = Rotation(T_WORLD_TO_CV, CvWorld, World)
 
 
-def display_rotation(quat) -> np.ndarray | None:
+def body_to_world_rotation(quat: QuatLike) -> Rotation[World, Body]:
+    """The stream-9 SFLP quaternion as the frame-tagged body -> SFLP-world
+    rotation `R` of `docs/coordinate-frames.md`."""
+    return Rotation(quat_to_matrix(*_as_quat(quat)), World, Body)
+
+
+def display_frame_rotation(quat: QuatLike | None) -> Rotation[CvWorld, CV] | None:
+    """`display_rotation` with its frames on: the ToF-camera (CV) -> Open3D-CV-world
+    rotation that gravity-aligns the live display, or None when there is no
+    orientation yet (ToF-only session). Apply it to a `Cloud[CV]` and the result
+    is a `Cloud[CvWorld]`; hand a `Cloud[CV]` on as if it were the world cloud
+    and Pyright rejects it -- that omission is BUG-026."""
+    if quat is None:
+        return None
+    return R_CVWORLD_FROM_WORLD @ body_to_world_rotation(quat) @ R_BODY_FROM_CV
+
+
+def display_rotation(quat: QuatLike | None) -> Mat3 | None:
     """Body -> Open3D-CV-world rotation used to gravity-align the live display,
     or None when there is no orientation yet (ToF-only session).
 
     This is the one composed mapping from `docs/coordinate-frames.md`
     (`T_WORLD_TO_CV @ R @ T_CV_TO_BODY`) — the same matrix the desktop panel
     applied to its orbit-mode cloud (`panel.py:1337`) and the same one shipped to
-    the client as the gizmo's `rot`. Never re-derive it locally.
+    the client as the gizmo's `rot`. Never re-derive it locally. The bare-matrix
+    form of `display_frame_rotation`, kept for the numpy consumers (the `sensor`
+    message, `thumbs.py`, tests); the broadcaster's cloud path uses the tagged one.
 
     Lives here rather than in `web.py` (where it was until 2026-07-31) so the
     thumbnail renderer can use it: `thumbs.py` must not import `web`, which
     imports the whole server, the SLAM stack and this module — a cycle. `web.py`
     re-exports it, so every existing caller is unchanged."""
-    if quat is None:
-        return None
-    return T_WORLD_TO_CV @ quat_to_matrix(*quat) @ T_CV_TO_BODY
+    tagged = display_frame_rotation(quat)
+    return None if tagged is None else tagged.matrix
 
 
-def gizmo_pose(quat: tuple[float, float, float, float], scale: float,
-               anchor: tuple[float, float, float]) -> np.ndarray:
+def gizmo_pose(quat: QuatLike, scale: float,
+               anchor: tuple[float, float, float]) -> NDArray[np.float64]:
     """4x4 pose for the orientation gizmo: rotation from quaternion, uniform scale, placed
     at anchor. Suitable for Open3D geometry.transform()."""
-    r = quat_to_matrix(*quat)
-    r_mapped = T_WORLD_TO_CV @ r @ T_CV_TO_BODY
+    r_mapped = (R_CVWORLD_FROM_WORLD @ body_to_world_rotation(quat) @ R_BODY_FROM_CV).matrix
     m = np.eye(4)
     m[:3, :3] = r_mapped * scale
     m[:3, 3] = np.array(anchor, dtype=np.float64)
     return m
 
 
-def ir_gravity_angle_deg(quat: tuple[float, float, float, float]) -> float:
+def ir_gravity_angle_deg(quat: QuatLike) -> float:
     """In-plane rotation to APPLY to the IR image so its content stands upright
     against gravity. **Continuous** (not snapped), in degrees, [-180, 180),
     CCW-positive **as seen on screen** — i.e. `np.rot90`'s sense (row 0 renders at
@@ -760,14 +806,14 @@ def ir_gravity_angle_deg(quat: tuple[float, float, float, float]) -> float:
     points down**, so a positive rotation there is CLOCKWISE on screen, the exact
     trap that produced the inversion.
     """
-    r = quat_to_matrix(*quat)   # body → world
+    r = quat_to_matrix(*_as_quat(quat))   # body → world
     gravity_world = np.array([0.0, 0.0, -1.0])
     g_body = r.T @ gravity_world   # sensor body frame gravity vector
     gx, gy = float(g_body[1]), float(-g_body[0])   # in-plane components
     return wrap180(-math.degrees(math.atan2(gx, gy)))
 
 
-def ir_gravity_rot(quat: tuple[float, float, float, float]) -> int:
+def ir_gravity_rot(quat: QuatLike) -> int:
     """Number of CCW 90° turns (0–3) to apply to the raw IR image so its "down"
     approaches physical gravity — i.e. `ir_gravity_angle_deg` snapped to the
     nearest quarter turn, as an `np.rot90` count.
@@ -778,7 +824,7 @@ def ir_gravity_rot(quat: tuple[float, float, float, float]) -> int:
     return int(round(ir_gravity_angle_deg(quat) / 90.0)) % 4
 
 
-def ir_gravity_residual_deg(quat: tuple[float, float, float, float]) -> float:
+def ir_gravity_residual_deg(quat: QuatLike) -> float:
     """The part of the gravity roll that `ir_gravity_rot`'s quarter-turn snap
     leaves behind: `angle - 90*steps`, wrapped to (-45, 45]. CCW-positive.
 
@@ -816,9 +862,9 @@ def ir_gravity_residual_deg(quat: tuple[float, float, float, float]) -> float:
 # calibrated field into the world frame (world Z is up, verified against the
 # accelerometer at (0,0,-1)) and its Z must be NEGATIVE. `host/tools/heading_check.py`
 # scores it, and `test_axis_convention_puts_the_field_below_the_horizon` pins it.
-MAG_MOUNT_ROTATION = np.diag([1.0, -1.0, -1.0])
+MAG_MOUNT_ROTATION: Mat3 = np.diag([1.0, -1.0, -1.0])
 MAG_FIELD_SIGN = -1.0
-AXIS_CONVENTION = MAG_FIELD_SIGN * MAG_MOUNT_ROTATION
+AXIS_CONVENTION: Mat3 = MAG_FIELD_SIGN * MAG_MOUNT_ROTATION
 for _m in (MAG_MOUNT_ROTATION, AXIS_CONVENTION):
     _m.setflags(write=False)   # module constants — guard against in-place mutation
 
@@ -851,7 +897,7 @@ class YawFusion:
         self.motion_rate_dps = float(motion_rate_dps)
         self._delta = 0.0
         self._have_delta = False
-        self._last_quat: tuple[float, float, float, float] | None = None
+        self._last_quat: Quat | None = None
         self._last_t: int | None = None
         self.status = "init"
 
@@ -862,8 +908,8 @@ class YawFusion:
     # the normal ~30/60 Hz cadence remains fully covered.
     MOTION_MIN_DT_US = 12_000
 
-    def update(self, quat, raw_mag, t_us: int) -> None:
-        quat = tuple(float(v) for v in quat)
+    def update(self, quat: QuatLike, raw_mag: Vec3Like, t_us: int) -> None:
+        quat = _as_quat(quat)
         prev_quat, prev_t = self._last_quat, self._last_t
         self._last_quat = quat
         if self.cal is None:
@@ -902,7 +948,7 @@ class YawFusion:
         # difference of two unlike quantities (BUG-058) whose device-bearing
         # terms did not cancel: driven at a known bearing, the fused quat came
         # out MIRRORED, its boresight reading -bearing.
-        target = magnetic_north_bearing_deg(quat, tuple(cal_mag))
+        target = magnetic_north_bearing_deg(quat, cal_mag)
         if target is None:
             self.status = "gated:no-field"
             self._last_t = t_us
@@ -933,7 +979,7 @@ class YawFusion:
         self._last_t = None
         self.status = "init"
 
-    def fused_quat(self):
+    def fused_quat(self) -> Quat | None:
         if self._last_quat is None:
             return None
         # The datum correction is a rotation about world Z -- a twist by definition.

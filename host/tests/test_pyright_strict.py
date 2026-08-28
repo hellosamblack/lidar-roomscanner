@@ -48,3 +48,26 @@ def test_strict_modules_have_zero_pyright_errors():
     n, diags = run_pyright(mods)
     msg = "\n".join(f"{d['file']}:{d['range']['start']['line'] + 1}: {d['message']}" for d in diags)
     assert n == 0, f"{n} pyright error(s) in strict modules:\n{msg}"
+
+
+NEGATIVE = HOST / "tests" / "pyright_negative" / "frames_negative.py"
+
+
+def test_frame_tags_reject_mismatch():
+    """#225: the frame-tagged `Cloud[F]` / `Rotation[To, From]` types must reject
+    exactly the lines `frames_negative.py` marks `# EXPECT-ERROR` -- the BUG-026
+    shape (a CV cloud returned as the render-world cloud) among them -- and
+    accept every other line. Asserting the *set* of lines, not just a count,
+    keeps a new false positive from cancelling out a lost true one."""
+    # Trailing marker only, so the fixture's own docstring (which names the
+    # marker) is not counted as an expected error.
+    expected = {i for i, line in enumerate(NEGATIVE.read_text().splitlines(), start=1)
+                if line.rstrip().endswith("# EXPECT-ERROR")}
+    assert expected, "fixture has no EXPECT-ERROR lines"
+    _n, diags = run_pyright([str(NEGATIVE)])
+    # A rejected line may carry a secondary "type is unknown" diagnostic; the
+    # claim is about WHICH lines fail, so compare the set of lines.
+    got = sorted({d["range"]["start"]["line"] + 1 for d in diags})
+    msgs = "\n".join(f"L{d['range']['start']['line'] + 1}: {d['message'].splitlines()[0]}"
+                     for d in diags)
+    assert sorted(expected) == got, f"expected errors on {sorted(expected)}, got {got}:\n{msgs}"

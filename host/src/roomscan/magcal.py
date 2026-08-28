@@ -7,10 +7,15 @@ rig through all orientations (see `fit_ellipsoid`)."""
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 
 @dataclass(frozen=True)
@@ -19,7 +24,7 @@ class MagCalibration:
     matrix: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]
     field_ut: float
 
-    def apply(self, raw_ut) -> np.ndarray:
+    def apply(self, raw_ut: "Sequence[float] | np.ndarray") -> "NDArray[np.float64]":
         raw = np.asarray(raw_ut, dtype=np.float64)
         m = np.asarray(self.matrix, dtype=np.float64)
         b = np.asarray(self.offset, dtype=np.float64)

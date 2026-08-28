@@ -31,6 +31,17 @@ attempted, two (BUG-044, BUG-062) are the "no default args / exhaustive struct
 destructuring" class the spec already attributed to Rust only, and one (BUG-082)
 is the arithmetic-erasure limit of `NewType`.
 
+> **Follow-up (#225, 2026-08-28): BUG-026 is now REJECTED — 9/12.** `domain.py`
+> gained frame-tagged `Cloud[F]` / `Rotation[To, From]` (frames `CV`, `Body`,
+> `World`, `CvWorld`, plus `View` for the mode-dependent browser cloud) with a
+> composition-checked `@`; `sensors.display_frame_rotation` returns a
+> `Rotation[CvWorld, CV]`, and the broadcaster's cloud path only packs a
+> `Cloud[View]`. `bug026.py` was rewritten against that API and `run_all.py`
+> reports it rejected (`Type "Cloud[CV]" is not assignable to return type
+> "Cloud[CvWorld]"`). The strict set also grew to `sensors.py`, `imufusion.py`,
+> `protocol.py` (167 / 22 / 4 errors -> 0, by annotation, no `type: ignore`).
+> Negative fixture: `tests/pyright_negative/frames_negative.py`.
+
 ## Two honest caveats about the 8
 
 * **Escape hatches remain.** `NewType` is erased and arithmetic on it yields the

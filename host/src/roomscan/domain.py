@@ -5,8 +5,10 @@ Spec: docs/superpowers/specs/2026-08-27-rust-migration-feasibility.md,
 "Compile-time correctness payoff" (experiment E1, issue #223). Every type here
 is a `typing.NewType` (erased at runtime -- zero cost, zero behaviour change) or
 a small frozen dataclass / enum, so the only thing they add is a *name* that
-Pyright can refuse to conflate. Keep this module boring: no operator overloads,
-no generics, no metaclasses -- an agent must be able to read it in one screen.
+Pyright can refuse to conflate. Keep this module boring: no metaclasses, and
+the ONE generic family (`Cloud[F]` / `Rotation[To, From]` at the bottom) exists
+only because frame mismatch is not a scalar mistake -- an agent must still be
+able to read each section in one screen.
 
 What each family guards (the shipped bug behind it):
 
@@ -26,6 +28,15 @@ What each family guards (the shipped bug behind it):
   None for it, so a consumer must unwrap before it can read `pressure_pa`.
 * `IcpMode` / `WireVersion` -- single-source enums so a missing case is a
   type error (`assert_never`) rather than a silent `None` (BUG-071's shape).
+* Frames -- BUG-026: a body/CV-frame point cloud was drawn as if it were
+  already in the render world (the display rotation was computed and then not
+  applied). `Cloud[F]` tags an (N, 3) array with the frame it is expressed in
+  and `Rotation[To, From]` tags a 3x3 matrix with both frames; `R @ cloud` and
+  `R_a @ R_b` type-check the frames, so a `Cloud[CV]` cannot be returned where
+  a `Cloud[CvWorld]` is declared and `T_WORLD_TO_CV @ T_CV_TO_BODY` cannot be
+  written with the middle rotation missing. The frame names are the four in
+  `docs/coordinate-frames.md`; the tags are also checked at runtime (cheap
+  identity compare) so an untyped caller fails loudly instead of silently.
 
 Python cannot forbid `Bearing - Bearing` (it is just `float - float`) -- the
 arithmetic result is a plain float, which a `Bearing`-typed consumer then
@@ -36,9 +47,13 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
-from typing import NewType
+from typing import Any, Generic, NewType, TypeAlias, TypeVar, overload
+
+import numpy as np
+from numpy.typing import NDArray
 
 # --- Clock domains ------------------------------------------------------------
 
@@ -174,3 +189,125 @@ class WireVersion(IntEnum):
     """RSCN frame-header versions `protocol.FrameHeader.unpack` accepts."""
     V1 = 1
     V2 = 2
+
+
+# --- Frames (frame-tagged clouds and rotations) --------------------------------
+#
+# The four frames of `docs/coordinate-frames.md`, as marker classes. They carry
+# no data; they exist so `Cloud[CV]` and `Cloud[CvWorld]` are different types to
+# Pyright and different objects at runtime. Never instantiate one.
+
+class Frame:
+    """Base marker for a coordinate frame. Subclass, never instantiate."""
+    __slots__ = ()
+
+
+class CV(Frame):
+    """ToF camera frame: X = Right, Y = Down, Z = Forward (`Deprojector` output)."""
+    __slots__ = ()
+
+
+class Body(Frame):
+    """SFLP body frame: X = Up, Y = Right, Z = Forward (board vertical, USB down)."""
+    __slots__ = ()
+
+
+class World(Frame):
+    """SFLP world frame: X = North, Y = West, Z = Up. What stream 9 rotates into."""
+    __slots__ = ()
+
+
+class CvWorld(Frame):
+    """Open3D CV world: X = East, Y = Down, Z = North. The renderer's / TSDF's world."""
+    __slots__ = ()
+
+
+class View(Frame):
+    """The frame the live browser cloud is packed in for the selected view mode:
+    `CvWorld` in World mode, a level boresight frame in FPV, mirrored in Mirror.
+    Its axes vary with the mode, so it is its own tag rather than any of the four
+    physical frames -- a consumer that wants gravity-true geometry must ask for
+    `Cloud[CvWorld]`, not `Cloud[View]`."""
+    __slots__ = ()
+
+
+F = TypeVar("F", bound=Frame)
+To = TypeVar("To", bound=Frame)
+From = TypeVar("From", bound=Frame)
+_X = TypeVar("_X", bound=Frame)
+
+#: A [w, x, y, z] unit quaternion as this codebase passes it around.
+Quat: TypeAlias = tuple[float, float, float, float]
+#: What a quaternion-taking helper accepts: a tuple/list of 4 floats or a
+#: 4-element float array. Helpers that need a real tuple call `sensors._unit_quat`.
+QuatLike: TypeAlias = Sequence[float] | NDArray[np.floating[Any]]
+#: A 3-vector by value; same accepted spellings as `QuatLike`.
+Vec3Like: TypeAlias = Sequence[float] | NDArray[np.floating[Any]]
+#: 3x3 rotation matrix, float64.
+Mat3: TypeAlias = NDArray[np.float64]
+
+
+@dataclass(frozen=True, slots=True)
+class Cloud(Generic[F]):
+    """(..., 3) points expressed in frame `F` -- a flat (N, 3) cloud or the
+    surface path's (h, w, 3) grid. `Cloud(pts, CV)` infers `Cloud[CV]` -- always
+    pass the frame class, never rely on inference from `pts` (an untagged
+    construction would be `Cloud[Unknown]`, which Pyright lets through
+    anywhere). Unwrap with `.xyz` at the numpy / Open3D boundary."""
+    xyz: NDArray[np.floating[Any]]
+    frame: type[F]
+
+    def __post_init__(self) -> None:
+        if self.xyz.ndim < 2 or self.xyz.shape[-1] != 3:
+            raise ValueError(f"Cloud expects a (..., 3) array, got shape {self.xyz.shape}")
+
+    def __len__(self) -> int:
+        """Number of points (all leading axes flattened)."""
+        return int(self.xyz.size // 3)
+
+
+@dataclass(frozen=True, slots=True)
+class Rotation(Generic[To, From]):
+    """3x3 rotation taking `From`-frame coordinates to `To`-frame coordinates.
+    Read `Rotation[CvWorld, CV]` as "CvWorld <- CV". `Rotation(m, CvWorld, CV)`
+    infers the parameters from the two frame classes.
+
+    Composition is checked both ways: `a @ b` requires `a.src is b.dst`
+    (Pyright rejects the mismatch; at runtime it raises), and `r @ cloud` /
+    `r.apply(cloud)` requires `cloud.frame is r.src`."""
+    matrix: Mat3
+    dst: type[To]
+    src: type[From]
+
+    def __post_init__(self) -> None:
+        if self.matrix.shape != (3, 3):
+            raise ValueError(f"Rotation expects a (3, 3) matrix, got shape {self.matrix.shape}")
+
+    @overload
+    def __matmul__(self, other: Rotation[From, _X]) -> Rotation[To, _X]: ...
+    @overload
+    def __matmul__(self, other: Cloud[From]) -> Cloud[To]: ...
+
+    def __matmul__(self, other: Rotation[From, _X] | Cloud[From]) -> Rotation[To, _X] | Cloud[To]:
+        if isinstance(other, Cloud):
+            return self.apply(other)
+        return self.then(other)
+
+    def then(self, other: Rotation[From, _X]) -> Rotation[To, _X]:
+        """`self @ other`: first `other` (X -> From), then `self` (From -> To)."""
+        if other.dst is not self.src:
+            raise ValueError(
+                f"frame mismatch composing {self.dst.__name__}<-{self.src.__name__} "
+                f"with {other.dst.__name__}<-{other.src.__name__}")
+        return Rotation(self.matrix @ other.matrix, self.dst, other.src)
+
+    def apply(self, cloud: Cloud[From]) -> Cloud[To]:
+        """Rotate every point of a `From`-frame cloud into the `To` frame."""
+        if cloud.frame is not self.src:
+            raise ValueError(
+                f"frame mismatch: rotation takes {self.src.__name__}, "
+                f"cloud is in {cloud.frame.__name__}")
+        return Cloud(cloud.xyz @ self.matrix.T, self.dst)
+
+    def inverse(self) -> Rotation[From, To]:
+        return Rotation(np.ascontiguousarray(self.matrix.T), self.src, self.dst)

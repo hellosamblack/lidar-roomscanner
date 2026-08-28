@@ -43,7 +43,7 @@ from ..control import (
 )
 from ..decoder import StreamDecoder
 from ..deproject import Deprojector
-from ..domain import Bearing, HostMono, Twist, bearing_delta, now_mono
+from ..domain import CV, Bearing, Cloud, CvWorld, HostMono, Rotation, Twist, View, bearing_delta, now_mono
 from ..domain import elapsed_s as mono_elapsed_s
 from ..ir_image import ir_range, reflectance_to_rgb
 from ..logbus import LogBus
@@ -728,6 +728,34 @@ def rotate_points(pts: np.ndarray, rot: np.ndarray | None) -> np.ndarray:
     if rot is None or pts.size == 0:
         return pts
     return np.ascontiguousarray(pts @ rot.T, dtype=np.float32)
+
+
+# --- Frame-tagged twins of the two helpers above (#225, BUG-026) --------------
+#
+# The broadcaster's cloud path goes through these. `view_frame_rotation` is
+# where the render frame changes identity with the view mode, so it is the one
+# place a `Rotation[CvWorld, CV]` is deliberately re-tagged `Rotation[View, CV]`
+# (in World mode the two are the same matrix). Everything downstream then only
+# accepts a `Cloud[CV]` in and yields a `Cloud[View]` out -- returning the
+# un-rotated CV cloud where the view cloud is expected is a Pyright error, which
+# is exactly the omission BUG-026 was. The bare-array functions stay for
+# `web.py`'s re-exports and the tests that pin their numerics.
+
+def view_frame_rotation(grav: Rotation[CvWorld, CV] | None,
+                        view_mode: str) -> Rotation[View, CV] | None:
+    """`view_rotation` with frames on: gravity-aligned CV -> CvWorld in, the
+    rotation into the selected view's frame out (None = the cloud stays in the
+    sensor's own frame, which is what the client expects for that case)."""
+    mat = view_rotation(None if grav is None else grav.matrix, view_mode)
+    return None if mat is None else Rotation(mat, View, CV)
+
+
+def rotate_cloud(cloud: Cloud[CV], rot: Rotation[View, CV] | None) -> Cloud[View]:
+    """`rotate_points` with frames on. Same no-copy behaviour when `rot` is None
+    (the sensor frame IS the view then), same float32 output otherwise."""
+    if rot is None:
+        return Cloud(cloud.xyz, View)
+    return Cloud(rotate_points(cloud.xyz, rot.matrix), View)
 
 
 def rotation_key(rot: np.ndarray | None):

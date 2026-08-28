@@ -40,9 +40,10 @@ from ..protocol import (
     StandbyLevel,
     StreamId,
 )
+from ..domain import CV, Cloud
 from ..sensors import (
     SensorState,
-    display_rotation,
+    display_frame_rotation,
     graft_yaw,
     quat_pitch_alt_deg,
     quat_pitch_deg,
@@ -805,14 +806,15 @@ async def _broadcaster() -> None:
             # Smoothed display-side only: the raw quat's ~0.14 deg/update noise
             # becomes visible shimmer once it swings a 3 m lever arm.
             grav_quat = smoother.update(state.sensor_state.fused_quat())
-            grav_rot = display_rotation(grav_quat)
+            grav_rot = display_frame_rotation(grav_quat)   # Rotation[CvWorld, CV] | None
             # ...unless the user picked FPV/Mirror, which ship the cloud in the
             # sensor's own frame instead. `grav_quat`/`grav_rot` themselves stay
             # gravity-true below: the IR pane's quarter-turn snap and the
             # `sensor` message are deliberately unaffected by the view mode
             # (owner: "IR view is unchanged for all but mirror", and Mirror's IR
             # flip is a client-side CSS transform, not a re-rotation).
-            view_rot = view_rotation(grav_rot, ui.view_mode)
+            view_rot = view_frame_rotation(grav_rot, ui.view_mode)   # Rotation[View, CV] | None
+            view_mat = None if view_rot is None else view_rot.matrix
 
             # POINT_CLOUD (or SURFACE) every tick (so late joiners see data
             # within ~36ms), but only in real-time mode -- SLAM mode replaces
@@ -828,14 +830,17 @@ async def _broadcaster() -> None:
                 # and refreshes the `/ws-thin` stash (#215).
                 thin_cmap = ui.thin_view.colormap
                 key = (header.seq, ui.color_mode, ui.view_colormap, surf_key,
-                       rotation_key(view_rot), thin_cmap)
+                       rotation_key(view_mat), thin_cmap)
                 if key != last_pc_key:
                     if ui.surface_enabled:
                         pg, cg, val, tris, cov, fell_back, thin_cg = select_surface(
                             outputs, state.deproj, ui.color_mode,
                             ui.view_colormap, ui.surface_mode,
                             ui.surface_threshold_pct, thin_colormap=thin_cmap)
-                        rot = rotate_points(pg, view_rot)
+                        # Frame tags on (#225): `pg` is the deprojector's CV
+                        # grid; only a `Cloud[View]` may reach the packer.
+                        view_cloud = rotate_cloud(Cloud(pg, CV), view_rot)
+                        rot = view_cloud.xyz
                         last_pc_bytes = pack_surface_cloud(
                             rot, cg, val, tris, cov)
                         # `/ws-thin` renders the *gravity-corrected* grid so
@@ -851,7 +856,8 @@ async def _broadcaster() -> None:
                             outputs, state.deproj, ui.color_mode)
                         colors = _apply_colormap(vn, ui.view_colormap).astype(
                             np.float32, copy=False)
-                        rot = rotate_points(pts, view_rot)
+                        view_cloud = rotate_cloud(Cloud(pts, CV), view_rot)
+                        rot = view_cloud.xyz
                         last_pc_bytes = pack_point_cloud(rot, colors)
                         thin_colors = (colors if thin_cmap == ui.view_colormap
                                        else _apply_colormap(vn, thin_cmap).astype(

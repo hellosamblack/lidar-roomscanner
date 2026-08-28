@@ -166,6 +166,37 @@ points here; keep this doc short and binding.
   always a *different* test's leak** — bisect by running the failing file after suspect files, not by
   debugging the failing file.
 
+### Typing (Pyright strict set + domain types)
+
+- **`host/pyrightconfig.json` → `strict` is the list of modules held to Pyright strict with zero
+  errors**, gated by `tests/test_pyright_strict.py` (E1, #223; extended in #225). Today: `domain.py`,
+  `sensor_time.py`, `sensors.py`, `imufusion.py`, `protocol.py`. Everything else is `basic`. Grow the
+  list module by module; **make a module strict by annotating, never by `# type: ignore`** — use
+  `numpy.typing.NDArray[np.float64]` (with the dtype where it is known), the `domain.py` aliases
+  (`Quat`, `QuatLike`, `Vec3Like`, `Mat3`), `TypedDict` for dict-shaped readbacks (`protocol.TofMeta`),
+  and `Protocol` for duck-typed collaborators. If a strict module calls into a basic one and the
+  error is "type of X is partially unknown", annotate the *callee's* signature — that is the fix
+  that pays twice.
+- **Domain newtypes are demanded by consumers, not minted by producers.** `Bearing`/`EulerYaw`/`Twist`,
+  `HostMono`/`WallTime`, `Millimetres`/`Metres` are erased at runtime; the guard is that every consumer
+  of a heading / clock / length parameter *asks for the newtype*, so the error lands one call from the
+  mistake. A `Bearing(...)` cast on an expression is the review point (`host/tools/spikes/e1_results.md`).
+- **Point clouds and rotations carry their frame** (#225, BUG-026): `domain.Cloud[F]` is an `(..., 3)`
+  array tagged with one of the `docs/coordinate-frames.md` frames (`CV`, `Body`, `World`, `CvWorld`,
+  plus `View` for the mode-dependent browser cloud) and `domain.Rotation[To, From]` a 3×3 tagged with
+  both — `R @ cloud` and `R_a @ R_b` type-check the frames and also identity-check them at runtime.
+  Build them with the frame class (`Cloud(pts, CV)`, `Rotation(m, CvWorld, World)`); an untagged
+  `Cloud(pts)` would infer `Cloud[Unknown]` and pass anywhere. The tagged API in `sensors.py` is
+  `R_BODY_FROM_CV`, `R_CVWORLD_FROM_WORLD`, `body_to_world_rotation`, `display_frame_rotation`; the
+  bare `T_*` / `display_rotation` arrays remain for Open3D/numpy consumers. **Keep the numpy boundary
+  thin**: tag at the deprojector, unwrap with `.matrix` / `.xyz` at the pack/Open3D call, nowhere else.
+  Negative fixture: `tests/pyright_negative/frames_negative.py` — every `# EXPECT-ERROR` line must
+  fail and no other, so a lost rejection cannot hide behind a new false positive.
+- **Bit-identical is a test contract here.** Filters and drift tests compare quaternions at 1e-6°,
+  which is one ulp of a dot product. Rewriting `w, x, y, z = q` as `(float(c) for c in q)` on numpy
+  scalars moved a result by that ulp and failed `test_timestamp_wrap_is_a_non_event` — when annotating,
+  change types, not arithmetic.
+
 ## Web UI
 
 - **Every interactive button/toggle/control must have a `title` attribute** (native browser tooltip)

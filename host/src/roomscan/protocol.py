@@ -6,10 +6,11 @@ import struct
 import zlib
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import TypedDict
 
 import numpy as np
 
-from .domain import LsmTicks, WireVersion
+from .domain import LsmTicks, Vec3Like, WireVersion
 from .sensor_time import signed_tick_delta
 
 MAGIC = b"RSCN"
@@ -690,7 +691,7 @@ def decode_env(payload: bytes) -> tuple[float, tuple[float, float, float], float
     return pressure, (mx, my, mz), temp
 
 
-def is_valid_mag(mag: tuple[float, float, float] | list[float] | np.ndarray) -> bool:
+def is_valid_mag(mag: Vec3Like) -> bool:
     """True if mag vector is finite and non-zero (> 1e-3 µT magnitude)."""
     if len(mag) != 3:
         return False
@@ -700,7 +701,7 @@ def is_valid_mag(mag: tuple[float, float, float] | list[float] | np.ndarray) -> 
     return (mx * mx + my * my + mz * mz) > 1e-3
 
 
-def is_valid_env(pressure_pa: float, mag: tuple[float, float, float] | list[float] | np.ndarray, temp_c: float) -> bool:
+def is_valid_env(pressure_pa: float, mag: Vec3Like, temp_c: float) -> bool:
     """True if all ENV components are finite and within physical sensor bounds."""
     if not (math.isfinite(pressure_pa) and 30000.0 <= pressure_pa <= 120000.0):
         return False
@@ -732,7 +733,36 @@ def _u24le(m: bytes, o: int) -> int:
     return m[o] | (m[o + 1] << 8) | (m[o + 2] << 16)
 
 
-def decode_tof_meta(payload: bytes) -> dict | None:
+class TofMeta(TypedDict):
+    """`decode_tof_meta`'s readback (one key per `vl53l9_meta_t` field we decode,
+    plus the derived `fps` / `exposure_ms` / `exposure_consistent`). A TypedDict
+    rather than a dataclass because every consumer already reads it as a dict
+    (`state.tof_meta`, the `tof_meta` message, capture tooling)."""
+    frame_counter: int
+    die_temp_c: int
+    error_status: int
+    error_code: int
+    ranging_mode: str | None
+    nb_step: int
+    dss_mode: int
+    binning: int
+    power_mode: int
+    sync_mode: int
+    ambient_attenuation: int
+    frame_period_us: int
+    fps: float | None
+    exposure_ms: float | None
+    exposure_consistent: bool | None
+    nb_shot_step1: int
+    nb_shot_step4_5: int
+    nb_shot_step6: int
+    nb_shot_step7: int
+    ref_channels: list[int]
+    frame_width: int
+    frame_height: int
+
+
+def decode_tof_meta(payload: bytes | None) -> TofMeta | None:
     """Decode the vl53l9_meta_t block in a RAW_3DMD payload's last 100 bytes.
 
     Accepts a full RAW_3DMD payload (or just the >=100-byte tail) and returns a
@@ -774,8 +804,8 @@ def decode_tof_meta(payload: bytes) -> dict | None:
     step7 = _u24le(m, 85)
 
     ranging_mode = {7: "precision", 6: "ambient"}.get(nb_step)
-    exposure_ms = None
-    exposure_consistent = None
+    exposure_ms: float | None = None
+    exposure_consistent: bool | None = None
     ratios = _TOF_EXPOSURE_RATIOS.get(nb_step)
     if ratios is not None:
         x1 = step1 / ratios[0]

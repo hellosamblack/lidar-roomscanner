@@ -48,6 +48,28 @@ Open3D's Y-up world. This is why yaw (a Z-rotation in the Z-up SFLP world) corre
 Y-rotation in Open3D — the `T_WORLD_TO_CV` sandwich remaps the rotation axis. Skipping the sandwich makes
 yaw appear as roll (the original BUG-004 symptom).
 
+### Frame-tagged types (#225)
+
+The four frames above are marker classes in `host/src/roomscan/domain.py` — `CV`, `Body`, `World`
+(SFLP world), `CvWorld` (Open3D CV world) — plus `View`, the frame the live browser cloud is packed in
+for the selected view mode (`CvWorld` in World mode, a level boresight frame in FPV, mirrored in Mirror;
+its axes vary, so it is its own tag). `Cloud[F]` is an `(..., 3)` array tagged with its frame and
+`Rotation[To, From]` a 3×3 tagged with both (read "To ← From"). The sandwich, with frames on:
+
+```python
+R_CVWORLD_FROM_WORLD @ body_to_world_rotation(quat) @ R_BODY_FROM_CV   # Rotation[CvWorld, CV]
+display_frame_rotation(quat) @ Cloud(cv_points, CV)                     # Cloud[CvWorld]
+```
+
+Pyright rejects a mis-composition (`R_CVWORLD_FROM_WORLD @ R_BODY_FROM_CV` — the quaternion left out),
+a rotation applied to a cloud in the wrong frame, and the BUG-026 shape itself — a `Cloud[CV]` returned
+where a `Cloud[CvWorld]` is declared. The same checks run at runtime (an identity compare on the frame
+classes), so an untyped caller fails loudly rather than drawing a body-frame cloud as the world. The bare
+`T_CV_TO_BODY` / `T_WORLD_TO_CV` / `display_rotation` arrays remain for Open3D / numpy consumers
+(`slam/frames.py`, `mapper.py`, `thumbs.py`, the `sensor` message); the broadcaster's cloud path
+(`server/ws_broadcaster.py` → `rotate_cloud` / `view_frame_rotation` in `server/session.py`) is tagged
+end to end. Negative fixture: `host/tests/pyright_negative/frames_negative.py`.
+
 ## Gravity / "down"
 
 - World gravity in the SFLP Z-up world is `[0, 0, -1]` (`sensors.py:209`).

@@ -1,13 +1,23 @@
 {
-  "include": ["src/roomscan"],
-  "exclude": ["**/__pycache__", "src/roomscan/static"],
-  "extraPaths": ["src"],
+  "include": [
+    "src/roomscan"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "src/roomscan/static"
+  ],
+  "extraPaths": [
+    "src"
+  ],
   "pythonVersion": "3.12",
   "typeCheckingMode": "basic",
   "reportMissingImports": false,
   "reportMissingModuleSource": false,
   "strict": [
     "src/roomscan/domain.py",
-    "src/roomscan/sensor_time.py"
+    "src/roomscan/sensor_time.py",
+    "src/roomscan/sensors.py",
+    "src/roomscan/imufusion.py",
+    "src/roomscan/protocol.py"
   ]
 }
