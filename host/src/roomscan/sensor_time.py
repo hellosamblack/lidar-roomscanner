@@ -23,13 +23,18 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from .domain import LsmTicks
+
+Quat = tuple[float, float, float, float]
+QuatLike = Sequence[float] | np.ndarray
+
 #: The LSM6DSV16X TIMESTAMP register is a free-running uint32 (~21.7 us/LSB,
 #: wraps every ~26 h). All deltas below are modular so the wrap is a non-event.
 TICK_MASK = 0xFFFFFFFF
 _TICK_SPAN = float(TICK_MASK) + 1.0
 
 
-def signed_tick_delta(a: float, b: float) -> float:
+def signed_tick_delta(a: LsmTicks, b: LsmTicks) -> float:
     """Signed tick delta a -> b, choosing the nearest modular representative.
 
     The intervals this module reasons about are milliseconds on a ~26 h counter,
@@ -42,29 +47,29 @@ def signed_tick_delta(a: float, b: float) -> float:
     return d
 
 
-def slerp(a, b, t: float) -> tuple[float, float, float, float]:
+def slerp(a: QuatLike, b: QuatLike, t: float) -> Quat:
     """Spherical linear interpolation between unit quaternions [w,x,y,z], from
     `a` at t=0 to `b` at t=1. Falls back to a normalized lerp when the two are
     nearly parallel (numerically safer, and the regime the SLAM prior smoother
     lives in). Hemisphere-corrects so it takes the short arc."""
-    a = np.asarray(a, dtype=np.float64)
-    b = np.asarray(b, dtype=np.float64)
-    dot = float(np.dot(a, b))
+    qa = np.asarray(a, dtype=np.float64)
+    qb = np.asarray(b, dtype=np.float64)
+    dot = float(np.dot(qa, qb))
     if dot < 0.0:
-        b = -b
+        qb = -qb
         dot = -dot
     if dot > 0.9995:
-        out = a + t * (b - a)
+        out = qa + t * (qb - qa)
     else:
-        theta = np.arccos(max(-1.0, min(1.0, dot)))
-        s = np.sin(theta)
-        out = (np.sin((1.0 - t) * theta) / s) * a + (np.sin(t * theta) / s) * b
-    n = np.linalg.norm(out)
+        theta = float(np.arccos(max(-1.0, min(1.0, dot))))
+        s = float(np.sin(theta))
+        out = (float(np.sin((1.0 - t) * theta)) / s) * qa + (float(np.sin(t * theta)) / s) * qb
+    n = float(np.linalg.norm(out))
     out = out / n if n > 1e-12 else np.array([1.0, 0.0, 0.0, 0.0])
     return (float(out[0]), float(out[1]), float(out[2]), float(out[3]))
 
 
-def _valid_quat(q) -> tuple[float, float, float, float] | None:
+def _valid_quat(q: QuatLike) -> Quat | None:
     """Normalize q ([w,x,y,z]) or return None for non-finite/degenerate input."""
     try:
         w, x, y, z = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
@@ -98,8 +103,7 @@ class TimestampedQuaternionBuffer:
     """
 
     def __init__(self, capacity: int = 64, max_span_ticks: float | None = None):
-        self._samples: deque[tuple[float, tuple[float, float, float, float]]] = \
-            deque(maxlen=int(capacity))
+        self._samples: deque[tuple[float, Quat]] = deque(maxlen=int(capacity))
         self._last_raw: float | None = None
         self.max_span_ticks = max_span_ticks
 
@@ -118,7 +122,7 @@ class TimestampedQuaternionBuffer:
         self._samples.clear()
         self._last_raw = None
 
-    def add(self, ticks: float, quat) -> bool:
+    def add(self, ticks: LsmTicks, quat: QuatLike) -> bool:
         """Insert a sample at raw (possibly wrapped) LSM tick `ticks`."""
         q = _valid_quat(quat)
         if q is None or not np.isfinite(float(ticks)):
@@ -126,19 +130,19 @@ class TimestampedQuaternionBuffer:
         if self._last_raw is None:
             self._samples.append((0.0, q))
         else:
-            d = signed_tick_delta(self._last_raw, ticks)
+            d = signed_tick_delta(LsmTicks(self._last_raw), ticks)
             if d <= 0.0:
                 return False
             self._samples.append((self._samples[-1][0] + d, q))
         self._last_raw = float(ticks) % _TICK_SPAN
         return True
 
-    def _unwrap_query(self, ticks: float) -> float | None:
+    def _unwrap_query(self, ticks: LsmTicks) -> float | None:
         if self._last_raw is None or not np.isfinite(float(ticks)):
             return None
-        return self._samples[-1][0] + signed_tick_delta(self._last_raw, ticks)
+        return self._samples[-1][0] + signed_tick_delta(LsmTicks(self._last_raw), ticks)
 
-    def at(self, ticks: float) -> tuple[float, float, float, float] | None:
+    def at(self, ticks: LsmTicks) -> Quat | None:
         """Orientation at raw LSM tick `ticks`, or None if not bracketed."""
         t = self._unwrap_query(ticks)
         if t is None or len(self._samples) == 0:
@@ -161,10 +165,10 @@ class TimestampedQuaternionBuffer:
 
 
 def interpolate_quaternion_at(
-    buffer_or_samples: TimestampedQuaternionBuffer | Sequence[tuple[float, Any]],
-    target_ticks: float,
+    buffer_or_samples: TimestampedQuaternionBuffer | Sequence[tuple[LsmTicks, Any]],
+    target_ticks: LsmTicks,
     max_span_ticks: float | None = None,
-) -> tuple[float, float, float, float] | None:
+) -> Quat | None:
     """Query orientation at target LSM tick, interpolating between bracketing samples.
 
     Accepts either a `TimestampedQuaternionBuffer` or a sequence of `(ticks, quat)`
@@ -282,6 +286,7 @@ class LiveGroupAggregator:
         return None
 
     def _finalize_pending(self, seq: int | None) -> PairedGroupFrame:
+        assert self._pending_depth is not None
         header, outputs = self._pending_depth
         self._pending_depth = None
         self._pending_seq = None

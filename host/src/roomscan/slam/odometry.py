@@ -36,6 +36,8 @@ from dataclasses import dataclass
 import numpy as np
 import open3d as o3d
 
+from ..domain import IcpMode
+
 _reg = o3d.t.pipelines.registration
 
 
@@ -436,8 +438,10 @@ def register(source: o3d.t.geometry.PointCloud, target: o3d.t.geometry.PointClou
     # accumulates drift, so fewer iterations track the true motion better. iter=6 is
     # the drift minimum; it also happens to sit near the ~35 ms/frame live-preview
     # target, but accuracy -- not that budget -- is why it's the default.
-    if mode not in ("translation", "6dof", "adaptive", "soft_prior"):
-        raise ValueError(f"unknown mode {mode!r}")
+    try:
+        mode = IcpMode(mode)      # single source of the mode set: domain.IcpMode
+    except ValueError:
+        raise ValueError(f"unknown mode {mode!r}") from None
     init_pose = np.asarray(init_pose, dtype=np.float64)
 
     weights: np.ndarray | None = None

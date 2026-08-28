@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import numpy as np
 
+from .domain import MM_PER_M, Millimetres
+
 
 class Deprojector:
     def __init__(self, width: int, height: int, fov_h_deg: float = 55.0,
-                 fov_v_deg: float = 42.0, max_range_mm: float = 10000.0,
+                 fov_v_deg: float = 42.0, max_range_mm: Millimetres = Millimetres(10000.0),
                  zone_tan_x: np.ndarray | None = None, zone_tan_y: np.ndarray | None = None):
         """zone_tan_x/zone_tan_y: optional (height, width) per-zone tan(angle) tables
         that override the separable linear FoV model (see module docstring). Must be
@@ -69,7 +71,9 @@ class Deprojector:
         z_safe = np.where(valid, z, 0.0)
         x = np.broadcast_to(z_safe * self._tan_x, z.shape)
         y = np.broadcast_to(z_safe * self._tan_y, z.shape)
-        return np.stack([x, y, z_safe], axis=-1) / 1000.0, valid
+        # The mm -> m boundary: depth arrives in wire millimetres, points leave in
+        # SLAM metres. One named constant, so the unit change is greppable.
+        return np.stack([x, y, z_safe], axis=-1) / MM_PER_M, valid
 
     def __call__(self, depth_mm: np.ndarray) -> np.ndarray:
         pts, valid = self.grid(depth_mm)

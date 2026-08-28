@@ -1,0 +1,13 @@
+{
+  "include": ["src/roomscan"],
+  "exclude": ["**/__pycache__", "src/roomscan/static"],
+  "extraPaths": ["src"],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": false,
+  "reportMissingModuleSource": false,
+  "strict": [
+    "src/roomscan/domain.py",
+    "src/roomscan/sensor_time.py"
+  ]
+}

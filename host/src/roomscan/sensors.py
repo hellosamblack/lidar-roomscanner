@@ -13,6 +13,7 @@ import numpy as np
 if TYPE_CHECKING:   # import-only: imufusion imports the quaternion helpers from here
     from .imufusion import ImuFusion
 
+from .domain import Bearing, EulerYaw, LsmTicks, Twist
 from .magcal import MagCalibration
 from .protocol import (
     IMU_RAW_TICK_US,
@@ -82,7 +83,7 @@ class SensorState:
                     self._fusion.update(q, self._raw_mag, frame.header.t_us)
                 if (self._imu_sync is not None and self._imu_sync.valid
                         and self._imu_sync.quat_mid_ticks):
-                    self._quat_buf.add(self._imu_sync.quat_mid_ticks, q)
+                    self._quat_buf.add(LsmTicks(self._imu_sync.quat_mid_ticks), q)
         elif sid == StreamId.ENV:
             pressure, mag, temp = decode_env(frame.payload)
             if is_valid_env(pressure, mag, temp):
@@ -121,7 +122,7 @@ class SensorState:
                 with self._lock:
                     self._imu_sync = sync
                     if sync.quat_n and sync.quat_mid_ticks and self._quat is not None:
-                        self._quat_buf.add(sync.quat_mid_ticks, self._quat)
+                        self._quat_buf.add(LsmTicks(sync.quat_mid_ticks), self._quat)
 
     @property
     def imu_tick_us(self) -> float:
@@ -207,9 +208,9 @@ class SensorState:
             if s is None or not s.valid or not s.quat_mid_ticks:
                 return None
             target_ticks = s.frame_ready_ticks(self._imu_tick_us)
-            return self._quat_buf.at(target_ticks)
+            return self._quat_buf.at(LsmTicks(target_ticks))
 
-    def quat_at_ticks(self, ticks: float) -> tuple[float, float, float, float] | None:
+    def quat_at_ticks(self, ticks: LsmTicks) -> tuple[float, float, float, float] | None:
         """Orientation at raw LSM tick, interpolated via TimestampedQuaternionBuffer."""
         with self._lock:
             return self._quat_buf.at(ticks)
@@ -318,10 +319,11 @@ def wrap180(deg: float) -> float:
     return (deg + 180.0) % 360.0 - 180.0
 
 
-def quat_yaw_deg(quat) -> float:
-    """ZYX yaw (heading) of a [w,x,y,z] quaternion, in degrees, [-180, 180)."""
+def quat_yaw_deg(quat) -> EulerYaw:
+    """ZYX yaw of a [w,x,y,z] quaternion, in degrees, [-180, 180). Typed
+    `EulerYaw`: display only, never a `Bearing` (BUG-039/048/051)."""
     w, x, y, z = quat
-    return math.degrees(math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
+    return EulerYaw(math.degrees(math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))))
 
 
 def quat_pitch_deg(quat) -> float:
@@ -477,7 +479,7 @@ def triad_roll_deg(down_body, axis_body=(0.0, 0.0, 1.0),
     return math.degrees(math.atan2(float(np.dot(cross, axis)), float(np.dot(perp_n, ref_n))))
 
 
-def graft_yaw(quat, delta_deg: float) -> tuple[float, float, float, float]:
+def graft_yaw(quat, delta_deg: Twist) -> tuple[float, float, float, float]:
     """Rotate `quat` about the WORLD +Z axis by `delta_deg` (pre-multiply). This
     changes only heading; roll/pitch (tilt) are preserved. Returns a unit quat."""
     a = math.radians(delta_deg) / 2.0
@@ -489,7 +491,7 @@ def graft_yaw(quat, delta_deg: float) -> tuple[float, float, float, float]:
     return (w / n, x / n, y / n, z / n)
 
 
-def graft_yaw_error_deg(target, quat) -> float:
+def graft_yaw_error_deg(target, quat) -> Twist:
     """Degrees about WORLD +Z that carry `quat` as close as possible to `target`.
 
     The exact inverse of `graft_yaw`: ``graft_yaw(quat, graft_yaw_error_deg(t, quat))``
@@ -517,7 +519,7 @@ def graft_yaw_error_deg(target, quat) -> float:
     tw, tx, ty, tz = _unit_quat(target)
     qw, qx, qy, qz_ = _unit_quat(quat)
     rel = quat_mul((tw, tx, ty, tz), (qw, -qx, -qy, -qz_))
-    return wrap180(math.degrees(2.0 * math.atan2(rel[3], rel[0])))
+    return Twist(wrap180(math.degrees(2.0 * math.atan2(rel[3], rel[0]))))
 
 
 def _unit_quat(quat) -> tuple[float, float, float, float]:
@@ -528,7 +530,7 @@ def _unit_quat(quat) -> tuple[float, float, float, float]:
     return (w / n, x / n, y / n, z / n)
 
 
-def yaw_twist_deg(quat) -> float:
+def yaw_twist_deg(quat) -> Twist:
     """How far `quat` is rotated about **world +Z**, in degrees [-180, 180) --
     the swing-twist twist.
 
@@ -559,7 +561,7 @@ def yaw_twist_deg(quat) -> float:
       device lives.
     """
     w, _, _, z = _unit_quat(quat)
-    return wrap180(math.degrees(2.0 * math.atan2(z, w)))
+    return Twist(wrap180(math.degrees(2.0 * math.atan2(z, w))))
 
 
 def tilt_compensated_heading(
@@ -599,7 +601,7 @@ MIN_HORIZONTAL_FIELD_UT = 0.5
 BEARING_SINGULARITY_MARGIN_DEG = 10.0
 
 
-def magnetic_north_bearing_deg(quat, mag_ut) -> float | None:
+def magnetic_north_bearing_deg(quat, mag_ut) -> Bearing | None:
     """Compass bearing (CW, [-180, 180)) at which magnetic north lies **in the
     frame `quat` is expressed in** -- i.e. how far that frame's +X datum has
     ended up from north. None when the field has no usable horizontal
@@ -623,10 +625,10 @@ def magnetic_north_bearing_deg(quat, mag_ut) -> float | None:
     m_world = r @ np.asarray(mag_ut, dtype=np.float64)
     if float(math.hypot(m_world[0], m_world[1])) < MIN_HORIZONTAL_FIELD_UT:
         return None
-    return wrap180(math.degrees(math.atan2(-float(m_world[1]), float(m_world[0]))))
+    return Bearing(wrap180(math.degrees(math.atan2(-float(m_world[1]), float(m_world[0])))))
 
 
-def boresight_bearing_deg(quat) -> float | None:
+def boresight_bearing_deg(quat) -> Bearing | None:
     """Compass bearing [0,360) of the ToF optical axis in the frame `quat` is
     expressed in, or None within `BEARING_SINGULARITY_MARGIN_DEG` of vertical
     where a bearing does not exist. `boresight_view_deg`'s azimuth, gated.
@@ -638,10 +640,10 @@ def boresight_bearing_deg(quat) -> float | None:
     azimuth, elevation, _roll = boresight_view_deg(quat)
     if 90.0 - abs(elevation) < BEARING_SINGULARITY_MARGIN_DEG:
         return None
-    return azimuth
+    return Bearing(azimuth)
 
 
-def absolute_heading(quat, mag_ut) -> float | None:
+def absolute_heading(quat, mag_ut) -> Bearing | None:
     """Drift-free magnetic compass bearing of the BORESIGHT, in degrees
     [0,360) -- where the sensor is aimed, referenced to magnetic north instead
     of to the SFLP world frame's drifting +X datum. None when either half is
@@ -674,7 +676,7 @@ def absolute_heading(quat, mag_ut) -> float | None:
     bearing = boresight_bearing_deg(quat)
     if north is None or bearing is None:
         return None
-    return (bearing - north) % 360.0
+    return Bearing((bearing - north) % 360.0)
 
 
 # True physical mapping derived from board orientation:
@@ -905,6 +907,14 @@ class YawFusion:
             self.status = "gated:no-field"
             self._last_t = t_us
             return
+        self._absorb_north_bearing(target, dt)
+        self.status = "active"
+        self._last_t = t_us
+
+    def _absorb_north_bearing(self, target: Bearing, dt: float) -> None:
+        """Fold one measured north `Bearing` into the datum correction. The
+        parameter type is the whole guard: an Euler yaw or a world-Z twist is
+        not a `Bearing`, so neither can reach this loop again (BUG-051/058)."""
         if not self._have_delta:
             self._delta = target                   # snap on first valid sample
             self._have_delta = True
@@ -913,8 +923,6 @@ class YawFusion:
             # first-order low-pass toward the measured datum error; re-wrap so
             # delta stays in [-180, 180) even after many ±180 crossings.
             self._delta = wrap180(self._delta + gain * wrap180(target - self._delta))
-        self.status = "active"
-        self._last_t = t_us
 
     def reset(self) -> None:
         """Clear accumulated yaw correction so the filter snaps fresh on the
@@ -928,4 +936,5 @@ class YawFusion:
     def fused_quat(self):
         if self._last_quat is None:
             return None
-        return graft_yaw(self._last_quat, self._delta)
+        # The datum correction is a rotation about world Z -- a twist by definition.
+        return graft_yaw(self._last_quat, Twist(self._delta))

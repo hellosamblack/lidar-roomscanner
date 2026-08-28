@@ -1316,8 +1316,9 @@ class ControlPanel:
         quat = self.sensor_state.fused_quat()
         quat_display = quat
         if quat is not None and self._baseline_yaw is not None:
+            from .domain import Twist
             from .sensors import graft_yaw
-            quat_display = graft_yaw(quat, -self._baseline_yaw)
+            quat_display = graft_yaw(quat, Twist(-self._baseline_yaw))
 
         if fp:
             # Sensor-fixed: keep the cloud in the raw sensor frame so it stays
@@ -3060,8 +3061,9 @@ class ControlPanel:
         quat = self.sensor_state.fused_quat()
         quat_display = quat
         if quat is not None and self._baseline_yaw is not None:
+            from .domain import Twist
             from .sensors import graft_yaw
-            quat_display = graft_yaw(quat, -self._baseline_yaw)
+            quat_display = graft_yaw(quat, Twist(-self._baseline_yaw))
         if gizmo_should_update(getattr(self, "camera_mode", CAM_ORBIT), self.imu_gizmo) \
                 and quat_display is not None:
             self._update_camera_gizmo(quat_display)

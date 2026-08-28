@@ -24,6 +24,8 @@ import zlib
 from collections import deque
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
+from enum import StrEnum
+from typing import assert_never
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +43,8 @@ from ..control import (
 )
 from ..decoder import StreamDecoder
 from ..deproject import Deprojector
+from ..domain import Bearing, HostMono, Twist, bearing_delta, now_mono
+from ..domain import elapsed_s as mono_elapsed_s
 from ..ir_image import ir_range, reflectance_to_rgb
 from ..logbus import LogBus
 from ..magcal import MagCalibration
@@ -1126,7 +1130,7 @@ class OrientationJitter:
         self._prev_roll: float | None = None
         self._prev_pitch: float | None = None
         self._prev_yaw: float | None = None
-        self._prev_heading: float | None = None
+        self._prev_heading: Bearing | None = None
         self._mode: str = "zyx"
 
     def update(self, quat, heading_deg: float | None, now: float | None = None,
@@ -1168,8 +1172,10 @@ class OrientationJitter:
             self._prev_quat = quat
         if heading_deg is not None:
             if self._prev_heading is not None:
-                diffs["heading"] = abs(wrap180(heading_deg - self._prev_heading))
-            self._prev_heading = float(heading_deg)
+                # Bearings live on a circle: 359 -> 0 is one degree of motion,
+                # not 359 (BUG-082). `bearing_delta` is the wrap-aware subtraction.
+                diffs["heading"] = abs(bearing_delta(Bearing(heading_deg), self._prev_heading))
+            self._prev_heading = Bearing(float(heading_deg))
         if diffs:
             self._samples.append((now, diffs))
         cutoff = now - self.window_s
@@ -1769,7 +1775,7 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
     # absolute `heading_full` above, not a function of this quat's yaw.
     display_quat = quat
     if quat is not None and mode != "world" and yaw_offset_deg:
-        display_quat = graft_yaw(quat, float(yaw_offset_deg))
+        display_quat = graft_yaw(quat, Twist(float(yaw_offset_deg)))
     view = orientation_view(mode, display_quat,
                              mag_ut_raw=(env.mag_ut if env is not None else None),
                              heading_full=heading_full, mag_cal=mag_cal,
@@ -1857,26 +1863,49 @@ def build_sensor_message(sensor_state: SensorState, mag_cal: MagCalibration | No
     }
 
 
+class CmdName(StrEnum):
+    """Generic inbound `{"type": "cmd", "name": ...}` names. `resolve_command`
+    matches this exhaustively (`assert_never`), so adding a member without a
+    wire mapping is a type error rather than a silent None (BUG-071)."""
+    PING = "ping"
+    CALIB = "calib"
+    REINIT = "reinit"
+    USECASE = "usecase"
+    PERIOD = "period"
+    EXPOSURE = "exposure"
+    STANDBY = "standby"
+
+
 def resolve_command(name: str, param) -> tuple[CommandCode, int, str] | None:
     """Inbound `cmd` request -> (CommandCode, param, label), or None for an
     unknown name. usecase carries the id as both param and label suffix."""
-    if name == "ping":
-        return CommandCode.PING, 0, "ping"
-    if name == "calib":
-        return CommandCode.SEND_CALIB, 0, "calib"
-    if name == "reinit":
-        return CommandCode.REINIT, 0, "reinit"
-    if name == "usecase":
-        uid = int(param)
-        return CommandCode.SET_USECASE, uid, f"usecase {uid}"
-    if name == "period":
-        return CommandCode.SET_FRAME_PERIOD_US, int(param), f"period {int(param)}"
-    if name == "exposure":
-        return CommandCode.SET_EXPOSURE_MS, int(param), f"exposure {int(param)}"
-    if name == "standby":
-        level = int(param)
-        return CommandCode.SET_STANDBY, level, f"standby {level}"
-    return None
+    try:
+        cmd = CmdName(name)
+    except ValueError:
+        return None
+    return _resolve_known_command(cmd, param)
+
+
+def _resolve_known_command(cmd: CmdName, param) -> tuple[CommandCode, int, str]:
+    match cmd:
+        case CmdName.PING:
+            return CommandCode.PING, 0, "ping"
+        case CmdName.CALIB:
+            return CommandCode.SEND_CALIB, 0, "calib"
+        case CmdName.REINIT:
+            return CommandCode.REINIT, 0, "reinit"
+        case CmdName.USECASE:
+            uid = int(param)
+            return CommandCode.SET_USECASE, uid, f"usecase {uid}"
+        case CmdName.PERIOD:
+            return CommandCode.SET_FRAME_PERIOD_US, int(param), f"period {int(param)}"
+        case CmdName.EXPOSURE:
+            return CommandCode.SET_EXPOSURE_MS, int(param), f"exposure {int(param)}"
+        case CmdName.STANDBY:
+            level = int(param)
+            return CommandCode.SET_STANDBY, level, f"standby {level}"
+        case _:
+            assert_never(cmd)
 
 
 # --- Ranging profiles & manual sensor control (Task 10, high-framerate plan) ------
@@ -4093,7 +4122,7 @@ class SessionController:
         # callback from a reader the controller has already superseded is
         # discarded rather than corrupting the new source's state.
         self.generation = 0
-        self._record_started = 0.0
+        self._record_started: HostMono = HostMono(0.0)
         self._last_recorded_name = None
         # Whether the CURRENT take was started automatically on entering Live
         # SLAM (owner ask, 2026-07-31). It exists so leaving Live SLAM stops
@@ -4372,7 +4401,7 @@ class SessionController:
         Path(self.captures_dir).mkdir(parents=True, exist_ok=True)
         path = str(Path(self.captures_dir) / f"web_{time.strftime('%Y%m%d_%H%M%S')}.bin")
         self.recorder.start(path)
-        self._record_started = time.monotonic()
+        self._record_started = now_mono()
         self._last_recorded_name = None    # clear the previous take's "just finished" name
         self._auto_recording = False       # manual unless start_auto_record says otherwise
         self.bus.publish(f"recording -> {path}")
@@ -4543,7 +4572,7 @@ class SessionController:
         rec_bytes = 0
         rec_elapsed = 0.0
         if rec_active:
-            rec_elapsed = max(0.0, time.monotonic() - self._record_started)
+            rec_elapsed = max(0.0, mono_elapsed_s(now_mono(), self._record_started))
             try:
                 rec_bytes = os.path.getsize(rec_path) if rec_path else 0
             except OSError:

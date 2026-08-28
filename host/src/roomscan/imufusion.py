@@ -70,6 +70,7 @@ import math
 
 import numpy as np
 
+from .domain import Twist
 from .protocol import IMU_RAW_TICK_US, ImuRawBatch
 from .sensors import graft_yaw, graft_yaw_error_deg, quat_mul, quat_to_matrix
 
@@ -505,6 +506,7 @@ class ImuFusion:
         wrong measurement rather than a mistuned gain (BUG-039)."""
         if yaw_ref is None:
             return
-        err = graft_yaw_error_deg(yaw_ref, self._q)
+        err: Twist = graft_yaw_error_deg(yaw_ref, self._q)
         gain = dt / (self.tau_yaw_s + dt)
-        self._q = graft_yaw(self._q, gain * err)
+        # A scaled twist is still a twist; a scaled Euler yaw never was (BUG-039).
+        self._q = graft_yaw(self._q, Twist(gain * err))

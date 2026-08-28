@@ -70,6 +70,7 @@ import logging
 import numpy as np
 import open3d as o3d
 
+from ..domain import MM_PER_M, Metres
 from . import gpumem as _gpumem
 
 
@@ -198,7 +199,7 @@ _CUDA_EXTRACT_BYTES_PER_BLOCK = 20 * 1024
 class TsdfMap:
     def __init__(self, voxel_size: float = 0.01, trunc_multiplier: float = 8.0,
                  block_resolution: int = 8, block_count: int = DEFAULT_BLOCK_COUNT,
-                 depth_scale: float = 1000.0, depth_max: float = 5.0,
+                 depth_scale: float = MM_PER_M, depth_max: Metres = Metres(5.0),
                  weight_threshold: float = 3.0,
                  device: str | o3d.core.Device = "CPU:0",
                  release_cache_every: int = 1):

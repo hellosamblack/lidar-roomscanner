@@ -9,6 +9,7 @@ from enum import IntEnum
 
 import numpy as np
 
+from .domain import LsmTicks, WireVersion
 from .sensor_time import signed_tick_delta
 
 MAGIC = b"RSCN"
@@ -18,7 +19,7 @@ VERSION = 2
 # 32-byte frame header and every DATA/EVENT stream are byte-for-byte unchanged, so a v1
 # recording still decodes: FrameHeader.unpack() accepts either version, new encodes use
 # VERSION (2). See docs/protocol.md "Version history".
-SUPPORTED_VERSIONS = (1, 2)
+SUPPORTED_VERSIONS = tuple(int(v) for v in WireVersion)   # single source: domain.WireVersion
 HEADER_SIZE = 32
 FLAG_DROPPED = 0x01
 
@@ -662,7 +663,7 @@ class ImuSync:
         """
         if not self.quat_n or not self.quat_mid_ticks:
             return None
-        mid_after_latch = signed_tick_delta(self.lsm_ticks, self.quat_mid_ticks)
+        mid_after_latch = signed_tick_delta(LsmTicks(self.lsm_ticks), LsmTicks(self.quat_mid_ticks))
         return (mid_after_latch + self.latch_delay_us / tick_us) * tick_us
 
 

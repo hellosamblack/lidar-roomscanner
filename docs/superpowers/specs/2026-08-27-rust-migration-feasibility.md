@@ -289,6 +289,12 @@ nvblox CMake/Eigen/glog, VRAM eviction authored by us).
 | **E3** A Rust front-end (decode+deproject+translation-ICP+gates, PyO3, kiddo) beats the shipped path without changing behaviour | ~1.5 k lines Rust; Python calls `step_front(frame) -> (pose, gates)`; Open3D raycast/integrate stay in Python | `slam_ensemble` n=10 × {shipped, rust} × {`imuTranslationError.bin` null, both circuits} | null fabricated path, `horizontal_closure_m` paired CI, lost frames, in-Mapper step p50/p99 | shipped: null ≤ baseline drift, closure 0.74 ± 0.19 m, step 12.7/41 ms | closure within CI of shipped, null not worse, step p99 ≤25 ms | any drift/closure regression, or step win <3 ms | Pass → ship behind `engine=rust`, stop there (no TSDF in Rust). Fail → archive; C++ N1 remains the native path. |
 | **E4** (only if #113 N1 passes) Rust vs C++ for the native core | none — decided by library access | — | — | — | — | — | If small_gicp/nvblox are in, C++; Rust only if E3 passed and the core is Open3D-only. |
 
+**E1 result (2026-08-27, #223): 8/12 rejected — pass, at the threshold.** Tally, pyright messages and
+the corpus in `host/tools/spikes/e1_results.md` + `host/tools/spikes/e1_bug_patches/`. Caught: the four
+yaw/bearing/twist bugs, the clock split, the unit split, the ENV sentinel, the missing enum arm.
+Not caught: BUG-026 (frames not encoded), BUG-082 (`NewType` arithmetic erases to float), BUG-044/062
+(default args / kwarg subsets — the Rust-only class). Strict set so far: `domain.py`, `sensor_time.py`.
+
 E1 and E2 are cheap (days), answer the primary motivation (correctness) and the only measured runtime
 problem (GIL) respectively, and both are killable. E3 runs only if E2 fails.
 
