@@ -303,9 +303,11 @@ web process) 0.91 / 89–121 ms / 9 %; remote service shipping finished MESH pac
 backends (mapper step p95 ≈50 ms + latest-wins wait), i.e. no regression and not the IPC's to fix. Three
 things the design missed and the per-hop breakdown found: frames queued in the socket behind each 36 MB
 mesh (fixed with a frame credit), `bytearray(36 MB)` zero-filling under the GIL (→ `np.empty`), and the
-in-service MeshPrep needing the same 12 MB/s governor. Margin is thin (0.974 vs 0.97);
-`roomSweepFull20260730.bin` not yet run. Full write-up `host/tools/spikes/e2_results.md`. Not yet
-productised: `SlamRunner` still runs in-process — follow-up issue.
+in-service MeshPrep needing the same 12 MB/s governor. Full write-up `host/tools/spikes/e2_results.md`.
+**Productised 2026-08-28 (#224):** `[slam] backend = "remote"` now runs packet mode in `SlamRunner`
+with a supervised service subprocess (Save over the wire, restart on death). On all 3525 frames of
+`roomSweepFull20260730.bin` (70 MB map, twice E2's) it measures tick_share 0.976 / 0.978, worst
+stall 15–24 ms, against local 0.736 / 263 ms — the margin is no longer thin. Default stays local.
 
 **E3: skipped.** E2 passed, so by the program's own rule the Rust ICP front-end spike does not run.
 Rust's only unique runtime argument (GIL-free front-end) is closed architecturally; its correctness

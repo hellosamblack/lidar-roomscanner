@@ -128,11 +128,9 @@ per-hop breakdown, not by the headline numbers:
 
 ## Not done / follow-ups
 
-- `SlamRunner` (session.py) still constructs `RemoteSlamWorker` in arrays mode and runs its own
-  `MeshPrep`; wiring `mesh_format="packet"` through `[slam] backend=remote` + `poll()` consuming
-  `latest_packet()` is the productisation step (needs `save()` to fetch a full mesh on demand,
-  which the wire does not yet offer).
-- Second capture (`roomSweepFull20260730.bin`) not run.
+- ~~`SlamRunner` still constructs `RemoteSlamWorker` in arrays mode~~ **done, #224** -- see
+  "Productised" below.
+- ~~Second capture (`roomSweepFull20260730.bin`) not run.~~ **run, #224** -- 0.976 / 0.978.
 - The service is single-threaded: a 36 MB `sendall` still blocks its frame loop for the time the
   client takes to drain 20 MB past the 16 MB buffer (~5 ms here). Two sockets (pose / mesh) would
   remove that if it ever shows.
@@ -143,4 +141,81 @@ per-hop breakdown, not by the headline numbers:
 host/tools/spikes/e2_batch.sh serial:1 local:1 remote-arrays:1 remote-packet:1   # JSON in /tmp/e2_*.json
 host/.venv/bin/python host/tools/slam_stall_profile.py captures/coffeeRoomCircuitNoMnt.bin \
     --frames 1800 --device CUDA:0 --mode live --backend remote --mesh-format packet
+```
+
+
+## Productised (#224, 2026-08-28)
+
+`SlamRunner` now runs this configuration when `[slam] backend = "remote"` (`remote_mesh_format =
+"packet"` by default; `remote_spawn = true` has the web app spawn and supervise the service on
+`remote_addr`, loopback only). Save fetches the full-res mesh over the wire (`mesh_request` /
+`mesh_full`); the UI's wall toggle reaches the in-service MeshPrep (`set_view`); a dead service is
+detected in `poll()` (socket closed without `stop()`), the worker is torn down and the next frame's
+rebuild restarts the subprocess -- the CUDA-OOM isolation BUG-053 asked for. Default stays local.
+Of the two named residuals, `list(trajectory)` per pose is gone (the append-only list is published
+as-is); the 36 MB `recv_into` page-faulting was left alone -- it happens with the GIL released and
+the margin below no longer needs it.
+
+### roomSweepFull20260730.bin, ALL 3525 frames, CUDA:0, real-time cadence (117 s wall)
+
+The second capture the spec named (the one E2 did not run). The map ends at ~1.2 M vertices /
+70-76 MB per MESH -- twice E2's coffee-room map -- so this is the margin check E2 asked for.
+
+| config | run | tick_share | worst stall ms | starved % | processed / overwritten | fps | web-proc CPU | meshes | final MB |
+|---|---|---|---|---|---|---|---|---|---|
+| live, local (shipped default) | 1 | 0.736 | 263.0 | 26.4 | 3163 / 362 | 26.9 | 532 % | 90 | 74.5 |
+| **live, remote, packet** | 1 | **0.976** | **15.2** | 2.4 | 3003 / 522 | 25.6 | 4.5 % | 87 | 75.8 |
+| live, remote, packet (post-rebase, commit under test) | 2 | **0.978** | **23.6** | 2.2 | 3094 / 431 | 26.4 | 4.2 % | 89 | 69.6 |
+
+Pose age (submit -> visible in `poll()`, includes mapper compute): local p50/p95/p99 16.5 / 67.3 /
+114 ms; remote-packet 19.3 / 84.7 / 165 ms (run 1), 18.0 / 72.1 / 155 ms (run 2). Transport share
+(age minus the step's own compute): local p95 21 ms; remote p95 39 ms, p99 73-98 ms, max 372-408 ms.
+The per-hop breakdown puts the remote tail in one place: `send_to_service` p99 50-55 ms / max
+369-376 ms with `service_to_client` p95 < 1 ms -- the single-threaded service loop is inside
+`sendall()` of a 70 MB mesh while the client drains it past the 16 MB socket buffer. That is E2's
+"two sockets (pose / mesh)" follow-up, now measurable and still not needed for the gate; the mapper
+step itself is p95 49-62 ms on either backend, so the tail is a p99 phenomenon at this map size.
+Service process: ~500-540 % of a core, RSS 1.4-1.7 GB. Mesh cadence p50 0.5 s, governed to ~5-9 s
+once the map is 70 MB (12 MB/s rule), delivery p95 149 ms for 70 MB.
+
+The margin is no longer thin: 0.976 / 0.978 on a map twice E2's size, against 0.974 on the small
+one; the local baseline on this capture is *worse* than on the coffee room (0.74 vs 0.79, 263 ms
+worst stall vs 100), because the stalls scale with the map and the packet path does not.
+
+### Live rig, real browser (second `roomscan-web` on :8010 from the worktree, replaying the same capture, looped)
+
+`host/tools/spikes/e2_web_second_instance.sh` + `e2_live_probe.py` (arms SLAM over `/ws`, then
+runs `ws_probe` for 20 s; `slam_age_ms` = server `ts` -> arrival on this host, the far-side pose
+age). A headless Chrome tab (MCP `ui_screenshot`, SwiftShader WebGL) was connected on `/ws` +
+`/ws-mesh` throughout and had rendered the map (screenshot taken; event log showed
+`[slam] worker started, backend=remote device=CUDA:0 mesh_format=packet`, and per loop wrap
+`[slam-service] client disconnected; credit stats sent/replaced/acks=(93, 0, 93)` -- every mesh
+acked, none replaced).
+
+| window | map at probe | slam msg Hz | pose age p50 / p95 / max ms | meshes in 20 s | MESH bytes | payload |
+|---|---|---|---|---|---|---|
+| early (369 frames, 3.7 MB) | 74 k verts | 30.0 | 1.3 / 2.0 / 7.6 | 29 | 94 MB | clean |
+| grown (2143 -> 2654 frames) | 1.19 M verts, 62 MB | 29.6 | 1.4 / 5.9 / 124.7 | 6 | 345 MB | clean |
+| grown, tab resumed from idle (2016 -> 2526 frames) | 1.21 M verts, 62 MB | 29.7 | 1.5 / 7.4 / 153.8 | 5 | 285 MB | clean |
+
+Caveat on the "real browser": the tab had hit the UI's 5-minute idle modal before the two grown-map
+windows (the first window is pre-idle; the third was taken right after clicking Resume, so the tab
+was active for it). The pose stream stayed at 29.6-30 Hz with p95 <= 7.4 ms in every window; the
+100-150 ms maxima coincide with a 62 MB MESH going to two `/ws-mesh` clients. A screenshot after the
+last window hung the MCP browser for 30 min (SwiftShader on a 1.2 M-vertex mesh, cf. the
+headless-Chrome-burns-cores note) -- that is the probe's cost, not the server's.
+
+Not exercised live: the Save button (refused in replay by design -- `save -> replay SLAM is a
+preview`); Save through the remote backend is covered end-to-end by
+`test_end_to_end_remote_packet_runner_saves_a_real_map` (real service subprocess, real capture,
+PLY written) and by the wire-level `mesh_request` tests. CUDA-OOM restart is covered by the
+supervisor test (SIGKILL the child, `ensure()` restarts it) and the runner's dead-worker teardown
+test, not by an actual OOM.
+
+Reproduce:
+
+```
+E2_CAPTURE=captures/roomSweepFull20260730.bin E2_FRAMES=0 host/tools/spikes/e2_run.sh /tmp/rp.json --mode live --backend remote --mesh-format packet
+host/tools/spikes/e2_web_second_instance.sh            # :8010, private HOME, backend=remote
+host/.venv/bin/python host/tools/spikes/e2_live_probe.py --restart --arm-wait 78 --seconds 20
 ```
