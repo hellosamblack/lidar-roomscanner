@@ -1,10 +1,19 @@
 """Client-side drop-in for SlamWorker that ships frames to a SlamService over a
 localhost socket and republishes the returned (mesh, trajectory, FrameStep).
-Same interface as slam.worker.SlamWorker, so panel.py is agnostic to which one
-it holds. On any socket failure the caller falls back to the local worker."""
+Same interface as slam.worker.SlamWorker, so the web SlamRunner is agnostic to
+which one it holds. On any socket failure the caller falls back to the local
+worker.
+
+Wire v2 (E2, #223): `start()` sends one `hello` carrying the mapper cfg and
+frame geometry (cfg used to ride on EVERY frame), frames are tagged and cfg-
+free, and meshes are credit-gated: the service holds at most one unacked mesh
+in flight and this client returns the credit (`mesh_ack`) when the CONSUMER
+first takes the mesh out of `latest()` (arrays) / `latest_packet()` (packet)
+-- so a consumer that falls behind sees only the newest mesh, and neither the
+socket nor this process ever holds a backlog of 36 MB copies.
+"""
 from __future__ import annotations
 
-import json
 import logging
 import socket
 import threading
@@ -16,52 +25,75 @@ from . import wire
 from .mapper import FrameStep
 
 _IDLE_SLEEP_S = 0.005
+_INFLIGHT_TIMEOUT_S = 1.0     # credit safety valve (v1 service never replies per frame)
+_SOCK_BUF = 16 << 20           # let a whole mesh drain into the kernel, not block the peer
 
 logger = logging.getLogger(__name__)
 
 
 class RemoteSlamWorker:
     def __init__(self, width, height, addr="127.0.0.1:5555", mesh_every=5,
-                 connect_timeout=1.0, **mapper_kwargs):
+                 connect_timeout=1.0, mesh_format=wire.MESH_FORMAT_ARRAYS,
+                 wall_mode="split", **mapper_kwargs):
         self._w, self._h = width, height
         self._addr = addr
         self._connect_timeout = connect_timeout
+        self._mesh_every = int(mesh_every)
+        self._mesh_format = str(mesh_format)
+        self._wall_mode = str(wall_mode)
         self._sock = None
         self._fid = 0
-        # Forward the client's mapper params to the service so the remote
+        # The client's mapper params, forwarded ONCE in the hello so the remote
         # Mapper is built with the same effective config (except `device`,
-        # which the container owns). Sent on every submitted frame; the
-        # server only needs to read it once, on lazy worker creation.
-        self._cfg_json = json.dumps(
-            {k: v for k, v in mapper_kwargs.items() if k != "device"})
+        # which the service owns).
+        self._cfg = {k: v for k, v in mapper_kwargs.items() if k != "device"}
 
         self._in_lock = threading.Lock()
+        self._in_cv = threading.Condition(self._in_lock)
         self._in_slot = None
+        # Frame credit (E2): at most `_max_inflight` frames between send and
+        # its pose reply. Without it every submitted frame went straight into
+        # the socket, and whenever the service paused (a 36 MB mesh send) the
+        # queue in the kernel buffer aged every pose behind it by hundreds of
+        # ms -- measured p95 submit->service-recv 170-207 ms. With it, a stall
+        # turns into overwrites of the client-side slot (fresh frames), exactly
+        # what the local SlamWorker's latest-wins slot does. `_inflight_since`
+        # bounds the wait so a v1 service that never answers cannot deadlock it.
+        self._max_inflight = 1
+        self._inflight = 0
+        self._inflight_since = 0.0
         self._out_lock = threading.Lock()
         self._out_slot = None
+        self._send_lock = threading.Lock()
         self._tracking_lost_count = 0
 
         self._last_mesh_seq = -1
         self._last_mesh = None
-        self._trajectory = []          # accumulated from pose deltas (no full-traj resend)
-        self._warned_legacy = False    # one-time warn on a pre-split (untagged) service
+        self._last_packet = None           # (bytes, meta) in packet mode
+        self._unacked_seq = None           # mesh_seq the consumer has not yet taken
+        self._acked_seq = -1
+        self._trajectory = []              # accumulated from pose deltas (no full-traj resend)
+        self._warned_legacy = False        # one-time warn on a pre-split (untagged) service
 
         # Plan item 2 (2026-08-02): the same submit/overwrite/processed shape
         # as SlamWorker, but measured on THIS side of the socket -- i.e. the
-        # transport slot, not the container's own mapper. `frames_submitted`/
-        # `frames_overwritten` count `submit()` calls into `_in_slot` exactly
-        # like SlamWorker's; `frames_processed` counts POSE messages received
-        # back (each one frame the service actually ran through its Mapper).
-        # `_device` is populated from the service's own report on that same
-        # POSE message (an optional field -- see wire.pose_message/service.py)
-        # and stays None until the first one arrives, rather than assuming
-        # whatever the LOCAL host would infer for itself (the whole point of
-        # this counter set: the remote compute device lives in a different
-        # process and must report itself).
+        # transport slot, not the service's own mapper.
         self._frames_submitted = 0
         self._frames_overwritten = 0
         self._frames_processed = 0
         self._device: str | None = None
+        self._icp_device: str | None = None
+        self._service_version: int | None = None
+        # E2 instrumentation: latest pose's IPC timestamps, mesh counters, and
+        # the prep-side numbers a packet-mode service reports.
+        self.last_pose_timing: dict | None = None
+        self._meshes_received = 0
+        self._mesh_bytes_received = 0
+        self._mesh_extract_ms = 0.0
+        self._prep_ms = 0.0
+        self._pack_ms = 0.0
+        self._payload_bytes = 0
+        self._last_source_verts = 0
 
         self._threads = []
         self._stop_evt = threading.Event()
@@ -73,32 +105,33 @@ class RemoteSlamWorker:
             self._sock = socket.create_connection(
                 (host, port), timeout=self._connect_timeout)
             self._sock.settimeout(None)
+            try:
+                self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, _SOCK_BUF)
+                self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, _SOCK_BUF)
+            except OSError:
+                pass
             return True
         except (OSError, ValueError):
             self._sock = None
             return False
 
+    # ---- producer side ---------------------------------------------------------
     def submit(self, depth, quat, pressure, reflectance=None, confidence=None,
                imu_rate_hz=None, imu_raw=None, quat_offset_us=None,
                t_device_us=None) -> None:
-        """`imu_rate_hz` (Task 8): carried in the message so the container's
-        own Mapper rescales `baro_tau_frames` identically to the local
-        backend (see `SlamService.serve_client`). Omitted from the message
-        entirely when `None`, so an older service (that never looks for the
-        key) is unaffected -- same shape as reflectance/confidence above.
-
-        `t_device_us`/`quat_offset_us` (#181): carried in the message when
-        provided so remote SLAM receives exact frame/group timing and phase offset.
-
-        `imu_raw`: serialized when present so the remote Mapper can evaluate
-        ZUPT stationarity and gyro rollback."""
+        """`imu_rate_hz` (Task 8), `t_device_us`/`quat_offset_us` (#181) and
+        `imu_raw` travel in the message when given, omitted otherwise (an older
+        service never looks for the keys). `t_client_submit` stamps this
+        process's monotonic clock; the service echoes it on the pose so
+        `last_pose_timing` can measure submit -> pose-visible age."""
         with self._in_lock:
             self._fid += 1
-            msg = {"fid": self._fid,
+            msg = {"type": wire.FRAME, "fid": self._fid,
                    "depth": np.asarray(depth, np.float32),
                    "quat": np.asarray(quat, np.float32),
                    "pressure": None if pressure is None else float(pressure),
-                   "cfg": self._cfg_json}
+                   "t_client_submit": time.monotonic()}
             if reflectance is not None:
                 msg["reflectance"] = np.asarray(reflectance, np.float32)
             if confidence is not None:
@@ -113,87 +146,206 @@ class RemoteSlamWorker:
                 if hasattr(imu_raw, "gyro_dps") and hasattr(imu_raw, "accel_g"):
                     msg["imu_raw_gyro_dps"] = np.asarray(imu_raw.gyro_dps, np.float64)
                     msg["imu_raw_accel_g"] = np.asarray(imu_raw.accel_g, np.float64)
-                    if hasattr(imu_raw, "gravity_g") and imu_raw.gravity_g is not None:
+                    if getattr(imu_raw, "gravity_g", None) is not None:
                         msg["imu_raw_gravity_g"] = np.asarray(imu_raw.gravity_g, np.float64)
-                    if hasattr(imu_raw, "gbias_dps") and imu_raw.gbias_dps is not None:
+                    if getattr(imu_raw, "gbias_dps", None) is not None:
                         msg["imu_raw_gbias_dps"] = np.asarray(imu_raw.gbias_dps, np.float64)
-                    if hasattr(imu_raw, "timestamp_ticks") and imu_raw.timestamp_ticks is not None:
+                    if getattr(imu_raw, "timestamp_ticks", None) is not None:
                         msg["imu_raw_timestamp_ticks"] = np.asarray(imu_raw.timestamp_ticks, np.uint32)
-                    if hasattr(imu_raw, "tick_us") and imu_raw.tick_us is not None:
+                    if getattr(imu_raw, "tick_us", None) is not None:
                         msg["imu_raw_tick_us"] = float(imu_raw.tick_us)
-                    if hasattr(imu_raw, "n_records") and imu_raw.n_records is not None:
+                    if getattr(imu_raw, "n_records", None) is not None:
                         msg["imu_raw_n_records"] = int(imu_raw.n_records)
             self._frames_submitted += 1
             if self._in_slot is not None:
                 self._frames_overwritten += 1
             self._in_slot = msg
+            self._in_cv.notify()
 
+    # ---- consumer side -----------------------------------------------------------
     def latest(self):
+        """Latest `(mesh, trajectory, FrameStep)`. Taking a NEW mesh out of
+        here returns the mesh credit to the service (arrays mode)."""
         with self._out_lock:
-            return self._out_slot
+            res = self._out_slot
+        if res is not None and self._mesh_format == wire.MESH_FORMAT_ARRAYS:
+            self._maybe_ack()
+        return res
+
+    def latest_packet(self):
+        """Packet mode: pop the newest finished MESH bytes as `(packed, meta)`
+        or None; popping returns the mesh credit. `meta` carries `mesh_seq`,
+        `source_vertex_count`, `sent_vertex_count`, `prep_ms`, `pack_ms`,
+        `extract_ms`, `t_pub`, `t_recv`."""
+        with self._out_lock:
+            pkt, self._last_packet = self._last_packet, None
+        if pkt is not None:
+            self._maybe_ack()
+        return pkt
+
+    def _maybe_ack(self) -> None:
+        seq = self._unacked_seq
+        if seq is None or seq == self._acked_seq:
+            return
+        self._acked_seq = seq
+        self._unacked_seq = None
+        try:
+            with self._send_lock:
+                wire.send_message(self._sock, wire.mesh_ack_message(seq))
+        except (OSError, AttributeError):
+            pass
 
     @property
     def tracking_lost_count(self) -> int:
         return self._tracking_lost_count
 
-    # ---- instrumentation (plan item 2, 2026-08-02) ---------------------------
+    # ---- instrumentation --------------------------------------------------------
     @property
     def frames_submitted(self) -> int:
-        """Total `submit()` calls into this client's send slot."""
         return self._frames_submitted
 
     @property
     def frames_processed(self) -> int:
         """POSE responses received -- one per frame the SERVICE actually ran
-        through its Mapper. NOTE this is transport-confirmed, not the
-        service's own processed count (which is not on the wire); a frame
-        that was sent but whose response hasn't arrived yet is neither
-        processed nor overwritten here."""
+        through its Mapper (transport-confirmed)."""
         return self._frames_processed
 
     @property
     def frames_overwritten(self) -> int:
         """Submits that replaced a still-pending, not-yet-SENT message in
-        this client's own transport slot (measured on the CLIENT side of the
-        socket -- see SlamWorker.frames_overwritten's docstring for the
-        general shape). Does not see drops or overwrites inside the service
-        itself, since the service processes one frame per received message."""
+        this client's own transport slot."""
         return self._frames_overwritten
 
     @property
     def device(self) -> str | None:
-        """The remote SlamService's own resolved compute device, from the
-        most recent POSE response's optional "device" field. None until the
-        first response arrives, or when talking to a service built before
-        this field existed."""
+        """The remote SlamService's own resolved compute device (from its
+        hello reply or the most recent POSE). None until the first arrives."""
         return self._device
+
+    @property
+    def icp_device(self) -> str | None:
+        return self._icp_device
+
+    @property
+    def service_version(self) -> int | None:
+        """Wire version the service announced in its hello; None for a v1
+        service (no hello ever comes back)."""
+        return self._service_version
 
     @property
     def backend(self) -> str:
         return "remote"
 
+    @property
+    def mesh_format(self) -> str:
+        return self._mesh_format
+
+    @property
+    def mesh_extract_ms(self) -> float:
+        return self._mesh_extract_ms
+
+    @property
+    def prep_ms(self) -> float:
+        return self._prep_ms
+
+    @property
+    def pack_ms(self) -> float:
+        return self._pack_ms
+
+    @property
+    def payload_bytes(self) -> int:
+        return self._payload_bytes
+
+    @property
+    def meshes_received(self) -> int:
+        return self._meshes_received
+
+    @property
+    def mesh_bytes_received(self) -> int:
+        return self._mesh_bytes_received
+
+    # ---- lifecycle -----------------------------------------------------------------
     def start(self) -> None:
         if self._threads:
             return
         if self._sock is None and not self.connect():
             raise ConnectionError(f"slam-service unreachable at {self._addr}")
         self._stop_evt.clear()
+        with self._send_lock:
+            wire.send_message(self._sock, wire.hello_message(
+                cfg=self._cfg, width=self._w, height=self._h,
+                mesh_format=self._mesh_format, wall_mode=self._wall_mode,
+                mesh_every=self._mesh_every))
         self._threads = [threading.Thread(target=self._send_loop, daemon=True),
                          threading.Thread(target=self._recv_loop, daemon=True)]
         for t in self._threads:
             t.start()
 
+    def _credit_ok(self) -> bool:
+        return (self._inflight < self._max_inflight
+                or time.monotonic() - self._inflight_since > _INFLIGHT_TIMEOUT_S)
+
     def _send_loop(self) -> None:
         while not self._stop_evt.is_set():
-            with self._in_lock:
+            with self._in_cv:
+                if self._in_slot is None or not self._credit_ok():
+                    self._in_cv.wait(_IDLE_SLEEP_S)
+                    continue
                 msg, self._in_slot = self._in_slot, None
-            if msg is None:
-                time.sleep(_IDLE_SLEEP_S)
-                continue
+                self._inflight += 1
+                self._inflight_since = time.monotonic()
+            # Re-stamp at the moment it actually leaves, so the age a pose
+            # reports is transport + compute, not time spent waiting for credit
+            # (that wait is what `frames_overwritten` counts).
+            msg["t_client_send"] = time.monotonic()
             try:
-                wire.send_message(self._sock, msg)
+                with self._send_lock:
+                    wire.send_message(self._sock, msg)
             except OSError:
                 break
+
+    def _on_mesh(self, res: dict) -> None:
+        seq = int(res["mesh_seq"])
+        if seq == self._last_mesh_seq:
+            return
+        t_recv = time.monotonic()
+        fmt = res.get("format", wire.MESH_FORMAT_ARRAYS)
+        if fmt == wire.MESH_FORMAT_PACKET and "packet" in res:
+            # Zero-copy: the packet is a uint8 view over this message's own
+            # receive buffer, which nothing reuses, so hand out a memoryview
+            # (bytes-like: `len()`, websocket `send_bytes`, file writes all
+            # accept it) rather than paying a 36 MB `bytes()` copy under the GIL.
+            packed = memoryview(res["packet"]).cast("B")
+            meta = {"mesh_seq": seq, "t_pub": res.get("t_pub"), "t_recv": t_recv,
+                    "source_vertex_count": int(res.get("source_vertex_count", 0)),
+                    "sent_vertex_count": int(res.get("sent_vertex_count", 0)),
+                    "prep_ms": float(res.get("prep_ms", 0.0)),
+                    "pack_ms": float(res.get("pack_ms", 0.0)),
+                    "extract_ms": float(res.get("extract_ms", 0.0))}
+            self._prep_ms, self._pack_ms = meta["prep_ms"], meta["pack_ms"]
+            self._payload_bytes = len(packed)
+            self._last_source_verts = meta["source_vertex_count"]
+            self._mesh_bytes_received += len(packed)
+            with self._out_lock:
+                self._last_packet = (packed, meta)
+        elif "mesh_v" in res:
+            self._last_mesh = wire.arrays_to_mesh(res)
+            nbytes = sum(int(np.asarray(res[k]).nbytes)
+                         for k in ("mesh_v", "mesh_t", "mesh_c") if k in res)
+            self._mesh_bytes_received += nbytes
+        else:
+            return
+        self._last_mesh_seq = seq
+        self._meshes_received += 1
+        self._unacked_seq = seq
+        # Republish so the new mesh is visible NOW, not on the next pose: a
+        # mesh always trails the pose of the frame that extracted it, and
+        # before this a consumer polling between the two saw the stale mesh.
+        if fmt != wire.MESH_FORMAT_PACKET:
+            with self._out_lock:
+                if self._out_slot is not None:
+                    _m, traj, step = self._out_slot
+                    self._out_slot = (self._last_mesh, traj, step)
 
     def _recv_loop(self) -> None:
         while not self._stop_evt.is_set():
@@ -203,18 +355,19 @@ class RemoteSlamWorker:
                 break
             if res is None:
                 break
-            if res.get("type") == wire.MESH:
-                if res["mesh_seq"] != self._last_mesh_seq and "mesh_v" in res:
-                    self._last_mesh = wire.arrays_to_mesh(res)
-                    self._last_mesh_seq = res["mesh_seq"]
+            typ = wire.message_type(res)
+            if typ == wire.HELLO:
+                self._service_version = int(res.get("version") or 1)
+                self._device = res.get("device") or self._device
+                self._icp_device = res.get("icp_device")
                 continue
-            # A pose message (new tagged format) OR a legacy untagged combined
-            # message from a service built before the pose/mesh split -- e.g. a
-            # GPU container image that predates Component B. The new POSE message
-            # never carries mesh arrays, so an inline "mesh_v" here means we're
-            # talking to a legacy service; recover its mesh (otherwise the live
-            # view is silently starved of surfaces -- pose/traj fine, mesh None)
-            # and warn once to rebuild the container for the pose/mesh-split win.
+            if typ == wire.MESH:
+                self._on_mesh(res)
+                continue
+            # A pose message (tagged) OR a legacy untagged combined message
+            # from a service built before the pose/mesh split. The tagged POSE
+            # never carries mesh arrays, so an inline "mesh_v" means a legacy
+            # service; recover its mesh and warn once.
             if "mesh_v" in res and res.get("mesh_seq") != self._last_mesh_seq:
                 self._last_mesh = wire.arrays_to_mesh(res)
                 self._last_mesh_seq = res.get("mesh_seq", self._last_mesh_seq)
@@ -226,27 +379,35 @@ class RemoteSlamWorker:
                         "recovering meshes in compatibility mode. Rebuild the "
                         "SLAM container image to get the pose/mesh-split "
                         "bandwidth win (tools/slam-container/build.ps1).")
-            step = FrameStep(pose=np.asarray(res["pose"], np.float64),
-                             fitness=res["fitness"], rmse=res["rmse"],
+            t_recv = time.monotonic()
+            pose = np.asarray(res["pose"], np.float64)
+            step_kwargs = {}
+            for name in wire.STEP_SCALAR_FIELDS:
+                if name in res:
+                    step_kwargs[name] = res[name]
+            step = FrameStep(pose=pose, fitness=res["fitness"], rmse=res["rmse"],
                              tracking_lost=res["tracking_lost"], slam_ms=res["slam_ms"],
-                             # Optional: a container built before the block
-                             # gauge (BUG-035) simply omits them -> None, which
-                             # the UI renders as "unknown", not as 0 blocks.
-                             blocks_used=res.get("blocks_used"),
-                             blocks_capacity=res.get("blocks_capacity"),
-                             blocks_configured=res.get("blocks_configured"))
+                             **step_kwargs)
             self._tracking_lost_count = res["tracking_lost_count"]
             self._frames_processed += 1
-            # The service's own resolved device (optional -- older services
-            # simply omit it, and this stays None until the first response).
-            # See Mapper.device's docstring: this is what makes device
-            # reporting for a remote backend correct rather than the host
-            # guessing its own preferred_device() for a process it isn't
-            # running compute in.
+            with self._in_cv:
+                self._inflight = max(0, self._inflight - 1)
+                self._in_cv.notify()
             dev = res.get("device")
             if dev is not None:
                 self._device = dev
-            self._trajectory.append(np.asarray(res["pose"], np.float64))
+            if "mesh_extract_ms" in res:
+                self._mesh_extract_ms = float(res["mesh_extract_ms"])
+            self.last_pose_timing = {
+                "fid": res.get("fid"),
+                "t_client_submit": res.get("t_client_submit"),
+                "t_client_send": res.get("t_client_send"),
+                "t_service_recv": res.get("t_service_recv"),
+                "t_service_done": res.get("t_service_done"),
+                "t_client_recv": t_recv,
+                "t_device_us": step.t_device_us,
+            }
+            self._trajectory.append(pose)
             with self._out_lock:
                 self._out_slot = (self._last_mesh, list(self._trajectory), step)
 

@@ -284,7 +284,7 @@ ask constantly), `capture_analyze(path)`, `capture_magcheck(path, cal_path?, com
 `profile_tuning(ranging_mode?, power_config?, resolution?, dss?, output_interface?, fps?, exposure_ms?, ambient_lux?)`,
 `slam_rerender(capture, voxel_size?, block_count?, device?, max_frames?, icp_trace_start_s?, icp_trace_end_s?)`,
 `slam_ensemble(capture, n?, device?, voxel_size?, block_count?, icp_mode?, max_frames?, apply_quat_phase?, quat_interp_mode?)`,
-`slam_stall_profile(capture, frames?, device?, decimate?)`,
+`slam_stall_profile(capture, frames?, device?, decimate?, mode?, backend?, mesh_format?)`,
 `slam_icp_bench(capture?, what?, frames?, raycast_frames?, ensemble_n?, device?, ab_pairs?, ab_frames?, baseline_icp_device?, candidate_icp_device?)`,
 `splat_list()`, `splat_build(video, name, force?, fps?, iters?, max_gaussians?)`,
 `splat_compare(capture, reference?, opacity_min?, voxel?, allow_scale?)`,
