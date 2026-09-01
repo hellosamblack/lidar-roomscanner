@@ -1405,6 +1405,78 @@
             image-rendering: pixelated;         /* crisp nearest-neighbour upscale (§7.3) */
         }
 
+        /* ---- component: camera monitor (#226 Stage A, spec §5.5) ----------
+         * The rig-mounted C270 relayed from the Pi bridge. One <img> pointed at
+         * the same-origin proxy -- never a second upstream connection, and no
+         * camera bytes on /ws. Same glass/tone as the IR monitor above so the
+         * two read as one family of instrument panes; the frame is 16/9 (the
+         * C270's real aspect) rather than the IR pane's square, because nothing
+         * here is gravity-rolled and letterboxing a webcam would be a lie about
+         * its field of view.
+         *
+         * Expand is a CSS class on the card itself, NOT a DOM move into a modal:
+         * re-parenting a live <img> can re-run the browser's image-update
+         * algorithm and restart the MJPEG request, which would briefly double
+         * the host's subscriber count for no benefit. Floating in place keeps
+         * exactly one stream per tab, which is the §4.3 invariant expressed in
+         * the UI. It is deliberately not native video PiP (§3 non-goals). */
+        #camera-card.hidden { display: none; }
+        #camera-frame {
+            position: relative;
+            width: 100%; aspect-ratio: 16 / 9;
+            background: #000; border-radius: 6px;
+            overflow: hidden;
+            display: flex; align-items: center; justify-content: center;
+        }
+        #camera-img, #camera-hold {
+            max-width: 100%; max-height: 100%;
+            display: block;
+        }
+        #camera-img.hidden, #camera-hold.hidden { display: none; }
+        #camera-placeholder {
+            position: absolute; inset: 0;
+            display: flex; align-items: center; justify-content: center;
+            font-family: var(--font-mono); font-size: 0.72rem;
+            color: var(--text-muted); letter-spacing: 0.04em; text-transform: uppercase;
+        }
+        #camera-placeholder.hidden { display: none; }
+        .camera-chip {
+            position: absolute; top: 6px; left: 6px; z-index: 2;
+            border: 1px solid; border-radius: 4px; padding: 1px 6px;
+            font-family: var(--font-mono); font-size: 0.64rem;
+            font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+            background: rgba(11, 12, 16, 0.78);
+        }
+        .camera-chip.hidden { display: none; }
+        /* One class per state word, so the badge's colour is derived from the
+           server's state string and cannot drift from the text beside it. */
+        .camera-chip--live     { color: var(--success); border-color: var(--success); }
+        .camera-chip--stale    { color: var(--warning); border-color: var(--warning); }
+        .camera-chip--connecting { color: var(--text-muted); border-color: var(--panel-border); }
+        .camera-chip--offline  { color: var(--danger);  border-color: var(--danger); }
+        .camera-chip--frozen {
+            left: auto; right: 6px;
+            color: var(--accent); border-color: var(--accent);
+        }
+        .camera-card-controls {
+            display: flex; align-items: center; gap: 8px;
+            width: 100%; margin-bottom: 6px; flex-wrap: wrap;
+        }
+        .camera-card-controls .camera-spacer { flex: 1 1 auto; }
+        /* Match the IR card's .segmented--sm scale: these sit in a card header
+           row, not a dialog footer, so they take the compact size the rest of
+           that row already uses rather than the global button padding. */
+        .camera-card-controls button {
+            padding: 2px 8px; font-size: 0.68rem; height: 22px; flex: 0 0 auto;
+        }
+        #camera-card.is-expanded {
+            position: fixed;
+            top: calc(var(--dock-top) + 8px);
+            left: 50%; transform: translateX(-50%);
+            width: min(960px, 92vw); max-height: calc(100vh - var(--dock-top) - var(--dock-bottom) - 24px);
+            z-index: 30; overflow: auto;
+        }
+
         /* Bottom — collapsible full-width event-log console. */
         #log-console {
             position: fixed;
@@ -1976,6 +2048,34 @@
                 <div id="ir-frame">
                     <canvas id="ir-canvas" width="1" height="1"></canvas>
                 </div>
+            </div>
+        </div>
+
+        <!-- Rig camera monitor (#226 Stage A, spec §5.5). Pixels arrive over the
+             same-origin HTTP proxy, never over /ws; this card only reads the
+             low-rate `camera` state message for its readouts. -->
+        <div id="camera-card" class="card collapsed" data-card-id="camera">
+            <button class="control-group__header" type="button"><span>Camera</span><span class="chevron">&#9662;</span></button>
+            <div class="card-body control-group__body">
+                <div class="camera-card-controls">
+                    <span id="camera-state" class="camera-chip camera-chip--offline" title="Camera link state as the server measures it: Offline (no daemon or no camera), Connecting (dialling or backing off), Live (a frame arrived recently), Stale (connected but frames stopped)">Offline</span>
+                    <span class="camera-spacer"></span>
+                    <label class="toggle toggle--sm" title="Hold the last received picture and stop pulling the stream. The state readout keeps reporting the real camera, so a frozen image never reads as a live one."><input type="checkbox" id="camera-freeze"><span>Freeze</span></label>
+                    <button id="camera-snapshot" type="button" title="Download the host's newest original JPEG exactly as the camera produced it (no re-encode)">Snapshot</button>
+                    <button id="camera-expand" type="button" title="Float this card large over the app. Not operating-system Picture-in-Picture.">Expand</button>
+                </div>
+                <div id="camera-frame">
+                    <img id="camera-img" class="hidden" alt="Live rig camera">
+                    <canvas id="camera-hold" class="hidden"></canvas>
+                    <div id="camera-placeholder">No signal</div>
+                    <span id="camera-frozen" class="camera-chip camera-chip--frozen hidden">Frozen</span>
+                </div>
+                <div class="hud-row" title="The picture's ACTUAL raster size, read from the JPEG the camera sent -- not the mode that was requested."><span>Resolution</span><span class="hud-val" id="camera-res">--</span></div>
+                <div class="hud-row" title="Frames per second the camera reports capturing, measured from its own capture timestamps on the Pi's clock. Blank when the Pi supplies no usable timestamp."><span>Capture FPS</span><span class="hud-val" id="camera-capture-fps">--</span></div>
+                <div class="hud-row" title="Frames per second arriving at this host, measured from arrival times here."><span>Host FPS</span><span class="hud-val" id="camera-host-fps">--</span></div>
+                <div class="hud-row" title="How long ago the newest frame arrived at this host. An arrival age, not a display latency -- no camera clock has been mapped to this one."><span>Frame age</span><span class="hud-val" id="camera-age">--</span></div>
+                <div class="hud-row" title="Frames the camera produced that never reached this host (gaps in its sequence numbers), and frames this host received but a viewer was too slow to draw."><span>Drops src/ingest</span><span class="hud-val" id="camera-drops">--</span></div>
+                <div class="hud-row" title="What the server last failed at while talking to the camera daemon. Blank when there is nothing to report."><span>Last error</span><span class="hud-val" id="camera-error">--</span></div>
             </div>
         </div>
 

@@ -1987,3 +1987,106 @@ def test_floorplan_module_is_imported_and_instantiated_in_app_js():
     assert "createFloorplan" in app_js
     assert "window.__floorplan" in app_js
     assert (STATIC / "floorplan.js").exists()
+
+
+# --- camera monitor card (#226 Stage A, spec §5.5) --------------------------
+
+CAMERA_JS = STATIC / "camera.js"
+
+
+def _camera_js() -> str:
+    return CAMERA_JS.read_text(encoding="utf-8")
+
+
+def test_camera_card_exists_with_the_four_documented_states():
+    """The card must be able to SAY Offline/Connecting/Live/Stale.
+
+    A monitor that can only be "on" or "off" cannot express the case that
+    actually matters -- connected but frames stopped -- which is what a frozen
+    preview usually is (§8's unplug row).
+    """
+    html = _index()
+    assert 'data-card-id="camera"' in html
+    assert 'id="camera-img"' in html
+    js = _camera_js()
+    for state in ("offline", "connecting", "live", "stale"):
+        assert f"camera-chip--{state}" in html, f"no CSS class for the {state} state"
+    assert "'offline', 'connecting', 'live', 'stale'" in js.replace('"', "'")
+
+
+def test_camera_card_has_freeze_snapshot_and_expand():
+    html = _index()
+    for element_id in ("camera-freeze", "camera-snapshot", "camera-expand"):
+        assert f'id="{element_id}"' in html, f"missing control {element_id}"
+
+
+def test_camera_pixels_come_from_the_http_proxy_and_never_from_the_websocket():
+    """§3 non-goal: "No camera bytes on /ws, /ws-mesh, or /ws-thin."
+
+    The card's only pixel source must be the same-origin HTTP proxy. A future
+    edit that pushed frames through the hub would have to add a binary tag
+    here, and this is what refuses it.
+    """
+    js = _camera_js()
+    assert "/api/camera/stream.mjpg" in js
+    assert "/api/camera/frame.jpg" in js
+    for forbidden in ("new WebSocket", "'point_cloud'", "ArrayBuffer"):
+        assert forbidden not in js, (
+            f"camera.js references {forbidden!r} -- camera pixels must not "
+            f"travel over any websocket")
+
+
+def test_camera_stream_is_detached_when_the_card_cannot_be_seen():
+    """A collapsed or hidden card must not hold an open proxy request.
+
+    `display:none` does NOT abort an in-flight `<img>` request, so the check has
+    to be explicit -- otherwise a collapsed card is invisible load on the
+    server, which is exactly what BUG-060 measured for stale `/ws` sockets.
+    """
+    js = _camera_js()
+    assert "classList.contains('collapsed')" in js
+    assert "classList.contains('hidden')" in js
+    assert "removeAttribute('src')" in js, (
+        "detaching must use removeAttribute; `src = ''` re-requests the page")
+    assert "MutationObserver" in js, (
+        "nothing watches the collapse class, so collapsing cannot detach")
+
+
+def test_camera_stream_url_is_cache_busted_only_on_a_generation_change():
+    """Reassigning `src` tears down and reopens the multipart request.
+
+    Doing it per telemetry tick gives a permanently reconnecting picture that
+    still reports a healthy state -- the #216 shape of failure, where the
+    mechanism looks right and only the far-side observable is wrong.
+    """
+    js = _camera_js()
+    assert "attachedGeneration === generation) return" in js, (
+        "attach() is not edge-triggered on the generation")
+    assert "'?g=' + generation" in js
+
+
+def test_camera_card_is_registered_in_the_squircle_rail():
+    """Same invariant `test_every_card_id_has_a_squircle_icon_and_title` checks
+    for every card, named separately here because a collapsed camera card with
+    no squircle would be unreachable from the UI entirely."""
+    js = LAYOUT_JS.read_text(encoding="utf-8")
+    assert "camera" in _js_object_keys(js, "CARD_ICONS")
+    assert "camera" in _js_object_keys(js, "CARD_TITLES")
+
+
+def test_camera_module_is_imported_and_instantiated_in_app_js():
+    app_js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "import { createCamera } from './camera.js';" in app_js
+    assert "createCamera(hub);" in app_js
+
+
+def test_expand_floats_in_app_and_is_not_sold_as_native_picture_in_picture():
+    """§3 non-goal: an `<img>` cannot do OS Picture-in-Picture, so the control
+    must not promise it. The tooltip is the promise a user reads."""
+    html = _index()
+    m = re.search(r'<button[^>]*id="camera-expand"[^>]*>', html)
+    assert m, "no Expand button"
+    tooltip = m.group(0).lower()
+    assert "not operating-system picture-in-picture" in tooltip
+    assert "#camera-card.is-expanded" in html, "Expand has no floating style"
+    assert "requestPictureInPicture" not in _camera_js()

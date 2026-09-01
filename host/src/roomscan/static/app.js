@@ -9,6 +9,7 @@
 import { createHub } from './ws.js';
 import { createScene } from './scene.js';
 import { createIr } from './ir.js';
+import { createCamera } from './camera.js';
 import { createHud } from './hud.js';
 import { createLog } from './log.js';
 import { createControls } from './controls.js';
@@ -43,6 +44,10 @@ window.__scene = sceneApi;   // diagnostics only, see scene.js's `controls` comm
 const captureApi = createCapture(hub);
 createBrowser(hub, captureApi, sceneApi);
 createIr(hub);
+// Rig-camera monitor (#226): pixels arrive over the same-origin HTTP proxy,
+// never through the hub — this takes `hub` only for the low-rate `camera`
+// state message and the connection lifecycle.
+createCamera(hub);
 // Top-bar maintenance actions. Talks to /api/* over fetch, not the hub — it
 // takes `hub` only to watch 'conn' so the Restart button can clear its busy
 // state when the socket comes back.

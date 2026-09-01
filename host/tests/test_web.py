@@ -4231,6 +4231,10 @@ def test_rail_cards_data_attributes_and_default_collapsed_states():
         "resources": False,  # Expanded (only rendered at all in Live SLAM)
         "browser": False,    # Expanded (§12: the View page's file browser; preview drawer integrated inside)
         "ir-view": True,     # Collapsed
+        "camera": True,      # Collapsed (#226): the rig-camera monitor. Starts
+                             # collapsed on purpose -- an expanded card holds an
+                             # open MJPEG proxy request from first paint, so the
+                             # default must be the one that costs nothing.
         "device": True,      # Collapsed
         "view": False,       # Expanded
         # "capture" removed (issue #118, 2026-08-19): Record moved out of its own
