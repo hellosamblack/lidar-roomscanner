@@ -1,0 +1,92 @@
+{
+  "arm": "preview_snapshot",
+  "clock_offset_ns": 7346440,
+  "clock_uncertainty_ms": 1.248,
+  "connections": [
+    {
+      "age_first_decile_median_ms": 97.91,
+      "age_last_decile_median_ms": 69.52,
+      "arrival_bytes_per_s": 112392.4,
+      "arrival_fps": 1.966,
+      "arrival_gap_ms": {
+        "max": 968.43,
+        "median": 506.24,
+        "min": 127.63,
+        "n": 177,
+        "p95": 567.31,
+        "p99": 810.99
+      },
+      "bad_jpeg": 0,
+      "capture_to_send_ms": {
+        "max": 290.72,
+        "median": 36.66,
+        "min": 32.55,
+        "n": 178,
+        "p95": 37.14,
+        "p99": 87.98
+      },
+      "frames": 178,
+      "host_arrival_age_ms": {
+        "max": 505.22,
+        "median": 72.05,
+        "min": 53.5,
+        "n": 178,
+        "p95": 137.15,
+        "p99": 377.09
+      },
+      "pi_to_host_transit_ms": {
+        "max": 468.45,
+        "median": 36.63,
+        "min": 10.42,
+        "n": 178,
+        "p95": 93.72,
+        "p99": 343.76
+      },
+      "role": "snapshot",
+      "seq_skipped": 2506
+    },
+    {
+      "age_first_decile_median_ms": 57.45,
+      "age_last_decile_median_ms": 51.91,
+      "arrival_bytes_per_s": 1681357.6,
+      "arrival_fps": 29.492,
+      "arrival_gap_ms": {
+        "max": 284.39,
+        "median": 33.04,
+        "min": 4.3,
+        "n": 2655,
+        "p95": 47.93,
+        "p99": 86.65
+      },
+      "bad_jpeg": 0,
+      "capture_to_send_ms": {
+        "max": 290.87,
+        "median": 32.95,
+        "min": 32.54,
+        "n": 2656,
+        "p95": 37.05,
+        "p99": 53.57
+      },
+      "frames": 2656,
+      "host_arrival_age_ms": {
+        "max": 462.46,
+        "median": 52.21,
+        "min": 38.31,
+        "n": 2656,
+        "p95": 90.38,
+        "p99": 273.31
+      },
+      "pi_to_host_transit_ms": {
+        "max": 429.61,
+        "median": 17.65,
+        "min": 5.54,
+        "n": 2656,
+        "p95": 48.42,
+        "p99": 236.43
+      },
+      "role": "preview",
+      "seq_skipped": 29
+    }
+  ],
+  "mode_requested": "1280x720@30"
+}

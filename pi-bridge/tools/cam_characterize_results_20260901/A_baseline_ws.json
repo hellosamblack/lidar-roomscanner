@@ -1,0 +1,47 @@
+{
+  "url": "ws://localhost:8000",
+  "seconds": 25.0,
+  "json_counts": {
+    "captures": 1,
+    "comm": 8,
+    "metrics": 100,
+    "ranging": 101,
+    "saved": 1,
+    "sensor": 375,
+    "session": 101,
+    "splats": 1,
+    "state": 1
+  },
+  "binary_tags": {
+    "1": 750,
+    "2": 375
+  },
+  "binary_bytes": {
+    "1": 36459120,
+    "2": 2554500
+  },
+  "logs": [],
+  "slam": null,
+  "state": {
+    "mode": "realtime",
+    "source": "live",
+    "display": "point_cloud",
+    "selected_capture": null,
+    "view_mode": "world",
+    "slam_available": true
+  },
+  "meshes": 0,
+  "mesh_bytes": 0,
+  "mesh_tags": {},
+  "mesh_decode": null,
+  "mesh_error": null,
+  "ws_error": null,
+  "mesh_rate_hz": 0.0,
+  "slam_msg_hz": 0.0,
+  "slam_age_ms": null,
+  "verdict": {
+    "server_computing": false,
+    "transport_delivering": false,
+    "payload_ok": null
+  }
+}

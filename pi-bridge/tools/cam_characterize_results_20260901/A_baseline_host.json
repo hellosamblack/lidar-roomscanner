@@ -1,0 +1,15 @@
+{
+  "bind": "0.0.0.0:5099",
+  "connections": [
+    {
+      "exchanges": 45,
+      "header": {
+        "role": "clock"
+      },
+      "peer": "172.17.2.78:48536",
+      "role": "clock"
+    }
+  ],
+  "seconds": 115.0,
+  "started_wall": 1788296729.017557
+}

@@ -1,0 +1,63 @@
+{
+  "bind": "0.0.0.0:5099",
+  "connections": [
+    {
+      "exchanges": 45,
+      "header": {
+        "role": "clock"
+      },
+      "peer": "172.17.2.78:50134",
+      "role": "clock"
+    },
+    {
+      "arrival_bytes_per_s": 1946678.1,
+      "arrival_fps": 28.489,
+      "arrival_gap_ms": {
+        "max": 2679.8,
+        "median": 33.63,
+        "min": 12.83,
+        "n": 2565,
+        "p95": 47.66,
+        "p99": 93.4
+      },
+      "bad_jpeg": 0,
+      "bytes": 175268086,
+      "frames": 2566,
+      "header": {
+        "arm": "preview",
+        "mode": "1280x720@30",
+        "negotiated": {
+          "buffer_layout": "time64",
+          "buffers": 4,
+          "bytesperline": 0,
+          "capability": 4096,
+          "capturemode": 0,
+          "colorspace": 8,
+          "field": 1,
+          "fourcc": "MJPG",
+          "fps": 30.0,
+          "height": 720,
+          "interval_denominator": 30,
+          "interval_numerator": 1,
+          "pixelformat": 1196444237,
+          "requested": {
+            "fourcc": "MJPG",
+            "fps": 30,
+            "height": 720,
+            "width": 1280
+          },
+          "sizeimage": 1843200,
+          "width": 1280
+        },
+        "role": "preview"
+      },
+      "peer": "172.17.2.78:50122",
+      "role": "preview",
+      "seq_first": 4,
+      "seq_last": 2686,
+      "seq_skipped": 117
+    }
+  ],
+  "seconds": 115.0,
+  "started_wall": 1788296851.218838
+}

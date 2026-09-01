@@ -1,0 +1,50 @@
+{
+  "arm": "preview",
+  "clock_offset_ns": 8145865,
+  "clock_uncertainty_ms": 1.204,
+  "connections": [
+    {
+      "age_first_decile_median_ms": 56.27,
+      "age_last_decile_median_ms": 55.15,
+      "arrival_bytes_per_s": 1946678.1,
+      "arrival_fps": 28.489,
+      "arrival_gap_ms": {
+        "max": 2679.8,
+        "median": 33.63,
+        "min": 12.83,
+        "n": 2565,
+        "p95": 47.66,
+        "p99": 93.4
+      },
+      "bad_jpeg": 0,
+      "capture_to_send_ms": {
+        "max": 125.6,
+        "median": 32.91,
+        "min": 32.52,
+        "n": 2566,
+        "p95": 36.96,
+        "p99": 58.06
+      },
+      "frames": 2566,
+      "host_arrival_age_ms": {
+        "max": 3158.95,
+        "median": 55.16,
+        "min": 37.13,
+        "n": 2566,
+        "p95": 89.61,
+        "p99": 395.87
+      },
+      "pi_to_host_transit_ms": {
+        "max": 3122.16,
+        "median": 20.66,
+        "min": 4.41,
+        "n": 2566,
+        "p95": 49.56,
+        "p99": 362.85
+      },
+      "role": "preview",
+      "seq_skipped": 117
+    }
+  ],
+  "mode_requested": "1280x720@30"
+}

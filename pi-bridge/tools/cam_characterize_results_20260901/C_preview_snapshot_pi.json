@@ -1,0 +1,2138 @@
+{
+  "arm": "preview_snapshot",
+  "camera": {
+    "negotiated": {
+      "buffer_layout": "time64",
+      "buffers": 4,
+      "bytesperline": 0,
+      "capability": 4096,
+      "capturemode": 0,
+      "colorspace": 8,
+      "field": 1,
+      "fourcc": "MJPG",
+      "fps": 30.0,
+      "height": 720,
+      "interval_denominator": 30,
+      "interval_numerator": 1,
+      "pixelformat": 1196444237,
+      "requested": {
+        "fourcc": "MJPG",
+        "fps": 30,
+        "height": 720,
+        "width": 1280
+      },
+      "sizeimage": 1843200,
+      "width": 1280
+    },
+    "querycap": {
+      "bus_info": "usb-3f980000.usb-1.4",
+      "capabilities": 2225078273,
+      "card": "C270 HD WEBCAM",
+      "device_caps": 69206017,
+      "driver": "uvcvideo",
+      "version": "6.18.34"
+    }
+  },
+  "capture": {
+    "buffer_errors": 0,
+    "driver_sequence_first": 0,
+    "driver_sequence_gaps": 2,
+    "driver_sequence_last": 2686,
+    "fps_achieved": 29.73,
+    "fps_steady": 29.789,
+    "frames": 2685,
+    "interframe_gap_ms": {
+      "max": 180.03,
+      "median": 32.01,
+      "min": 31.81,
+      "n": 2684,
+      "p95": 36.01,
+      "p99": 36.02
+    },
+    "interframe_gap_ms_steady": {
+      "max": 67.96,
+      "median": 32.01,
+      "min": 31.81,
+      "n": 2659,
+      "p95": 36.01,
+      "p99": 36.02
+    },
+    "invalid_jpeg": 0,
+    "jpeg_bytes": {
+      "max": 69122.0,
+      "median": 53841.0,
+      "min": 21100.0,
+      "n": 2685,
+      "p95": 68894.0,
+      "p99": 69001.0
+    },
+    "jpeg_bytes_per_s": 1694854.4,
+    "span_s": 90.28,
+    "timestamp_domains": {
+      "pi_monotonic": 2685
+    }
+  },
+  "clock": {
+    "error": null,
+    "offset_spread_ns": 1342902,
+    "pi_to_host_offset_ns": 7346440,
+    "raw": [
+      {
+        "offset_ns": 5563910,
+        "rtt_ns": 6498011,
+        "t1": 1788297139191598311,
+        "t1_mono": 675862334938697,
+        "t2": 1788297139200411227,
+        "t3": 1788297139200412107,
+        "t4": 1788297139198097202
+      },
+      {
+        "offset_ns": 13617112,
+        "rtt_ns": 17451981,
+        "t1": 1788297141198399584,
+        "t1_mono": 675864341739293,
+        "t2": 1788297141220742687,
+        "t3": 1788297141220744937,
+        "t4": 1788297141215853815
+      },
+      {
+        "offset_ns": 15480737,
+        "rtt_ns": 20009944,
+        "t1": 1788297143216242600,
+        "t1_mono": 675866359581162,
+        "t2": 1788297143241728309,
+        "t3": 1788297143241728839,
+        "t4": 1788297143236253074
+      },
+      {
+        "offset_ns": 8105328,
+        "rtt_ns": 4897707,
+        "t1": 1788297145236531648,
+        "t1_mono": 675868379870471,
+        "t2": 1788297145247085830,
+        "t3": 1788297145247087382,
+        "t4": 1788297145241430907
+      },
+      {
+        "offset_ns": 12538680,
+        "rtt_ns": 13542550,
+        "t1": 1788297147241709166,
+        "t1_mono": 675870385047624,
+        "t2": 1788297147261019121,
+        "t3": 1788297147261021019,
+        "t4": 1788297147255253614
+      },
+      {
+        "offset_ns": 17836769,
+        "rtt_ns": 28647334,
+        "t1": 1788297149255580671,
+        "t1_mono": 675872398919129,
+        "t2": 1788297149287741107,
+        "t3": 1788297149287743081,
+        "t4": 1788297149284229979
+      },
+      {
+        "offset_ns": 8588532,
+        "rtt_ns": 7902231,
+        "t1": 1788297151284546409,
+        "t1_mono": 675874427885961,
+        "t2": 1788297151297086057,
+        "t3": 1788297151297087610,
+        "t4": 1788297151292450193
+      },
+      {
+        "offset_ns": 18832219,
+        "rtt_ns": 31220475,
+        "t1": 1788297153292732036,
+        "t1_mono": 675876436071744,
+        "t2": 1788297153327174493,
+        "t3": 1788297153327175560,
+        "t4": 1788297153323953578
+      },
+      {
+        "offset_ns": 9820909,
+        "rtt_ns": 13221486,
+        "t1": 1788297155324245001,
+        "t1_mono": 675878467591116,
+        "t2": 1788297155340676653,
+        "t3": 1788297155340678209,
+        "t4": 1788297155337468043
+      },
+      {
+        "offset_ns": 21960635,
+        "rtt_ns": 35460798,
+        "t1": 1788297157337723423,
+        "t1_mono": 675880481061048,
+        "t2": 1788297157377414457,
+        "t3": 1788297157377416284,
+        "t4": 1788297157373186048
+      },
+      {
+        "offset_ns": 8667368,
+        "rtt_ns": 5421028,
+        "t1": 1788297159373506372,
+        "t1_mono": 675882516846133,
+        "t2": 1788297159384884254,
+        "t3": 1788297159384886182,
+        "t4": 1788297159378929328
+      },
+      {
+        "offset_ns": 8877553,
+        "rtt_ns": 6568058,
+        "t1": 1788297161379208087,
+        "t1_mono": 675884522547483,
+        "t2": 1788297161391369669,
+        "t3": 1788297161391371075,
+        "t4": 1788297161385777551
+      },
+      {
+        "offset_ns": 16026846,
+        "rtt_ns": 24345732,
+        "t1": 1788297163386043286,
+        "t1_mono": 675886529381849,
+        "t2": 1788297163414242998,
+        "t3": 1788297163414244293,
+        "t4": 1788297163410390313
+      },
+      {
+        "offset_ns": 8031735,
+        "rtt_ns": 3759394,
+        "t1": 1788297165410685628,
+        "t1_mono": 675888554023878,
+        "t2": 1788297165420597060,
+        "t3": 1788297165420598334,
+        "t4": 1788297165414446296
+      },
+      {
+        "offset_ns": 7216977,
+        "rtt_ns": 2787998,
+        "t1": 1788297167414710724,
+        "t1_mono": 675890558048817,
+        "t2": 1788297167423321700,
+        "t3": 1788297167423323539,
+        "t4": 1788297167417500561
+      },
+      {
+        "offset_ns": 7256625,
+        "rtt_ns": 2774301,
+        "t1": 1788297169417794465,
+        "t1_mono": 675892561133652,
+        "t2": 1788297169426438241,
+        "t3": 1788297169426440496,
+        "t4": 1788297169420571021
+      },
+      {
+        "offset_ns": 7192887,
+        "rtt_ns": 2754005,
+        "t1": 1788297171420887630,
+        "t1_mono": 675894564228484,
+        "t2": 1788297171429457520,
+        "t3": 1788297171429459081,
+        "t4": 1788297171423643196
+      },
+      {
+        "offset_ns": 7380218,
+        "rtt_ns": 2496244,
+        "t1": 1788297173423917719,
+        "t1_mono": 675896567256125,
+        "t2": 1788297173432546059,
+        "t3": 1788297173432547778,
+        "t4": 1788297173426415682
+      },
+      {
+        "offset_ns": 12075860,
+        "rtt_ns": 13176723,
+        "t1": 1788297175426660775,
+        "t1_mono": 675898569998557,
+        "t2": 1788297175445324997,
+        "t3": 1788297175445326264,
+        "t4": 1788297175439838765
+      },
+      {
+        "offset_ns": 9327903,
+        "rtt_ns": 6612539,
+        "t1": 1788297177440126929,
+        "t1_mono": 675900583466585,
+        "t2": 1788297177452761102,
+        "t3": 1788297177452762193,
+        "t4": 1788297177446740559
+      },
+      {
+        "offset_ns": 7342767,
+        "rtt_ns": 2709874,
+        "t1": 1788297179447051219,
+        "t1_mono": 675902590391553,
+        "t2": 1788297179455748923,
+        "t3": 1788297179455750501,
+        "t4": 1788297179449762671
+      },
+      {
+        "offset_ns": 18757236,
+        "rtt_ns": 27677882,
+        "t1": 1788297181450094475,
+        "t1_mono": 675904593434964,
+        "t2": 1788297181482690652,
+        "t3": 1788297181482691715,
+        "t4": 1788297181477773420
+      },
+      {
+        "offset_ns": 11002468,
+        "rtt_ns": 9856116,
+        "t1": 1788297183478058554,
+        "t1_mono": 675906621396700,
+        "t2": 1788297183493989080,
+        "t3": 1788297183493990285,
+        "t4": 1788297183487915875
+      },
+      {
+        "offset_ns": 11510563,
+        "rtt_ns": 12062152,
+        "t1": 1788297185488186787,
+        "t1_mono": 675908631524048,
+        "t2": 1788297185505728426,
+        "t3": 1788297185505728954,
+        "t4": 1788297185500249467
+      },
+      {
+        "offset_ns": 15945338,
+        "rtt_ns": 20353622,
+        "t1": 1788297187500545950,
+        "t1_mono": 675910643883263,
+        "t2": 1788297187526668099,
+        "t3": 1788297187526668544,
+        "t4": 1788297187520900017
+      },
+      {
+        "offset_ns": 11987796,
+        "rtt_ns": 14699710,
+        "t1": 1788297189521280611,
+        "t1_mono": 675912664620372,
+        "t2": 1788297189540618262,
+        "t3": 1788297189540619403,
+        "t4": 1788297189535981462
+      },
+      {
+        "offset_ns": 8758890,
+        "rtt_ns": 7390936,
+        "t1": 1788297191536299293,
+        "t1_mono": 675914679636918,
+        "t2": 1788297191548753651,
+        "t3": 1788297191548754781,
+        "t4": 1788297191543691359
+      },
+      {
+        "offset_ns": 16012107,
+        "rtt_ns": 20303473,
+        "t1": 1788297193543987001,
+        "t1_mono": 675916687325615,
+        "t2": 1788297193570150845,
+        "t3": 1788297193570151855,
+        "t4": 1788297193564291484
+      },
+      {
+        "offset_ns": 8620387,
+        "rtt_ns": 5328130,
+        "t1": 1788297195564574154,
+        "t1_mono": 675918707912456,
+        "t2": 1788297195575858606,
+        "t3": 1788297195575859630,
+        "t4": 1788297195569903308
+      },
+      {
+        "offset_ns": 10389863,
+        "rtt_ns": 8653603,
+        "t1": 1788297197570167121,
+        "t1_mono": 675920713505006,
+        "t2": 1788297197584883786,
+        "t3": 1788297197584884433,
+        "t4": 1788297197578821371
+      },
+      {
+        "offset_ns": 10954388,
+        "rtt_ns": 10132987,
+        "t1": 1788297199579143359,
+        "t1_mono": 675922722483952,
+        "t2": 1788297199595164241,
+        "t3": 1788297199595165865,
+        "t4": 1788297199589277970
+      },
+      {
+        "offset_ns": 6821993,
+        "rtt_ns": 12200227,
+        "t1": 1788297201589576934,
+        "t1_mono": 675924732914924,
+        "t2": 1788297201602499041,
+        "t3": 1788297201602500296,
+        "t4": 1788297201601778416
+      },
+      {
+        "offset_ns": 6688833,
+        "rtt_ns": 3731945,
+        "t1": 1788297203602103991,
+        "t1_mono": 675926745442137,
+        "t2": 1788297203610658797,
+        "t3": 1788297203610660281,
+        "t4": 1788297203605837420
+      },
+      {
+        "offset_ns": 8061024,
+        "rtt_ns": 3869827,
+        "t1": 1788297205606103931,
+        "t1_mono": 675928749443066,
+        "t2": 1788297205616099869,
+        "t3": 1788297205616101283,
+        "t4": 1788297205609975172
+      },
+      {
+        "offset_ns": 7967827,
+        "rtt_ns": 3601189,
+        "t1": 1788297207610274440,
+        "t1_mono": 675930753614044,
+        "t2": 1788297207620042862,
+        "t3": 1788297207620044217,
+        "t4": 1788297207613876984
+      },
+      {
+        "offset_ns": 7577416,
+        "rtt_ns": 3202612,
+        "t1": 1788297209614181979,
+        "t1_mono": 675932757533406,
+        "t2": 1788297209623360701,
+        "t3": 1788297209623362300,
+        "t4": 1788297209617386190
+      },
+      {
+        "offset_ns": 9450989,
+        "rtt_ns": 6887213,
+        "t1": 1788297211617679307,
+        "t1_mono": 675934761018286,
+        "t2": 1788297211630573903,
+        "t3": 1788297211630575580,
+        "t4": 1788297211624568197
+      },
+      {
+        "offset_ns": 9705385,
+        "rtt_ns": 7196219,
+        "t1": 1788297213624827510,
+        "t1_mono": 675936768166645,
+        "t2": 1788297213638131005,
+        "t3": 1788297213638133050,
+        "t4": 1788297213632025774
+      },
+      {
+        "offset_ns": 18301567,
+        "rtt_ns": 28755984,
+        "t1": 1788297215632314355,
+        "t1_mono": 675938775653543,
+        "t2": 1788297215664993914,
+        "t3": 1788297215664994477,
+        "t4": 1788297215661070902
+      },
+      {
+        "offset_ns": 7232739,
+        "rtt_ns": 2924858,
+        "t1": 1788297217661391095,
+        "t1_mono": 675940804730959,
+        "t2": 1788297217670086263,
+        "t3": 1788297217670086971,
+        "t4": 1788297217664316661
+      },
+      {
+        "offset_ns": 10346354,
+        "rtt_ns": 15746422,
+        "t1": 1788297219664622424,
+        "t1_mono": 675942807962705,
+        "t2": 1788297219682841989,
+        "t3": 1788297219682843238,
+        "t4": 1788297219680370095
+      },
+      {
+        "offset_ns": 11921182,
+        "rtt_ns": 16583644,
+        "t1": 1788297221680713043,
+        "t1_mono": 675944824052543,
+        "t2": 1788297221700926047,
+        "t3": 1788297221700926947,
+        "t4": 1788297221697297587
+      },
+      {
+        "offset_ns": 9476183,
+        "rtt_ns": 8716427,
+        "t1": 1788297223697543345,
+        "t1_mono": 675946840881387,
+        "t2": 1788297223711377742,
+        "t3": 1788297223711379003,
+        "t4": 1788297223706261033
+      },
+      {
+        "offset_ns": 17558429,
+        "rtt_ns": 23321077,
+        "t1": 1788297225706531997,
+        "t1_mono": 675948849870507,
+        "t2": 1788297225735750965,
+        "t3": 1788297225735751499,
+        "t4": 1788297225729853608
+      },
+      {
+        "offset_ns": 6922820,
+        "rtt_ns": 3463821,
+        "t1": 1788297227730134569,
+        "t1_mono": 675950873473601,
+        "t2": 1788297227738789300,
+        "t3": 1788297227738790940,
+        "t4": 1788297227733600030
+      }
+    ],
+    "rtt_ms": {
+      "max": 35.461,
+      "median": 8.654,
+      "min": 2.496,
+      "n": 45,
+      "p95": 28.756,
+      "p99": 35.461
+    },
+    "samples": 45,
+    "uncertainty_ms": 1.248
+  },
+  "controls": "\nUser Controls\n\n                     brightness 0x00980900 (int)    : min=0 max=255 step=1 default=-8193 value=128 flags=has-min-max\n                       contrast 0x00980901 (int)    : min=0 max=255 step=1 default=57343 value=32 flags=has-min-max\n                     saturation 0x00980902 (int)    : min=0 max=255 step=1 default=57343 value=32 flags=has-min-max\n        white_balance_automatic 0x0098090c (bool)   : default=1 value=1\n                           gain 0x00980913 (int)    : min=0 max=255 step=1 default=57343 value=24 flags=has-min-max\n           power_line_frequency 0x00980918 (menu)   : min=0 max=2 default=2 value=2 (60 Hz)\n      white_balance_temperature 0x0098091a (int)    : min=0 max=10000 step=1 default=57343 value=4200 flags=inactive, has-min-max\n                      sharpness 0x0098091b (int)    : min=0 max=255 step=1 default=57343 value=24 flags=has-min-max\n         backlight_compensation 0x0098091c (int)    : min=0 max=1 step=1 default=57343 value=1 flags=has-min-max\n\nCamera Controls\n\n                  auto_exposure 0x009a0901 (menu)   : min=0 max=3 default=0 value=3 (Aperture Priority Mode)\n         exposure_time_absolute 0x009a0902 (int)    : min=1 max=10000 step=1 default=156 value=333 flags=inactive, has-min-max\n     exposure_dynamic_framerate 0x009a0903 (bool)   : default=0 value=0\n",
+  "deltas": {
+    "cpu_process_pct_of_one_core": 5.1,
+    "cpu_system_busy_pct": 7.5,
+    "eth0": {
+      "rx_bytes_per_s": 487655.1,
+      "rx_dropped_per_s": 0.0,
+      "rx_errors_per_s": 0.0,
+      "rx_packets_per_s": 451.9,
+      "tx_bytes_per_s": 52.6,
+      "tx_dropped_per_s": 0.0,
+      "tx_errors_per_s": 0.0,
+      "tx_packets_per_s": 1.0
+    },
+    "nft": {
+      "roomscan-dnat-to-scanner": {
+        "bytes_per_s": 0.0,
+        "packets_per_s": 0.0
+      },
+      "roomscan-fwd-established": {
+        "bytes_per_s": 487684.1,
+        "packets_per_s": 452.9
+      },
+      "roomscan-fwd-host-to-scanner": {
+        "bytes_per_s": 0.0,
+        "packets_per_s": 0.0
+      },
+      "roomscan-fwd-scanner-to-host": {
+        "bytes_per_s": 0.0,
+        "packets_per_s": 0.0
+      },
+      "roomscan-masq-to-host": {
+        "bytes_per_s": 4.4,
+        "packets_per_s": 0.0
+      },
+      "roomscan-masq-to-scanner": {
+        "bytes_per_s": 0.0,
+        "packets_per_s": 0.0
+      }
+    },
+    "span_s": 90.129,
+    "wlan0": {
+      "rx_bytes_per_s": 14821.9,
+      "rx_dropped_per_s": 0.9,
+      "rx_errors_per_s": 0.0,
+      "rx_packets_per_s": 265.5,
+      "tx_bytes_per_s": 2370267.0,
+      "tx_dropped_per_s": 0.0,
+      "tx_errors_per_s": 0.0,
+      "tx_packets_per_s": 1713.4
+    }
+  },
+  "device_selection": {
+    "candidates": [
+      {
+        "bus_info": "usb-3f980000.usb-1.4",
+        "by_path": [
+          "/dev/v4l/by-path/platform-3f980000.usb-usb-0:1.4:1.0-video-index0",
+          "/dev/v4l/by-path/platform-3f980000.usb-usbv2-0:1.4:1.0-video-index0",
+          "/dev/v4l/by-id/usb-046d_C270_HD_WEBCAM_7936D010-video-index0"
+        ],
+        "capture": true,
+        "card": "C270 HD WEBCAM",
+        "driver": "uvcvideo",
+        "error": null,
+        "index": 0,
+        "path": "/dev/video0",
+        "streaming": true,
+        "usb_vid_pid": "046d:0825"
+      },
+      {
+        "bus_info": "usb-3f980000.usb-1.4",
+        "by_path": [
+          "/dev/v4l/by-path/platform-3f980000.usb-usb-0:1.4:1.0-video-index1",
+          "/dev/v4l/by-path/platform-3f980000.usb-usbv2-0:1.4:1.0-video-index1",
+          "/dev/v4l/by-id/usb-046d_C270_HD_WEBCAM_7936D010-video-index1"
+        ],
+        "capture": false,
+        "card": "C270 HD WEBCAM",
+        "driver": "uvcvideo",
+        "error": null,
+        "index": 1,
+        "path": "/dev/video1",
+        "streaming": true,
+        "usb_vid_pid": "046d:0825"
+      },
+      {
+        "bus_info": "platform:bcm2835-codec",
+        "by_path": [],
+        "capture": false,
+        "card": "bcm2835-codec-decode",
+        "driver": "bcm2835-codec",
+        "error": null,
+        "index": 10,
+        "path": "/dev/video10",
+        "streaming": true,
+        "usb_vid_pid": null
+      },
+      {
+        "bus_info": "platform:bcm2835-codec",
+        "by_path": [],
+        "capture": false,
+        "card": "bcm2835-codec-encode",
+        "driver": "bcm2835-codec",
+        "error": null,
+        "index": 11,
+        "path": "/dev/video11",
+        "streaming": true,
+        "usb_vid_pid": null
+      },
+      {
+        "bus_info": "platform:bcm2835-codec",
+        "by_path": [],
+        "capture": false,
+        "card": "bcm2835-codec-isp",
+        "driver": "bcm2835-codec",
+        "error": null,
+        "index": 12,
+        "path": "/dev/video12",
+        "streaming": true,
+        "usb_vid_pid": null
+      },
+      {
+        "bus_info": "platform:bcm2835-isp",
+        "by_path": [],
+        "capture": false,
+        "card": "bcm2835-isp",
+        "driver": "bcm2835-isp",
+        "error": null,
+        "index": 13,
+        "path": "/dev/video13",
+        "streaming": true,
+        "usb_vid_pid": null
+      },
+      {
+        "bus_info": "platform:bcm2835-isp",
+        "by_path": [],
+        "capture": true,
+        "card": "bcm2835-isp",
+        "driver": "bcm2835-isp",
+        "error": null,
+        "index": 14,
+        "path": "/dev/video14",
+        "streaming": true,
+        "usb_vid_pid": null
+      },
+      {
+        "bus_info": "platform:bcm2835-isp",
+        "by_path": [],
+        "capture": true,
+        "card": "bcm2835-isp",
+        "driver": "bcm2835-isp",
+        "error": null,
+        "index": 15,
+        "path": "/dev/video15",
+        "streaming": true,
+        "usb_vid_pid": null
+      },
+      {
+        "bus_info": "platform:bcm2835-isp",
+        "by_path": [],
+        "capture": false,
+        "card": "bcm2835-isp",
+        "driver": "bcm2835-isp",
+        "error": null,
+        "index": 16,
+        "path": "/dev/video16",
+        "streaming": true,
+        "usb_vid_pid": null
+      },
+      {
+        "bus_info": "platform:bcm2835-codec",
+        "by_path": [
+          "/dev/v4l/by-path/platform-3f00b840.mailbox-video-index0"
+        ],
+        "capture": false,
+        "card": "bcm2835-codec-image_fx",
+        "driver": "bcm2835-codec",
+        "error": null,
+        "index": 18,
+        "path": "/dev/video18",
+        "streaming": true,
+        "usb_vid_pid": null
+      },
+      {
+        "bus_info": "platform:bcm2835-isp",
+        "by_path": [],
+        "capture": false,
+        "card": "bcm2835-isp",
+        "driver": "bcm2835-isp",
+        "error": null,
+        "index": 20,
+        "path": "/dev/video20",
+        "streaming": true,
+        "usb_vid_pid": null
+      },
+      {
+        "bus_info": "platform:bcm2835-isp",
+        "by_path": [
+          "/dev/v4l/by-path/platform-3f00b840.mailbox-video-index1"
+        ],
+        "capture": true,
+        "card": "bcm2835-isp",
+        "driver": "bcm2835-isp",
+        "error": null,
+        "index": 21,
+        "path": "/dev/video21",
+        "streaming": true,
+        "usb_vid_pid": null
+      },
+      {
+        "bus_info": "platform:bcm2835-isp",
+        "by_path": [
+          "/dev/v4l/by-path/platform-3f00b840.mailbox-video-index2"
+        ],
+        "capture": true,
+        "card": "bcm2835-isp",
+        "driver": "bcm2835-isp",
+        "error": null,
+        "index": 22,
+        "path": "/dev/video22",
+        "streaming": true,
+        "usb_vid_pid": null
+      },
+      {
+        "bus_info": "platform:bcm2835-isp",
+        "by_path": [
+          "/dev/v4l/by-path/platform-3f00b840.mailbox-video-index3"
+        ],
+        "capture": false,
+        "card": "bcm2835-isp",
+        "driver": "bcm2835-isp",
+        "error": null,
+        "index": 23,
+        "path": "/dev/video23",
+        "streaming": true,
+        "usb_vid_pid": null
+      },
+      {
+        "bus_info": "platform:bcm2835-codec",
+        "by_path": [],
+        "capture": false,
+        "card": "bcm2835-codec-encode_image",
+        "driver": "bcm2835-codec",
+        "error": null,
+        "index": 31,
+        "path": "/dev/video31",
+        "streaming": true,
+        "usb_vid_pid": null
+      }
+    ],
+    "reason": "046d:0825 capture node via stable by-path video-index0 link",
+    "selected": "/dev/v4l/by-path/platform-3f980000.usb-usb-0:1.4:1.0-video-index0"
+  },
+  "errors": [],
+  "host": "172.17.2.54:5099",
+  "mode_requested": "1280x720@30",
+  "preview": {
+    "sent": 2656,
+    "skipped": 29
+  },
+  "scanner_pcap": {
+    "available": true,
+    "bytes_per_s_on_wire": 494091.3,
+    "file_bytes": 505490,
+    "file_is_fresh": true,
+    "interpacket_gap_ms": {
+      "max": 7.949,
+      "median": 2.29,
+      "min": 0.002,
+      "n": 6321,
+      "p95": 5.045,
+      "p99": 5.093
+    },
+    "packets": 6322,
+    "packets_per_s": 452.8,
+    "path": "/tmp/roomscan-cam-scanner-23761-675892456260513.pcap",
+    "port": 5000,
+    "seconds": 15.0,
+    "span_s": 13.961,
+    "tcpdump_returncode": 124,
+    "tcpdump_stderr": "tcpdump: listening on eth0, link-type EN10MB (Ethernet), snapshot length 64 bytes\n6322 packets captured\n6772 packets received by filter\n0 packets dropped by kernel"
+  },
+  "seconds": 90.0,
+  "snapshot": {
+    "sent": 178,
+    "skipped": 2507
+  },
+  "started_mono_ns": 675861417040673,
+  "started_wall": 1788297138.2736602,
+  "system_after": {
+    "cpu": {
+      "clk_tck": 100,
+      "idle": 251916329,
+      "process": 502,
+      "system": 265796270
+    },
+    "eth0": {
+      "rx_bytes": 329596898360,
+      "rx_dropped": 0,
+      "rx_errors": 0,
+      "rx_packets": 305454719,
+      "tx_bytes": 45676635,
+      "tx_dropped": 0,
+      "tx_errors": 0,
+      "tx_packets": 712571
+    },
+    "loadavg": [
+      "0.36",
+      "0.68",
+      "0.53"
+    ],
+    "mem_available_kb": 792332,
+    "mono_ns": 675952459467267,
+    "nft": {
+      "roomscan-dnat-to-scanner": {
+        "bytes": 19807,
+        "packets": 683
+      },
+      "roomscan-fwd-established": {
+        "bytes": 329538845552,
+        "packets": 306036133
+      },
+      "roomscan-fwd-host-to-scanner": {
+        "bytes": 29,
+        "packets": 1
+      },
+      "roomscan-fwd-scanner-to-host": {
+        "bytes": 0,
+        "packets": 0
+      },
+      "roomscan-masq-to-host": {
+        "bytes": 437478,
+        "packets": 4933
+      },
+      "roomscan-masq-to-scanner": {
+        "bytes": 357,
+        "packets": 2
+      }
+    },
+    "real_ns": 1788297229316138600,
+    "temp_c": 62.3,
+    "throttled": "0x0",
+    "wlan0": {
+      "rx_bytes": 1430386411,
+      "rx_dropped": 628924,
+      "rx_errors": 0,
+      "rx_packets": 7318269,
+      "tx_bytes": 2267814540,
+      "tx_dropped": 0,
+      "tx_errors": 0,
+      "tx_packets": 305112577
+    },
+    "wlan_link": {
+      "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1231930995 bytes (5489936 packets)\n\tTX: 3666641001 bytes (179087080 packets)\n\tsignal: -41 dBm\n\trx bitrate: 72.2 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+      "rssi_dbm": -41,
+      "rx_bitrate_mbps": 72.2,
+      "ssid": "Surly_Office",
+      "tx_bitrate_mbps": 72.2
+    }
+  },
+  "system_before": {
+    "cpu": {
+      "clk_tck": 100,
+      "idle": 251884423,
+      "process": 40,
+      "system": 265761764
+    },
+    "eth0": {
+      "rx_bytes": 329552946420,
+      "rx_dropped": 0,
+      "rx_errors": 0,
+      "rx_packets": 305413986,
+      "tx_bytes": 45671895,
+      "tx_dropped": 0,
+      "tx_errors": 0,
+      "tx_packets": 712478
+    },
+    "loadavg": [
+      "0.81",
+      "0.82",
+      "0.57"
+    ],
+    "mem_available_kb": 803708,
+    "mono_ns": 675862330310062,
+    "nft": {
+      "roomscan-dnat-to-scanner": {
+        "bytes": 19807,
+        "packets": 683
+      },
+      "roomscan-fwd-established": {
+        "bytes": 329494890994,
+        "packets": 305995314
+      },
+      "roomscan-fwd-host-to-scanner": {
+        "bytes": 29,
+        "packets": 1
+      },
+      "roomscan-fwd-scanner-to-host": {
+        "bytes": 0,
+        "packets": 0
+      },
+      "roomscan-masq-to-host": {
+        "bytes": 437080,
+        "packets": 4931
+      },
+      "roomscan-masq-to-scanner": {
+        "bytes": 357,
+        "packets": 2
+      }
+    },
+    "real_ns": 1788297139186984780,
+    "temp_c": 62.8,
+    "throttled": "0x0",
+    "wlan0": {
+      "rx_bytes": 1429050530,
+      "rx_dropped": 628840,
+      "rx_errors": 0,
+      "rx_packets": 7294339,
+      "tx_bytes": 2054184377,
+      "tx_dropped": 0,
+      "tx_errors": 0,
+      "tx_packets": 304958147
+    },
+    "wlan_link": {
+      "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1226219337 bytes (5437117 packets)\n\tTX: 3451778810 bytes (178932657 packets)\n\tsignal: -43 dBm\n\trx bitrate: 72.2 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+      "rssi_dbm": -43,
+      "rx_bitrate_mbps": 72.2,
+      "ssid": "Surly_Office",
+      "tx_bitrate_mbps": 72.2
+    }
+  },
+  "system_series": [
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251886261,
+        "process": 67,
+        "system": 265763768
+      },
+      "eth0": {
+        "rx_bytes": 329555450026,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305416306,
+        "tx_bytes": 45672150,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712483
+      },
+      "loadavg": [
+        "0.82",
+        "0.83",
+        "0.57"
+      ],
+      "mem_available_kb": 798864,
+      "mono_ns": 675867461591931,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329497394845,
+          "packets": 305997637
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437401,
+          "packets": 4932
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297144318263265,
+      "temp_c": 62.3,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1429133622,
+        "rx_dropped": 628845,
+        "rx_errors": 0,
+        "rx_packets": 7295870,
+        "tx_bytes": 2067237690,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 304967496
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1226572556 bytes (5440405 packets)\n\tTX: 3464894635 bytes (178941991 packets)\n\tsignal: -41 dBm\n\trx bitrate: 72.2 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -41,
+        "rx_bitrate_mbps": 72.2,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251888013,
+        "process": 91,
+        "system": 265765705
+      },
+      "eth0": {
+        "rx_bytes": 329557887268,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305418565,
+        "tx_bytes": 45672455,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712489
+      },
+      "loadavg": [
+        "0.76",
+        "0.81",
+        "0.56"
+      ],
+      "mem_available_kb": 794868,
+      "mono_ns": 675872461540025,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329499832362,
+          "packets": 305999902
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437401,
+          "packets": 4932
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297149318210265,
+      "temp_c": 62.3,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1429219867,
+        "rx_dropped": 628849,
+        "rx_errors": 0,
+        "rx_packets": 7297435,
+        "tx_bytes": 2081085834,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 304977343
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1226952199 bytes (5443928 packets)\n\tTX: 3478833341 bytes (178951847 packets)\n\tsignal: -43 dBm\n\trx bitrate: 72.2 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -43,
+        "rx_bitrate_mbps": 72.2,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251889805,
+        "process": 117,
+        "system": 265767626
+      },
+      "eth0": {
+        "rx_bytes": 329560343278,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305420842,
+        "tx_bytes": 45672710,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712494
+      },
+      "loadavg": [
+        "0.70",
+        "0.80",
+        "0.56"
+      ],
+      "mem_available_kb": 794124,
+      "mono_ns": 675877491114125,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329502281717,
+          "packets": 306002177
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437478,
+          "packets": 4933
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297154347783219,
+      "temp_c": 62.3,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1429319371,
+        "rx_dropped": 628854,
+        "rx_errors": 0,
+        "rx_packets": 7299007,
+        "tx_bytes": 2094697787,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 304987045
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1227346002 bytes (5447439 packets)\n\tTX: 3492345372 bytes (178961398 packets)\n\tsignal: -48 dBm\n\trx bitrate: 65.0 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -48,
+        "rx_bitrate_mbps": 65.0,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251891449,
+        "process": 141,
+        "system": 265769545
+      },
+      "eth0": {
+        "rx_bytes": 329562780498,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305423100,
+        "tx_bytes": 45672965,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712499
+      },
+      "loadavg": [
+        "0.72",
+        "0.80",
+        "0.56"
+      ],
+      "mem_available_kb": 793772,
+      "mono_ns": 675882494263321,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329504723360,
+          "packets": 306004443
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437478,
+          "packets": 4933
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297159350933873,
+      "temp_c": 62.3,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1429404398,
+        "rx_dropped": 628858,
+        "rx_errors": 0,
+        "rx_packets": 7300524,
+        "tx_bytes": 2108595973,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 304996929
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1227724345 bytes (5450958 packets)\n\tTX: 3506487727 bytes (178971424 packets)\n\tsignal: -44 dBm\n\trx bitrate: 72.2 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -44,
+        "rx_bitrate_mbps": 72.2,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251893239,
+        "process": 167,
+        "system": 265771467
+      },
+      "eth0": {
+        "rx_bytes": 329565233932,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305425373,
+        "tx_bytes": 45673220,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712504
+      },
+      "loadavg": [
+        "0.66",
+        "0.79",
+        "0.56"
+      ],
+      "mem_available_kb": 794320,
+      "mono_ns": 675887525497641,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329507172645,
+          "packets": 306006718
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437478,
+          "packets": 4933
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297164382168662,
+      "temp_c": 62.3,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1429475097,
+        "rx_dropped": 628863,
+        "rx_errors": 0,
+        "rx_packets": 7301839,
+        "tx_bytes": 2120620588,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 305005607
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1228040699 bytes (5453910 packets)\n\tTX: 3518581609 bytes (178980100 packets)\n\tsignal: -41 dBm\n\trx bitrate: 72.2 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -41,
+        "rx_bitrate_mbps": 72.2,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251895046,
+        "process": 193,
+        "system": 265773393
+      },
+      "eth0": {
+        "rx_bytes": 329567673728,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305427635,
+        "tx_bytes": 45673475,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712509
+      },
+      "loadavg": [
+        "0.61",
+        "0.78",
+        "0.56"
+      ],
+      "mem_available_kb": 789796,
+      "mono_ns": 675892526596598,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329509618314,
+          "packets": 306008989
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437478,
+          "packets": 4933
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297169383270691,
+      "temp_c": 62.3,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1429544126,
+        "rx_dropped": 628868,
+        "rx_errors": 0,
+        "rx_packets": 7303118,
+        "tx_bytes": 2132033223,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 305013910
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1228340615 bytes (5456704 packets)\n\tTX: 3530060937 bytes (178988406 packets)\n\tsignal: -41 dBm\n\trx bitrate: 65.0 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -41,
+        "rx_bitrate_mbps": 65.0,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251896828,
+        "process": 219,
+        "system": 265775299
+      },
+      "eth0": {
+        "rx_bytes": 329570110948,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305429893,
+        "tx_bytes": 45673730,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712514
+      },
+      "loadavg": [
+        "0.56",
+        "0.76",
+        "0.55"
+      ],
+      "mem_available_kb": 789496,
+      "mono_ns": 675897525547312,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329512056767,
+          "packets": 306011255
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437478,
+          "packets": 4933
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297174382217708,
+      "temp_c": 62.3,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1429611861,
+        "rx_dropped": 628873,
+        "rx_errors": 0,
+        "rx_packets": 7304395,
+        "tx_bytes": 2143432874,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 305022192
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1228635969 bytes (5459469 packets)\n\tTX: 3541540613 bytes (178996696 packets)\n\tsignal: -43 dBm\n\trx bitrate: 72.2 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -43,
+        "rx_bitrate_mbps": 72.2,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251898668,
+        "process": 244,
+        "system": 265777240
+      },
+      "eth0": {
+        "rx_bytes": 329572564358,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305432167,
+        "tx_bytes": 45673985,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712519
+      },
+      "loadavg": [
+        "0.52",
+        "0.75",
+        "0.55"
+      ],
+      "mem_available_kb": 789700,
+      "mono_ns": 675902561313965,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329514510322,
+          "packets": 306013533
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437478,
+          "packets": 4933
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297179417984204,
+      "temp_c": 61.8,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1429679084,
+        "rx_dropped": 628878,
+        "rx_errors": 0,
+        "rx_packets": 7305663,
+        "tx_bytes": 2154911747,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 305030532
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1228932152 bytes (5462242 packets)\n\tTX: 3553086387 bytes (179005039 packets)\n\tsignal: -44 dBm\n\trx bitrate: 72.2 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -44,
+        "rx_bitrate_mbps": 72.2,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251900436,
+        "process": 269,
+        "system": 265779156
+      },
+      "eth0": {
+        "rx_bytes": 329575020392,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305434443,
+        "tx_bytes": 45674240,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712524
+      },
+      "loadavg": [
+        "0.55",
+        "0.75",
+        "0.55"
+      ],
+      "mem_available_kb": 796628,
+      "mono_ns": 675907594091544,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329516968713,
+          "packets": 306015818
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437478,
+          "packets": 4933
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297184450761784,
+      "temp_c": 62.3,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1429746727,
+        "rx_dropped": 628882,
+        "rx_errors": 0,
+        "rx_packets": 7306862,
+        "tx_bytes": 2166282902,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 305038805
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1229228211 bytes (5464976 packets)\n\tTX: 3564542595 bytes (179013328 packets)\n\tsignal: -43 dBm\n\trx bitrate: 43.3 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -43,
+        "rx_bitrate_mbps": 43.3,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251902241,
+        "process": 300,
+        "system": 265781091
+      },
+      "eth0": {
+        "rx_bytes": 329577473818,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305436716,
+        "tx_bytes": 45674495,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712529
+      },
+      "loadavg": [
+        "0.51",
+        "0.74",
+        "0.55"
+      ],
+      "mem_available_kb": 797736,
+      "mono_ns": 675912625432027,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329519420072,
+          "packets": 306018093
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437478,
+          "packets": 4933
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297189482102527,
+      "temp_c": 62.3,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1429809292,
+        "rx_dropped": 628887,
+        "rx_errors": 0,
+        "rx_packets": 7308042,
+        "tx_bytes": 2177430102,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 305046909
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1229517521 bytes (5467684 packets)\n\tTX: 3575735734 bytes (179021415 packets)\n\tsignal: -43 dBm\n\trx bitrate: 65.0 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -43,
+        "rx_bitrate_mbps": 65.0,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251904039,
+        "process": 326,
+        "system": 265783027
+      },
+      "eth0": {
+        "rx_bytes": 329579928140,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305438990,
+        "tx_bytes": 45674750,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712534
+      },
+      "loadavg": [
+        "0.47",
+        "0.73",
+        "0.55"
+      ],
+      "mem_available_kb": 795992,
+      "mono_ns": 675917662295812,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329521883033,
+          "packets": 306020379
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437478,
+          "packets": 4933
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297194518966677,
+      "temp_c": 61.8,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1429878706,
+        "rx_dropped": 628891,
+        "rx_errors": 0,
+        "rx_packets": 7309320,
+        "tx_bytes": 2188922635,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 305055264
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1229818572 bytes (5470488 packets)\n\tTX: 3587297464 bytes (179029772 packets)\n\tsignal: -42 dBm\n\trx bitrate: 72.2 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -42,
+        "rx_bitrate_mbps": 72.2,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251905860,
+        "process": 350,
+        "system": 265784951
+      },
+      "eth0": {
+        "rx_bytes": 329582383284,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305441268,
+        "tx_bytes": 45675055,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712540
+      },
+      "loadavg": [
+        "0.59",
+        "0.75",
+        "0.55"
+      ],
+      "mem_available_kb": 796568,
+      "mono_ns": 675922694548914,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329524342056,
+          "packets": 306022663
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437478,
+          "packets": 4933
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297199551221341,
+      "temp_c": 61.8,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1429947936,
+        "rx_dropped": 628896,
+        "rx_errors": 0,
+        "rx_packets": 7310593,
+        "tx_bytes": 2200306158,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 305063548
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1230120309 bytes (5473294 packets)\n\tTX: 3598747636 bytes (179038060 packets)\n\tsignal: -42 dBm\n\trx bitrate: 72.2 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -42,
+        "rx_bitrate_mbps": 72.2,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251907454,
+        "process": 374,
+        "system": 265786861
+      },
+      "eth0": {
+        "rx_bytes": 329584820504,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305443525,
+        "tx_bytes": 45675310,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712545
+      },
+      "loadavg": [
+        "0.54",
+        "0.74",
+        "0.55"
+      ],
+      "mem_available_kb": 793380,
+      "mono_ns": 675927693364475,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329526766971,
+          "packets": 306024914
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437478,
+          "packets": 4933
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297204550034558,
+      "temp_c": 63.4,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1430020209,
+        "rx_dropped": 628900,
+        "rx_errors": 0,
+        "rx_packets": 7311862,
+        "tx_bytes": 2211616070,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 305071800
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1230421605 bytes (5476068 packets)\n\tTX: 3610108967 bytes (179046296 packets)\n\tsignal: -44 dBm\n\trx bitrate: 65.0 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -44,
+        "rx_bitrate_mbps": 65.0,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251909284,
+        "process": 401,
+        "system": 265788775
+      },
+      "eth0": {
+        "rx_bytes": 329587273938,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305445798,
+        "tx_bytes": 45675565,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712550
+      },
+      "loadavg": [
+        "0.50",
+        "0.72",
+        "0.55"
+      ],
+      "mem_available_kb": 793960,
+      "mono_ns": 675932725599627,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329529220558,
+          "packets": 306027192
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437478,
+          "packets": 4933
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297209582269971,
+      "temp_c": 62.8,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1430089039,
+        "rx_dropped": 628905,
+        "rx_errors": 0,
+        "rx_packets": 7313122,
+        "tx_bytes": 2223061066,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 305080122
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1230726330 bytes (5478900 packets)\n\tTX: 3621620680 bytes (179054620 packets)\n\tsignal: -42 dBm\n\trx bitrate: 72.2 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -42,
+        "rx_bitrate_mbps": 72.2,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251911054,
+        "process": 426,
+        "system": 265790692
+      },
+      "eth0": {
+        "rx_bytes": 329589730876,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305448076,
+        "tx_bytes": 45675820,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712555
+      },
+      "loadavg": [
+        "0.46",
+        "0.71",
+        "0.54"
+      ],
+      "mem_available_kb": 792668,
+      "mono_ns": 675937761937306,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329531676897,
+          "packets": 306029476
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437478,
+          "packets": 4933
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297214618607545,
+      "temp_c": 62.3,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1430155660,
+        "rx_dropped": 628910,
+        "rx_errors": 0,
+        "rx_packets": 7314361,
+        "tx_bytes": 2234494218,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 305088431
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1231024656 bytes (5481684 packets)\n\tTX: 3633159511 bytes (179062954 packets)\n\tsignal: -42 dBm\n\trx bitrate: 65.0 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -42,
+        "rx_bitrate_mbps": 65.0,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251912884,
+        "process": 452,
+        "system": 265792606
+      },
+      "eth0": {
+        "rx_bytes": 329592183374,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305450348,
+        "tx_bytes": 45676075,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712560
+      },
+      "loadavg": [
+        "0.42",
+        "0.70",
+        "0.54"
+      ],
+      "mem_available_kb": 790748,
+      "mono_ns": 675942793651333,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329534130362,
+          "packets": 306031753
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437478,
+          "packets": 4933
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297219650321625,
+      "temp_c": 62.3,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1430228083,
+        "rx_dropped": 628915,
+        "rx_errors": 0,
+        "rx_packets": 7315709,
+        "tx_bytes": 2245906177,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 305096717
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1231328592 bytes (5484515 packets)\n\tTX: 3644632163 bytes (179071238 packets)\n\tsignal: -45 dBm\n\trx bitrate: 72.2 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -45,
+        "rx_bitrate_mbps": 72.2,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    },
+    {
+      "cpu": {
+        "clk_tck": 100,
+        "idle": 251914677,
+        "process": 478,
+        "system": 265794511
+      },
+      "eth0": {
+        "rx_bytes": 329594639462,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_packets": 305452626,
+        "tx_bytes": 45676380,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 712566
+      },
+      "loadavg": [
+        "0.39",
+        "0.69",
+        "0.54"
+      ],
+      "mem_available_kb": 791952,
+      "mono_ns": 675947825417115,
+      "nft": {
+        "roomscan-dnat-to-scanner": {
+          "bytes": 19807,
+          "packets": 683
+        },
+        "roomscan-fwd-established": {
+          "bytes": 329536586455,
+          "packets": 306034034
+        },
+        "roomscan-fwd-host-to-scanner": {
+          "bytes": 29,
+          "packets": 1
+        },
+        "roomscan-fwd-scanner-to-host": {
+          "bytes": 0,
+          "packets": 0
+        },
+        "roomscan-masq-to-host": {
+          "bytes": 437478,
+          "packets": 4933
+        },
+        "roomscan-masq-to-scanner": {
+          "bytes": 357,
+          "packets": 2
+        }
+      },
+      "real_ns": 1788297224682087511,
+      "temp_c": 62.3,
+      "throttled": "0x0",
+      "wlan0": {
+        "rx_bytes": 1430301853,
+        "rx_dropped": 628920,
+        "rx_errors": 0,
+        "rx_packets": 7317012,
+        "tx_bytes": 2257211410,
+        "tx_dropped": 0,
+        "tx_errors": 0,
+        "tx_packets": 305104919
+      },
+      "wlan_link": {
+        "raw": "Connected to 34:60:f9:bb:7e:88 (on wlan0)\n\tSSID: Surly_Office\n\tfreq: 2462.0\n\tRX: 1231627055 bytes (5487254 packets)\n\tTX: 3655816735 bytes (179079288 packets)\n\tsignal: -48 dBm\n\trx bitrate: 65.0 MBit/s\n\ttx bitrate: 72.2 MBit/s\n\tbss flags: short-preamble short-slot-time\n\tdtim period: 1\n\tbeacon int: 100",
+        "rssi_dbm": -48,
+        "rx_bitrate_mbps": 65.0,
+        "ssid": "Surly_Office",
+        "tx_bitrate_mbps": 72.2
+      }
+    }
+  ]
+}
