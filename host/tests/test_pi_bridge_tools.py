@@ -398,3 +398,63 @@ def test_bridge_image_build_reports_a_missing_secrets_file(monkeypatch, tmp_path
     fn = getattr(bridge_image_build, "fn", bridge_image_build)
     got = fn(secrets=str(tmp_path / "nope.yaml"))
     assert got["ok"] is False and "not found" in got["error"]
+
+
+# --- optional camera unit (#226 Stage A, spec §5.3) -------------------------
+#
+# The Pi's status script grows a `camera` block on the other half of this work.
+# These pin how the HOST reads it, which is the part that decides whether a
+# bridge without a webcam reads as broken.
+
+
+def test_an_absent_camera_unit_is_not_a_bridge_fault():
+    """A bridge deployed with no C270 is a healthy bridge.
+
+    Without the optional-unit carve-out the generic unit loop below reports
+    `unit roomscan-cam is inactive`, which turns a deliberate absence into a
+    warning a human has to triage every single time they look. Spec §5.3:
+    "without turning a deliberately absent optional camera into a bridge
+    failure".
+    """
+    d = {**HEALTHY,
+         "camera": {"present": False},
+         "units": {**HEALTHY.get("units", {}), "roomscan-cam": "inactive"}}
+    warns = pb._status_warnings(d)
+    assert not any("roomscan-cam" in w for w in warns), warns
+
+
+def test_a_status_script_with_no_camera_block_at_all_is_silent():
+    """An older Pi payload reports nothing about a camera. Unknown is not a
+    fault, and it must not become one just because this host learned the key."""
+    assert pb._status_warnings(HEALTHY) == []
+
+
+def test_a_present_but_faulted_camera_is_reported_with_its_reason():
+    d = {**HEALTHY,
+         "camera": {"present": True, "state": "faulted",
+                    "last_error": "VIDIOC_STREAMON: No such device"}}
+    warns = pb._status_warnings(d)
+    assert any("faulted" in w and "VIDIOC_STREAMON" in w for w in warns), warns
+
+
+def test_a_configured_camera_the_daemon_cannot_find_is_reported():
+    d = {**HEALTHY, "camera": {"present": True, "state": "device_absent"}}
+    warns = pb._status_warnings(d)
+    assert any("cannot find it" in w for w in warns), warns
+
+
+def test_a_present_camera_unit_that_is_dead_is_still_a_warning():
+    """The carve-out applies only when the camera is genuinely absent. A Pi
+    that HAS a camera and whose daemon is dead must still say so."""
+    d = {**HEALTHY,
+         "camera": {"present": True, "state": "streaming"},
+         "units": {**HEALTHY.get("units", {}), "roomscan-cam": "failed"}}
+    warns = pb._status_warnings(d)
+    assert any("roomscan-cam" in w and "failed" in w for w in warns), warns
+
+
+def test_a_healthy_streaming_camera_adds_no_warnings():
+    d = {**HEALTHY,
+         "camera": {"present": True, "state": "streaming", "last_error": None},
+         "units": {**HEALTHY.get("units", {}), "roomscan-cam": "active"}}
+    assert pb._status_warnings(d) == []

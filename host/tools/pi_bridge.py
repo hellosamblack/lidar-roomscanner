@@ -235,8 +235,27 @@ def _status_warnings(d: dict) -> list[str]:
     if d.get("ntp_synced") is False:
         warn.append("clock not NTP-synced; the Pi 3 has no RTC, so tee and journal "
                     "timestamps are meaningless until it syncs")
+    # The camera (#226) is an OPTIONAL unit. A bridge deployed without a C270
+    # is a healthy bridge, so `roomscan-cam` being inactive is only a warning
+    # when the Pi actually reports a camera present -- otherwise the generic
+    # unit check below would turn a deliberate absence into a bridge failure
+    # (spec §5.3). Absence of the `camera` key at all (an older status script)
+    # reads as "unknown", which is also not a fault.
+    cam = d.get("camera") or {}
+    cam_present = cam.get("present")
+    optional_units = set() if cam_present else {"roomscan-cam", "roomscan-cam.service"}
+    if cam_present:
+        cam_state = cam.get("state")
+        if cam_state == "faulted":
+            warn.append(f"camera daemon is faulted: {cam.get('last_error') or 'no reason given'}")
+        elif cam_state == "device_absent":
+            warn.append("a camera is configured but the daemon cannot find it -- "
+                        "check the USB connection and `bridge_logs roomscan-cam`")
+
     restarts = d.get("unit_restarts") or {}
     for unit, state in (d.get("units") or {}).items():
+        if unit in optional_units:
+            continue
         n = restarts.get(unit)
         if state not in ("active", "activating", None):
             warn.append(f"unit {unit} is {state}")

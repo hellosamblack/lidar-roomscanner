@@ -2193,3 +2193,66 @@ def test_pdeathsig_is_installed_on_the_chrome_we_spawn():
     assert "preexec_fn=browser_reap.pdeathsig" in src, (
         "CdpSession must spawn Chrome with PR_SET_PDEATHSIG so a SIGKILLed server "
         "cannot leak it")
+
+
+# --- camera tools (#226 Stage A, spec §5.6) ---------------------------------
+
+
+def test_camera_tools_go_through_roomscan_web_not_straight_to_the_pi():
+    """The client-never-competitor invariant, applied to the camera.
+
+    The Pi daemon serves ONE V4L2 loop and counts its clients; an MCP tool that
+    dialled it directly would open a second upstream connection and would then
+    be measuring itself. Asserted on the URLs the tools actually build.
+    """
+    from roomscan.mcp_server import tools_camera        # noqa: F401 - registers
+    from roomscan import camera as cam
+    from roomscan.mcp_server.paths import WEB_URL
+
+    seen = []
+
+    class _Resp:
+        headers: dict = {}
+
+        def read(self):
+            return b'{"state": "live"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(url, *a, **k):
+        seen.append(url)
+        return _Resp()
+
+    import roomscan.camera as camera_mod
+    original = camera_mod.urllib.request.urlopen
+    camera_mod.urllib.request.urlopen = fake_urlopen
+    try:
+        out = cam.fetch_camera_status(WEB_URL)
+    finally:
+        camera_mod.urllib.request.urlopen = original
+
+    assert out["ok"] is True and out["state"] == "live"
+    assert seen == [f"{WEB_URL}/api/camera/status"]
+    assert str(cam.DEFAULT_CAMERA_PORT) not in seen[0], (
+        "the tool dialled the Pi's camera port directly instead of roomscan-web")
+
+
+def test_camera_tool_docstrings_name_the_null_versus_zero_rule():
+    """The docstring IS the description the agent reads, and this surface's
+    single most misreadable field is a rate that is unknown versus one that is
+    measured zero. If that sentence goes, the tool starts lying by omission."""
+    from roomscan.mcp_server import tools_camera
+
+    doc = tools_camera.camera_status.__doc__ or ""
+    assert "Null means unknown" in doc
+    assert "arrival age" in " ".join(doc.split()).lower()
+    assert "NOT a display latency" in " ".join(doc.split()), (
+        "the doc must say what age_ms is NOT, or an agent will read it as latency")
+
+    snap = tools_camera.camera_snapshot.__doc__ or ""
+    assert "results/" in snap and "captures/" in snap
+    assert "path actually" in snap or "actually on disk" in snap
