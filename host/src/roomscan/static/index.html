@@ -1440,14 +1440,27 @@
             color: var(--text-muted); letter-spacing: 0.04em; text-transform: uppercase;
         }
         #camera-placeholder.hidden { display: none; }
+        /* LOOK only -- no positioning. The first cut folded `position:absolute`
+           into this base class for the in-frame Frozen badge, and the state
+           chip inherited it: with no positioned ancestor of its own it resolved
+           against `.card[data-card-id]{position:relative}` and pinned itself to
+           the CARD's top-left corner, landing on top of the header icon and the
+           first letter of the title ("[LIVE]AMERA"). Same shape as every
+           surprise-default bug in AGENTS.md -- the dangerous behaviour was the
+           default and the safe one had to be remembered. Now positioning is
+           strictly opt-in via `--overlay`, so a new chip cannot inherit it. */
         .camera-chip {
-            position: absolute; top: 6px; left: 6px; z-index: 2;
             border: 1px solid; border-radius: 4px; padding: 1px 6px;
             font-family: var(--font-mono); font-size: 0.64rem;
             font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
             background: rgba(11, 12, 16, 0.78);
+            flex: 0 0 auto; white-space: nowrap;
         }
         .camera-chip.hidden { display: none; }
+        /* The only chips that float over the video. Opt-in, and paired with a
+           positioned ancestor (#camera-frame) rather than whatever happens to
+           be positioned further up the tree. */
+        .camera-chip--overlay { position: absolute; top: 6px; left: 6px; z-index: 2; }
         /* One class per state word, so the badge's colour is derived from the
            server's state string and cannot drift from the text beside it. */
         .camera-chip--live     { color: var(--success); border-color: var(--success); }
@@ -1455,14 +1468,19 @@
         .camera-chip--connecting { color: var(--text-muted); border-color: var(--panel-border); }
         .camera-chip--offline  { color: var(--danger);  border-color: var(--danger); }
         .camera-chip--frozen {
-            left: auto; right: 6px;
+            left: auto; right: 6px;          /* with --overlay: the other corner */
             color: var(--accent); border-color: var(--accent);
         }
+        /* The state chip rides the card header as a plain flex sibling between
+           the title and the chevron -- the same row `.chevron` already lives in,
+           which keeps its hard-right position because its `margin-left:auto`
+           still absorbs all the free space. No absolute positioning, so it
+           cannot overlap the icon or the title at any rail width. */
+        .control-group__header .camera-chip { margin-left: 2px; }
         .camera-card-controls {
             display: flex; align-items: center; gap: 8px;
             width: 100%; margin-bottom: 6px; flex-wrap: wrap;
         }
-        .camera-card-controls .camera-spacer { flex: 1 1 auto; }
         /* Match the IR card's .segmented--sm scale: these sit in a card header
            row, not a dialog footer, so they take the compact size the rest of
            that row already uses rather than the global button padding. */
@@ -2055,11 +2073,9 @@
              same-origin HTTP proxy, never over /ws; this card only reads the
              low-rate `camera` state message for its readouts. -->
         <div id="camera-card" class="card collapsed" data-card-id="camera">
-            <button class="control-group__header" type="button"><span>Camera</span><span class="chevron">&#9662;</span></button>
+            <button class="control-group__header" type="button"><span>Camera</span><span id="camera-state" class="camera-chip camera-chip--offline" title="Camera link state as the server measures it: Offline (no daemon or no camera), Connecting (dialling or backing off), Live (a frame arrived recently), Stale (connected but frames stopped)">Offline</span><span class="chevron">&#9662;</span></button>
             <div class="card-body control-group__body">
                 <div class="camera-card-controls">
-                    <span id="camera-state" class="camera-chip camera-chip--offline" title="Camera link state as the server measures it: Offline (no daemon or no camera), Connecting (dialling or backing off), Live (a frame arrived recently), Stale (connected but frames stopped)">Offline</span>
-                    <span class="camera-spacer"></span>
                     <label class="toggle toggle--sm" title="Hold the last received picture and stop pulling the stream. The state readout keeps reporting the real camera, so a frozen image never reads as a live one."><input type="checkbox" id="camera-freeze"><span>Freeze</span></label>
                     <button id="camera-snapshot" type="button" title="Download the host's newest original JPEG exactly as the camera produced it (no re-encode)">Snapshot</button>
                     <button id="camera-expand" type="button" title="Float this card large over the app. Not operating-system Picture-in-Picture.">Expand</button>
@@ -2068,7 +2084,7 @@
                     <img id="camera-img" class="hidden" alt="Live rig camera">
                     <canvas id="camera-hold" class="hidden"></canvas>
                     <div id="camera-placeholder">No signal</div>
-                    <span id="camera-frozen" class="camera-chip camera-chip--frozen hidden">Frozen</span>
+                    <span id="camera-frozen" class="camera-chip camera-chip--overlay camera-chip--frozen hidden">Frozen</span>
                 </div>
                 <div class="hud-row" title="The picture's ACTUAL raster size, read from the JPEG the camera sent -- not the mode that was requested."><span>Resolution</span><span class="hud-val" id="camera-res">--</span></div>
                 <div class="hud-row" title="Frames per second the camera reports capturing, measured from its own capture timestamps on the Pi's clock. Blank when the Pi supplies no usable timestamp."><span>Capture FPS</span><span class="hud-val" id="camera-capture-fps">--</span></div>

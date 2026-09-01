@@ -2108,3 +2108,132 @@ def test_the_card_does_not_promise_a_recording_state_stage_a_cannot_report():
     for absent in ("camera-chip--recording", "camera-chip--partial"):
         assert absent not in html, (
             f"{absent} styles a state Stage A cannot truthfully report")
+
+
+# --- camera state chip: header row, not an overlay (#226 review round 3) -----
+#
+# Shipped defect: `.camera-chip` folded `position: absolute; top: 6px; left: 6px`
+# into the BASE class for the in-frame Frozen badge, and `#camera-state`
+# inherited it. Sitting in a statically-positioned row, its containing block
+# resolved all the way up to `.card[data-card-id] { position: relative }`, so it
+# pinned itself to the CARD's top-left corner -- on top of the header icon and
+# the first letter of the title. Measured on the live server at a 1600x1000
+# viewport, 320 px rail: 16.0 px over the icon and 10.6 px over "CAMERA",
+# reading as "[LIVE]AMERA". Collapsed it was worse -- the chip escaped the card
+# entirely and `elementFromPoint` at its centre returned the top bar.
+#
+# These pin the MECHANISM, which is what a text-parsing test can actually see.
+# The geometry itself was measured in a real browser against a worktree-local
+# server (48 collapsed x rail-width x state combinations, 0.0 px overlap), and
+# the same probe reproduces the numbers above when run against the pre-fix
+# markup -- the assertions below are the cheap standing guard, not the proof.
+
+
+def _camera_chip_rules() -> list:
+    """`[(selector, declaration text)]` for every `.camera-chip*` CSS rule.
+
+    A LIST, not a selector-keyed dict. CSS allows the same selector twice and
+    the later rule wins, so a dict silently drops one of them -- and a guard
+    that cannot see a duplicated selector cannot see the most natural way to
+    reintroduce this defect, which is a second `.camera-chip--frozen { position:
+    absolute }` further down the sheet. (Found by mutation: that exact mutant
+    passed against the dict version.)
+
+    Comments are stripped FIRST. Without that a rule's own explanatory comment
+    -- which necessarily quotes the property it is warning about -- lands in
+    the selector text and in the declaration body, so the guard fires on the
+    documentation of the fix rather than on the code. A check that cannot tell
+    a rule from a sentence about a rule is not checking the rule.
+    """
+    css = re.sub(r"/\*.*?\*/", " ", _style_css(), flags=re.DOTALL)
+    return [(m.group(1).strip(), m.group(2))
+            for m in re.finditer(r"([^{}]*\.camera-chip[^{}]*)\{([^{}]*)\}", css)]
+
+
+def _camera_header_tag() -> str:
+    """The camera card's header `<button ...>...</button>`, markup and all."""
+    html = _index()
+    start = html.index('id="camera-card"')
+    header = re.search(r'<button class="control-group__header".*?</button>',
+                       html[start:], re.DOTALL)
+    assert header, "the camera card has no control-group__header"
+    return header.group(0)
+
+
+def test_the_camera_state_chip_lives_in_the_card_header():
+    """It is a flex sibling in the header row, not floated over it.
+
+    `.control-group__header` is `display:flex` with `.chevron` taking
+    `margin-left:auto`, so a span inserted between the title and the chevron
+    lays out after the title and cannot reach the icon -- which is the whole
+    fix. Every other card puts its header content in exactly this row.
+    """
+    header = _camera_header_tag()
+    assert 'id="camera-state"' in header, (
+        "the state chip is not in the card header; if it moved back into the "
+        "body it will float over the header again")
+    # order inside the row: title, then chip, then chevron. (`layout.js`
+    # `injectCardIcons` prepends the icon at runtime, so it is not in the file.)
+    title_at = header.index("<span>Camera</span>")
+    chip_at = header.index('id="camera-state"')
+    chevron_at = header.index('class="chevron"')
+    assert title_at < chip_at < chevron_at, (
+        f"header order must be title -> chip -> chevron, got "
+        f"{sorted([('title', title_at), ('chip', chip_at), ('chevron', chevron_at)], key=lambda p: p[1])}")
+
+
+def test_the_camera_chip_base_class_declares_no_positioning():
+    """Positioning is OPT-IN, so a new chip cannot inherit an overlay.
+
+    This is the surprise-default shape AGENTS.md keeps naming: the dangerous
+    behaviour was the default and the safe one had to be remembered. A base
+    class that only describes how a chip LOOKS cannot put anything anywhere.
+    """
+    bases = [body for sel, body in _camera_chip_rules() if sel == ".camera-chip"]
+    assert bases, "the .camera-chip base rule vanished"
+    offenders = [b.strip() for b in bases if "position:" in b]
+    assert not offenders, (
+        f"the .camera-chip base class declares positioning again: {offenders}. "
+        f"Put it on .camera-chip--overlay, which only the in-frame badges use.")
+
+
+def test_only_the_overlay_modifier_positions_a_camera_chip():
+    """`position: absolute` appears on exactly one camera-chip selector."""
+    positioned = sorted(sel for sel, body in _camera_chip_rules()
+                        if "position:" in body)
+    assert positioned == [".camera-chip--overlay"], (
+        f"camera-chip selectors declaring position: {positioned} -- expected only "
+        f".camera-chip--overlay")
+
+
+def test_the_state_chip_is_not_an_overlay_and_the_frozen_badge_is():
+    """The two chips have genuinely different jobs, so they carry different
+    classes: one rides a header row, one floats over the video.
+
+    Asserted as a PAIR. Checking only that the state chip lost `--overlay`
+    would pass just as well if the Frozen badge had lost it too and stopped
+    floating over the frame -- a fix that traded one rendering defect for
+    another.
+    """
+    html = _index()
+    state = re.search(r'<span id="camera-state"[^>]*class="([^"]*)"', html)
+    frozen = re.search(r'<span id="camera-frozen" class="([^"]*)"', html)
+    assert state and frozen, "one of the two camera chips is gone"
+    assert "camera-chip--overlay" not in state.group(1), (
+        "the header state chip must not be an overlay -- that is the defect")
+    assert "camera-chip--overlay" in frozen.group(1), (
+        "the Frozen badge must still float over the video frame")
+    assert "camera-chip" in state.group(1), "the state chip lost its shared look"
+
+
+def test_the_frozen_badge_has_a_positioned_ancestor_of_its_own():
+    """An absolutely-positioned chip is only ever as correct as the ancestor it
+    resolves against. `#camera-frame` is `position: relative`; without that the
+    Frozen badge would climb to `.card[data-card-id]` exactly as the state chip
+    did, and land back on the header."""
+    css = _style_css()
+    frame = re.search(r"#camera-frame\s*\{([^{}]*)\}", css)
+    assert frame, "no #camera-frame rule"
+    assert "position: relative" in frame.group(1), (
+        "#camera-frame is not positioned, so its overlay children would resolve "
+        "against the card and float over the header")
