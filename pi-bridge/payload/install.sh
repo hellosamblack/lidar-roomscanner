@@ -710,6 +710,18 @@ is_net_restart_unit() {
 # unit activation
 # ---------------------------------------------------------------------------
 
+# Has an administrator masked this unit? `masked` and `masked-runtime` are the
+# only two words `systemctl is-enabled` produces that no automated path here
+# ever causes, which is what makes them safe to treat as intent -- unlike
+# `disabled`, which a freshly copied unit also reports and which the issue #200
+# fix exists to clear.
+unit_is_masked() {
+    case "$(systemctl is-enabled "$1" 2>/dev/null || true)" in
+        masked|masked-runtime) return 0 ;;
+    esac
+    return 1
+}
+
 unit_exists() {
     systemctl list-unit-files "$1" --no-legend 2>/dev/null | grep -q "^$1"
 }
@@ -810,14 +822,10 @@ activate_units() {
             continue
         fi
         # A MASKED optional unit is an administrator saying "not on this box".
-        # Honour it, on first boot and on update alike. This is safe to
-        # distinguish where `disabled` is not: a freshly copied unit is never
-        # masked, so unlike `disabled` this cannot be confused with "brand new
-        # and not enabled yet" -- which is the case issue #200 exists for.
-        # Without this the deploy would silently switch the camera back on and
-        # log a scary enable failure while doing it (issue #226).
-        if [ "$(systemctl is-enabled "${unit}" 2>/dev/null || true)" = "masked" ] || \
-           [ "$(systemctl is-enabled "${unit}" 2>/dev/null || true)" = "masked-runtime" ]; then
+        # Honour it, on first boot and on update alike. Without this the deploy
+        # would silently switch the camera back on and log a scary enable
+        # failure while doing it (issue #226).
+        if unit_is_masked "${unit}"; then
             log "optional unit ${unit} is masked by the operator, leaving it alone"
             continue
         fi
@@ -851,14 +859,12 @@ activate_units() {
 
     for unit in "${OPTIONAL_UNITS[@]}"; do
         unit_exists "${unit}" || continue
-        case "$(systemctl is-enabled "${unit}" 2>/dev/null || true)" in
-            masked|masked-runtime)
-                # Deliberately off. Reporting it as "not active" here would be
-                # true and useless -- it is the state the operator asked for.
-                log "optional unit ${unit} is masked by the operator, not checking it"
-                continue
-                ;;
-        esac
+        if unit_is_masked "${unit}"; then
+            # Deliberately off. Reporting it as "not active" here would be
+            # true and useless -- it is the state the operator asked for.
+            log "optional unit ${unit} is masked by the operator, not checking it"
+            continue
+        fi
         # A .timer is active-or-waiting; is-active reports 'active' for both.
         verify_unit_active "${unit}" || log "WARNING: optional unit ${unit} is not active (non-fatal, but the capability it provides is absent)"
     done

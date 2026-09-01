@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import xml.dom.minidom
 from pathlib import Path
 
@@ -1712,6 +1713,12 @@ _STATUS_ARGV = (
     "cam_active_state", "cam_result",
 )
 
+#: Every camera field a caller may read, so a test that asserts one of them
+#: cannot silently be reading a key that no longer exists.
+_CAMERA_KEYS = {"usb_present", "unit_enabled", "unit_active_state", "unit_result",
+                "disabled_by_operator", "note", "port", "daemon",
+                "daemon_reachable", "unit", "warning"}
+
 
 def _run_status_assembler(**overrides) -> dict:
     """Execute roomscan-bridge-status's JSON assembler with a chosen reading.
@@ -1748,9 +1755,15 @@ def test_status_reports_a_deliberately_off_camera_as_off_not_as_broken():
                                     cam_active_state="inactive", cam_result="success",
                                     cam_status_raw="", cam_port="5001")
         cam = out["camera"]
+        assert set(cam) == _CAMERA_KEYS, sorted(cam)
         assert cam["unit_enabled"] == enabled
         assert cam["disabled_by_operator"] is True
-        assert cam["warning"] == (
+        # A NOTE, not a warning: the host prints `warning` verbatim as
+        # WARNING: on every bridge_status call, so a deliberately-off camera
+        # emitting one is a permanent true-but-useless line -- the exact thing
+        # this change removes.
+        assert cam["warning"] is None, cam
+        assert cam["note"] == (
             f"camera disabled by operator (systemctl is-enabled = {enabled})"), cam
 
 
@@ -1767,8 +1780,10 @@ def test_status_agrees_with_reconcile_about_a_plain_systemctl_stop():
                                 cam_status_raw="", cam_port="5001")
     cam = out["camera"]
     assert cam["disabled_by_operator"] is True, cam
-    assert "camera disabled by operator" in cam["warning"]
-    assert "Result=success" in cam["warning"]
+    assert cam["warning"] is None, cam
+    assert "camera disabled by operator" in cam["note"]
+    assert "Result=success" in cam["note"]
+    assert cam["unit_active_state"] == "inactive"
     # And the two really do agree, rather than merely both looking plausible.
     assert _camera_decision("yes", "enabled", "inactive", "success"
                             ).startswith("skip:")
@@ -1785,10 +1800,43 @@ def test_status_still_reports_a_camera_that_crashed():
                                 cam_status_raw="", cam_port="5001")
     cam = out["camera"]
     assert cam["disabled_by_operator"] is False, cam
+    assert cam["note"] is None, cam
     assert cam["warning"] == ("C270 is on the USB bus but roomscan-cam is not "
                               "answering on its port")
     assert _camera_decision("yes", "enabled", "failed", "exit-code"
                             ).startswith("restart:")
+
+
+def test_unit_state_and_daemon_state_are_not_the_same_field():
+    """`unit_active_state` is systemd about the UNIT; `daemon.state` is the
+    daemon about the CAMERA. They answer different questions and routinely
+    disagree -- an unfitted camera on a perfectly healthy unit is
+    `active` + `device_absent`.
+
+    They were briefly the same Python name, and the daemon branch ran last, so
+    the JSON reported the daemon word under the unit key. Nothing in the file
+    said the two were related; the last writer simply won.
+    """
+    out = _run_status_assembler(
+        cam_usb_present="no", cam_unit_enabled="enabled",
+        cam_active_state="active", cam_result="success", cam_port="5001",
+        cam_status_raw=json.dumps({"state": "device_absent", "generation": 3}))
+    cam = out["camera"]
+    assert cam["unit_active_state"] == "active", cam
+    assert cam["daemon"]["state"] == "device_absent"
+    assert cam["warning"] == "roomscan-cam reports state=device_absent"
+    assert cam["disabled_by_operator"] is False
+
+
+def test_a_faulted_daemon_does_not_overwrite_the_unit_state_either():
+    out = _run_status_assembler(
+        cam_usb_present="yes", cam_unit_enabled="enabled",
+        cam_active_state="active", cam_result="success", cam_port="5001",
+        cam_status_raw=json.dumps({"state": "faulted", "last_error": "boom"}))
+    cam = out["camera"]
+    assert cam["unit_active_state"] == "active", cam
+    assert cam["unit_result"] == "success"
+    assert cam["warning"] == "roomscan-cam reports state=faulted"
 
 
 def test_status_is_silent_about_a_healthy_camera():
@@ -1797,7 +1845,10 @@ def test_status_is_silent_about_a_healthy_camera():
         cam_active_state="active", cam_result="success",
         cam_status_raw=json.dumps({"state": "streaming", "generation": 1}))
     cam = out["camera"]
+    assert set(cam) == _CAMERA_KEYS, sorted(cam)
     assert cam["warning"] is None, cam
+    assert cam["note"] is None, cam
+    assert cam["unit_active_state"] == "active"
     assert cam["daemon_reachable"] is True
     assert cam["daemon"]["state"] == "streaming"
 
@@ -1809,8 +1860,10 @@ def test_status_does_not_invent_a_camera_verdict_it_could_not_reach():
     cam = out["camera"]
     assert cam["usb_present"] is False
     assert cam["unit_enabled"] is None
+    assert cam["unit_active_state"] is None
     assert cam["disabled_by_operator"] is False
     assert cam["warning"] is None
+    assert cam["note"] is None
 
 
 def test_install_leaves_a_masked_optional_unit_masked():
@@ -1828,3 +1881,112 @@ def test_install_leaves_a_masked_optional_unit_masked():
     assert "leaving it alone" in optional_loop
     # And the #200 behaviour is still there for everything else.
     assert 'systemctl enable "${unit}"' in optional_loop.split("else", 1)[1]
+
+
+# ---------------------------------------------------------------------------
+# install.sh's optional-unit handling, EXECUTED (issue #226)
+# ---------------------------------------------------------------------------
+
+_FAKE_SYSTEMCTL = r"""#!/bin/bash
+# Records every invocation, and answers the three queries activate_units makes.
+echo "$@" >> "$CALLS"
+case "$1" in
+    is-enabled)
+        state="$(grep -E "^$2=" "$ENABLED_MAP" 2>/dev/null | cut -d= -f2)"
+        [ -n "$state" ] || state="enabled"
+        echo "$state"
+        [ "$state" = "enabled" ] && exit 0
+        exit 1
+        ;;
+    is-active)
+        echo active
+        exit 0
+        ;;
+    list-unit-files)
+        # `unit_exists` greps for the unit name at line start, so an empty
+        # success here makes every unit look absent -- which silently turned
+        # the mask assertions into a test of a loop that never ran. That is
+        # what the "required units still get driven" case below is for.
+        echo "$2 enabled enabled"
+        exit 0
+        ;;
+    show) echo 0; exit 0 ;;
+esac
+exit 0
+"""
+
+
+def _run_activate_units(enabled_map: dict, first_boot: str = "0") -> list[str]:
+    """Source install.sh and actually run `activate_units` against a fake systemd.
+
+    The install tests in this file split the script's TEXT, which cannot tell
+    a `continue` that runs from one that was deleted -- the verify-pass skip
+    was covered by exactly such a test, and deleting its `continue` left the
+    test green. install.sh already guards `main` behind BASH_SOURCE, so it can
+    be sourced and one function driven directly.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        bindir = tmpdir / "bin"
+        bindir.mkdir()
+        calls = tmpdir / "calls.txt"
+        calls.touch()
+        emap = tmpdir / "enabled.map"
+        emap.write_text("".join(f"{k}={v}\n" for k, v in enabled_map.items()))
+        for name in ("systemctl", "journalctl", "nft"):
+            tool = bindir / name
+            tool.write_text(_FAKE_SYSTEMCTL if name == "systemctl"
+                            else "#!/bin/bash\nexit 0\n")
+            tool.chmod(0o755)
+        env = {
+            **os.environ,
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "CALLS": str(calls),
+            "ENABLED_MAP": str(emap),
+            "UNIT_SETTLE_SECS": "0",
+        }
+        script = (
+            f'set -u; FIRST_BOOT={first_boot}; '
+            f'source "{PAYLOAD / "install.sh"}"; '
+            f'FIRST_BOOT={first_boot}; UNIT_SETTLE_SECS=0; '
+            'capture_in_progress() { return 1; }; '
+            'activate_units'
+        )
+        proc = subprocess.run(["bash", "-c", script], capture_output=True,
+                              text=True, env=env)
+        assert proc.returncode == 0, proc.stderr[-3000:]
+        return calls.read_text().splitlines()
+
+
+@pytest.mark.parametrize("first_boot", ["0", "1"])
+def test_activate_units_never_touches_a_masked_optional_unit(first_boot):
+    """A deploy must not switch a deliberately-off camera back on -- on update
+    OR on first boot. And it must not then report the unit it deliberately
+    skipped as unhealthy, which is the half a text-splitting test misses."""
+    calls = _run_activate_units({"roomscan-cam.service": "masked"},
+                                first_boot=first_boot)
+    for verb in ("enable", "restart", "start"):
+        offenders = [c for c in calls
+                     if c.startswith(verb) and "roomscan-cam.service" in c]
+        assert not offenders, f"masked unit was {verb}d: {offenders}"
+    # The verify pass must skip it too: is-active on a unit we deliberately
+    # left down produces a WARNING that is true and useless.
+    assert not [c for c in calls if c.startswith("is-active")
+                and "roomscan-cam.service" in c], calls
+
+
+def test_activate_units_still_enables_a_normal_optional_unit_on_update():
+    """The issue #200 behaviour the mask check must not have broken: a
+    brand-new optional unit reports `disabled` and MUST still be enabled, or
+    it silently vanishes at the next reboot."""
+    calls = _run_activate_units({"roomscan-cam.service": "disabled"})
+    assert [c for c in calls if c == "enable roomscan-cam.service"], calls
+    assert [c for c in calls if c == "restart roomscan-cam.service"], calls
+
+
+def test_activate_units_leaves_the_required_units_alone_when_masked_is_absent():
+    """Sanity on the harness itself: the required units are still driven, so a
+    passing mask assertion above cannot be an artefact of nothing running."""
+    calls = _run_activate_units({})
+    assert [c for c in calls if c == "restart dnsmasq.service"], calls
+    assert [c for c in calls if c == "enable roomscan-cam.service"], calls

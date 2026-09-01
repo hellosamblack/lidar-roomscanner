@@ -342,7 +342,13 @@ if cam_status_raw.strip():
     except ValueError:
         cam_daemon = None
 cam_enabled = s(cam_unit_enabled)
-cam_state = s(cam_active_state)
+# cam_unit_state, NOT cam_state: the faulted/device_absent branch below binds
+# the DAEMON state, and when both were called cam_state that branch silently
+# overwrote this one before the JSON was built -- so an unfitted camera on a
+# healthy unit reported unit_active_state="device_absent". Two different
+# things must not share a name in a script that assembles its output at the
+# end, because the last writer wins and nothing says so.
+cam_unit_state = s(cam_active_state)
 cam_result_word = s(cam_result)
 # Two independent administrator signals, matching reconcile exactly:
 #   * is-enabled is disabled/masked/masked-runtime -- only an admin does that;
@@ -350,27 +356,29 @@ cam_result_word = s(cam_result)
 #     `failed`, or a Result that is not `success`.
 cam_switched_off = cam_enabled is not None and cam_enabled not in (
     "enabled", "enabled-runtime")
-cam_stopped_clean = cam_state == "inactive" and cam_result_word == "success"
+cam_stopped_clean = cam_unit_state == "inactive" and cam_result_word == "success"
 cam_off_on_purpose = bool(cam_switched_off or (cam_enabled and cam_stopped_clean))
 cam_warning = None
+cam_note = None
 if cam_off_on_purpose:
-    # NOT a fault, and it must not read as one. An operator who ran
-    # `systemctl stop`, `disable --now` or `mask --now` gets told exactly
-    # that, with the systemd words that prove it, so bridge_status stays clean
-    # while the camera is deliberately off -- for a measurement, or for good.
+    # NOT a fault, so NOT a warning: the host prints this scripts `warning`
+    # verbatim as WARNING: on every bridge_status, and a deliberately-off
+    # camera emitting one forever is the exact true-but-useless line this
+    # whole change exists to remove. The evidence goes in `note`, which is
+    # informational and which no fault path reads.
     if cam_switched_off:
         cam_detail = f"systemctl is-enabled = {cam_enabled}"
     else:
-        cam_detail = f"stopped, ActiveState={cam_state} Result={cam_result_word}"
-    cam_warning = f"camera disabled by operator ({cam_detail})"
+        cam_detail = f"stopped, ActiveState={cam_unit_state} Result={cam_result_word}"
+    cam_note = f"camera disabled by operator ({cam_detail})"
 elif yesno(cam_usb_present) and cam_daemon is None:
     cam_warning = ("C270 is on the USB bus but roomscan-cam is not answering "
                    "on its port")
 elif cam_daemon and cam_daemon.get("state") in ("faulted", "device_absent"):
     # No apostrophe anywhere in this block on purpose: the whole assembler is a
     # single-quoted `python3 -c` argument, and one stray quote ends it.
-    cam_state = cam_daemon.get("state")
-    cam_warning = f"roomscan-cam reports state={cam_state}"
+    cam_daemon_state = cam_daemon.get("state")
+    cam_warning = f"roomscan-cam reports state={cam_daemon_state}"
 
 out = {
     "model": s(model),
@@ -423,9 +431,12 @@ out = {
         # The exact systemd word, not a re-derived boolean: a re-derived label
         # diverges from its source the moment either side moves.
         "unit_enabled": cam_enabled,
-        "unit_active_state": cam_state,
+        "unit_active_state": cam_unit_state,
         "unit_result": cam_result_word,
         "disabled_by_operator": cam_off_on_purpose,
+        # Informational, never a fault. The host prints `warning` verbatim;
+        # it does not print this.
+        "note": cam_note,
         "port": i(cam_port),
         "daemon": cam_daemon,
         "daemon_reachable": cam_daemon is not None,
