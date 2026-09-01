@@ -45,6 +45,25 @@ table ip roomscan_bridge {
 		iifname "wlan0" udp dport {{STREAM_PORT}} counter dnat to {{SCANNER_IP}}:{{STREAM_PORT}} comment "roomscan-dnat-to-scanner"
 	}
 
+	chain input {
+		# Policy accept, deliberately: this box has never filtered its
+		# own input and turning that on here would be a firewall change
+		# smuggled in with a camera feature. These two rules exist to
+		# SCOPE the camera port and to COUNT what reaches it.
+		type filter hook input priority filter; policy accept;
+
+		# The camera service binds wlan0's own address, so eth0 cannot
+		# reach it in the first place; this is the belt to that brace,
+		# and its counter is the evidence that the scanner-facing side
+		# never tried. A nonzero count here is a real finding.
+		iifname "eth0" tcp dport {{CAM_PORT}} counter drop comment "roomscan-cam-deny-eth0"
+
+		# The roomscan LAN is the trust boundary for the camera feed,
+		# matching the already-unauthenticated web UI. Not published to
+		# the internet; not reachable from the scanner segment.
+		iifname "wlan0" tcp dport {{CAM_PORT}} counter accept comment "roomscan-cam-allow-wlan0"
+	}
+
 	chain postrouting {
 		type nat hook postrouting priority srcnat; policy accept;
 

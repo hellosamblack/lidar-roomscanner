@@ -1,0 +1,105 @@
+[Unit]
+Description=roomscan bridge -- bounded MJPEG live feed from the rig camera (C270)
+Documentation=https://github.com/hellosamblack/lidar-roomscanner/issues/226
+# Structurally OPTIONAL, in the same sense as roomscan-tee.service: the
+# scanner data path is kernel forwarding plus nftables NAT and does not consult
+# this unit in any way. A missing, failed or disabled camera service must never
+# read as a broken bridge -- install.sh treats it as optional and
+# roomscan-bridge-status reports it without escalating it.
+After=network-online.target
+Wants=network-online.target
+# Five starts in five minutes, then it stays down and is VISIBLE as failed.
+# Same reasoning as roomscan-tee: an unbounded 5 s restart loop on a
+# structural fault is journal churn that nothing ever escalates. Ordinary
+# unplug/replug does NOT reach this limit -- the daemon handles a disappearing
+# device internally by incrementing its generation and reopening, and only
+# exits on something it cannot recover from (issue #226, spec 5.3).
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/roomscan-cam
+# The port comes from the SAME build-time token the nftables rule uses, so the
+# firewall and the listener cannot disagree about it. The mode and the control
+# below are the ones the characterization gate actually passed:
+# exposure_dynamic_framerate=1 halves the C270's cadence to 14.7 fps at EVERY
+# resolution, so 30 fps is a property of this control, not of 720p.
+Environment=ROOMSCAN_CAM_PORT={{CAM_PORT}}
+Environment=ROOMSCAN_CAM_IFACE=wlan0
+Environment=ROOMSCAN_CAM_MODE=1280x720@30
+Environment=ROOMSCAN_CAM_VID_PID=046d:0825
+Environment=ROOMSCAN_CAM_CONTROLS=exposure_dynamic_framerate=0
+# Optional operator override, absent on a normal image (the leading `-`).
+EnvironmentFile=-/etc/roomscan-bridge/cam.env
+Restart=on-failure
+RestartSec=5
+Nice=5
+
+# The camera is a comfort feature sharing a 4-core Pi 3B with the scanner's
+# forwarding path. Measured cost is ~5% of one core at 720p30 (see
+# pi-bridge/tools/cam_characterize_results_20260901.md), so this weight only
+# matters if something regresses -- which is exactly when it should matter.
+CPUWeight=20
+IOWeight=20
+
+# --- what it is allowed to be ------------------------------------------
+# A dedicated unprivileged identity WITHOUT adding an account to the image:
+# DynamicUser allocates one per start and SupplementaryGroups gives it the
+# `video` access it needs and nothing else. It never needs root: the C270
+# nodes are root:video 0660 and the daemon binds a port above 1024.
+DynamicUser=yes
+SupplementaryGroups=video
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RuntimeDirectory=roomscan-cam
+RuntimeDirectoryMode=0750
+
+# --- what it is allowed to touch ---------------------------------------
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# PrivateDevices= is deliberately ABSENT. It would give this unit a private
+# /dev containing only null/zero/full/random/urandom/tty -- i.e. it would hide
+# /dev/video* from a service whose entire purpose is /dev/video*. The correct
+# tool is a closed device policy plus one explicit allow.
+DevicePolicy=closed
+DeviceAllow=char-video4linux rw
+
+# --- what it is allowed to reach ---------------------------------------
+# AF_INET only: an HTTP server on wlan0. AF_UNIX is kept because the v4l2-ctl
+# control readback and timedatectl are subprocesses that use it.
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+# The roomscan LAN is the trust boundary, exactly as it already is for the
+# unauthenticated web UI. This does not enumerate the LAN's subnet, which
+# changes between the home and travel Wi-Fi profiles; the binding to wlan0's
+# own address plus the nftables input rule are what scope the surface.
+IPAddressAllow=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+
+# --- bounded --------------------------------------------------------------
+# One capture loop, one latest frame, at most max_clients writer threads. The
+# measured working set at 720p30 is a few tens of MB; these are ceilings that
+# turn a leak into a restart instead of into an OOM on a 920 MB box.
+MemoryMax=256M
+TasksMax=32
+LimitNOFILE=256
+
+[Install]
+WantedBy=multi-user.target

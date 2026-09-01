@@ -23,6 +23,7 @@
 : "${SCANNER_FALLBACK_IP:=172.31.253.1}"
 : "${ETH_ADDR:=172.31.100.1}"
 : "${STREAM_PORT:=5000}"
+: "${CAM_PORT:=5001}"
 : "${HOSTNAME:=roomscan-bridge}"
 
 NODE_ENV_FILE="${NODE_ENV_FILE:-/etc/roomscan-bridge/node.env}"

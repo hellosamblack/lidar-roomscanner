@@ -25,6 +25,11 @@ PAYLOAD = PI / "payload"
 BOOT = PI / "boot"
 
 
+# Importing a payload module writes __pycache__ INTO the payload tree, which
+# install.sh would then try to ship to /usr/local/sbin. Off for this session.
+sys.dont_write_bytecode = True
+
+
 def _load_build_image():
     """Import `pi-bridge/build_image.py` without putting it on sys.path.
 
@@ -1260,3 +1265,223 @@ def test_compress_xz_fallback_when_no_xz(tmp_path, monkeypatch):
     with lzma.open(out, "rb") as f:
         assert f.read() == data
 
+
+
+# ---------------------------------------------------------------------------
+# Camera payload (issue #226)
+# ---------------------------------------------------------------------------
+
+CAM_UNIT = "roomscan-cam.service"
+
+
+def _cam_unit(rendered):
+    import configparser
+    cp = configparser.ConfigParser(strict=False, allow_no_value=True)
+    cp.optionxform = str
+    cp.read_string((rendered / "etc" / "systemd" / "system" / CAM_UNIT).read_text())
+    return cp
+
+
+def test_the_camera_unit_is_optional_and_never_a_required_one():
+    """A bridge with no camera fitted is a healthy bridge.
+
+    `roomscan-cam` sits in OPTIONAL_UNITS for the same structural reason
+    `roomscan-tee` does: the scanner data path is kernel forwarding plus the
+    nftables rules and does not consult it. Promoting it to REQUIRED_UNITS
+    would make an unplugged webcam fail the whole install.
+    """
+    text = (PAYLOAD / "install.sh").read_text()
+    optional = text.split("OPTIONAL_UNITS=(", 1)[1].split("\n)", 1)[0]
+    required = text.split("REQUIRED_UNITS=(", 1)[1].split("\n)", 1)[0]
+    assert CAM_UNIT in optional
+    assert CAM_UNIT not in required
+
+
+def test_the_camera_unit_does_not_hide_the_devices_it_exists_to_read():
+    """`PrivateDevices=yes` gives a unit a /dev with no `video*` in it.
+
+    It is the obvious-looking hardening line to add and it would break this
+    service completely -- and silently, because the daemon's own failure mode
+    for a missing node is `device_absent`, which reads as "no camera plugged
+    in". The correct pairing is a closed device policy plus one explicit
+    allow, so assert BOTH halves: the trap is absent, the allow is present.
+    """
+    raw = (PAYLOAD / "etc" / "systemd" / "system" / CAM_UNIT).read_text()
+    directives = [line.split("#", 1)[0].strip() for line in raw.splitlines()]
+    assert not [d for d in directives if d.startswith("PrivateDevices=")], \
+        "PrivateDevices= would hide /dev/video* from the camera service"
+    assert "DevicePolicy=closed" in directives
+    assert "DeviceAllow=char-video4linux rw" in directives
+
+
+def test_the_camera_unit_runs_unprivileged_with_video_access_only(rendered):
+    cp = _cam_unit(rendered)
+    service = cp["Service"]
+    assert service["DynamicUser"] == "yes"
+    assert service["SupplementaryGroups"] == "video"
+    assert service["NoNewPrivileges"] == "yes"
+    # An empty bounding set is the strongest statement available: this service
+    # needs no capability at all -- the C270 nodes are root:video 0660 and the
+    # port is above 1024.
+    assert service["CapabilityBoundingSet"] == ""
+    assert service["ProtectSystem"] == "strict"
+    # Bounded rather than best-effort: a leak on a 920 MB box must become a
+    # restart, not an OOM that takes the bridge with it.
+    assert service["MemoryMax"] == "256M"
+    assert int(service["TasksMax"]) <= 64
+    assert int(service["LimitNOFILE"]) <= 1024
+
+
+def test_the_camera_unit_bounds_its_own_restart_loop(rendered):
+    cp = _cam_unit(rendered)
+    assert cp["Service"]["Restart"] == "on-failure"
+    assert int(cp["Unit"]["StartLimitBurst"]) <= 5
+    assert int(cp["Unit"]["StartLimitIntervalSec"]) >= 60
+
+
+def test_the_camera_unit_ships_the_control_the_measurement_required(rendered):
+    """Measured on the real bridge 2026-09-01: with
+    `exposure_dynamic_framerate=1` the C270 delivers 14.7 fps at 720p AND at
+    480p -- the resolution is not the variable, the control is. Shipping the
+    unit without this line would advertise a 30 fps mode nothing supports."""
+    raw = (rendered / "etc" / "systemd" / "system" / CAM_UNIT).read_text()
+    assert "ROOMSCAN_CAM_CONTROLS=exposure_dynamic_framerate=0" in raw
+    assert "ROOMSCAN_CAM_MODE=1280x720@30" in raw
+    assert "ROOMSCAN_CAM_IFACE=wlan0" in raw
+
+
+def test_the_camera_port_is_one_token_shared_by_the_unit_and_the_firewall():
+    """Two literals for one port drift; the nft rule would then guard a port
+    nothing listens on, and read as a working firewall."""
+    unit = (PAYLOAD / "etc" / "systemd" / "system" / CAM_UNIT).read_text()
+    nft = (PAYLOAD / "etc" / "nftables" / "roomscan-bridge.nft").read_text()
+    assert "ROOMSCAN_CAM_PORT={{CAM_PORT}}" in unit
+    assert nft.count("{{CAM_PORT}}") == 2
+    assert bi.DEFAULT_NETWORK["CAM_PORT"] == "5001"
+    assert "CAM_PORT" in bi.NODE_ENV_KEYS
+
+
+def test_the_camera_port_is_scoped_to_wlan0_and_counted(rendered):
+    """The scanner-facing side must not reach the camera feed, and the rule
+    that says so must COUNT -- a silent drop rule and an absent one look the
+    same from outside. Policy stays `accept`: turning on input filtering for
+    the whole box would be a firewall change smuggled in with a feature."""
+    nft = (rendered / "etc" / "nftables" / "roomscan-bridge.nft").read_text()
+    chain = nft.split("chain input {", 1)[1].split("\n\t}", 1)[0]
+    assert "policy accept" in chain
+    deny = [ln for ln in chain.splitlines() if "roomscan-cam-deny-eth0" in ln]
+    allow = [ln for ln in chain.splitlines() if "roomscan-cam-allow-wlan0" in ln]
+    assert len(deny) == 1 and len(allow) == 1
+    assert 'iifname "eth0"' in deny[0] and "counter drop" in deny[0]
+    assert 'iifname "wlan0"' in allow[0] and "counter accept" in allow[0]
+    assert "tcp dport 5001" in deny[0] and "tcp dport 5001" in allow[0]
+
+
+def test_reconcile_restarts_the_camera_only_when_a_camera_is_present():
+    """Asymmetric on purpose. A bridge with no camera fitted has nothing to
+    heal, and restarting on every 10 s pass would burn the unit's
+    StartLimitBurst on a non-problem -- leaving it dead for the moment a
+    camera IS plugged in, which is precisely when it is wanted."""
+    text = (PAYLOAD / "usr" / "local" / "sbin" / "roomscan-bridge-reconcile").read_text()
+    body = text.split("ensure_camera_service() {", 1)[1].split("\n}", 1)[0]
+    assert "camera_present" in body
+    assert "046d:0825" in text, "the camera is identified by USB id, not /dev/videoN"
+    # Same latched-start-limit clear the tee needed in #191.
+    assert "reset-failed roomscan-cam.service" in body
+    assert "ensure_camera_service" in text.split("main() {", 1)[1]
+
+
+def test_status_separates_no_camera_fitted_from_camera_service_broken():
+    """Collapsing those two is how an unplugged webcam becomes a bridge alarm
+    -- and how a genuinely dead daemon becomes invisible. Same class as the
+    `iw`-missing bug in #191: an absent answer must not read as a real
+    negative."""
+    text = (PAYLOAD / "usr" / "local" / "sbin" / "roomscan-bridge-status").read_text()
+    assert "CAM_USB_PRESENT" in text and "CAM_STATUS_RAW" in text
+    assert '"usb_present": yesno(cam_usb_present)' in text
+    assert '"daemon": cam_daemon' in text
+    assert '"daemon_reachable"' in text
+    assert '"warning": cam_warning' in text
+    # The daemon's own status.json is passed through, not re-derived: a
+    # re-derived label diverges from its source the moment either side moves.
+    assert "cam_daemon = json.loads(cam_status_raw)" in text
+    assert "roomscan-cam.service" in text.split("UNITS_LIST=", 1)[1].splitlines()[0]
+
+
+def _payload_python() -> list[Path]:
+    """Payload files that the Pi's python3 has to be able to run."""
+    out = []
+    for p in _payload_files():
+        head = p.read_bytes()[:64]
+        if p.suffix == ".py" or (head.startswith(b"#!") and b"python" in head):
+            out.append(p)
+    return out
+
+
+def test_every_payload_python_file_compiles_and_is_executable(tmp_path):
+    import py_compile
+    files = _payload_python()
+    assert len(files) >= 2, f"expected roomscan-cam + its v4l2 module, found {files}"
+    for p in files:
+        # cfile into tmp_path, never beside the source: a .pyc left in the
+        # payload is a file install.sh would ship to the Pi.
+        py_compile.compile(str(p), cfile=str(tmp_path / (p.name + "c")),
+                           doraise=True)
+        assert os.access(p, os.X_OK), f"{p.relative_to(PI)} is not executable"
+
+
+def test_the_payload_carries_no_build_artifacts():
+    """Everything in `usr/local/sbin/` is installed verbatim onto the Pi, so a
+    stray `__pycache__` from a test run would be shipped as a system tool."""
+    strays = [str(p.relative_to(PI)) for p in _payload_files()
+              if "__pycache__" in p.parts or p.suffix in (".pyc", ".pyo")]
+    assert not strays, strays
+
+
+def test_the_daemon_and_the_characterization_tool_share_one_v4l2_layer():
+    """One copy, not two. When two tools disagree about the same bytes the
+    tool is usually the bug, and a second transcription of `struct
+    v4l2_buffer` offsets is a guaranteed future disagreement."""
+    module = PAYLOAD / "usr" / "local" / "sbin" / "roomscan_cam_v4l2.py"
+    assert module.is_file()
+    assert not (PI / "tools" / "v4l2_capture.py").exists(), \
+        "the V4L2 layer was duplicated back into pi-bridge/tools/"
+    tool = (PI / "tools" / "cam_characterize.py").read_text()
+    assert "import roomscan_cam_v4l2 as v4l2" in tool
+    daemon = (PAYLOAD / "usr" / "local" / "sbin" / "roomscan-cam").read_text()
+    assert "import roomscan_cam_v4l2 as v4l2" in daemon
+
+
+def test_the_v4l2_layer_probes_the_buffer_layout_instead_of_deriving_it():
+    """Raspbian 13 armhf is a 64-bit-`time_t` port, so `struct v4l2_buffer` is
+    80 bytes and `VIDIOC_DQBUF` is a different ioctl NUMBER than the 68-byte
+    TIME32 one an armv7l guess would pick. The kernel accepts both; only one
+    matches what this process packs. Measured on the real bridge: `time64`."""
+    module = (PAYLOAD / "usr" / "local" / "sbin" / "roomscan_cam_v4l2.py").read_text()
+    assert "_probe_layout" in module
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "roomscan_cam_v4l2_under_test",
+        PAYLOAD / "usr" / "local" / "sbin" / "roomscan_cam_v4l2.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    sizes = sorted(layout.size for layout in mod.BUFFER_LAYOUTS)
+    assert sizes == [68, 80], sizes
+    # Distinct ioctl numbers is the whole reason a probe is possible.
+    numbers = {layout.DQBUF for layout in mod.BUFFER_LAYOUTS}
+    assert len(numbers) == len(mod.BUFFER_LAYOUTS)
+
+
+def test_the_measured_characterization_result_is_committed_beside_the_daemon():
+    """The spec forbids writing the daemon before the numbers exist. Keeping
+    the evidence in the tree is what makes that checkable a year from now."""
+    results = PI / "tools" / "cam_characterize_results_20260901.md"
+    assert results.is_file()
+    text = results.read_text()
+    assert "exposure_dynamic_framerate" in text
+    # The measured cadence, not the requested one -- if this file ever stops
+    # carrying a real number the daemon's default has lost its evidence.
+    assert "29.7" in text and "14.7" in text
+    raw = PI / "tools" / "cam_characterize_results_20260901"
+    assert (raw / "B_preview_pi.json").is_file()
+    assert (raw / "A_baseline_pi.json").is_file()

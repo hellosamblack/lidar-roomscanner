@@ -156,8 +156,48 @@ if ring_names="$(as_root ls -t "${RING_DIR}" 2>/dev/null)"; then
     fi
 fi
 
+# --- camera (issue #226) ------------------------------------------------
+# Three independent questions, kept independent, because collapsing them is how
+# "the camera is unplugged" and "the camera service is broken" become the same
+# reading:
+#
+#   1. is the C270 present on the USB bus at all      -> CAM_USB_PRESENT
+#   2. is roomscan-cam.service running                -> in UNITS_LIST below
+#   3. what does the daemon itself say it is doing    -> CAM_STATUS_RAW
+#
+# All three are tri-state. A camera that is deliberately not fitted is NOT a
+# bridge failure and must not be reported as one; the MCP-side consumer decides
+# whether it cares, and it can only do that if it can tell absent from broken.
+CAM_USB_PRESENT=""
+if have lsusb; then
+    CAM_USB_PRESENT="no"
+    if lsusb 2>/dev/null | grep -qi "046d:0825"; then
+        CAM_USB_PRESENT="yes"
+    fi
+elif [ -d /sys/bus/usb/devices ]; then
+    CAM_USB_PRESENT="no"
+    for idv in /sys/bus/usb/devices/*/idVendor; do
+        [ -f "${idv}" ] || continue
+        idp="$(dirname "${idv}")/idProduct"
+        if [ "$(cat "${idv}" 2>/dev/null)" = "046d" ] && \
+           [ "$(cat "${idp}" 2>/dev/null)" = "0825" ]; then
+            CAM_USB_PRESENT="yes"
+            break
+        fi
+    done
+fi
+
+# The daemon binds wlan0's address, never 0.0.0.0, so ask it there. An
+# unreachable or absent daemon leaves this empty, which the JSON below renders
+# as null -- never as a fabricated "offline" state the daemon did not report.
+CAM_STATUS_RAW=""
+CAM_ADDR="$(printf '%s' "${WLAN0_IPV4}" | cut -d/ -f1)"
+if [ -n "${CAM_ADDR}" ] && have curl; then
+    CAM_STATUS_RAW="$(curl -fsS --max-time 3 "http://${CAM_ADDR}:${CAM_PORT}/status.json" 2>/dev/null || true)"
+fi
+
 # --- units --------------------------------------------------------------
-UNITS_LIST="dnsmasq.service avahi-daemon.service nftables.service roomscan-tee.service roomscan-bridge-reconcile.timer roomscan-bridge-healthlog.timer"
+UNITS_LIST="dnsmasq.service avahi-daemon.service nftables.service roomscan-tee.service roomscan-bridge-reconcile.timer roomscan-bridge-healthlog.timer roomscan-cam.service"
 UNITS_RAW=""
 for u in ${UNITS_LIST}; do
     state="$(systemctl is-active "${u}" 2>/dev/null || true)"
@@ -192,7 +232,8 @@ import sys
     units_raw,
     temp_c, throttled, ntp_synced,
     scanner_ip, stream_port,
-) = sys.argv[1:28]
+    cam_usb_present, cam_status_raw, cam_port,
+) = sys.argv[1:31]
 
 
 def s(v):
@@ -278,6 +319,22 @@ for line in units_raw.splitlines():
 
 ring_files = i(ring_files_count) or 0
 
+cam_daemon = None
+if cam_status_raw.strip():
+    try:
+        cam_daemon = json.loads(cam_status_raw)
+    except ValueError:
+        cam_daemon = None
+cam_warning = None
+if yesno(cam_usb_present) and cam_daemon is None:
+    cam_warning = ("C270 is on the USB bus but roomscan-cam is not answering "
+                   "on its port")
+elif cam_daemon and cam_daemon.get("state") in ("faulted", "device_absent"):
+    # No apostrophe anywhere in this block on purpose: the whole assembler is a
+    # single-quoted `python3 -c` argument, and one stray quote ends it.
+    cam_state = cam_daemon.get("state")
+    cam_warning = f"roomscan-cam reports state={cam_state}"
+
 out = {
     "model": s(model),
     "hostname": s(hostname_val),
@@ -317,6 +374,21 @@ out = {
     },
     "units": units,
     "unit_restarts": unit_restarts,
+    # A deliberately absent optional camera is not a bridge failure, so this
+    # block reports and never escalates. `usb_present` false with `daemon` null
+    # is "no camera fitted"; `usb_present` true with `daemon` null is
+    # "camera fitted, service not answering" -- a real warning, and a different
+    # one. `daemon` is the verbatim /status.json the daemon served, so its
+    # state/generation/counters do not get re-derived (and re-derived labels
+    # diverge from their source).
+    "camera": {
+        "usb_present": yesno(cam_usb_present),
+        "port": i(cam_port),
+        "daemon": cam_daemon,
+        "daemon_reachable": cam_daemon is not None,
+        "unit": units.get("roomscan-cam.service"),
+        "warning": cam_warning,
+    },
     "temp_c": f(temp_c),
     "throttled": s(throttled),
     "ntp_synced": yesno(ntp_synced),
@@ -332,4 +404,5 @@ print()
     "${TEE_ACTIVE}" "${RING_FILES_COUNT}" "${RING_BYTES}" "${RING_NEWEST}" "${RING_OLDEST}" "${TEE_READABLE}" \
     "${UNITS_RAW}" \
     "${TEMP_C}" "${THROTTLED}" "${NTP_SYNCED}" \
-    "${SCANNER_IP}" "${STREAM_PORT}"
+    "${SCANNER_IP}" "${STREAM_PORT}" \
+    "${CAM_USB_PRESENT}" "${CAM_STATUS_RAW}" "${CAM_PORT}"

@@ -196,6 +196,59 @@ ensure_wlan0_connected() {
 }
 
 # ---------------------------------------------------------------------------
+# Camera (issue #226)
+# ---------------------------------------------------------------------------
+
+# Is the C270 actually on the USB bus? Identity, never a /dev/videoN guess:
+# the camera exposes TWO nodes with the same USB id and only one of them is a
+# capture node, and the numbering moves across replug.
+camera_present() {
+    if command -v lsusb >/dev/null 2>&1; then
+        lsusb 2>/dev/null | grep -qi "046d:0825" && return 0
+        return 1
+    fi
+    local idv idp
+    for idv in /sys/bus/usb/devices/*/idVendor; do
+        [ -f "${idv}" ] || continue
+        idp="$(dirname "${idv}")/idProduct"
+        if [ "$(cat "${idv}" 2>/dev/null)" = "046d" ] && \
+           [ "$(cat "${idp}" 2>/dev/null)" = "0825" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Restart roomscan-cam ONLY when the camera identity is present.
+#
+# The asymmetry is the point. With no camera fitted, the daemon is supposed to
+# sit in `device_absent` and the unit is supposed to be active, so there is
+# nothing to heal -- and hammering `systemctl restart` at a bridge that simply
+# has no camera would burn the unit StartLimitBurst on a non-problem and leave
+# it dead for the moment a camera IS plugged in. With a camera present and the
+# unit dead, that is a real fault and worth one restart per pass.
+ensure_camera_service() {
+    systemctl list-unit-files roomscan-cam.service >/dev/null 2>&1 || return 0
+    if ! camera_present; then
+        return 0
+    fi
+    if systemctl is-active --quiet roomscan-cam.service; then
+        return 0
+    fi
+    log "C270 present but roomscan-cam.service is not active, restarting"
+    # reset-failed first: a unit that already burned its StartLimitBurst
+    # answers every restart with `Start request repeated too quickly` and never
+    # runs again, which is exactly the state a self-healing pass must clear
+    # (the lesson roomscan-tee taught in issue #191).
+    systemctl reset-failed roomscan-cam.service 2>/dev/null || true
+    if systemctl restart roomscan-cam.service; then
+        log "restarted roomscan-cam.service successfully"
+    else
+        log "ERROR: failed to restart roomscan-cam.service"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Unit health
 # ---------------------------------------------------------------------------
 
@@ -223,6 +276,7 @@ main() {
     fi
     restart_dead_units
     ensure_wlan0_connected
+    ensure_camera_service
 }
 
 main "$@"

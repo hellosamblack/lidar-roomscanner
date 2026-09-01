@@ -133,6 +133,13 @@ OPTIONAL_UNITS=(
     "roomscan-tee.service"
     "roomscan-bridge-reconcile.timer"
     "roomscan-bridge-healthlog.timer"
+    # The camera feed (issue #226). Optional in the strong sense: a bridge
+    # with no C270 plugged in runs this unit anyway, and the daemon reports
+    # `device_absent` rather than exiting -- so "the camera is unplugged" and
+    # "the camera service is broken" stay distinguishable in bridge_status.
+    # It is in OPTIONAL_UNITS and not REQUIRED_UNITS because nothing on the
+    # scanner data path consults it.
+    "roomscan-cam.service"
 )
 
 # Set by activate_units(); read by main() after it returns.

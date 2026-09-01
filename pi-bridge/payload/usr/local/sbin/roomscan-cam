@@ -1,0 +1,776 @@
+#!/usr/bin/python3
+"""roomscan-cam -- bounded MJPEG live feed from the rig camera (issue #226).
+
+One V4L2 MMAP capture loop, one latest-frame slot, any number of latest-only
+HTTP consumers.  Nothing here queues pixels: a browser that stops reading
+stalls its own socket and, when it drains, receives the NEWEST frame and skips
+everything it missed.  That is the whole design, and it is what keeps a slow
+viewer from turning into seconds of latency on a shared Wi-Fi uplink (#217).
+
+MEASURED BEFORE IT WAS WRITTEN.  The mode this serves by default -- MJPG
+1280x720 at 30 fps -- is the highest mode that actually passed the spec's
+characterization gate on this hardware, not the highest the device enumerates.
+`pi-bridge/tools/cam_characterize_results_20260901.md` has the numbers: 29.73
+-- 29.80 fps sustained over 90 s, 68.7 KB median JPEG, ~2.0 MB/s, 5% of one
+Pi 3B core, 63.4 C peak, no throttling, and no measurable effect on the
+scanner stream sharing the USB tree and the wlan0 uplink.
+
+THE ONE CONTROL THAT DECIDES THE FRAME RATE.  `exposure_dynamic_framerate`
+lets the C270 halve its cadence to lengthen exposure.  The unit was carrying
+`1`, and at `1` it delivers 14.7 fps at 720p AND at 480p -- the resolution is
+not the variable, the control is.  So the daemon SETS it explicitly and reports
+the readback in `/status.json`; a mode that enumerates at 30 fps and a mode
+that delivers 30 fps are different claims.
+
+WHAT THIS BINDS.  wlan0's address only, never 0.0.0.0: the scanner-facing eth0
+must not be able to reach this service even by accident.  The roomscan LAN is
+the trust boundary, exactly as it already is for the unauthenticated web UI.
+
+Endpoints (spec 5.2):
+    GET/HEAD /stream.mjpg    multipart/x-mixed-replace, latest-wins
+    GET/HEAD /frame.jpg      the current frame, exact original bytes
+    GET/HEAD /status.json    actual identity/mode/controls/rates/errors
+    GET      /clock.json     four-timestamp exchange support
+"""
+from __future__ import annotations
+
+import argparse
+import http.server
+import json
+import os
+import socket
+import struct
+import sys
+import threading
+import time
+import fcntl
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import roomscan_cam_v4l2 as v4l2  # noqa: E402
+
+BOUNDARY = "frame"
+TIMESTAMP_DOMAIN_HEADER = "X-Roomscan-Timestamp-Domain"
+
+DEFAULTS = {
+    "port": 5001,
+    "iface": "wlan0",
+    "mode": "1280x720@30",
+    "vid_pid": "046d:0825",
+    "device": "",
+    "max_clients": 8,
+    # 720p MJPEG measured at 69 KB worst case; 2 MB is ~30x headroom and still
+    # bounds a driver that hands back a garbage bytesused.
+    "max_frame_bytes": 2 * 1024 * 1024,
+    "controls": "exposure_dynamic_framerate=0",
+    "reopen_backoff_s": 1.0,
+    "reopen_backoff_max_s": 15.0,
+}
+
+STATE_DEVICE_ABSENT = "device_absent"
+STATE_OPENING = "opening"
+STATE_STREAMING = "streaming"
+STATE_FAULTED = "faulted"
+
+
+# ===========================================================================
+# Frames
+# ===========================================================================
+
+class CameraFrame:
+    """One immutable capture.  Shared by every consumer; never mutated.
+
+    `__slots__` and the absence of setters are the point: the latest slot hands
+    the SAME object to every client thread, so a mutable frame would be a data
+    race with no symptom until a client saw half of the next JPEG.
+    """
+
+    # `__weakref__` is listed on purpose: __slots__ otherwise makes the class
+    # un-weak-referenceable, and the bounded-memory test proves its claim by
+    # showing superseded frames get COLLECTED, which needs a weakref.
+    __slots__ = ("generation", "seq", "jpeg", "pi_capture_mono_ns",
+                 "timestamp_valid", "timestamp_flags", "timestamp_domain",
+                 "dequeue_mono_ns", "width", "height", "fourcc", "__weakref__")
+
+    def __init__(self, *, generation, seq, jpeg, pi_capture_mono_ns,
+                 timestamp_valid, timestamp_flags, timestamp_domain,
+                 dequeue_mono_ns, width, height, fourcc):
+        self.generation = generation
+        self.seq = seq
+        self.jpeg = jpeg
+        self.pi_capture_mono_ns = pi_capture_mono_ns
+        self.timestamp_valid = timestamp_valid
+        self.timestamp_flags = timestamp_flags
+        self.timestamp_domain = timestamp_domain
+        self.dequeue_mono_ns = dequeue_mono_ns
+        self.width = width
+        self.height = height
+        self.fourcc = fourcc
+
+    @property
+    def key(self) -> tuple[int, int]:
+        """`(generation, seq)` -- the identity a reconnect must not duplicate."""
+        return (self.generation, self.seq)
+
+
+def frame_headers(frame: CameraFrame) -> list[tuple[str, str]]:
+    """The per-part headers, in the spec's order.
+
+    `X-Roomscan-Capture-Timestamp-Valid` and `X-Roomscan-Capture-Dequeue-Mono-Ns`
+    are ADDITIONS to spec 5.2's list, and deliberate ones: when the driver does
+    not assert a usable timestamp domain there has to be a way to say so that
+    is not "put the dequeue time in the capture field".  A consumer that only
+    reads the spec's five headers is unaffected.
+    """
+    return [
+        ("Content-Type", "image/jpeg"),
+        ("Content-Length", str(len(frame.jpeg))),
+        ("X-Roomscan-Camera-Generation", str(frame.generation)),
+        ("X-Roomscan-Camera-Seq", str(frame.seq)),
+        ("X-Roomscan-Capture-Mono-Ns", str(frame.pi_capture_mono_ns)),
+        (TIMESTAMP_DOMAIN_HEADER, frame.timestamp_domain),
+        ("X-Roomscan-Capture-Timestamp-Valid",
+         "true" if frame.timestamp_valid else "false"),
+        ("X-Roomscan-Capture-Dequeue-Mono-Ns", str(frame.dequeue_mono_ns)),
+    ]
+
+
+def multipart_part(frame: CameraFrame, boundary: str = BOUNDARY) -> bytes:
+    """Exactly the bytes spec 5.2 specifies for one multipart part.
+
+    Built once per client per frame rather than cached on the frame, because
+    the boundary is a per-response property and caching it on a shared
+    immutable frame would tie the two together for no gain.
+    """
+    head = f"--{boundary}\r\n"
+    head += "".join(f"{k}: {v}\r\n" for k, v in frame_headers(frame))
+    head += "\r\n"
+    return head.encode("ascii") + frame.jpeg + b"\r\n"
+
+
+# ===========================================================================
+# Latest slot
+# ===========================================================================
+
+class LatestSlot:
+    """Condition-variable fanout holding exactly one frame.
+
+    There is no per-client deque anywhere in this file, and that is the
+    invariant worth protecting: memory here is O(1) in the number of clients
+    and O(1) in how far behind the slowest one is.
+    """
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._frame: CameraFrame | None = None
+        self._closed = False
+
+    def publish(self, frame: CameraFrame) -> None:
+        with self._cond:
+            self._frame = frame
+            self._cond.notify_all()
+
+    def latest(self) -> CameraFrame | None:
+        """Peek without consuming -- `/frame.jpg` and status both need this.
+
+        Explicitly NOT a pop: a popping slot is only safe with a finite
+        producer, and this producer runs forever.
+        """
+        with self._cond:
+            return self._frame
+
+    def close(self) -> None:
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+
+    def wait_newer(self, last_key: tuple[int, int] | None,
+                   timeout: float = 1.0) -> CameraFrame | None:
+        """Block until a frame newer than `last_key` exists, then return it.
+
+        Returns the NEWEST frame, not the next one in order.  A client that
+        spent 800 ms blocked in `sendall` gets the current frame and the
+        intervening ones are simply gone -- which is the difference between
+        latest-wins and a queue.
+        """
+        with self._cond:
+            if self._is_newer(self._frame, last_key):
+                return self._frame
+            if self._closed:
+                return None
+            self._cond.wait(timeout)
+            if self._is_newer(self._frame, last_key):
+                return self._frame
+            return None
+
+    @staticmethod
+    def _is_newer(frame: CameraFrame | None, last_key) -> bool:
+        if frame is None:
+            return False
+        if last_key is None:
+            return True
+        # A generation change is always newer, even if the new generation's
+        # sequence restarted at 0 -- reconnects must not look like the past.
+        return frame.key != last_key and (
+            frame.generation != last_key[0] or frame.seq > last_key[1])
+
+
+# ===========================================================================
+# Capture
+# ===========================================================================
+
+class CaptureStats:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.generation = 0
+        self.frames = 0
+        self.frames_this_generation = 0
+        self.malformed = 0
+        self.oversize = 0
+        self.buffer_errors = 0
+        self.restarts = 0
+        self.last_error: str | None = None
+        self.state = STATE_OPENING
+        self.negotiated: dict = {}
+        self.identity: dict = {}
+        self.controls: dict = {}
+        self.opened_mono_ns: int | None = None
+        self._recent: list[int] = []
+
+    def note_frame(self, mono_ns: int) -> None:
+        with self.lock:
+            self.frames += 1
+            self.frames_this_generation += 1
+            self._recent.append(mono_ns)
+            if len(self._recent) > 120:
+                del self._recent[:-120]
+
+    def capture_fps(self) -> float | None:
+        """Measured from arrival instants, never from the requested interval."""
+        with self.lock:
+            recent = list(self._recent)
+        if len(recent) < 2:
+            return None
+        span = (recent[-1] - recent[0]) / 1e9
+        if span <= 0 or (time.monotonic_ns() - recent[-1]) > 2_000_000_000:
+            return 0.0 if recent else None
+        return round((len(recent) - 1) / span, 2)
+
+
+class CaptureLoop:
+    """Owns the device.  One thread, one open, reopen on any failure.
+
+    `frame_source` is injectable so the fanout, framing and status paths can be
+    tested without a camera -- but note what a fake source cannot see, and do
+    not mistake green unit tests for a working device (the lesson of #219).
+    """
+
+    def __init__(self, slot: LatestSlot, stats: CaptureStats, config: dict,
+                 frame_source=None):
+        self.slot = slot
+        self.stats = stats
+        self.config = config
+        self.frame_source = frame_source
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self.run, name="capture", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._stop.set()
+        self.slot.close()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+
+    def run(self) -> None:
+        backoff = self.config["reopen_backoff_s"]
+        while not self._stop.is_set():
+            try:
+                self._one_generation()
+                backoff = self.config["reopen_backoff_s"]
+            except Exception as exc:                      # noqa: BLE001
+                # Reopen is the normal response to unplug, to a USB reset and
+                # to a driver hiccup, so this catch is deliberately broad --
+                # but it is NEVER silent.  A bare `except: continue` in a retry
+                # loop is how a 100% failure rate hides behind a process that
+                # merely looks quiet (#219).
+                with self.stats.lock:
+                    self.stats.last_error = f"{type(exc).__name__}: {exc}"
+                    self.stats.state = (STATE_DEVICE_ABSENT
+                                        if isinstance(exc, FileNotFoundError)
+                                        else STATE_FAULTED)
+                    self.stats.restarts += 1
+                _log(f"capture generation ended: {type(exc).__name__}: {exc}")
+            if self._stop.is_set():
+                break
+            self._stop.wait(backoff)
+            backoff = min(backoff * 2, self.config["reopen_backoff_max_s"])
+
+    def _one_generation(self) -> None:
+        with self.stats.lock:
+            self.stats.state = STATE_OPENING
+            self.stats.generation += 1
+            self.stats.frames_this_generation = 0
+            generation = self.stats.generation
+        if self.frame_source is not None:
+            # A callable is asked for a FRESH iterable per generation, so a
+            # test can exercise the reopen path -- an exhausted generator
+            # cannot be replayed, and a fake that silently yields nothing on
+            # generation 2 would make a broken reopen look like a working one.
+            source = (self.frame_source() if callable(self.frame_source)
+                      else self.frame_source)
+            self._pump(source, generation)
+            return
+
+        selection = v4l2.select_device(vid_pid=self.config["vid_pid"],
+                                       override=self.config["device"] or None)
+        if not selection["selected"]:
+            with self.stats.lock:
+                self.stats.state = STATE_DEVICE_ABSENT
+                self.stats.last_error = selection["reason"]
+                self.stats.identity = {"candidates": [
+                    {k: c[k] for k in ("path", "usb_vid_pid", "card", "capture")}
+                    for c in selection["candidates"]]}
+            raise FileNotFoundError(selection["reason"])
+
+        width, height, fps = parse_mode(self.config["mode"])
+        apply_controls(selection["selected"], self.config["controls"])
+        device = v4l2.V4L2Device(selection["selected"])
+        device.open()
+        try:
+            negotiated = device.start(width, height, v4l2.V4L2_PIX_FMT_MJPEG, fps)
+            with self.stats.lock:
+                self.stats.state = STATE_STREAMING
+                self.stats.negotiated = negotiated
+                self.stats.identity = {"path": selection["selected"],
+                                       "reason": selection["reason"],
+                                       **device.query_cap()}
+                self.stats.controls = read_controls(selection["selected"])
+                self.stats.opened_mono_ns = time.monotonic_ns()
+                self.stats.last_error = None
+            _log(f"streaming {negotiated['width']}x{negotiated['height']} "
+                 f"{negotiated['fourcc']} @ {negotiated['fps']} fps "
+                 f"from {selection['selected']} (generation {generation})")
+            self._pump(_device_frames(device), generation)
+        finally:
+            try:
+                device.stream_off()
+            finally:
+                device.close()
+
+    def _pump(self, source, generation: int) -> None:
+        seq = 0
+        with self.stats.lock:
+            self.stats.state = STATE_STREAMING
+        for raw in source:
+            if self._stop.is_set():
+                return
+            jpeg = raw["data"]
+            if len(jpeg) > self.config["max_frame_bytes"]:
+                with self.stats.lock:
+                    self.stats.oversize += 1
+                continue
+            if not v4l2.looks_like_jpeg(jpeg):
+                with self.stats.lock:
+                    self.stats.malformed += 1
+                continue
+            if raw.get("buffer_error"):
+                with self.stats.lock:
+                    self.stats.buffer_errors += 1
+            seq += 1
+            self.slot.publish(CameraFrame(
+                generation=generation,
+                seq=seq,
+                jpeg=jpeg,
+                pi_capture_mono_ns=raw["capture_mono_ns"],
+                timestamp_valid=raw["timestamp_valid"],
+                timestamp_flags=raw["timestamp_flags"],
+                timestamp_domain=raw["timestamp_domain"],
+                dequeue_mono_ns=raw["dequeue_mono_ns"],
+                width=raw.get("width") or self.stats.negotiated.get("width"),
+                height=raw.get("height") or self.stats.negotiated.get("height"),
+                fourcc=raw.get("fourcc") or self.stats.negotiated.get("fourcc"),
+            ))
+            self.stats.note_frame(time.monotonic_ns())
+
+
+def _device_frames(device):
+    while True:
+        yield device.dequeue(timeout_s=3.0)
+
+
+# ===========================================================================
+# Controls
+# ===========================================================================
+
+def parse_mode(text: str) -> tuple[int, int, int]:
+    geom, _, fps = text.partition("@")
+    width, _, height = geom.partition("x")
+    return int(width), int(height), int(fps or 30)
+
+
+def parse_controls(text: str) -> dict[str, str]:
+    out = {}
+    for item in text.replace(";", ",").split(","):
+        item = item.strip()
+        if not item or "=" not in item:
+            continue
+        key, _, value = item.partition("=")
+        out[key.strip()] = value.strip()
+    return out
+
+
+def apply_controls(path: str, text: str) -> None:
+    import subprocess
+    wanted = parse_controls(text)
+    if not wanted:
+        return
+    args = []
+    for key, value in wanted.items():
+        args += ["-c", f"{key}={value}"]
+    try:
+        subprocess.run(["/usr/bin/v4l2-ctl", "-d", path, *args],
+                       capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log(f"could not apply controls {wanted}: {exc}")
+
+
+def read_controls(path: str) -> dict:
+    """Read the controls BACK.  Requested is not actual (spec 4.4)."""
+    import re
+    import subprocess
+    try:
+        proc = subprocess.run(["/usr/bin/v4l2-ctl", "-d", path, "--list-ctrls"],
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"error": str(exc)}
+    out = {}
+    for line in (proc.stdout or "").splitlines():
+        match = re.match(r"\s*(\w+)\s+0x[0-9a-f]+\s+\(\w+\)\s*:.*\bvalue=(-?\d+)", line)
+        if match:
+            out[match.group(1)] = int(match.group(2))
+    return out
+
+
+# ===========================================================================
+# HTTP
+# ===========================================================================
+
+class CamServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, addr, handler, slot: LatestSlot, stats: CaptureStats,
+                 config: dict):
+        super().__init__(addr, handler)
+        self.slot = slot
+        self.stats = stats
+        self.config = config
+        self.client_lock = threading.Lock()
+        self.clients = 0
+        self.sent_frames = 0
+        self.rejected_clients = 0
+
+
+class CamHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "roomscan-cam/1"
+    sys_version = ""
+
+    def log_message(self, fmt, *args):          # noqa: A003
+        return                                   # journald gets our own _log
+
+    # -- routing -----------------------------------------------------------
+    def do_GET(self):                            # noqa: N802
+        self._dispatch(body=True)
+
+    def do_HEAD(self):                           # noqa: N802
+        self._dispatch(body=False)
+
+    def _dispatch(self, body: bool) -> None:
+        path = self.path.split("?", 1)[0]
+        if path == "/status.json":
+            self._json(build_status(self.server), body)
+        elif path == "/clock.json":
+            self._clock(body)
+        elif path == "/frame.jpg":
+            self._frame(body)
+        elif path == "/stream.mjpg":
+            self._stream(body)
+        else:
+            self._json({"error": "not found", "path": path}, body, code=404)
+
+    # -- responses ---------------------------------------------------------
+    def _json(self, payload: dict, body: bool, code: int = 200) -> None:
+        blob = json.dumps(payload, sort_keys=True).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(blob)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if body:
+            self.wfile.write(blob)
+
+    def _clock(self, body: bool) -> None:
+        """Pi receive/send monotonic + realtime, for a four-timestamp fit.
+
+        Receive is stamped first and send last, so the host can bound the
+        Pi-side residency of its own request rather than assume it is zero.
+        """
+        receive_mono, receive_real = time.monotonic_ns(), time.time_ns()
+        payload = {
+            "pi_receive_mono_ns": receive_mono,
+            "pi_receive_real_ns": receive_real,
+            "pi_send_mono_ns": time.monotonic_ns(),
+            "pi_send_real_ns": time.time_ns(),
+            "clock_domains": {"monotonic": "pi_monotonic", "realtime": "pi_wall"},
+            "ntp_synchronized": _ntp_synchronized(),
+        }
+        self._json(payload, body)
+
+    def _frame(self, body: bool) -> None:
+        frame = self.server.slot.latest()
+        if frame is None:
+            self._json({"error": "no frame", "state": self.server.stats.state},
+                       body, code=503)
+            return
+        self.send_response(200)
+        for key, value in frame_headers(frame):
+            self.send_header(key, value)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if body:
+            self.wfile.write(frame.jpeg)
+
+    def _stream(self, body: bool) -> None:
+        server = self.server
+        with server.client_lock:
+            if server.clients >= server.config["max_clients"]:
+                server.rejected_clients += 1
+                admitted = False
+            else:
+                server.clients += 1
+                admitted = True
+        if not admitted:
+            # A bounded thread budget means saying no, out loud, rather than
+            # accepting an unbounded number of capture-rate writers.
+            self._json({"error": "too many clients",
+                        "max_clients": server.config["max_clients"]},
+                       body, code=503)
+            return
+        try:
+            self.send_response(200)
+            self.send_header(
+                "Content-Type", f"multipart/x-mixed-replace; boundary={BOUNDARY}")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            if not body:
+                return
+            self.close_connection = True
+            last_key = None
+            while True:
+                frame = server.slot.wait_newer(last_key, timeout=1.0)
+                if frame is None:
+                    if server.stats.state == STATE_DEVICE_ABSENT and last_key:
+                        return
+                    continue
+                last_key = frame.key
+                # ONE immutable reference, held only across this write.  A
+                # blocked socket blocks this thread and nothing else; when it
+                # drains, wait_newer returns the current frame, not the next
+                # one in a backlog.
+                self.wfile.write(multipart_part(frame))
+                with server.client_lock:
+                    server.sent_frames += 1
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+        finally:
+            with server.client_lock:
+                server.clients -= 1
+
+
+def build_status(server) -> dict:
+    """What the camera IS doing, read back -- not what it was asked to do."""
+    stats = server.stats
+    with stats.lock:
+        state = stats.state
+        generation = stats.generation
+        negotiated = dict(stats.negotiated)
+        identity = dict(stats.identity)
+        controls = dict(stats.controls)
+        counters = {
+            "frames": stats.frames,
+            "frames_this_generation": stats.frames_this_generation,
+            "malformed_buffers": stats.malformed,
+            "oversize_buffers": stats.oversize,
+            "buffer_errors": stats.buffer_errors,
+            "restarts": stats.restarts,
+        }
+        last_error = stats.last_error
+        opened_mono_ns = stats.opened_mono_ns
+    with server.client_lock:
+        clients = server.clients
+        sent_frames = server.sent_frames
+        rejected = server.rejected_clients
+    frame = server.slot.latest()
+    now = time.monotonic_ns()
+    return {
+        "service": "roomscan-cam",
+        "state": state,
+        "generation": generation,
+        "device": identity or None,
+        "mode": {
+            "requested": server.config["mode"],
+            "width": negotiated.get("width"),
+            "height": negotiated.get("height"),
+            "fourcc": negotiated.get("fourcc"),
+            "fps_requested": negotiated.get("fps"),
+            "buffers": negotiated.get("buffers"),
+            "buffer_layout": negotiated.get("buffer_layout"),
+        } if negotiated else {"requested": server.config["mode"]},
+        "controls": controls or None,
+        "capture_fps": stats.capture_fps(),
+        "sent_frames": sent_frames,
+        "clients": clients,
+        "max_clients": server.config["max_clients"],
+        "rejected_clients": rejected,
+        "counters": counters,
+        "latest_frame": None if frame is None else {
+            "seq": frame.seq,
+            "generation": frame.generation,
+            "bytes": len(frame.jpeg),
+            "age_ms": round((now - frame.dequeue_mono_ns) / 1e6, 1),
+            "capture_mono_ns": frame.pi_capture_mono_ns,
+            "timestamp_valid": frame.timestamp_valid,
+            "timestamp_domain": frame.timestamp_domain,
+        },
+        "uptime_s": (round((now - opened_mono_ns) / 1e9, 1)
+                     if opened_mono_ns else None),
+        "last_error": last_error,
+        "bind": f"{server.server_address[0]}:{server.server_address[1]}",
+    }
+
+
+# ===========================================================================
+# Bind address
+# ===========================================================================
+
+SIOCGIFADDR = 0x8915
+
+
+def interface_address(iface: str) -> str | None:
+    """wlan0's IPv4 address, or None.
+
+    Binding the interface address rather than 0.0.0.0 is the actual
+    enforcement of "not reachable from eth0"; the nftables rule beside it is
+    the belt to this brace.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        packed = fcntl.ioctl(sock.fileno(), SIOCGIFADDR,
+                             struct.pack("256s", iface.encode()[:15]))
+        return socket.inet_ntoa(packed[20:24])
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+
+def _ntp_synchronized() -> bool | None:
+    import subprocess
+    try:
+        proc = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized",
+                               "--value"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = (proc.stdout or "").strip()
+    return {"yes": True, "no": False}.get(value)
+
+
+def _log(message: str) -> None:
+    print(f"roomscan-cam: {message}", file=sys.stderr, flush=True)
+
+
+def load_config(argv=None) -> dict:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--port", type=int,
+                        default=int(os.environ.get("ROOMSCAN_CAM_PORT")
+                                    or DEFAULTS["port"]))
+    parser.add_argument("--iface",
+                        default=os.environ.get("ROOMSCAN_CAM_IFACE")
+                        or DEFAULTS["iface"])
+    parser.add_argument("--bind", default=os.environ.get("ROOMSCAN_CAM_BIND") or None,
+                        help="explicit bind address; default is --iface's address")
+    parser.add_argument("--mode",
+                        default=os.environ.get("ROOMSCAN_CAM_MODE") or DEFAULTS["mode"])
+    parser.add_argument("--vid-pid",
+                        default=os.environ.get("ROOMSCAN_CAM_VID_PID")
+                        or DEFAULTS["vid_pid"])
+    parser.add_argument("--device",
+                        default=os.environ.get("ROOMSCAN_CAM_DEVICE")
+                        or DEFAULTS["device"])
+    parser.add_argument("--controls",
+                        default=os.environ.get("ROOMSCAN_CAM_CONTROLS")
+                        if os.environ.get("ROOMSCAN_CAM_CONTROLS") is not None
+                        else DEFAULTS["controls"])
+    parser.add_argument("--max-clients", type=int,
+                        default=int(os.environ.get("ROOMSCAN_CAM_MAX_CLIENTS")
+                                    or DEFAULTS["max_clients"]))
+    parser.add_argument("--max-frame-bytes", type=int,
+                        default=int(os.environ.get("ROOMSCAN_CAM_MAX_FRAME_BYTES")
+                                    or DEFAULTS["max_frame_bytes"]))
+    parser.add_argument("--bind-wait-s", type=float, default=60.0,
+                        help="how long to wait for the interface to get an address")
+    args = parser.parse_args(argv)
+    return {
+        "port": args.port, "iface": args.iface, "bind": args.bind,
+        "mode": args.mode, "vid_pid": args.vid_pid, "device": args.device,
+        "controls": args.controls, "max_clients": args.max_clients,
+        "max_frame_bytes": args.max_frame_bytes,
+        "bind_wait_s": args.bind_wait_s,
+        "reopen_backoff_s": DEFAULTS["reopen_backoff_s"],
+        "reopen_backoff_max_s": DEFAULTS["reopen_backoff_max_s"],
+    }
+
+
+def main(argv=None) -> int:
+    config = load_config(argv)
+    bind = config["bind"]
+    if not bind:
+        deadline = time.monotonic() + config["bind_wait_s"]
+        while not bind and time.monotonic() < deadline:
+            bind = interface_address(config["iface"])
+            if not bind:
+                # NetworkManager addresses wlan0 asynchronously after boot, so
+                # a service ordered After=network-online.target can still start
+                # before the address exists.  Waiting beats binding 0.0.0.0.
+                _log(f"waiting for an IPv4 address on {config['iface']}")
+                time.sleep(2.0)
+    if not bind:
+        _log(f"ERROR: {config['iface']} has no IPv4 address after "
+             f"{config['bind_wait_s']}s; refusing to bind 0.0.0.0")
+        return 1
+
+    slot = LatestSlot()
+    stats = CaptureStats()
+    capture = CaptureLoop(slot, stats, config)
+    server = CamServer((bind, config["port"]), CamHandler, slot, stats, config)
+    capture.start()
+    _log(f"listening on http://{bind}:{config['port']} "
+         f"(iface {config['iface']}, mode {config['mode']})")
+    try:
+        server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+        server.server_close()
+        capture.stop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

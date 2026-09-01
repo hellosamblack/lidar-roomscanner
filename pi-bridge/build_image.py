@@ -171,6 +171,10 @@ DEFAULT_NETWORK = {
     "DHCP_RANGE_START": "172.31.100.20",
     "DHCP_RANGE_END": "172.31.100.40",
     "STREAM_PORT": "5000",
+    # The camera feed's HTTP port (issue #226). Tokenised rather than
+    # hardcoded for the same reason STREAM_PORT is: the nft rule, the unit and
+    # node.env must not be able to disagree about it.
+    "CAM_PORT": "5001",
     "MDNS_INSTANCE": "roomscanner",
     "MDNS_SERVICE": "_roomscan._udp",
     "BRIDGE_MDNS_INSTANCE": "roomscan-bridge",
@@ -823,7 +827,8 @@ def render_payload(src: Path, dest: Path, tokens: dict[str, str]) -> dict:
 #: Node identity the Pi reads at runtime from /etc/roomscan-bridge/node.env. The
 #: reconcile and status scripts source it instead of hard-coding addresses.
 NODE_ENV_KEYS = ("HOSTNAME", "USERNAME", "SCANNER_IP", "SCANNER_MAC",
-                 "SCANNER_FALLBACK_IP", "ETH_ADDR", "STREAM_PORT", "WIFI_COUNTRY")
+                 "SCANNER_FALLBACK_IP", "ETH_ADDR", "STREAM_PORT", "CAM_PORT",
+                 "WIFI_COUNTRY")
 
 
 def stage_extras(stage: Path, tokens: dict[str, str], ssh_pubkey: str) -> list[str]:

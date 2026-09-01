@@ -45,8 +45,20 @@ import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import v4l2_capture as v4l2  # noqa: E402
+# ONE copy of the V4L2 layer, not two.  The module lives in the payload
+# (`roomscan-cam` imports it as a sibling on the Pi), and this tool loads it
+# from the repo checkout when run from the source tree, or from the installed
+# location when run on a provisioned bridge.  Mirrored constants drift.
+_CANDIDATES = [
+    Path(__file__).resolve().parent.parent / "payload/usr/local/sbin",
+    Path(__file__).resolve().parent,          # scp'd next to this file
+    Path("/usr/local/sbin"),
+]
+for _dir in _CANDIDATES:
+    if (_dir / "roomscan_cam_v4l2.py").exists():
+        sys.path.insert(0, str(_dir))
+        break
+import roomscan_cam_v4l2 as v4l2  # noqa: E402
 
 MAGIC = b"RSCAMCHAR1"
 FRAME_HDR = "<IIQQQI"          # seq, generation, capture_mono, send_mono, send_real, nbytes

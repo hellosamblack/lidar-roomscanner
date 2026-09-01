@@ -31,6 +31,7 @@ Two entry points drive this payload:
 | `etc/avahi/avahi-daemon.conf` | Full avahi-daemon config, `allow-interfaces=wlan0` only (never announces on `eth0`). |
 | `etc/sysctl.d/99-roomscan-bridge.conf` | `net.ipv4.ip_forward=1`, `net.ipv4.conf.{all,default}.rp_filter=2` (loose, for the asymmetric NAT path). |
 | `etc/systemd/system/roomscan-tee.service` | Bounded pcap ring of the eth0 UDP/`{{STREAM_PORT}}` stream (`tcpdump -C 100 -W 20`, 2 GB max). Fail-open: purely observational, nothing depends on it. |
+| `etc/systemd/system/roomscan-cam.service` | The camera feed (issue #226). Optional unit, hardened: `DynamicUser=yes` + `SupplementaryGroups=video` (a per-start unprivileged identity with `video` access and nothing else), empty `CapabilityBoundingSet`, `ProtectSystem=strict`, `MemoryMax=256M`/`TasksMax=32`/`LimitNOFILE=256`, and `DevicePolicy=closed` + `DeviceAllow=char-video4linux rw`. **`PrivateDevices=` is deliberately absent** -- it would give the unit a private `/dev` with no `video*` node in it, i.e. it would hide the only device this service exists to read, and the daemon's `device_absent` state would make that look like an unplugged camera. `Environment=ROOMSCAN_CAM_PORT={{CAM_PORT}}` shares the port token with the nftables rule so the listener and the firewall cannot disagree; `ROOMSCAN_CAM_CONTROLS=exposure_dynamic_framerate=0` is load-bearing (see below). Optional per-node overrides go in `/etc/roomscan-bridge/cam.env`. |
 | `etc/systemd/system/roomscan-bridge-reconcile.service` | Oneshot that runs `usr/local/sbin/roomscan-bridge-reconcile`. |
 | `etc/systemd/system/roomscan-bridge-reconcile.timer` | Fires the reconcile service every 10s (`AccuracySec=1s`, `Persistent=false`). |
 | `etc/systemd/system/roomscan-bridge-healthlog.service` | Oneshot that runs `usr/local/sbin/roomscan-bridge-healthlog`. Fail-open, same shape as `roomscan-tee.service` -- nothing depends on it. |
@@ -38,6 +39,8 @@ Two entry points drive this payload:
 | `usr/local/sbin/roomscan-bridge-common.sh` | Shared library (sourced, not executed): node-identity defaults + `/etc/roomscan-bridge/node.env` loader, and the nft DNAT rule helpers (`roomscan_dnat_target_ip`, `roomscan_set_dnat_target`, `roomscan_stream_is_live`, ...) used by both `roomscan-bridge-reconcile` and `install.sh`'s restart guard. |
 | `usr/local/sbin/roomscan-bridge-reconcile` | Fail-closed bash: detects scanner presence/fallback-mode, retargets the nft DNAT rule, bounces `eth0` only when no stream traffic is flowing, restarts dead required units. Reads `SCANNER_IP`/`SCANNER_FALLBACK_IP`/`STREAM_PORT` via `roomscan-bridge-common.sh` (node.env-overridable), never hardcoded. |
 | `usr/local/sbin/roomscan-bridge-healthlog` | Appends one JSON-lines sample of system vitals (uptime, load, free memory, SoC temp, `vcgencmd get_throttled`, `wlan0` RSSI/tx-rate) to a bounded ring at `/var/lib/roomscan-bridge/healthlog/health.jsonl` (~2880 lines / ~12h cap, truncated to ~6h). Exists because issue #200's crashes are silent: a 1-minute hardware watchdog (`raspberrypi-sys-mods`' `40-rpi-enable-watchdog.conf`, not our payload) hard-resets the SoC the instant PID 1 stalls for 60s, with zero chance for anything else to log. This is the only thing writing continuously enough to catch the seconds before that happens. |
+| `usr/local/sbin/roomscan-cam` | The camera daemon (issue #226). Python 3 stdlib only -- the Pi has no pip, no ffmpeg and no gstreamer. One V4L2 MMAP capture loop, one immutable latest-frame slot with condition-variable fanout and **no per-client queue**, and an HTTP server on `{{CAM_PORT}}` bound to **wlan0's own address** (never `0.0.0.0`, so the scanner-facing `eth0` cannot reach it). Serves `/stream.mjpg`, `/frame.jpg`, `/status.json`, `/clock.json`. A stalled viewer stalls only its own thread and resumes at the newest frame -- measured on the real bridge: 171 frames skipped server-side across a 6 s stall, not queued. |
+| `usr/local/sbin/roomscan_cam_v4l2.py` | The V4L2 ioctl/mmap layer `roomscan-cam` imports (and `pi-bridge/tools/cam_characterize.py` imports too, so there is exactly one copy of the `struct v4l2_buffer` offsets). A module rather than a script, installed 0755 like everything else in this directory, same as `roomscan-bridge-common.sh`. It **probes** which `struct v4l2_buffer` layout the kernel accepts rather than deriving it from the word size: Raspbian 13 armhf is a 64-bit-`time_t` port, so `VIDIOC_DQBUF` is the 80-byte ioctl number, not the 68-byte `TIME32` one an `armv7l` guess would pick. Measured answer on this bridge: `time64`. |
 | `usr/local/sbin/roomscan-bridge-status` | Emits one JSON object on stdout — the source of truth for the MCP `bridge_status` tool. Every documented field is always present (`null` when unknown). Also sources `roomscan-bridge-common.sh` for `SCANNER_IP`/`STREAM_PORT`. |
 
 Not part of this payload but referenced by it:
@@ -94,6 +97,7 @@ and `pi-bridge/boot/`:
 | `{{SCANNER_FALLBACK_IP}}` | `roomscan-bridge.nft` (comment only -- the live value is runtime-managed); also expected as a `node.env` key | The scanner's self-assigned fallback address (`172.31.253.1`). |
 | `{{DHCP_RANGE_START}}` / `{{DHCP_RANGE_END}}` | `dnsmasq.d/roomscan-bridge.conf` | Single-host DHCP range bounds (both equal `{{SCANNER_IP}}` in this design, since there's exactly one static lease). |
 | `{{STREAM_PORT}}` | `roomscan-bridge.nft`, both avahi `.service` files, `roomscan-tee.service`; also expected as a `node.env` key | The RSCN UDP stream port (`5000`). |
+| `{{CAM_PORT}}` | `roomscan-bridge.nft`, `roomscan-cam.service`; also expected as a `node.env` key | The camera feed's HTTP port (`5001`). Tokenised rather than hardcoded for exactly the reason `STREAM_PORT` is: the nft input rule and the listener must not be able to disagree, or the firewall would be guarding a port nothing serves and would still read as working. |
 | `{{MDNS_SERVICE}}` | `avahi/services/roomscanner.service` | The scanner-stream mDNS service type (`_roomscan._udp`). The `<name>` instance (`roomscanner`) is deliberately left literal -- see the caveat below. |
 | `{{BRIDGE_MDNS_SERVICE}}` | `avahi/services/roomscan-bridge.service` | The bridge-ssh mDNS service type (`_roomscan-bridge._tcp`). The `<name>` instance (`roomscan-bridge`) is deliberately left literal -- see the caveat below. |
 
@@ -124,6 +128,26 @@ same source of truth it substitutes into the static files.
 
 - `eth0` never carries a gateway or DNS; the default route lives on `wlan0`
   only.
+- The camera feed is **wlan0-only** and unauthenticated: the roomscan LAN is
+  the trust boundary, exactly as it already is for the web UI. Enforcement is
+  the daemon binding wlan0's address; the nftables `input` chain's
+  `roomscan-cam-deny-eth0` / `roomscan-cam-allow-wlan0` pair is the belt to
+  that brace, and both rules carry a `counter` so a nonzero drop count is a
+  real finding rather than an invisible policy. That chain's policy stays
+  `accept` -- turning on input filtering for the whole box would be a firewall
+  change smuggled in with a camera feature.
+- **`exposure_dynamic_framerate=0` is what makes 720p30 real.** Measured on
+  this bridge 2026-09-01 with the scanner streaming: at `1` (the value the
+  unit was carrying) the C270 delivers 14.7 fps at 720p *and* at 480p -- the
+  resolution is not the variable, the control is. At `0` it sustains
+  29.73--29.80 fps, 68.7 KB median JPEG, ~2.0 MB/s on the wlan0 uplink, ~5% of
+  one core, 63.4 C peak, no throttling, and no measurable effect on the
+  scanner path. Numbers and method:
+  `pi-bridge/tools/cam_characterize_results_20260901.md`.
+- A bridge with no camera fitted is a healthy bridge. `roomscan-cam.service`
+  runs anyway and reports `device_absent`; `roomscan-bridge-status` reports
+  `camera.usb_present` and `camera.daemon` separately so "no camera fitted"
+  and "camera fitted, service not answering" stay distinguishable.
 - dnsmasq on `eth0` is DHCP-only (`port=0`) and authoritative, and must
   answer inside the scanner firmware's 3000 ms DHCP window — see the
   comment header in `etc/dnsmasq.d/roomscan-bridge.conf`.

@@ -20,10 +20,15 @@ layouts with a real `VIDIOC_QUERYBUF` and records which one the kernel took
 
 Nothing here is camera-specific; `roomscan-cam` and
 `pi-bridge/tools/cam_characterize.py` both import it so the two cannot drift.
+
+This is a MODULE, meant to be imported rather than executed -- but it ships
+0755 like everything else in `usr/local/sbin/` (install.sh installs that whole
+directory with one mode, the same way `roomscan-bridge-common.sh` is an
+executable sourced library).  Running it directly just defines things and
+exits.
 """
 from __future__ import annotations
 
-import ctypes
 import errno
 import fcntl
 import mmap
