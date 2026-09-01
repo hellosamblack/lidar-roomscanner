@@ -2090,3 +2090,21 @@ def test_expand_floats_in_app_and_is_not_sold_as_native_picture_in_picture():
     assert "not operating-system picture-in-picture" in tooltip
     assert "#camera-card.is-expanded" in html, "Expand has no floating style"
     assert "requestPictureInPicture" not in _camera_js()
+
+
+def test_the_card_does_not_promise_a_recording_state_stage_a_cannot_report():
+    """§5.5 names Recording/Partial; Stage A must not paint either.
+
+    They describe a capture-bundle writer that does not exist until #227, so a
+    badge driven by a field no code populates could read as healthy dual
+    capture while only the scanner is being written -- exactly the confusion
+    §6.3 exists to prevent. The deferral is recorded in the card's own source
+    so the next session finds the reason where it will look for it, not only in
+    a commit message.
+    """
+    js = _camera_js()
+    assert "#227" in js, "the Recording/Partial deferral is not recorded in camera.js"
+    html = _index()
+    for absent in ("camera-chip--recording", "camera-chip--partial"):
+        assert absent not in html, (
+            f"{absent} styles a state Stage A cannot truthfully report")

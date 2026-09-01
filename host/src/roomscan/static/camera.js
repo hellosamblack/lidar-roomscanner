@@ -46,6 +46,11 @@ const D = (m, l) => { try { window.__diag && window.__diag('camera.js: ' + m, l)
 
 const STREAM_URL = '/api/camera/stream.mjpg';
 const FRAME_URL = '/api/camera/frame.jpg';
+// The four states Stage A can honestly report. Recording / Partial are named
+// in spec §5.5 but belong to Stage B (#227): they describe a capture-bundle
+// writer that does not exist yet, and a badge driven by a field no code
+// populates would let "recording" read as healthy dual capture while only the
+// scanner is being written. They arrive with the writer.
 const STATES = ['offline', 'connecting', 'live', 'stale'];
 
 export function createCamera(hub) {
@@ -69,7 +74,6 @@ export function createCamera(hub) {
     let generation = null;        // server's camera generation, null until first message
     let attachedGeneration = null;  // the generation the current src was built for
     let frozen = false;
-    let state = 'offline';
 
     // -- stream attach / detach ------------------------------------------
 
@@ -197,7 +201,10 @@ export function createCamera(hub) {
 
     hub.on('camera', (msg) => {
         if (!msg) return;
-        state = STATES.indexOf(msg.state) >= 0 ? msg.state : 'offline';
+        // Unknown state words fall back to Offline rather than being rendered
+        // raw: an unstyled chip would read as "fine" (no colour = no alarm),
+        // which is the wrong way to fail on a status readout.
+        const state = STATES.indexOf(msg.state) >= 0 ? msg.state : 'offline';
         chipState.textContent = state.charAt(0).toUpperCase() + state.slice(1);
         chipState.className = 'camera-chip camera-chip--' + state;
 
