@@ -219,23 +219,109 @@ camera_present() {
     return 1
 }
 
-# Restart roomscan-cam ONLY when the camera identity is present.
+# Should the camera service be restarted? PURE: every input is an argument,
+# nothing is read and nothing is touched, so the policy can be exercised
+# directly by a test instead of only being read.
 #
-# The asymmetry is the point. With no camera fitted, the daemon is supposed to
-# sit in `device_absent` and the unit is supposed to be active, so there is
-# nothing to heal -- and hammering `systemctl restart` at a bridge that simply
-# has no camera would burn the unit StartLimitBurst on a non-problem and leave
-# it dead for the moment a camera IS plugged in. With a camera present and the
-# unit dead, that is a real fault and worth one restart per pass.
+#   $1 present       yes|no      -- C270 on the USB bus
+#   $2 enabled       the exact `systemctl is-enabled` word
+#   $3 active_state  the exact `systemctl show -p ActiveState` word
+#   $4 result        the exact `systemctl show -p Result` word
+#
+# Echoes "restart:<reason>" or "skip:<reason>".
+#
+# WHY THIS IS NOT JUST is-active (found on the deployed bridge, 2026-09-01).
+# The first version restarted whenever the unit was not active, so
+# `systemctl stop roomscan-cam.service` was undone two seconds later by the
+# next reconcile tick and the operator could not turn the camera off AT ALL --
+# which also made the spec section 5.1 camera-off arm unrunnable without
+# masking the unit. That is the #200 fix in reverse: a self-heal that cannot
+# tell a crash from an intention will always override the intention, because
+# a crash and a deliberate stop look identical from is-active alone.
+#
+# Two independent signals separate them:
+#   * is-enabled  -- `disabled`, `masked` and `masked-runtime` are all
+#                    administrator acts. Nothing else produces them.
+#   * Result      -- a clean `systemctl stop` leaves ActiveState=inactive with
+#                    Result=success. A crash, a non-zero exit, a signal or an
+#                    exhausted StartLimitBurst leaves `failed`, or a Result
+#                    that is not `success`. That difference IS the intent.
+camera_restart_decision() {
+    local present="$1" enabled="$2" active_state="$3" result="$4"
+
+    if [ "${present}" != "yes" ]; then
+        # With no camera fitted the daemon is supposed to sit in
+        # `device_absent` with the unit active, so there is nothing to heal --
+        # and hammering restart at a bridge that simply has no camera would
+        # burn the StartLimitBurst on a non-problem and leave the unit dead
+        # for the moment a camera IS plugged in.
+        echo "skip:no camera on the USB bus"
+        return 0
+    fi
+    case "${enabled}" in
+        enabled|enabled-runtime) ;;
+        "")
+            echo "skip:roomscan-cam.service is not installed"
+            return 0
+            ;;
+        *)
+            # disabled / masked / masked-runtime / static / not-found. Every
+            # one of these is either an administrator act or a unit that was
+            # never meant to run, and neither is a fault to heal.
+            echo "skip:operator turned the camera off (is-enabled=${enabled})"
+            return 0
+            ;;
+    esac
+    case "${active_state}" in
+        active)
+            echo "skip:already active"
+            return 0
+            ;;
+        activating|deactivating|reloading)
+            # Mid-transition, very likely systemd own Restart= backoff. A
+            # restart here races it and burns a start attempt.
+            echo "skip:in transition (${active_state})"
+            return 0
+            ;;
+    esac
+    if [ "${active_state}" = "inactive" ] && [ "${result}" = "success" ]; then
+        # Stopped cleanly and stayed stopped: an administrator ran
+        # `systemctl stop`. The daemon itself only ever exits 0 on SIGTERM,
+        # which is exactly what stop sends -- so this reading has no other
+        # ordinary cause.
+        echo "skip:stopped by the operator (Result=success)"
+        return 0
+    fi
+    echo "restart:state=${active_state} result=${result}"
+}
+
+# Apply the decision above. The reading and the acting live here; the policy
+# lives in the pure function so it can be tested.
 ensure_camera_service() {
-    systemctl list-unit-files roomscan-cam.service >/dev/null 2>&1 || return 0
-    if ! camera_present; then
+    local enabled active_state result decision action reason
+    enabled="$(systemctl is-enabled roomscan-cam.service 2>/dev/null || true)"
+    if [ -z "${enabled}" ]; then
+        systemctl list-unit-files roomscan-cam.service >/dev/null 2>&1 || return 0
+    fi
+    active_state="$(systemctl show -p ActiveState --value roomscan-cam.service 2>/dev/null || true)"
+    result="$(systemctl show -p Result --value roomscan-cam.service 2>/dev/null || true)"
+
+    local present="no"
+    if camera_present; then
+        present="yes"
+    fi
+
+    decision="$(camera_restart_decision "${present}" "${enabled}" "${active_state}" "${result}")"
+    action="${decision%%:*}"
+    reason="${decision#*:}"
+    if [ "${action}" != "restart" ]; then
+        # Deliberately silent for the ordinary cases: this runs every 10 s, and
+        # a line per tick for "the camera is off on purpose" is how a journal
+        # stops being readable.
         return 0
     fi
-    if systemctl is-active --quiet roomscan-cam.service; then
-        return 0
-    fi
-    log "C270 present but roomscan-cam.service is not active, restarting"
+
+    log "C270 present and roomscan-cam.service is enabled but down (${reason}), restarting"
     # reset-failed first: a unit that already burned its StartLimitBurst
     # answers every restart with `Start request repeated too quickly` and never
     # runs again, which is exactly the state a self-healing pass must clear
@@ -279,4 +365,10 @@ main() {
     ensure_camera_service
 }
 
-main "$@"
+# Sourcing this file for a test must not run a reconcile pass: `main` bounces
+# eth0, retargets nft rules and drives nmcli. `ROOMSCAN_RECONCILE_LIB_ONLY=1`
+# loads the function definitions and stops -- which is what makes
+# camera_restart_decision testable by EXECUTING it rather than by reading it.
+if [ "${ROOMSCAN_RECONCILE_LIB_ONLY:-0}" != "1" ]; then
+    main "$@"
+fi

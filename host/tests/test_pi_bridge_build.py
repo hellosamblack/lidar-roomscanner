@@ -9,6 +9,7 @@ operator gate, backed by firstrun.log landing on the FAT partition.
 from __future__ import annotations
 
 import importlib.util
+import json
 import lzma
 import os
 import shutil
@@ -1595,3 +1596,235 @@ def test_the_daemon_handles_sigterm_so_systemd_can_stop_it():
     assert "EXIT_ADDRESS_CHANGED" in daemon
     cp_raw = (PAYLOAD / "etc" / "systemd" / "system" / CAM_UNIT).read_text()
     assert "Restart=on-failure" in cp_raw
+
+
+# ---------------------------------------------------------------------------
+# Camera self-heal vs. operator intent (issue #226, found on the deployed Pi)
+# ---------------------------------------------------------------------------
+
+RECONCILE = PAYLOAD / "usr" / "local" / "sbin" / "roomscan-bridge-reconcile"
+
+
+def _camera_decision(present: str, enabled: str, active_state: str,
+                     result: str) -> str:
+    """Actually RUN reconcile's decision function.
+
+    Every other reconcile test in this file asserts on the script's source
+    text, which cannot tell a policy that works from one that merely mentions
+    the right words -- and the defect this covers shipped, deployed, and was
+    caught by a human running `systemctl stop`. `ROOMSCAN_RECONCILE_LIB_ONLY`
+    loads the definitions without running a pass, so the policy can be
+    executed here instead of read.
+    """
+    proc = subprocess.run(
+        ["bash", "-c",
+         f'source "{RECONCILE}"; camera_restart_decision "$1" "$2" "$3" "$4"',
+         "_", present, enabled, active_state, result],
+        capture_output=True, text=True,
+        env={**os.environ, "ROOMSCAN_RECONCILE_LIB_ONLY": "1", "PATH": os.environ["PATH"]})
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def test_reconcile_restarts_a_camera_service_that_actually_crashed():
+    """The self-heal must survive the fix that stops it overriding intent.
+
+    `failed` with a non-success Result is a crash, an exhausted
+    StartLimitBurst, or a signal -- none of which any operator asked for.
+    """
+    for result in ("exit-code", "signal", "start-limit-hit", "timeout", "core-dump"):
+        decision = _camera_decision("yes", "enabled", "failed", result)
+        assert decision.startswith("restart:"), f"Result={result}: {decision}"
+    # Inactive but with a failure Result is the same class of fault.
+    assert _camera_decision("yes", "enabled", "inactive", "exit-code"
+                            ).startswith("restart:")
+
+
+def test_reconcile_leaves_a_camera_the_operator_stopped_alone():
+    """The reported defect, exactly.
+
+    `sudo systemctl stop roomscan-cam.service` was undone two seconds later by
+    the next reconcile tick, so the camera could not be turned off at all and
+    the spec's section 5.1 camera-off arm could not be run without masking the
+    unit. A clean stop leaves ActiveState=inactive with Result=success, and
+    that pair is the intent.
+    """
+    decision = _camera_decision("yes", "enabled", "inactive", "success")
+    assert decision.startswith("skip:"), decision
+    assert "operator" in decision
+
+
+@pytest.mark.parametrize("enabled", ["disabled", "masked", "masked-runtime",
+                                     "static", "not-found"])
+def test_reconcile_leaves_a_disabled_or_masked_camera_alone(enabled):
+    """`disable`, `mask` and `mask --runtime` have no cause other than an
+    administrator. A self-heal that overrides them is not a self-heal."""
+    decision = _camera_decision("yes", enabled, "inactive", "success")
+    assert decision.startswith("skip:"), decision
+    assert enabled in decision, decision
+
+
+def test_reconcile_does_not_race_systemds_own_restart_backoff():
+    """`activating` is a unit coming up -- very often systemd's own
+    `Restart=on-failure` backoff. Restarting it there burns a start attempt
+    against the StartLimitBurst for nothing."""
+    for state in ("activating", "deactivating", "reloading"):
+        assert _camera_decision("yes", "enabled", state, "success"
+                                ).startswith("skip:")
+
+
+def test_reconcile_still_does_nothing_when_no_camera_is_fitted():
+    assert _camera_decision("no", "enabled", "failed", "exit-code"
+                            ).startswith("skip:")
+    assert _camera_decision("yes", "enabled", "active", "success"
+                            ).startswith("skip:")
+
+
+def test_reconcile_skips_a_camera_unit_that_is_not_installed_at_all():
+    assert _camera_decision("yes", "", "", "").startswith("skip:")
+
+
+def test_the_reconcile_library_guard_does_not_run_a_pass_when_sourced():
+    """The guard that makes the test above possible must not be reachable by
+    accident: without the environment variable, sourcing still runs `main`."""
+    text = RECONCILE.read_text()
+    assert 'if [ "${ROOMSCAN_RECONCILE_LIB_ONLY:-0}" != "1" ]; then' in text
+    assert text.rstrip().endswith("fi")
+    assert "\nmain \"$@\"\n" not in text, "main is still called unconditionally"
+
+
+STATUS_SCRIPT = PAYLOAD / "usr" / "local" / "sbin" / "roomscan-bridge-status"
+
+#: argv order of roomscan-bridge-status's python assembler, which unpacks
+#: sys.argv[1:32] positionally.
+_STATUS_ARGV = (
+    "model", "hostname_val", "uptime_s",
+    "wlan0_ssid", "wlan0_rssi", "wlan0_bitrate", "wlan0_powersave",
+    "wlan0_ipv4", "wlan0_connected",
+    "eth0_carrier", "eth0_ipv4", "eth0_neigh", "leases_raw",
+    "nft_raw", "nft_ok",
+    "tee_active", "ring_files_count", "ring_bytes", "ring_newest",
+    "ring_oldest", "tee_readable",
+    "units_raw",
+    "temp_c", "throttled", "ntp_synced",
+    "scanner_ip", "stream_port",
+    "cam_usb_present", "cam_status_raw", "cam_port", "cam_unit_enabled",
+    "cam_active_state", "cam_result",
+)
+
+
+def _run_status_assembler(**overrides) -> dict:
+    """Execute roomscan-bridge-status's JSON assembler with a chosen reading.
+
+    Reading the script's source cannot tell a branch that fires from one that
+    merely exists -- proved the hard way here: an earlier version of this test
+    passed with the operator branch replaced by `if False:`, because the
+    string it asserted on was still in the file. So extract the real
+    `python3 -c` body the Pi runs and run it, argv and all.
+    """
+    lines = STATUS_SCRIPT.read_text().splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("python3 -c '"))
+    end = next(i for i, ln in enumerate(lines[start + 1:], start + 1)
+               if ln.strip().startswith("' \\"))
+    body = "\n".join(lines[start + 1:end])
+    argv = [overrides.get(name, "") for name in _STATUS_ARGV]
+    proc = subprocess.run([sys.executable, "-c", body, *argv],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_status_reports_a_deliberately_off_camera_as_off_not_as_broken():
+    """bridge_status must stay clean while the camera is off on purpose.
+
+    Otherwise every check of a bridge whose camera is masked for a measurement
+    reports a warning that is true, useless, and indistinguishable from the
+    one that means the daemon died. A masked unit is ALSO unreachable, so the
+    "not answering" branch would win if the ordering were wrong -- which is
+    why this asserts the text, not merely that a warning exists.
+    """
+    for enabled in ("masked", "masked-runtime", "disabled"):
+        out = _run_status_assembler(cam_usb_present="yes", cam_unit_enabled=enabled,
+                                    cam_active_state="inactive", cam_result="success",
+                                    cam_status_raw="", cam_port="5001")
+        cam = out["camera"]
+        assert cam["unit_enabled"] == enabled
+        assert cam["disabled_by_operator"] is True
+        assert cam["warning"] == (
+            f"camera disabled by operator (systemctl is-enabled = {enabled})"), cam
+
+
+def test_status_agrees_with_reconcile_about_a_plain_systemctl_stop():
+    """The state the deployed bridge was actually in when this was reported.
+
+    is-enabled=enabled, ActiveState=inactive, Result=success. reconcile calls
+    that "off on purpose" and leaves it alone; status must say the same, or
+    the two mechanisms contradict each other about one reading -- which is how
+    a healthy deliberate state gets chased as a fault.
+    """
+    out = _run_status_assembler(cam_usb_present="yes", cam_unit_enabled="enabled",
+                                cam_active_state="inactive", cam_result="success",
+                                cam_status_raw="", cam_port="5001")
+    cam = out["camera"]
+    assert cam["disabled_by_operator"] is True, cam
+    assert "camera disabled by operator" in cam["warning"]
+    assert "Result=success" in cam["warning"]
+    # And the two really do agree, rather than merely both looking plausible.
+    assert _camera_decision("yes", "enabled", "inactive", "success"
+                            ).startswith("skip:")
+
+
+def test_status_still_reports_a_camera_that_crashed():
+    """The fault case must survive the fix that silences the deliberate one.
+
+    A crash leaves `failed`, or a Result that is not `success` -- and that is
+    exactly when reconcile restarts it, so status must not call it deliberate.
+    """
+    out = _run_status_assembler(cam_usb_present="yes", cam_unit_enabled="enabled",
+                                cam_active_state="failed", cam_result="exit-code",
+                                cam_status_raw="", cam_port="5001")
+    cam = out["camera"]
+    assert cam["disabled_by_operator"] is False, cam
+    assert cam["warning"] == ("C270 is on the USB bus but roomscan-cam is not "
+                              "answering on its port")
+    assert _camera_decision("yes", "enabled", "failed", "exit-code"
+                            ).startswith("restart:")
+
+
+def test_status_is_silent_about_a_healthy_camera():
+    out = _run_status_assembler(
+        cam_usb_present="yes", cam_unit_enabled="enabled", cam_port="5001",
+        cam_active_state="active", cam_result="success",
+        cam_status_raw=json.dumps({"state": "streaming", "generation": 1}))
+    cam = out["camera"]
+    assert cam["warning"] is None, cam
+    assert cam["daemon_reachable"] is True
+    assert cam["daemon"]["state"] == "streaming"
+
+
+def test_status_does_not_invent_a_camera_verdict_it_could_not_reach():
+    """No camera fitted and no unit installed: every camera field is null or
+    false, and nothing is reported as a fault."""
+    out = _run_status_assembler(cam_usb_present="no", cam_port="5001")
+    cam = out["camera"]
+    assert cam["usb_present"] is False
+    assert cam["unit_enabled"] is None
+    assert cam["disabled_by_operator"] is False
+    assert cam["warning"] is None
+
+
+def test_install_leaves_a_masked_optional_unit_masked():
+    """A deploy must not silently switch the camera back on.
+
+    `masked` is safe to honour where `disabled` is not: a freshly copied unit
+    is never masked, so this cannot be confused with "brand new and not
+    enabled yet" -- the case the issue #200 fix exists for, which the same
+    loop still handles.
+    """
+    text = (PAYLOAD / "install.sh").read_text()
+    optional_loop = text.split('for unit in "${OPTIONAL_UNITS[@]}"; do', 1)[1]
+    optional_loop = optional_loop.split("\n    done", 1)[0]
+    assert "masked" in optional_loop
+    assert "leaving it alone" in optional_loop
+    # And the #200 behaviour is still there for everything else.
+    assert 'systemctl enable "${unit}"' in optional_loop.split("else", 1)[1]

@@ -190,6 +190,21 @@ fi
 # The daemon binds wlan0's address, never 0.0.0.0, so ask it there. An
 # unreachable or absent daemon leaves this empty, which the JSON below renders
 # as null -- never as a fabricated "offline" state the daemon did not report.
+# Is the unit switched ON at all? `disabled`, `masked` and `masked-runtime`
+# are administrator acts and nothing else produces them, so this is the
+# reading that separates "the operator turned the camera off" from "the
+# camera is broken" -- a distinction bridge_status previously could not make,
+# and without which a deliberately-off camera reads as a fault forever.
+CAM_UNIT_ENABLED="$(systemctl is-enabled roomscan-cam.service 2>/dev/null || true)"
+# The SAME two readings roomscan-bridge-reconcile decides on. Deliberately the
+# same, because the alternative is two mechanisms disagreeing about one state:
+# measured on the real bridge, an operator stop left is-enabled=enabled,
+# ActiveState=inactive, Result=success -- reconcile correctly called that
+# "off on purpose" while status called it "not answering". A status line that
+# contradicts the self-heal beside it is worse than no status line.
+CAM_ACTIVE_STATE="$(systemctl show -p ActiveState --value roomscan-cam.service 2>/dev/null || true)"
+CAM_RESULT="$(systemctl show -p Result --value roomscan-cam.service 2>/dev/null || true)"
+
 CAM_STATUS_RAW=""
 CAM_ADDR="$(printf '%s' "${WLAN0_IPV4}" | cut -d/ -f1)"
 if [ -n "${CAM_ADDR}" ] && have curl; then
@@ -232,8 +247,9 @@ import sys
     units_raw,
     temp_c, throttled, ntp_synced,
     scanner_ip, stream_port,
-    cam_usb_present, cam_status_raw, cam_port,
-) = sys.argv[1:31]
+    cam_usb_present, cam_status_raw, cam_port, cam_unit_enabled,
+    cam_active_state, cam_result,
+) = sys.argv[1:34]
 
 
 def s(v):
@@ -325,8 +341,29 @@ if cam_status_raw.strip():
         cam_daemon = json.loads(cam_status_raw)
     except ValueError:
         cam_daemon = None
+cam_enabled = s(cam_unit_enabled)
+cam_state = s(cam_active_state)
+cam_result_word = s(cam_result)
+# Two independent administrator signals, matching reconcile exactly:
+#   * is-enabled is disabled/masked/masked-runtime -- only an admin does that;
+#   * inactive with Result=success -- a clean `systemctl stop`. A crash leaves
+#     `failed`, or a Result that is not `success`.
+cam_switched_off = cam_enabled is not None and cam_enabled not in (
+    "enabled", "enabled-runtime")
+cam_stopped_clean = cam_state == "inactive" and cam_result_word == "success"
+cam_off_on_purpose = bool(cam_switched_off or (cam_enabled and cam_stopped_clean))
 cam_warning = None
-if yesno(cam_usb_present) and cam_daemon is None:
+if cam_off_on_purpose:
+    # NOT a fault, and it must not read as one. An operator who ran
+    # `systemctl stop`, `disable --now` or `mask --now` gets told exactly
+    # that, with the systemd words that prove it, so bridge_status stays clean
+    # while the camera is deliberately off -- for a measurement, or for good.
+    if cam_switched_off:
+        cam_detail = f"systemctl is-enabled = {cam_enabled}"
+    else:
+        cam_detail = f"stopped, ActiveState={cam_state} Result={cam_result_word}"
+    cam_warning = f"camera disabled by operator ({cam_detail})"
+elif yesno(cam_usb_present) and cam_daemon is None:
     cam_warning = ("C270 is on the USB bus but roomscan-cam is not answering "
                    "on its port")
 elif cam_daemon and cam_daemon.get("state") in ("faulted", "device_absent"):
@@ -383,6 +420,12 @@ out = {
     # diverge from their source).
     "camera": {
         "usb_present": yesno(cam_usb_present),
+        # The exact systemd word, not a re-derived boolean: a re-derived label
+        # diverges from its source the moment either side moves.
+        "unit_enabled": cam_enabled,
+        "unit_active_state": cam_state,
+        "unit_result": cam_result_word,
+        "disabled_by_operator": cam_off_on_purpose,
         "port": i(cam_port),
         "daemon": cam_daemon,
         "daemon_reachable": cam_daemon is not None,
@@ -405,4 +448,5 @@ print()
     "${UNITS_RAW}" \
     "${TEMP_C}" "${THROTTLED}" "${NTP_SYNCED}" \
     "${SCANNER_IP}" "${STREAM_PORT}" \
-    "${CAM_USB_PRESENT}" "${CAM_STATUS_RAW}" "${CAM_PORT}"
+    "${CAM_USB_PRESENT}" "${CAM_STATUS_RAW}" "${CAM_PORT}" "${CAM_UNIT_ENABLED}" \
+    "${CAM_ACTIVE_STATE}" "${CAM_RESULT}"

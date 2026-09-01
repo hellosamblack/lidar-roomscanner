@@ -809,6 +809,18 @@ activate_units() {
             log "optional unit ${unit} not found, skipping (non-fatal)"
             continue
         fi
+        # A MASKED optional unit is an administrator saying "not on this box".
+        # Honour it, on first boot and on update alike. This is safe to
+        # distinguish where `disabled` is not: a freshly copied unit is never
+        # masked, so unlike `disabled` this cannot be confused with "brand new
+        # and not enabled yet" -- which is the case issue #200 exists for.
+        # Without this the deploy would silently switch the camera back on and
+        # log a scary enable failure while doing it (issue #226).
+        if [ "$(systemctl is-enabled "${unit}" 2>/dev/null || true)" = "masked" ] || \
+           [ "$(systemctl is-enabled "${unit}" 2>/dev/null || true)" = "masked-runtime" ]; then
+            log "optional unit ${unit} is masked by the operator, leaving it alone"
+            continue
+        fi
         if [ "${FIRST_BOOT}" -eq 1 ]; then
             log "enabling + starting optional unit ${unit}"
             systemctl enable --now "${unit}" || log "WARNING: optional unit ${unit} failed to enable+start"
@@ -839,6 +851,14 @@ activate_units() {
 
     for unit in "${OPTIONAL_UNITS[@]}"; do
         unit_exists "${unit}" || continue
+        case "$(systemctl is-enabled "${unit}" 2>/dev/null || true)" in
+            masked|masked-runtime)
+                # Deliberately off. Reporting it as "not active" here would be
+                # true and useless -- it is the state the operator asked for.
+                log "optional unit ${unit} is masked by the operator, not checking it"
+                continue
+                ;;
+        esac
         # A .timer is active-or-waiting; is-active reports 'active' for both.
         verify_unit_active "${unit}" || log "WARNING: optional unit ${unit} is not active (non-fatal, but the capability it provides is absent)"
     done
