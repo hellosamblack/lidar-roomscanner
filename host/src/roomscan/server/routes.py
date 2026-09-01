@@ -11,9 +11,16 @@ import time
 from pathlib import Path
 
 from fastapi import Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 
 from .. import thumbs as thumbs_mod
+from ..camera import CameraFrame, LatestFrameSlot
 from ..sources import UdpSource
 from .session import *
 
@@ -157,6 +164,151 @@ async def api_restart() -> JSONResponse:
     return JSONResponse({"ok": True, "restart_in_s": RESTART_DELAY_S,
                          "argv": argv})
 
+
+
+# --- Pi-bridge camera proxy: /api/camera/* (#226 Stage A, spec §5.4) --------
+#
+# Three routes over ONE upstream connection. The `CameraClient` on
+# `app.state.camera` owns that connection (started by lifespan, see app.py);
+# everything here reads its latest-frame slot. A second browser tab therefore
+# costs one more host socket and ZERO additional Pi camera opens -- the §4.3
+# invariant, and the reason the routes never construct a client of their own.
+#
+# Bounding the slow-viewer case needed no new mechanism, only the right one:
+# unlike uvicorn's WEBSOCKET send (a bare `transport.write`, which is what left
+# `/ws` unbounded until #217), uvicorn's HTTP send calls `await
+# self.flow.drain()` whenever the transport's write buffer is over its 64 KiB
+# high-water mark. So awaiting each part's send before selecting the next frame
+# is genuine backpressure, and `wait_next` then hands back the NEWEST frame
+# rather than the next one in line. A stalled viewer holds exactly one JPEG.
+
+CAMERA_BOUNDARY = "frame"
+CAMERA_MEDIA_TYPE = f"multipart/x-mixed-replace; boundary={CAMERA_BOUNDARY}"
+
+#: Every camera response. A cached MJPEG stream or a cached "current" frame is
+#: a stale picture presented as live, which is the one thing a monitor must not do.
+CAMERA_NO_STORE = {"Cache-Control": "no-store, no-cache, must-revalidate",
+                   "Pragma": "no-cache"}
+
+
+def _camera_client(state):
+    """The lifespan-owned `CameraClient`, or None when the server was built
+    without one (every unit test that does not exercise the camera)."""
+    return getattr(state, "camera", None)
+
+
+def camera_frame_headers(frame: CameraFrame, age_ms: float | None) -> dict:
+    """The `X-Roomscan-*` headers a single frame carries out of this host.
+
+    Deliberately the SAME names the Pi daemon uses (spec §5.2) with the host's
+    own generation substituted, so a client -- browser, MCP snapshot, curl --
+    reads one vocabulary end to end. `age_ms` is added here and exists nowhere
+    upstream: it is a host-to-host measurement (arrival to now) and is named
+    `age`, never `latency`, because no clock has been mapped (§4.5).
+    """
+    headers = {
+        "X-Roomscan-Camera-Generation": str(frame.generation),
+        "X-Roomscan-Camera-Seq": str(frame.seq),
+        "X-Roomscan-Timestamp-Domain": frame.timestamp_domain or "unknown",
+        "X-Roomscan-Timestamp-Valid": "1" if frame.timestamp_valid else "0",
+    }
+    if frame.pi_capture_mono_ns is not None:
+        headers["X-Roomscan-Capture-Mono-Ns"] = str(int(frame.pi_capture_mono_ns))
+    if frame.source_generation is not None:
+        headers["X-Roomscan-Source-Generation"] = str(frame.source_generation)
+    if age_ms is not None:
+        headers["X-Roomscan-Camera-Age-Ms"] = f"{age_ms:.1f}"
+    return headers
+
+
+def encode_mjpeg_part(frame: CameraFrame, boundary: str = CAMERA_BOUNDARY) -> bytes:
+    """One `multipart/x-mixed-replace` part, byte-for-byte per spec §5.2.
+
+    Pure, so the framing this server EMITS is tested by the same
+    `MultipartParser` that reads the daemon's -- a round trip, rather than two
+    hand-written layouts that agree only until one of them is edited.
+    """
+    head = [f"--{boundary}", "Content-Type: image/jpeg",
+            f"Content-Length: {len(frame.jpeg)}"]
+    for name, value in camera_frame_headers(frame, None).items():
+        head.append(f"{name}: {value}")
+    return ("\r\n".join(head) + "\r\n\r\n").encode("latin-1") + frame.jpeg + b"\r\n"
+
+
+async def _camera_parts(slot: LatestFrameSlot, boundary: str = CAMERA_BOUNDARY):
+    """Latest-only async generator over `slot`.
+
+    The subscriber counter is incremented/decremented in a `finally`, so a
+    browser that vanishes mid-frame does not leave the card reporting a viewer
+    that is gone -- connection count is a real performance variable on this
+    server (BUG-060) and a lying one is worse than none.
+    """
+    slot.subscribers += 1
+    tick = 0
+    try:
+        while True:
+            tick, frame = await slot.wait_next(tick)
+            # `yield` returns only after Starlette's `await send(...)` for the
+            # previous part has completed. That await IS the bound.
+            yield encode_mjpeg_part(frame, boundary)
+    finally:
+        slot.subscribers = max(0, slot.subscribers - 1)
+
+
+async def api_camera_stream(request: Request) -> Response:
+    """`GET /api/camera/stream.mjpg` -- latest-only re-fanout of the Pi feed.
+
+    503 (not an empty 200) when there is no camera ingest at all, so an `<img>`
+    fails visibly and the card can say Offline rather than showing a blank
+    frame that could equally mean "black room".
+    """
+    client = _camera_client(_get_app_state(request))
+    if client is None:
+        return JSONResponse({"error": "camera ingest is not running"},
+                            status_code=503, headers=CAMERA_NO_STORE)
+    return StreamingResponse(_camera_parts(client.slot),
+                             media_type=CAMERA_MEDIA_TYPE, headers=CAMERA_NO_STORE)
+
+
+async def api_camera_frame(request: Request) -> Response:
+    """`GET /api/camera/frame.jpg` -- the current frame, exact original bytes.
+
+    What Snapshot and `camera_snapshot()` fetch. No re-encode: the JPEG handed
+    back is the one the C270 produced, which is what Stage B (#227) will archive
+    as authoritative.
+    """
+    client = _camera_client(_get_app_state(request))
+    if client is None:
+        return JSONResponse({"error": "camera ingest is not running"},
+                            status_code=503, headers=CAMERA_NO_STORE)
+    _, frame = client.slot.latest()
+    if frame is None:
+        return JSONResponse({"error": "no camera frame yet",
+                             "state": client.state()},
+                            status_code=503, headers=CAMERA_NO_STORE)
+    age_s = client.age_s()
+    headers = dict(CAMERA_NO_STORE)
+    headers.update(camera_frame_headers(
+        frame, None if age_s is None else age_s * 1000.0))
+    return Response(content=frame.jpeg, media_type="image/jpeg", headers=headers)
+
+
+async def api_camera_status(request: Request) -> JSONResponse:
+    """`GET /api/camera/status` -- host ingest state plus the Pi's own report.
+
+    Reports what was measured, never what was configured: `width`/`height` come
+    off the last JPEG's SOF marker, `host_fps` off arrival times, and the Pi's
+    `/status.json` is passed through verbatim under `source` rather than
+    re-summarised into fields that could drift from it.
+    """
+    client = _camera_client(_get_app_state(request))
+    if client is None:
+        return JSONResponse({"state": "offline", "running": False,
+                             "error": "camera ingest is not running"},
+                            headers=CAMERA_NO_STORE)
+    payload = client.status()
+    payload["running"] = client.running
+    return JSONResponse(payload, headers=CAMERA_NO_STORE)
 
 
 # --- capture thumbnails: GET /thumb/{name} (§12) ----------------------------

@@ -1120,6 +1120,13 @@ async def websocket_endpoint(websocket: WebSocket):
         last_comm = getattr(state, "last_comm", None)
         if last_comm is not None:
             await websocket.send_text(json.dumps(last_comm))
+        # Camera monitor (#226): same reason as `comm` above -- the card paints
+        # Offline/Connecting/Live/Stale on first frame instead of sitting blank
+        # for up to a heartbeat, and a late-joining tab sees the same
+        # server-authoritative state as the one already open.
+        last_camera = getattr(state, "last_camera", None)
+        if last_camera is not None:
+            await websocket.send_text(json.dumps(last_camera))
     except Exception:
         await _drop_client(clients, websocket)
         return

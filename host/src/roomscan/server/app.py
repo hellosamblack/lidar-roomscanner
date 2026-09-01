@@ -14,14 +14,19 @@ from ..thin_render import ThinRenderer
 from .session import (
     RESULTS_DIR,
     _bridge_health_loop,
+    _camera_state_loop,
     _comm_probe_loop,
     _idle_reconcile_loop,
     _init_ranging_state,
+    build_camera_client,
 )
 from .mdns import register_mdns, unregister_mdns
 from .routes import (
     api_bridge_logs,
     api_bridge_reboot,
+    api_camera_frame,
+    api_camera_status,
+    api_camera_stream,
     api_restart,
     get_capture_video,
     get_thumb,
@@ -56,6 +61,16 @@ async def _lifespan(app: FastAPI):
         # Pi bridge ssh health (#193): independent, much slower loop -- see its
         # own docstring for why this must not share the ICMP cadence above.
         app.state.bridge_health_task = asyncio.create_task(_bridge_health_loop(app.state))
+        # Pi-bridge camera ingest (#226): ONE upstream MJPEG connection, owned
+        # here rather than opened by the first route or session message that
+        # wants a picture -- an ingest a viewer can start is an ingest N
+        # viewers can start N times (spec §5.4). Its own state-broadcast loop,
+        # for the same reason the comm probe has one.
+        app.state.camera = build_camera_client(app.state)
+        if app.state.camera is not None:
+            await app.state.camera.start()
+            app.state.camera_state_task = asyncio.create_task(
+                _camera_state_loop(app.state))
         # Advertise this server so a thin client (and any future one) can find
         # it without a hardcoded IP. Off the event loop: `register_service`
         # blocks on multicast announcement.
@@ -78,6 +93,18 @@ async def _lifespan(app: FastAPI):
     bridge_health_task = getattr(app.state, "bridge_health_task", None)
     if bridge_health_task is not None:
         bridge_health_task.cancel()
+    camera_state_task = getattr(app.state, "camera_state_task", None)
+    if camera_state_task is not None:
+        camera_state_task.cancel()
+        app.state.camera_state_task = None
+    # Camera ingest: AWAITED, not merely cancelled. `stop()` closes the socket
+    # and joins its worker, so "the lifespan returned" genuinely means no task
+    # is still holding the upstream connection -- the difference between asking
+    # a task to stop and it having stopped (#219).
+    camera = getattr(app.state, "camera", None)
+    if camera is not None:
+        await camera.stop()
+        app.state.camera = None
     # Live SLAM: tear the worker down and, with `[slam] backend = "remote"`,
     # end the spawned service subprocess (#224) -- it holds the CUDA context.
     slam_runner = getattr(app.state, "slam_runner", None)
@@ -122,6 +149,9 @@ def create_app() -> FastAPI:
     application.add_api_route("/api/bridge/reboot", api_bridge_reboot, methods=["POST"], include_in_schema=False)
     application.add_api_route("/api/bridge/logs", api_bridge_logs, methods=["POST"], include_in_schema=False)
     application.add_api_route("/api/restart", api_restart, methods=["POST"], include_in_schema=False)
+    application.add_api_route("/api/camera/stream.mjpg", api_camera_stream, methods=["GET"], include_in_schema=False)
+    application.add_api_route("/api/camera/frame.jpg", api_camera_frame, methods=["GET"], include_in_schema=False)
+    application.add_api_route("/api/camera/status", api_camera_status, methods=["GET"], include_in_schema=False)
     application.add_api_route("/thumb/{name}", get_thumb, methods=["GET"], include_in_schema=False)
     application.add_api_route("/capture_video/{name}", get_capture_video, methods=["GET"], include_in_schema=False)
 

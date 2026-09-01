@@ -5146,6 +5146,84 @@ async def _comm_probe_loop(state) -> None:
 
 
 
+# --- Pi-bridge camera (#226 Stage A, spec §5.4) -----------------------------
+
+#: Fastest the `camera` message may go out. Human-rate by contract (§5.4: "the
+#: cadence is human-rate (<=4 Hz)"): a viewer reads a state word and a
+#: resolution, not a per-frame telemetry stream. The pixels have their own HTTP
+#: path and never touch `/ws`.
+CAMERA_STATE_MIN_INTERVAL_S = 0.25
+#: Slow heartbeat for the unchanged case, so counters and fps still refresh.
+CAMERA_STATE_HEARTBEAT_S = 2.0
+
+
+#: `ROOMSCAN_CAMERA=0` turns the ingest off entirely. Default ON, per spec
+#: §5.4 -- but a bridge with no camera daemon means one refused connection
+#: every backoff period for the life of the server, so there has to be a way to
+#: say "there is no camera here" that does not involve editing code. Off means
+#: `app.state.camera is None`, which every route already reports honestly as
+#: "camera ingest is not running" rather than as a fault.
+_CAMERA_OFF = {"0", "off", "false", "no"}
+
+
+def build_camera_client(state):
+    """Construct the lifespan-owned `CameraClient` for this server, or None.
+
+    Bridge resolution is shared, not re-invented: `_resolve_bridge_host` is the
+    same mDNS-first, TTL-cached resolver the ICMP probe and the ssh health poll
+    already use, so there is one resolution policy for the whole process rather
+    than a fourth that could disagree about where the Pi is (#209's lesson).
+    """
+    from ..camera import CameraClient, CameraIngestConfig
+
+    if (os.environ.get("ROOMSCAN_CAMERA") or "").strip().lower() in _CAMERA_OFF:
+        log.info("camera ingest disabled by ROOMSCAN_CAMERA")
+        return None
+    cfg = CameraIngestConfig()
+    port = int(os.environ.get("ROOMSCAN_CAMERA_PORT") or 0)
+    if port:
+        cfg.port = port
+    return CameraClient(cfg, resolve=lambda: _resolve_bridge_host(state))
+
+
+async def _camera_state_loop(state) -> None:
+    """Background task (started from `_lifespan`): broadcast the `camera` state
+    message, edge-triggered with a slow heartbeat.
+
+    Its own loop, like `_comm_probe_loop` and for the same reason: the camera
+    is an independent subsystem and its status must not ride -- or be able to
+    stall -- the frame broadcaster's tick (§5.4). The message carries state,
+    never pixels.
+
+    Cadence is bounded from BOTH ends: at most one message per
+    `CAMERA_STATE_MIN_INTERVAL_S` (so a camera flapping between live and stale
+    cannot turn into a JSON flood), and at least one per
+    `CAMERA_STATE_HEARTBEAT_S` (so `age_ms`/`host_fps`/drop counters stay
+    current on a card nobody is otherwise touching).
+    """
+    from ..camera import camera_message, camera_message_changed
+
+    previous: dict | None = None
+    last_sent = 0.0
+    while True:
+        await asyncio.sleep(CAMERA_STATE_MIN_INTERVAL_S)
+        try:
+            client = getattr(state, "camera", None)
+            if client is None:
+                continue
+            status = client.status()
+            now = time.monotonic()
+            due = (now - last_sent) >= CAMERA_STATE_HEARTBEAT_S
+            if not (due or camera_message_changed(previous, status)):
+                continue
+            msg = camera_message(status)
+            state.last_camera = msg
+            previous, last_sent = status, now
+            await _bc()._broadcast_text(state.clients, json.dumps(msg))
+        except Exception as exc:
+            log.warning("camera state tick failed: %r", exc)
+
+
 async def _apply_record(state, ctrl, on: bool) -> None:
     """Start/stop recording and tell every browser client about it.
 

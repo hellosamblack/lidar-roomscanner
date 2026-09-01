@@ -67,6 +67,26 @@ LsmTicks = NewType("LsmTicks", float)
 HostMono = NewType("HostMono", float)
 #: `time.time()` seconds since the Unix epoch. Never subtract from `HostMono`.
 WallTime = NewType("WallTime", float)
+#: `CLOCK_MONOTONIC` NANOSECONDS **on the Raspberry Pi bridge**, as carried by a
+#: V4L2 buffer timestamp and relayed in `X-Roomscan-Capture-Mono-Ns` (#226).
+#: A THIRD, independent monotonic origin: it shares neither epoch nor rate
+#: guarantee with `HostMono` (a different SoC, a different boot) and it is not
+#: `McuMicros` either. Subtracting it from anything but another `PiMonoNanos`
+#: is meaningless until Stage B (#227) fits an explicit Pi->host affine
+#: transform with an uncertainty bound; nothing in Stage A does that, which is
+#: exactly why the type exists -- so "camera capture time" can never be quietly
+#: differenced against a host arrival instant and read as a latency.
+PiMonoNanos = NewType("PiMonoNanos", int)
+
+
+def pi_mono_delta_s(a: PiMonoNanos, b: PiMonoNanos) -> float:
+    """Seconds from `a` to `b`, BOTH on the Pi's monotonic clock.
+
+    The only subtraction this domain permits. Used for the camera's
+    capture-side cadence (`capture_fps`), which is a Pi-local rate and needs no
+    cross-clock mapping to be true.
+    """
+    return (int(b) - int(a)) / 1e9
 
 
 def now_mono() -> HostMono:
