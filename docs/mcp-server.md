@@ -301,6 +301,22 @@ FileHub as the scanner's wireless uplink: `bridge_status(host?)`,
 `bridge_image_build(secrets?, release?, xz?, skip_debs?)`,
 `bridge_pcap_convert(path, out?)`.
 
+**camera** — the rig-mounted Logitech C270 relayed by the bridge (#226 Stage A):
+`camera_status()`, `camera_snapshot(out?)`.
+
+Both go through `roomscan-web`'s `/api/camera/*`, never straight to the Pi. The daemon
+serves one V4L2 loop and counts its clients, so a tool that dialled it directly would open
+a second upstream connection and would then be measuring itself — the same
+client-never-competitor invariant that keeps `capture.py` CLI-only. `camera_status`
+reports what was measured: `width`/`height` come from the last JPEG's own SOF marker
+rather than a header the daemon asserts, `capture_fps` is a Pi-clock cadence that reads
+null (not a stale window) once frames stop, and `age_ms` is an *arrival* age, never a
+display latency — Stage A maps no clocks. `camera_snapshot` writes the camera's exact
+original bytes under `results/` or `captures/` only (never a root directory itself) and
+reports the path actually written, returning `{"ok": false}` with a reason on a full disk
+or a read-only destination rather than raising. Null means unknown; zero means measured
+zero.
+
 The FileHub's defect was never that it broke -- it was that nothing about it was
 observable when it did, so a capture that lost 2.3-9.4 % of its frames looked exactly
 like a clean one (#60). These tools exist to make that hop legible, so each reports the
