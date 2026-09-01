@@ -40,11 +40,12 @@ def asyncio_test(fn):
     return wrapper
 
 
-def _frame(seq=1, generation=3, jpeg=None, valid=True) -> cam.CameraFrame:
+def _frame(seq=1, generation=3, jpeg=None, valid=True, dequeue=None) -> cam.CameraFrame:
     return cam.CameraFrame(
         generation=generation, seq=seq, jpeg=jpeg or make_jpeg(1280, 720),
         host_recv_mono=HostMono(1000.0), source_generation=2,
-        pi_capture_mono_ns=(4242 if valid else None), timestamp_valid=valid,
+        pi_capture_mono_ns=(4242 if valid else None),
+        pi_dequeue_mono_ns=dequeue, timestamp_valid=valid,
         timestamp_domain="pi_monotonic" if valid else None,
         width=1280, height=720)
 
@@ -117,16 +118,50 @@ def test_emitted_parts_round_trip_when_split_at_every_byte():
 
 
 def test_an_invalid_capture_timestamp_is_advertised_as_invalid_not_omitted():
-    """A missing header reads as "an older daemon"; an explicit `Valid: 0` reads
-    as "this frame has no capture time". They are different facts, and §8's
-    "Timestamp flag absent" row needs the second one to survive the proxy hop."""
+    """A missing header reads as "an older daemon"; an explicit `false` reads as
+    "this frame has no capture time". They are different facts, and §8's
+    "Timestamp flag absent" row needs the second one to survive the proxy hop.
+
+    The NAME and the value spelling are the daemon's own
+    (`X-Roomscan-Capture-Timestamp-Valid: true|false`), so a client reads one
+    vocabulary from the camera all the way to the browser -- and there is no
+    second host-invented header asserting the same fact beside it, because two
+    such headers are two things that can disagree.
+    """
     headers = routes_mod.camera_frame_headers(_frame(valid=False), None)
-    assert headers["X-Roomscan-Timestamp-Valid"] == "0"
+    assert headers["X-Roomscan-Capture-Timestamp-Valid"] == "false"
     assert "X-Roomscan-Capture-Mono-Ns" not in headers
+    assert "X-Roomscan-Timestamp-Valid" not in headers, (
+        "the host must not emit a second spelling of the daemon's own flag")
     valid = routes_mod.camera_frame_headers(_frame(valid=True), 12.5)
-    assert valid["X-Roomscan-Timestamp-Valid"] == "1"
+    assert valid["X-Roomscan-Capture-Timestamp-Valid"] == "true"
     assert valid["X-Roomscan-Capture-Mono-Ns"] == "4242"
     assert valid["X-Roomscan-Camera-Age-Ms"] == "12.5"
+
+
+def test_the_dequeue_stamp_is_relayed_only_when_the_daemon_sent_one():
+    """Relayed untouched, and absent rather than substituted when missing.
+
+    A dequeue instant standing in for a capture instant would be invisible --
+    both are plausible Pi nanoseconds -- so the header simply does not appear
+    when there is nothing to relay.
+    """
+    with_dequeue = routes_mod.camera_frame_headers(_frame(dequeue=9_999), None)
+    assert with_dequeue["X-Roomscan-Capture-Dequeue-Mono-Ns"] == "9999"
+    assert with_dequeue["X-Roomscan-Capture-Mono-Ns"] == "4242"
+    without = routes_mod.camera_frame_headers(_frame(), None)
+    assert "X-Roomscan-Capture-Dequeue-Mono-Ns" not in without
+
+
+def test_the_emitted_flag_round_trips_through_our_own_parser():
+    """The round trip that makes one vocabulary a testable claim rather than a
+    comment: what this host emits, this host's daemon-facing parser reads back
+    to the same `timestamp_valid`."""
+    for valid in (True, False):
+        part = routes_mod.encode_mjpeg_part(_frame(valid=valid))
+        parsed = cam.MultipartParser(routes_mod.CAMERA_BOUNDARY).feed(part)[0]
+        assert cam._bool_or_none(
+            parsed.headers["x-roomscan-capture-timestamp-valid"]) is valid
 
 
 # =============================================================================
@@ -142,6 +177,7 @@ def test_frame_route_serves_the_exact_jpeg_with_identifying_headers(monkeypatch)
     assert r.content == jpeg, "the proxy must not re-encode the camera's bytes"
     assert r.headers["x-roomscan-camera-generation"] == "3"
     assert r.headers["x-roomscan-camera-seq"] == "912"
+    assert r.headers["x-roomscan-capture-timestamp-valid"] == "true"
     assert float(r.headers["x-roomscan-camera-age-ms"]) == pytest.approx(50.0, abs=0.5)
 
 

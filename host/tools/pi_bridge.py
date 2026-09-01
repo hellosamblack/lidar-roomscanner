@@ -205,6 +205,78 @@ def status(host: str = "", *, timeout: float = 20.0) -> dict:
     return data
 
 
+#: The camera daemon's unit, under both spellings a status script might use.
+_CAMERA_UNITS = frozenset({"roomscan-cam", "roomscan-cam.service"})
+
+
+def _camera_present(d: dict) -> bool:
+    """Whether the Pi says a camera is PHYSICALLY there.
+
+    The status script reports `camera.usb_present` as `true`, `false`, or
+    `null` when it could not tell. Only an explicit `true` counts: `null` is
+    unknown, and unknown is not a fault (the same rule `nft.readable` and
+    `wlan0.connected` already follow above). A status script with no `camera`
+    key at all -- anything predating #226 -- lands here as False too.
+    """
+    cam = d.get("camera")
+    return isinstance(cam, dict) and cam.get("usb_present") is True
+
+
+def _camera_warnings(d: dict) -> list[str]:
+    """Camera warnings, from the Pi's own `camera` block (#226).
+
+    Shape consumed (`roomscan-bridge-status`):
+
+        "camera": {"usb_present": bool|null, "port": int,
+                   "daemon": <verbatim /status.json or null>,
+                   "daemon_reachable": bool, "unit": <systemctl is-active>,
+                   "warning": <string|null>}
+
+    **When the Pi supplies its own `warning`, that string is surfaced verbatim
+    and nothing is re-derived beside it.** The Pi is the only party that can see
+    the USB tree, the unit and the daemon at once; a second sentence computed
+    here from a subset of the same facts is a re-derived label, and re-derived
+    labels diverge from their source the moment one side is edited. The
+    branches below are the FALLBACK for a script that reports state but no
+    prose -- not a cross-check of the Pi's own conclusion.
+
+    Nothing is said at all unless `usb_present` is explicitly true, so a
+    camera-less or can't-tell bridge stays silent.
+    """
+    if not _camera_present(d):
+        return []
+    cam = d["camera"]
+    pi_warning = cam.get("warning")
+    if isinstance(pi_warning, str) and pi_warning.strip():
+        return [pi_warning]
+
+    port = cam.get("port")
+    daemon = cam.get("daemon") if isinstance(cam.get("daemon"), dict) else {}
+    unit = cam.get("unit")
+    warn: list[str] = []
+
+    if cam.get("daemon_reachable") is False:
+        # A camera is fitted and its service is not answering. This is the case
+        # the earlier `camera.present`/`camera.state` reading could never see,
+        # because neither key exists -- so it read as "no camera" and said
+        # nothing at all while the preview was dead.
+        warn.append(f"a camera is fitted but roomscan-cam is not answering on port "
+                    f"{port if port is not None else '5001'} (unit is "
+                    f"{unit or 'unknown'}) -- `bridge_logs roomscan-cam` for why")
+        return warn
+
+    state = daemon.get("state")
+    if state == "faulted":
+        warn.append(f"camera daemon is faulted: "
+                    f"{daemon.get('last_error') or 'no reason given'}")
+    elif state == "device_absent":
+        warn.append("a camera is fitted but the daemon cannot open it -- check the "
+                    "USB connection and `bridge_logs roomscan-cam`")
+    elif unit is not None and unit not in ("active", "activating"):
+        warn.append(f"unit roomscan-cam is {unit}")
+    return warn
+
+
 def _status_warnings(d: dict) -> list[str]:
     """Turn the raw readings into the few sentences a human actually acts on.
 
@@ -235,26 +307,19 @@ def _status_warnings(d: dict) -> list[str]:
     if d.get("ntp_synced") is False:
         warn.append("clock not NTP-synced; the Pi 3 has no RTC, so tee and journal "
                     "timestamps are meaningless until it syncs")
-    # The camera (#226) is an OPTIONAL unit. A bridge deployed without a C270
-    # is a healthy bridge, so `roomscan-cam` being inactive is only a warning
-    # when the Pi actually reports a camera present -- otherwise the generic
-    # unit check below would turn a deliberate absence into a bridge failure
-    # (spec §5.3). Absence of the `camera` key at all (an older status script)
-    # reads as "unknown", which is also not a fault.
-    cam = d.get("camera") or {}
-    cam_present = cam.get("present")
-    optional_units = set() if cam_present else {"roomscan-cam", "roomscan-cam.service"}
-    if cam_present:
-        cam_state = cam.get("state")
-        if cam_state == "faulted":
-            warn.append(f"camera daemon is faulted: {cam.get('last_error') or 'no reason given'}")
-        elif cam_state == "device_absent":
-            warn.append("a camera is configured but the daemon cannot find it -- "
-                        "check the USB connection and `bridge_logs roomscan-cam`")
+    warn.extend(_camera_warnings(d))
 
     restarts = d.get("unit_restarts") or {}
     for unit, state in (d.get("units") or {}).items():
-        if unit in optional_units:
+        # `roomscan-cam` is reported by `_camera_warnings` and by nothing else.
+        # It owns that unit outright -- via the Pi's own `warning` string, the
+        # fitted-but-not-answering branch, or its own unit-state branch -- so a
+        # second sentence here would be two claims about one fact, the later of
+        # them re-derived from a subset of what the Pi can see. Skipping it is
+        # also what makes the camera OPTIONAL (spec §5.3): a bridge deployed
+        # without a C270 is a healthy bridge, and its inactive unit must not
+        # hand a human a warning to re-triage every time they look.
+        if unit in _CAMERA_UNITS:
             continue
         n = restarts.get(unit)
         if state not in ("active", "activating", None):

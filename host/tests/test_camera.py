@@ -78,14 +78,25 @@ def make_jpeg(width: int = 64, height: int = 48, filler: int = 200) -> bytes:
 def part_bytes(jpeg: bytes, *, seq: int, generation: int = 1,
                capture_ns: int | None = 1_000_000_000,
                domain: str | None = "pi_monotonic",
+               valid: str | None = None,
+               dequeue_ns: int | None = None,
                boundary: str = "frame") -> bytes:
-    """One part exactly as spec §5.2 frames it."""
+    """One part exactly as `roomscan-cam` frames it (spec §5.2).
+
+    `valid` is the daemon's `X-Roomscan-Capture-Timestamp-Valid: true|false`
+    and `dequeue_ns` its `X-Roomscan-Capture-Dequeue-Mono-Ns`. Both default to
+    absent so the older-daemon path stays covered by every other test here.
+    """
     head = [f"--{boundary}", "Content-Type: image/jpeg",
             f"Content-Length: {len(jpeg)}",
             f"X-Roomscan-Camera-Generation: {generation}",
             f"X-Roomscan-Camera-Seq: {seq}"]
     if capture_ns is not None:
         head.append(f"X-Roomscan-Capture-Mono-Ns: {capture_ns}")
+    if valid is not None:
+        head.append(f"X-Roomscan-Capture-Timestamp-Valid: {valid}")
+    if dequeue_ns is not None:
+        head.append(f"X-Roomscan-Capture-Dequeue-Mono-Ns: {dequeue_ns}")
     if domain is not None:
         head.append(f"X-Roomscan-Timestamp-Domain: {domain}")
     return ("\r\n".join(head) + "\r\n\r\n").encode() + jpeg + b"\r\n"
@@ -408,15 +419,26 @@ class FakeReader:
 
 
 class FakeWriter:
+    """A StreamWriter stand-in that records BOTH halves of the close.
+
+    `close()` only requests the close; `wait_closed()` is what makes it a fact.
+    The fake tracks them separately so a teardown that skips the await is
+    visible here rather than only as a flaky socket in production.
+    """
+
     def __init__(self):
         self.written = bytearray()
         self.closed = False
+        self.close_awaited = False
 
     def write(self, data: bytes) -> None:
         self.written += data
 
     def close(self) -> None:
         self.closed = True
+
+    async def wait_closed(self) -> None:
+        self.close_awaited = True
 
 
 def http_head(boundary: str = "frame", status: int = 200) -> bytes:
@@ -457,11 +479,29 @@ async def _no_status(host, port):
     raise ConnectionRefusedError("status poll disabled in this test")
 
 
-def make_client(scripts, **cfg_kw) -> tuple[cam.CameraClient, FakeDialler]:
+def make_client(scripts, *, sleep=None, **cfg_kw) -> tuple[cam.CameraClient, FakeDialler]:
     cfg = cam.CameraIngestConfig(host="10.0.0.9", status_interval_s=3600.0, **cfg_kw)
     dialler = FakeDialler(scripts)
-    client = cam.CameraClient(cfg, connect=dialler, status_connect=_no_status)
+    client = cam.CameraClient(cfg, connect=dialler, status_connect=_no_status,
+                              sleep=sleep)
     return client, dialler
+
+
+class SleepLog:
+    """Records every backoff delay the client ASKS for, then yields the loop.
+
+    The delays requested are the schedule; wall-clock attempt counts are only a
+    blurry proxy for it, and a monotone backoff is invisible in that proxy
+    until the cap is reached. Sleeping ~0 keeps the test fast while leaving the
+    ordering of the ingest loop intact.
+    """
+
+    def __init__(self):
+        self.delays: list[float] = []
+
+    async def __call__(self, delay: float) -> None:
+        self.delays.append(float(delay))
+        await asyncio.sleep(0)
 
 
 async def drain(client: cam.CameraClient, *, frames: int, timeout: float = 2.0):
@@ -670,6 +710,132 @@ async def test_an_unfamiliar_timestamp_domain_is_also_invalid():
 
 
 @asyncio_test
+async def test_the_daemons_own_valid_false_revokes_a_well_formed_stamp():
+    """The header name the daemon ACTUALLY sends (review round 1, 2026-09-01).
+
+    Everything else about the part is impeccable -- `pi_monotonic` domain, a
+    positive capture stamp -- so a host reading only the old
+    `X-Roomscan-Timestamp-Valid` spelling would publish
+    `timestamp_valid=True` and hand Stage B a capture time the daemon had
+    explicitly disowned. That is the whole failure this pins: not a crash, a
+    quietly wrong "true".
+    """
+    jpeg = make_jpeg()
+    blob = part_bytes(jpeg, seq=1, capture_ns=7_000_000_000,
+                      domain="pi_monotonic", valid="false")
+    client, _ = make_client([[http_head(), blob]])
+    await client.start()
+    try:
+        await drain(client, frames=1)
+        _, frame = client.slot.latest()
+        assert frame.timestamp_valid is False
+        assert frame.pi_capture_mono_ns is None
+        assert client.status()["capture_fps"] is None, (
+            "a disowned stamp must not feed the capture cadence")
+    finally:
+        await client.stop()
+
+
+@asyncio_test
+async def test_the_daemons_valid_true_is_accepted_and_the_old_spelling_still_works():
+    jpeg = make_jpeg()
+    for header_kwargs in ({"valid": "true"}, {}):
+        blob = part_bytes(jpeg, seq=1, capture_ns=7_000_000_000, **header_kwargs)
+        client, _ = make_client([[http_head(), blob]])
+        await client.start()
+        try:
+            await drain(client, frames=1)
+            assert client.slot.latest()[1].timestamp_valid is True, header_kwargs
+        finally:
+            await client.stop()
+
+    # the legacy alias, still honoured for a daemon of the older vintage
+    blob = (part_bytes(jpeg, seq=1, capture_ns=7_000_000_000)
+            .replace(b"X-Roomscan-Camera-Seq: 1",
+                     b"X-Roomscan-Camera-Seq: 1\r\nX-Roomscan-Timestamp-Valid: 0"))
+    client, _ = make_client([[http_head(), blob]])
+    await client.start()
+    try:
+        await drain(client, frames=1)
+        assert client.slot.latest()[1].timestamp_valid is False
+    finally:
+        await client.stop()
+
+
+@asyncio_test
+async def test_a_valid_true_cannot_grant_validity_the_evidence_does_not_support():
+    """The flag revokes, never grants.
+
+    `Valid: true` beside an unnamed timestamp domain leaves us with a number in
+    no known clock. Trusting the flag over the evidence we can check ourselves
+    is the invariant-preserving check that verifies nothing (BUG-059).
+    """
+    jpeg = make_jpeg()
+    blob = part_bytes(jpeg, seq=1, capture_ns=5, domain=None, valid="true")
+    client, _ = make_client([[http_head(), blob]])
+    await client.start()
+    try:
+        await drain(client, frames=1)
+        assert client.slot.latest()[1].timestamp_valid is False
+    finally:
+        await client.stop()
+
+
+@asyncio_test
+async def test_the_dequeue_stamp_is_relayed_but_never_becomes_the_capture_time():
+    """§5.2: "dequeue time is recorded separately ... never renamed capture time".
+
+    Both are plausible-looking Pi nanoseconds, so a fallback from one to the
+    other would be invisible rather than wrong-looking -- which is exactly why
+    the two are asserted to be different values on the same frame, and why the
+    no-capture-stamp case must leave the capture time NULL rather than reaching
+    for the dequeue instant that is sitting right there.
+    """
+    jpeg = make_jpeg()
+    blob = part_bytes(jpeg, seq=1, capture_ns=1_000, dequeue_ns=9_999)
+    client, _ = make_client([[http_head(), blob]])
+    await client.start()
+    try:
+        await drain(client, frames=1)
+        frame = client.slot.latest()[1]
+        assert int(frame.pi_capture_mono_ns) == 1_000
+        assert int(frame.pi_dequeue_mono_ns) == 9_999
+    finally:
+        await client.stop()
+
+    # no capture stamp at all, dequeue present: capture time stays null
+    blob = part_bytes(jpeg, seq=1, capture_ns=None, dequeue_ns=9_999)
+    client, _ = make_client([[http_head(), blob]])
+    await client.start()
+    try:
+        await drain(client, frames=1)
+        frame = client.slot.latest()[1]
+        assert frame.pi_capture_mono_ns is None
+        assert frame.timestamp_valid is False
+        assert int(frame.pi_dequeue_mono_ns) == 9_999
+        assert client.status()["capture_fps"] is None
+    finally:
+        await client.stop()
+
+
+def test_bool_or_none_distinguishes_unknown_from_false():
+    """An unparseable flag is UNKNOWN, not False.
+
+    Reading garbage as False would let a typo in one header silently revoke
+    every capture timestamp on the stream, which is the loudest possible
+    consequence of the quietest possible defect.
+    """
+    assert cam._bool_or_none("true") is True
+    assert cam._bool_or_none("TRUE") is True
+    assert cam._bool_or_none(" 1 ") is True
+    assert cam._bool_or_none("false") is False
+    assert cam._bool_or_none("0") is False
+    assert cam._bool_or_none(None) is None
+    assert cam._bool_or_none("") is None
+    assert cam._bool_or_none("maybe") is None
+
+
+@asyncio_test
 async def test_capture_fps_is_measured_on_the_pi_clock_alone():
     """30 fps of Pi timestamps must read ~30, whatever the host clock does.
 
@@ -808,6 +974,266 @@ async def test_a_device_absent_daemon_reads_as_offline_even_while_connected():
 
 
 @asyncio_test
+async def test_backoff_resets_after_a_connection_that_actually_delivered_frames():
+    """The delay a working camera pays after a daemon restart.
+
+    Four refusals walk the backoff up; then a connection delivers real frames
+    and drops. The NEXT delay must be the floor again. Before the fix the reset
+    lived only on `_connect_and_stream`'s normal-return path -- which is
+    reached only at shutdown -- so the backoff was monotone for the life of the
+    process: a camera absent at boot pinned it at the 10 s cap, and every
+    daemon restart after that cost 10 s of Offline on a healthy link.
+
+    Asserted on the INTERVALS requested, not on a flag: a boolean "did we
+    reset" would agree with a reset that computed the wrong number.
+    """
+    blob, _ = stream_bytes(3)
+    log = SleepLog()
+    scripts = [ConnectionRefusedError("nothing there") for _ in range(4)]
+    scripts.append([http_head(), blob])                 # this one works
+    scripts.extend(ConnectionRefusedError("gone again") for _ in range(3))
+    client, _ = make_client(scripts, sleep=log,
+                            min_backoff_s=0.5, max_backoff_s=10.0)
+    await client.start()
+    try:
+        await drain(client, frames=3, timeout=3.0)
+        for _ in range(200):                            # let the drop land
+            if len(log.delays) >= 6:
+                break
+            await asyncio.sleep(0.002)
+    finally:
+        await client.stop()
+
+    assert log.delays[:4] == [0.5, 1.0, 2.0, 4.0], log.delays
+    assert log.delays[4] == 0.5, (
+        f"the delay after a productive connection must be the floor, "
+        f"not {log.delays[4]} -- the backoff never reset: {log.delays}")
+    assert log.delays[5] == 1.0, log.delays
+
+
+@asyncio_test
+async def test_backoff_does_not_reset_for_a_daemon_that_accepts_then_wedges():
+    """A response head is not a working camera.
+
+    Resetting on a successful connect would turn a daemon that accepts and then
+    sends nothing into a 0.5 s busy-loop. Only DELIVERED frames earn the floor.
+    """
+    log = SleepLog()
+    heads = [[http_head()] for _ in range(5)]           # 200 OK, then EOF
+    client, _ = make_client(heads, sleep=log,
+                            min_backoff_s=0.5, max_backoff_s=10.0)
+    await client.start()
+    try:
+        for _ in range(400):
+            if len(log.delays) >= 4:
+                break
+            await asyncio.sleep(0.002)
+    finally:
+        await client.stop()
+    assert client.frames == 0
+    assert log.delays[:4] == [0.5, 1.0, 2.0, 4.0], log.delays
+
+
+@asyncio_test
+async def test_state_is_connecting_not_stale_before_this_connections_first_frame():
+    """The daemon answered and is still opening the camera.
+
+    `stale` is a claim about a stream that WAS running and stopped; before the
+    first part there is no such stream. `age_s` alone cannot tell them apart --
+    it survives across reconnects -- so a card would paint Stale the moment a
+    reconnect's response head landed, which reads as a fault on a camera that
+    is merely warming up.
+    """
+    now = [100.0]
+    cfg = cam.CameraIngestConfig(host="h", status_interval_s=3600.0,
+                                 stale_after_s=2.0, min_backoff_s=0.01)
+
+    async def dial(host, port):
+        # Response head only; the body never produces a part.
+        return FakeReader([http_head()], then_eof=False), FakeWriter()
+
+    client = cam.CameraClient(cfg, connect=dial, status_connect=_no_status,
+                              clock=lambda: now[0])
+    await client.start()
+    try:
+        for _ in range(200):
+            if client._connected:
+                break
+            await asyncio.sleep(0.002)
+        assert client._connected, "the fake never got as far as the response head"
+        assert client.state() == "connecting"
+        now[0] += 60.0                     # a long silence is still Connecting
+        assert client.state() == "connecting", (
+            "no frame has EVER arrived on this connection; there is no stream "
+            "to have gone stale")
+    finally:
+        await client.stop()
+
+
+@asyncio_test
+async def test_state_is_stale_only_after_a_frame_then_silence():
+    """The other half of the pair: once a frame HAS arrived on this
+    connection, silence is Stale. Without both, either state could be a
+    constant and still pass."""
+    blob, _ = stream_bytes(1)
+    now = [100.0]
+    cfg = cam.CameraIngestConfig(host="h", status_interval_s=3600.0,
+                                 stale_after_s=2.0, min_backoff_s=0.01)
+
+    async def dial(host, port):
+        return FakeReader([http_head(), blob], then_eof=False), FakeWriter()
+
+    client = cam.CameraClient(cfg, connect=dial, status_connect=_no_status,
+                              clock=lambda: now[0])
+    await client.start()
+    try:
+        await drain(client, frames=1)
+        assert client.state() == "live"
+        now[0] += 60.0
+        assert client.state() == "stale"
+    finally:
+        await client.stop()
+
+
+@asyncio_test
+async def test_a_second_start_cannot_leak_a_live_status_poller():
+    """`start()` guards on BOTH tasks.
+
+    With the ingest task finished but the poller alive, a guard on `_task`
+    alone lets a second `start()` through, which overwrites `_status_task` and
+    strands the old poller: two pollers dialling the daemon forever, and
+    `stop()` able to join only the newer one. Asserted as a task census.
+    """
+    client, _ = make_client([], min_backoff_s=5.0)
+    await client.start()
+    poller = client._status_task
+    client._task.cancel()                  # the ingest half dies, the poller lives
+    try:
+        await client._task
+    except asyncio.CancelledError:
+        pass
+    assert not poller.done()
+
+    before = len(asyncio.all_tasks())
+    await client.start()                   # must be refused
+    try:
+        assert client._status_task is poller, "start() replaced the live poller"
+        assert len(asyncio.all_tasks()) == before, "start() spawned a second poller"
+    finally:
+        await client.stop()
+    assert poller.done()
+
+
+def status_head(body: bytes) -> list[bytes]:
+    """A complete `GET /status.json` response, as the daemon answers it."""
+    return [(f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+             f"Content-Length: {len(body)}\r\n\r\n").encode() + body]
+
+
+@asyncio_test
+async def test_the_status_poll_turns_a_live_camera_offline_when_it_is_unplugged():
+    """§8 "Camera unplugged live", seen through `/status.json`.
+
+    The MJPEG body can stay open across an unplug -- the daemon holds the
+    socket and simply stops producing -- so the frames-based signal alone would
+    read `stale`, which says "something is slow". `device_absent` is the
+    daemon telling us the hardware is gone, which is a different fact and the
+    one a viewer needs. This drives it through the real status poll rather than
+    by assigning `source_status`, so the polling path itself is exercised.
+    """
+    blob, _ = stream_bytes(2)
+    now = [500.0]
+    reports = [b'{"state": "streaming"}', b'{"state": "device_absent"}']
+
+    async def dial(host, port):
+        return FakeReader([http_head(), blob], then_eof=False), FakeWriter()
+
+    async def status_dial(host, port):
+        body = reports[0] if len(reports) == 1 else reports.pop(0)
+        return FakeReader(status_head(body)), FakeWriter()
+
+    cfg = cam.CameraIngestConfig(host="h", stale_after_s=2.0,
+                                 status_interval_s=0.01, min_backoff_s=0.01)
+    client = cam.CameraClient(cfg, connect=dial, status_connect=status_dial,
+                              clock=lambda: now[0])
+    await client.start()
+    try:
+        await drain(client, frames=2)
+        for _ in range(300):                      # first poll: streaming
+            if client.source_status == {"state": "streaming"}:
+                break
+            await asyncio.sleep(0.002)
+        assert client.state() == "live"
+
+        for _ in range(300):                      # second poll: unplugged
+            if (client.source_status or {}).get("state") == "device_absent":
+                break
+            await asyncio.sleep(0.002)
+        assert client.state() == "offline", (
+            "a daemon reporting device_absent is Offline, not Stale -- the "
+            "hardware is gone, the stream is not merely slow")
+        assert client.status()["source"] == {"state": "device_absent"}, (
+            "the daemon's own report must be passed through verbatim")
+    finally:
+        await client.stop()
+
+
+@asyncio_test
+async def test_a_body_that_closes_goes_offline_then_live_again_on_reconnect():
+    """§8's other unplug row: the daemon drops the response body.
+
+    Note what the state does FIRST: for `stale_after_s` after the drop it is
+    still `live`, deliberately -- the picture on screen genuinely is that
+    fresh, and flipping a card to Offline for a reconnect that completes in
+    120 ms would be noise, not information. Only once the last frame is
+    actually old AND the dials keep failing is it Offline, which is why this
+    drives the clock rather than sleeping.
+
+    Coming back must bump the host generation: the browser's cache-bust keys
+    off it, so a resumed stream reusing the old generation would leave every
+    viewer attached to a dead request.
+    """
+    blob1, _ = stream_bytes(1)
+    blob2, _ = stream_bytes(1)
+    now = [1000.0]
+    dialler = FakeDialler([[http_head(), blob1],
+                           ConnectionRefusedError("daemon gone"),
+                           ConnectionRefusedError("daemon gone"),
+                           [http_head(), blob2]])
+    cfg = cam.CameraIngestConfig(host="h", status_interval_s=3600.0,
+                                 stale_after_s=1.0, min_backoff_s=0.01,
+                                 max_backoff_s=0.02, offline_after_failures=2)
+    client = cam.CameraClient(cfg, connect=dialler, status_connect=_no_status,
+                              clock=lambda: now[0])
+    await client.start()
+    try:
+        await drain(client, frames=1)
+        assert client.state() == "live"
+        gen_before = client.slot.latest()[1].generation
+
+        for _ in range(400):                      # the two refusals land
+            if client._consecutive_failures >= 2:
+                break
+            await asyncio.sleep(0.002)
+        assert client.state() == "live", (
+            "a drop inside the freshness window is not yet Offline -- the "
+            "displayed frame really is that recent")
+        now[0] += 30.0
+        assert client.state() == "offline", (
+            "an old last frame plus repeated failed dials is a camera that is "
+            "gone, not one that is still connecting")
+
+        await drain(client, frames=2, timeout=3.0)
+        assert client.state() == "live"
+        gen_after = client.slot.latest()[1].generation
+        assert gen_after > gen_before, (
+            f"a reconnect must bump the host generation ({gen_before} -> "
+            f"{gen_after}); a viewer would otherwise keep a dead <img> request")
+    finally:
+        await client.stop()
+
+
+@asyncio_test
 async def test_stop_leaves_no_task_and_closes_the_socket():
     """§9 "Lifespan: ... worker self-cleanup, no leaked task/thread/process"."""
     blob, _ = stream_bytes(1)
@@ -825,6 +1251,9 @@ async def test_stop_leaves_no_task_and_closes_the_socket():
     assert ingest.done() and status.done(), "stop() returned before its tasks ended"
     assert len(asyncio.all_tasks()) == before, "camera tasks outlived stop()"
     assert dialler.writers and all(w.closed for w in dialler.writers)
+    assert all(w.close_awaited for w in dialler.writers), (
+        "close() only REQUESTS the close; without wait_closed() the transport "
+        "can still be flushing when stop() returns")
     assert client.slot.latest()[1] is None
     assert client.running is False
 
@@ -874,6 +1303,36 @@ async def test_cancelling_the_ingest_task_does_not_raise_out_of_stop():
     await asyncio.sleep(0)
     await client.stop()                 # must not propagate CancelledError
     assert client.running is False
+
+
+@asyncio_test
+async def test_stop_reraises_a_cancellation_aimed_at_its_own_caller():
+    """Swallowing the shutdown signal is not cleanup.
+
+    `stop()` legitimately absorbs the `CancelledError` from the tasks IT
+    cancelled. It must not also absorb a cancellation aimed at the task running
+    `stop()` -- on a real lifespan shutdown that is the signal to stop, and
+    eating it leaves the server waiting on a teardown that already decided to
+    end. Cleanup must still complete first, which is what the second half
+    asserts.
+    """
+    blob, _ = stream_bytes(1)
+    client, dialler = make_client([[http_head(), blob]], min_backoff_s=5.0)
+    await client.start()
+    await drain(client, frames=1)
+
+    async def stopper():
+        await client.stop()
+
+    task = asyncio.create_task(stopper())
+    await asyncio.sleep(0)
+    task.cancel()                       # cancel the CALLER of stop(), not the client
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert client._task is None and client._status_task is None
+    assert all(w.closed for w in dialler.writers), (
+        "the socket must be released even when the cancellation is re-raised")
+    assert client.slot.latest()[1] is None
 
 
 @asyncio_test
@@ -1037,6 +1496,51 @@ def test_save_camera_snapshot_writes_the_exact_bytes_and_reports_the_real_path(
     assert (out["width"], out["height"]) == (1280, 720)
     assert (out["generation"], out["seq"]) == (4, 912)
     assert out["age_ms"] == 31.5
+
+
+def test_snapshot_refuses_an_allowed_root_itself(tmp_path):
+    """`out="results"` is a directory, not a snapshot path.
+
+    The old check accepted `candidate == root`, so this sailed through
+    resolution and then hit `write_bytes` on a directory -- `IsADirectoryError`
+    raised out of a tool whose entire contract is to report rather than raise.
+    """
+    (tmp_path / "results").mkdir()
+    (tmp_path / "captures").mkdir()
+    for root in ("results", "captures"):
+        with pytest.raises(ValueError, match="allowed ROOT directory"):
+            cam.resolve_snapshot_path(root, repo=tmp_path)
+
+
+def test_save_camera_snapshot_reports_a_failed_write_rather_than_raising(
+        tmp_path, monkeypatch):
+    """A full disk, a read-only root and a directory destination are ordinary
+    answers to "save a snapshot". Asserted by making the write genuinely fail,
+    not by mocking the return value."""
+    jpeg = make_jpeg(64, 48)
+
+    class FakeResponse:
+        headers: dict = {}
+
+        def read(self):
+            return jpeg
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(cam.urllib.request, "urlopen", lambda *a, **k: FakeResponse())
+    # A DIRECTORY where the .jpg should be: resolution allows it (it is inside
+    # `results/`), and only the write can discover it is not a file.
+    (tmp_path / "results" / "camera").mkdir(parents=True)
+    (tmp_path / "results" / "camera" / "shot.jpg").mkdir()
+    out = cam.save_camera_snapshot("http://localhost:8000",
+                                   "results/camera/shot.jpg", repo=tmp_path)
+    assert out["ok"] is False
+    assert "IsADirectoryError" in out["error"]
+    assert out["path"].endswith("shot.jpg"), "the refused path must be reported"
 
 
 def test_save_camera_snapshot_refuses_a_non_jpeg_response(tmp_path, monkeypatch):

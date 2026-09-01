@@ -402,59 +402,132 @@ def test_bridge_image_build_reports_a_missing_secrets_file(monkeypatch, tmp_path
 
 # --- optional camera unit (#226 Stage A, spec §5.3) -------------------------
 #
-# The Pi's status script grows a `camera` block on the other half of this work.
-# These pin how the HOST reads it, which is the part that decides whether a
-# bridge without a webcam reads as broken.
+# The shape below is the one `roomscan-bridge-status` actually emits (verified
+# against the Pi worker's branch at review round 1, 2026-09-01):
+#
+#   "camera": {"usb_present": bool|null, "port": int,
+#              "daemon": <verbatim /status.json or null>,
+#              "daemon_reachable": bool, "unit": <systemctl is-active>,
+#              "warning": <string|null>}
+#
+# The first cut of this code read `camera.present` / `camera.state` /
+# `camera.last_error` -- none of which exist. Every lookup returned None, so
+# `present` was always falsy: the optional-unit carve-out applied
+# unconditionally and a fitted-but-dead camera warned about NOTHING. That is
+# why these fixtures are written out in full rather than built from a helper
+# that could drift the same way.
 
 
-def test_an_absent_camera_unit_is_not_a_bridge_fault():
-    """A bridge deployed with no C270 is a healthy bridge.
-
-    Without the optional-unit carve-out the generic unit loop below reports
-    `unit roomscan-cam is inactive`, which turns a deliberate absence into a
-    warning a human has to triage every single time they look. Spec §5.3:
-    "without turning a deliberately absent optional camera into a bridge
-    failure".
-    """
-    d = {**HEALTHY,
-         "camera": {"present": False},
-         "units": {**HEALTHY.get("units", {}), "roomscan-cam": "inactive"}}
-    warns = pb._status_warnings(d)
-    assert not any("roomscan-cam" in w for w in warns), warns
+def _cam(**over) -> dict:
+    """A status dict with a realistic `camera` block, healthy unless overridden."""
+    cam = {"usb_present": True, "port": 5001, "daemon_reachable": True,
+           "unit": "active", "warning": None,
+           "daemon": {"state": "streaming", "last_error": None}}
+    cam.update(over)
+    return {**HEALTHY, "camera": cam,
+            "units": {**HEALTHY.get("units", {}), "roomscan-cam": cam.get("unit")}}
 
 
 def test_a_status_script_with_no_camera_block_at_all_is_silent():
     """An older Pi payload reports nothing about a camera. Unknown is not a
     fault, and it must not become one just because this host learned the key."""
+    assert "camera" not in HEALTHY
     assert pb._status_warnings(HEALTHY) == []
 
 
-def test_a_present_but_faulted_camera_is_reported_with_its_reason():
-    d = {**HEALTHY,
-         "camera": {"present": True, "state": "faulted",
-                    "last_error": "VIDIOC_STREAMON: No such device"}}
+def test_an_absent_camera_unit_is_not_a_bridge_fault():
+    """A bridge deployed with no C270 is a healthy bridge.
+
+    Without the optional-unit carve-out the generic unit loop reports
+    `unit roomscan-cam is inactive`, which turns a deliberate absence into a
+    warning a human has to re-triage every time they look. Spec §5.3: "without
+    turning a deliberately absent optional camera into a bridge failure".
+    """
+    d = _cam(usb_present=False, daemon_reachable=False, unit="inactive", daemon=None)
+    assert pb._status_warnings(d) == [], pb._status_warnings(d)
+
+
+def test_usb_present_null_reads_as_unknown_not_as_a_fault():
+    """`usb_present` is `bool|null` -- null means the Pi could not tell.
+
+    Only an explicit `true` lifts the carve-out, the same rule `nft.readable`
+    and `wlan0.connected` already follow: an unknown reading is reported as
+    unknown or not at all, never as a negative.
+    """
+    d = _cam(usb_present=None, daemon_reachable=False, unit="failed", daemon=None)
+    assert pb._status_warnings(d) == [], pb._status_warnings(d)
+
+
+def test_a_fitted_camera_whose_daemon_is_not_answering_is_reported():
+    """The case the first cut could not see at all.
+
+    `usb_present` true + `daemon_reachable` false = the hardware is there and
+    the service is dead, which is precisely when the preview is broken and
+    nobody has been told.
+    """
+    d = _cam(daemon_reachable=False, unit="failed", daemon=None)
+    warns = pb._status_warnings(d)
+    assert any("not answering" in w and "5001" in w and "failed" in w for w in warns), warns
+
+
+def test_the_pis_own_warning_string_is_surfaced_verbatim():
+    """One source of truth for the sentence a human reads.
+
+    The Pi can see the USB tree, the unit and the daemon at once; a second
+    sentence computed here from a subset of those facts is a re-derived label,
+    and re-derived labels diverge from their source the moment either side is
+    edited. So the Pi's string wins outright and nothing is added beside it.
+    """
+    d = _cam(daemon_reachable=False, unit="failed", daemon=None,
+             warning="camera present but roomscan-cam has restarted 5 times")
+    warns = pb._status_warnings(d)
+    camera_lines = [w for w in warns if "camera" in w.lower() or "roomscan-cam" in w]
+    assert camera_lines == [
+        "camera present but roomscan-cam has restarted 5 times"], camera_lines
+
+
+def test_an_empty_pi_warning_falls_through_to_the_derived_branches():
+    """`warning: null` (and `""`) is "nothing to say", not "say nothing"."""
+    for empty in (None, "", "   "):
+        d = _cam(daemon_reachable=False, unit="failed", daemon=None, warning=empty)
+        assert any("not answering" in w for w in pb._status_warnings(d)), empty
+
+
+def test_a_faulted_daemon_is_reported_with_its_own_reason():
+    d = _cam(daemon={"state": "faulted",
+                     "last_error": "VIDIOC_STREAMON: No such device"})
     warns = pb._status_warnings(d)
     assert any("faulted" in w and "VIDIOC_STREAMON" in w for w in warns), warns
 
 
-def test_a_configured_camera_the_daemon_cannot_find_is_reported():
-    d = {**HEALTHY, "camera": {"present": True, "state": "device_absent"}}
+def test_a_daemon_that_cannot_open_the_camera_is_reported():
+    d = _cam(daemon={"state": "device_absent", "last_error": None})
     warns = pb._status_warnings(d)
-    assert any("cannot find it" in w for w in warns), warns
+    assert any("cannot open it" in w for w in warns), warns
 
 
-def test_a_present_camera_unit_that_is_dead_is_still_a_warning():
+def test_a_present_camera_whose_unit_is_dead_is_still_a_warning():
     """The carve-out applies only when the camera is genuinely absent. A Pi
-    that HAS a camera and whose daemon is dead must still say so."""
-    d = {**HEALTHY,
-         "camera": {"present": True, "state": "streaming"},
-         "units": {**HEALTHY.get("units", {}), "roomscan-cam": "failed"}}
+    that HAS a camera and whose unit is dead must still say so -- via the
+    camera branch and via the generic unit loop, which no longer skips it."""
+    d = _cam(unit="failed", daemon={"state": "streaming", "last_error": None})
     warns = pb._status_warnings(d)
-    assert any("roomscan-cam" in w and "failed" in w for w in warns), warns
+    assert any("roomscan-cam is failed" in w for w in warns), warns
 
 
 def test_a_healthy_streaming_camera_adds_no_warnings():
-    d = {**HEALTHY,
-         "camera": {"present": True, "state": "streaming", "last_error": None},
-         "units": {**HEALTHY.get("units", {}), "roomscan-cam": "active"}}
-    assert pb._status_warnings(d) == []
+    assert pb._status_warnings(_cam()) == [], pb._status_warnings(_cam())
+
+
+def test_camera_present_only_accepts_the_real_key():
+    """A guard on the mismatch itself.
+
+    `{"present": True}` is the key this code used to read and the Pi never
+    sends. If someone reintroduces it, presence must still be decided by
+    `usb_present` -- otherwise the two spellings coexist and the tests pass
+    against a shape production never produces.
+    """
+    assert pb._camera_present({"camera": {"present": True}}) is False
+    assert pb._camera_present({"camera": {"usb_present": True}}) is True
+    assert pb._camera_present({"camera": {}}) is False
+    assert pb._camera_present({}) is False

@@ -200,20 +200,32 @@ def _camera_client(state):
 def camera_frame_headers(frame: CameraFrame, age_ms: float | None) -> dict:
     """The `X-Roomscan-*` headers a single frame carries out of this host.
 
-    Deliberately the SAME names the Pi daemon uses (spec §5.2) with the host's
-    own generation substituted, so a client -- browser, MCP snapshot, curl --
-    reads one vocabulary end to end. `age_ms` is added here and exists nowhere
-    upstream: it is a host-to-host measurement (arrival to now) and is named
-    `age`, never `latency`, because no clock has been mapped (§4.5).
+    Deliberately the SAME names and the same value spellings the Pi daemon uses
+    (spec §5.2) with the host's own generation substituted, so a client --
+    browser, MCP snapshot, curl -- reads one vocabulary end to end. In
+    particular the flag is `X-Roomscan-Capture-Timestamp-Valid: true|false`, the
+    daemon's name, and NOT a second host-invented spelling beside it: two
+    headers asserting the same fact are two things that can disagree.
+
+    `age_ms` is added here and exists nowhere upstream: it is a host-to-host
+    measurement (arrival to now), named `age` and never `latency`, because no
+    clock has been mapped (§4.5).
     """
     headers = {
         "X-Roomscan-Camera-Generation": str(frame.generation),
         "X-Roomscan-Camera-Seq": str(frame.seq),
         "X-Roomscan-Timestamp-Domain": frame.timestamp_domain or "unknown",
-        "X-Roomscan-Timestamp-Valid": "1" if frame.timestamp_valid else "0",
+        "X-Roomscan-Capture-Timestamp-Valid": (
+            "true" if frame.timestamp_valid else "false"),
     }
     if frame.pi_capture_mono_ns is not None:
         headers["X-Roomscan-Capture-Mono-Ns"] = str(int(frame.pi_capture_mono_ns))
+    # Passed straight through when the daemon sent one. It is a DIAGNOSTIC, not
+    # a second capture time: a consumer that fell back to it would silently be
+    # reading buffer-delivery instants as exposure instants (§5.2).
+    if frame.pi_dequeue_mono_ns is not None:
+        headers["X-Roomscan-Capture-Dequeue-Mono-Ns"] = str(
+            int(frame.pi_dequeue_mono_ns))
     if frame.source_generation is not None:
         headers["X-Roomscan-Source-Generation"] = str(frame.source_generation)
     if age_ms is not None:

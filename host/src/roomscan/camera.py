@@ -43,9 +43,19 @@ daemon is written on a different branch:
       X-Roomscan-Camera-Generation: G\\r\\n
       X-Roomscan-Camera-Seq: S\\r\\n
       X-Roomscan-Capture-Mono-Ns: T\\r\\n
+      X-Roomscan-Capture-Timestamp-Valid: true|false\\r\\n
+      X-Roomscan-Capture-Dequeue-Mono-Ns: D\\r\\n
       X-Roomscan-Timestamp-Domain: pi_monotonic\\r\\n
       \\r\\n
       <N bytes>\\r\\n
+
+    `X-Roomscan-Capture-Dequeue-Mono-Ns` is when the V4L2 buffer was DEQUEUED,
+    not when the sensor exposed. It is relayed untouched and never folded into
+    the capture stamp or into `capture_fps`: §5.2 is explicit that "dequeue
+    time is recorded separately for diagnostics and is never renamed capture
+    time", and the whole reason the daemon sends both is that they are
+    different facts. Both are plausible-looking Pi nanoseconds, so a fallback
+    from one to the other would be invisible rather than wrong-looking.
 
     GET /frame.jpg    -> 200 image/jpeg + the same X-Roomscan-* headers
     GET /status.json  -> 200 JSON; passed through VERBATIM as `source` and read
@@ -153,6 +163,9 @@ class CameraFrame:
     host_recv_mono: HostMono
     source_generation: int | None = None
     pi_capture_mono_ns: PiMonoNanos | None = None
+    #: When the V4L2 buffer was DEQUEUED on the Pi -- a diagnostic, relayed
+    #: untouched. A separate field, never a fallback for the capture stamp.
+    pi_dequeue_mono_ns: PiMonoNanos | None = None
     timestamp_valid: bool = False
     timestamp_domain: str | None = None
     width: int | None = None
@@ -563,6 +576,7 @@ class CameraClient:
         connect=None,
         status_connect=None,
         clock=None,
+        sleep=None,
     ) -> None:
         self.config = config or CameraIngestConfig()
         #: async () -> str, the bridge address. Injected so the server can share
@@ -577,6 +591,11 @@ class CameraClient:
         #: MJPEG body must not have the status poll eat its first script.
         self._status_connect = status_connect or self._connect
         self._now = clock or (lambda: float(now_mono()))
+        #: `asyncio.sleep`, injected only by tests -- so the backoff SCHEDULE
+        #: can be asserted as the intervals actually requested rather than
+        #: inferred from wall-clock attempt counts, which is how a monotone
+        #: backoff hid here in the first place.
+        self._sleep = sleep or asyncio.sleep
 
         self.slot = LatestFrameSlot()
         self.generation = 0             # HOST ingest generation
@@ -597,6 +616,11 @@ class CameraClient:
         self._connected = False
         self._consecutive_failures = 0
         self._last_frame_at: float | None = None
+        #: Frames delivered by the CURRENT connection. Distinct from `frames`
+        #: (process lifetime) because both `state()` and the backoff reset ask
+        #: "has THIS connection produced anything yet?", and the lifetime
+        #: counter answers a different question.
+        self._frames_this_connection = 0
         self._host_rate = _Rate()
         self._capture_rate = _Rate()
         self._last_capture_ns: PiMonoNanos | None = None
@@ -611,7 +635,14 @@ class CameraClient:
         """Idempotent: a second `start` on a running client is a no-op, so a
         repeated lifespan (the app factory is exercised many times in tests)
         can never leave two ingest tasks racing for one slot."""
-        if self._task is not None and not self._task.done():
+        # BOTH tasks, not just the ingest one. Guarding on `_task` alone means
+        # an ingest task that has finished (a cancel from elsewhere, a bug that
+        # let `_run` return) lets a second `start()` through, which then
+        # overwrites `_status_task` with a fresh poller and leaks the live one
+        # -- two pollers dialling the daemon forever, and `stop()` able to join
+        # only the newer of them.
+        if any(t is not None and not t.done()
+               for t in (self._task, self._status_task)):
             return
         self._running = True
         self._task = asyncio.create_task(self._run(), name="camera-ingest")
@@ -627,27 +658,64 @@ class CameraClient:
         """
         self._running = False
         self._connected = False
-        self._close_writer()
         current = asyncio.current_task()
-        for attr in ("_task", "_status_task"):
-            task = getattr(self, attr)
-            setattr(self, attr, None)
-            if task is None or task is current:
-                continue
-            task.cancel()
+        cancelled_from_outside = False
+        try:
+            for attr in ("_task", "_status_task"):
+                task = getattr(self, attr)
+                setattr(self, attr, None)
+                # `is current` is the self-cancel guard: a task that cancels
+                # itself lands the CancelledError inside its own cleanup, with
+                # nowhere to go, and half-tears-down whatever it was holding
+                # (#219).
+                if task is None or task is current:
+                    continue
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    # Two different events raise here and they must not be
+                    # conflated: the task WE cancelled finishing (expected,
+                    # swallowed) versus THIS task being cancelled while we
+                    # waited -- which happens on a real lifespan shutdown.
+                    # Swallowing the second one silently eats the shutdown
+                    # signal, so it is re-raised after cleanup completes.
+                    if _being_cancelled(current):
+                        cancelled_from_outside = True
+                except Exception:               # noqa: BLE001 - a dead worker
+                    pass
+        finally:
+            # Runs even when the re-raise above is pending, so the socket and
+            # the slot are released either way.
             try:
-                await task
-            except (asyncio.CancelledError, Exception):   # noqa: BLE001
+                await self._aclose_writer()
+            except Exception:                   # noqa: BLE001
                 pass
-        self.slot.clear()
+            self.slot.clear()
+        if cancelled_from_outside:
+            raise asyncio.CancelledError
 
-    def _close_writer(self) -> None:
+    async def _aclose_writer(self) -> None:
+        """Close the upstream socket and WAIT for it to finish closing.
+
+        `close()` alone only requests it; without the `wait_closed()` the
+        transport can still be flushing when `stop()` returns, so "the lifespan
+        returned" would not actually mean the socket is gone -- the same
+        asked-versus-happened distinction the task join exists for.
+        """
         writer, self._writer = self._writer, None
         if writer is None:
             return
         try:
             writer.close()
         except Exception:                       # noqa: BLE001 - already dead
+            return
+        wait_closed = getattr(writer, "wait_closed", None)
+        if wait_closed is None:
+            return                              # a test double, or an old loop
+        try:
+            await wait_closed()
+        except Exception:                       # noqa: BLE001 - it is closing
             pass
 
     # -- the ingest loop -------------------------------------------------
@@ -655,6 +723,13 @@ class CameraClient:
     async def _run(self) -> None:
         backoff = self.config.min_backoff_s
         while self._running:
+            productive = False
+            # Zeroed HERE, at the top of the attempt, not inside
+            # `_connect_and_stream` -- a dial that fails never reaches that
+            # function, so the count from the PREVIOUS connection would survive
+            # and every subsequent failure would re-earn the reset. One owner,
+            # and it means exactly "frames delivered by the attempt just made".
+            self._frames_this_connection = 0
             try:
                 await self._connect_and_stream()
                 backoff = self.config.min_backoff_s
@@ -678,11 +753,27 @@ class CameraClient:
                 level("camera ingest attempt failed (%s); retry in %.1fs",
                       self.last_error, backoff)
             finally:
+                productive = self._frames_this_connection > 0
                 self._connected = False
-                self._close_writer()
+                await self._aclose_writer()
             if not self._running:
                 break
-            await asyncio.sleep(backoff)
+            # A connection that actually DELIVERED frames earns a fresh
+            # backoff. Without this the reset lived only on the normal-return
+            # path -- which `_connect_and_stream` reaches only at shutdown --
+            # so every real drop doubled and the delay was monotone for the
+            # life of the process. The visible symptom is nasty and delayed: a
+            # camera absent at boot walks the backoff to its 10 s cap, and from
+            # then on a daemon restart costs 10 s of Offline forever, on a link
+            # that is otherwise perfectly healthy.
+            #
+            # Keyed on frames delivered, NOT on a successful response head: a
+            # daemon that accepts the connection and then wedges would
+            # otherwise reset the backoff every attempt and turn this into a
+            # 0.5 s busy-loop against a broken peer.
+            if productive:
+                backoff = self.config.min_backoff_s
+            await self._sleep(backoff)
             backoff = min(backoff * 2.0, self.config.max_backoff_s)
 
     async def _connect_and_stream(self) -> None:
@@ -760,9 +851,20 @@ class CameraClient:
         # (§4.5, §8's "Timestamp flag absent" row). Arrival time is recorded
         # separately and is never renamed capture time.
         valid = domain == "pi_monotonic" and cap_ns is not None and cap_ns >= 0
-        explicit = headers.get("x-roomscan-timestamp-valid")
-        if explicit is not None and explicit.strip() in ("0", "false", "False"):
+        # The daemon's own flag, whatever it decided. `roomscan-cam` sends
+        # `X-Roomscan-Capture-Timestamp-Valid: true|false`; the shorter
+        # `X-Roomscan-Timestamp-Valid` is kept as an alias so either spelling is
+        # read. It can only ever REVOKE validity, never grant it: a `true`
+        # alongside an absent stamp or an unnamed domain still leaves no usable
+        # capture time, and taking the daemon's word over evidence we can check
+        # ourselves is how an invariant-preserving check verifies nothing.
+        explicit = _bool_or_none(headers.get("x-roomscan-capture-timestamp-valid"))
+        if explicit is None:
+            explicit = _bool_or_none(headers.get("x-roomscan-timestamp-valid"))
+        if explicit is False:
             valid = False
+        # Relayed, never consumed -- see `CameraFrame.pi_dequeue_mono_ns`.
+        dequeue_ns = _int_or_none(headers.get("x-roomscan-capture-dequeue-mono-ns"))
 
         now = self._now()
         self._track_sequence(src_gen, seq)
@@ -785,12 +887,16 @@ class CameraClient:
             host_recv_mono=HostMono(now),
             source_generation=src_gen,
             pi_capture_mono_ns=PiMonoNanos(cap_ns) if valid else None,
+            pi_dequeue_mono_ns=(PiMonoNanos(dequeue_ns)
+                                if dequeue_ns is not None and dequeue_ns >= 0
+                                else None),
             timestamp_valid=valid,
             timestamp_domain=domain,
             width=dims[0] if dims else None,
             height=dims[1] if dims else None,
         )
         self.frames += 1
+        self._frames_this_connection += 1
         self.bytes += len(body)
         self._last_frame_at = now
         self._host_rate.add(now)
@@ -902,7 +1008,13 @@ class CameraClient:
         if age is not None and age <= self.config.stale_after_s:
             return "live"
         if self._connected:
-            return "stale"
+            # `stale` is a claim about a stream that WAS running and stopped.
+            # Before this connection's first part there is no such stream: the
+            # daemon accepted us and is opening the camera, which is exactly
+            # what Connecting means. `age_s` cannot tell the two apart on its
+            # own -- it survives across reconnects -- so the per-connection
+            # counter is what separates "not started" from "stopped".
+            return "stale" if self._frames_this_connection else "connecting"
         if self._consecutive_failures >= self.config.offline_after_failures:
             return "offline"
         return "connecting"
@@ -967,7 +1079,18 @@ CAMERA_EDGE_KEYS = (
 
 
 def camera_message(status: dict) -> dict:
-    """The `/ws` `camera` message: state, never pixels (§5.4)."""
+    """The `/ws` `camera` message: state, never pixels (§5.4).
+
+    **No `recording {state, writer_drops, last_error}` sub-object, and no
+    Recording/Partial state word -- deferred to Stage B (#227) on purpose.**
+    §5.4 lists both, but they describe a capture-bundle writer that does not
+    exist yet: Stage A has nothing to write and therefore nothing truthful to
+    say about `writer_drops` or `camera_partial`. Emitting the keys as
+    permanent nulls would let a browser render a recording badge from a field
+    no code populates -- a `state` a viewer could read as "healthy dual
+    capture" while only the scanner is being written, which is precisely the
+    failure §6.3 exists to prevent. The keys arrive with the writer.
+    """
     msg = {"type": "camera"}
     msg.update(status)
     return msg
@@ -998,8 +1121,14 @@ def resolve_snapshot_path(out: str, *, repo: Path, now: float | None = None) -> 
 
     An empty `out` lands in `results/camera/<unix-ms>.jpg`. A relative path is
     taken against the repo root. Every result is `resolve()`d and checked to be
-    inside one of `SNAPSHOT_ROOTS` -- symlink and `..` traversal included,
-    because resolving first is the only check that sees either.
+    STRICTLY INSIDE one of `SNAPSHOT_ROOTS` -- symlink and `..` traversal
+    included, because resolving first is the only check that sees either.
+
+    Strictly inside, not "inside or equal": `out="results"` resolving to the
+    root directory itself passed the old check and then reached `write_bytes`
+    on a directory, which raises `IsADirectoryError` out of a tool whose whole
+    contract is to report rather than raise. A directory is not a snapshot
+    path, so it is refused here where the refusal can carry a reason.
     """
     repo = Path(repo).resolve()
     if not out:
@@ -1011,7 +1140,11 @@ def resolve_snapshot_path(out: str, *, repo: Path, now: float | None = None) -> 
             candidate = repo / candidate
     candidate = Path(candidate).resolve()
     allowed = [(repo / r).resolve() for r in SNAPSHOT_ROOTS]
-    if not any(candidate == root or root in candidate.parents for root in allowed):
+    if candidate in allowed:
+        raise ValueError(
+            f"snapshot path {candidate} is an allowed ROOT directory, not a file "
+            f"inside one -- name the .jpg to write")
+    if not any(root in candidate.parents for root in allowed):
         raise ValueError(
             f"snapshot path {candidate} is outside the allowed roots "
             f"{[str(a) for a in allowed]}")
@@ -1064,13 +1197,24 @@ def save_camera_snapshot(base_url: str, out: str = "", *, repo: Path,
     if not looks_like_jpeg(data):
         return {"ok": False, "error": f"response was not a JPEG ({len(data)} bytes)",
                 "url": url}
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(data)
+    # The WRITE is inside the try too, not just the fetch. A full disk, a
+    # read-only root, a permission denial and a destination that is a directory
+    # are all ordinary answers to "save a snapshot", and a tool that raises
+    # `OSError` at its caller instead of returning `{"ok": false, ...}` has
+    # stopped reporting what actually happened for exactly the cases where that
+    # matters most.
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        written = dest.stat().st_size
+    except OSError as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}",
+                "path": str(dest), "url": url}
     dims = jpeg_dimensions(data)
     return {
         "ok": True,
         "path": str(dest),
-        "bytes": dest.stat().st_size,
+        "bytes": written,
         "width": dims[0] if dims else None,
         "height": dims[1] if dims else None,
         "generation": _int_or_none(headers.get("x-roomscan-camera-generation")),
@@ -1115,6 +1259,26 @@ def _parse_response_head(head: bytes) -> tuple[int, dict[str, str]]:
     return status, _parse_headers(b"\r\n".join(lines[1:]))
 
 
+def _being_cancelled(task) -> bool:
+    """Whether `task` has a cancellation request pending against it.
+
+    `Task.cancelling()` (3.11+, and this package requires >=3.11) counts
+    outstanding `cancel()` calls on the task itself. It is the only signal that
+    separates "the coroutine I awaited was cancelled" from "I am being
+    cancelled while awaiting it" -- inspecting the awaited task cannot, because
+    in both cases it ends up cancelled.
+    """
+    if task is None:
+        return False
+    cancelling = getattr(task, "cancelling", None)
+    if cancelling is None:                      # pragma: no cover - <3.11
+        return False
+    try:
+        return cancelling() > 0
+    except Exception:                           # noqa: BLE001
+        return False
+
+
 def _int_or_none(raw: str | None) -> int | None:
     if raw is None:
         return None
@@ -1122,6 +1286,26 @@ def _int_or_none(raw: str | None) -> int | None:
         return int(raw.strip())
     except (ValueError, AttributeError):
         return None
+
+
+#: Every spelling of a boolean this wire has to survive. The daemon sends
+#: `true`/`false`, this host emits the same, and a `1`/`0` from anything else
+#: still reads correctly. Anything unrecognised is UNKNOWN (None), which is not
+#: the same as False -- an unparseable flag must not silently revoke a capture
+#: timestamp that is otherwise well-formed.
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+_FALSE_WORDS = frozenset({"0", "false", "no", "off"})
+
+
+def _bool_or_none(raw: str | None) -> bool | None:
+    if raw is None:
+        return None
+    token = raw.strip().lower()
+    if token in _TRUE_WORDS:
+        return True
+    if token in _FALSE_WORDS:
+        return False
+    return None
 
 
 def _float_or_none(raw: str | None) -> float | None:
