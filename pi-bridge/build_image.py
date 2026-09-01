@@ -119,7 +119,12 @@ RELEASES: dict[str, Release] = {
 DEFAULT_RELEASE = "trixie"
 
 #: Packages the bridge payload needs that Raspberry Pi OS Lite does not ship.
-EXTRA_PACKAGES = ("dnsmasq", "tcpdump", "nftables")
+#: `v4l-utils` supplies /usr/bin/v4l2-ctl, which roomscan-cam uses to SET and
+#: read back `exposure_dynamic_framerate`. Without it the set is a silent
+#: no-op and the C270 sits at 14.7 fps while the daemon advertises 30 (issue
+#: #226); the daemon now reports that as a control mismatch rather than
+#: hiding it, but the fix is to ship the tool.
+EXTRA_PACKAGES = ("dnsmasq", "tcpdump", "nftables", "v4l-utils")
 
 #: Archives to resolve the closure against, in preference order. The Raspberry
 #: Pi archive wins where it overrides a Debian package (it is listed first).

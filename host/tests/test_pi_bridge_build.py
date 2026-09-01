@@ -1485,3 +1485,113 @@ def test_the_measured_characterization_result_is_committed_beside_the_daemon():
     raw = PI / "tools" / "cam_characterize_results_20260901"
     assert (raw / "B_preview_pi.json").is_file()
     assert (raw / "A_baseline_pi.json").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Camera payload, review round 2 (issue #226)
+# ---------------------------------------------------------------------------
+
+#: systemd's symbolic IPAddressAllow names, expanded so the prefixes can be
+#: reasoned about numerically. From systemd.resource-control(5).
+_SYMBOLIC_PREFIXES = {
+    "localhost": ["127.0.0.0/8", "::1/128"],
+    "link-local": ["169.254.0.0/16", "fe80::/64"],
+    "multicast": ["224.0.0.0/4", "ff00::/8"],
+    "any": ["0.0.0.0/0", "::/0"],
+}
+
+
+def _ip_allow_networks(rendered):
+    import ipaddress
+    raw = (rendered / "etc" / "systemd" / "system" / CAM_UNIT).read_text()
+    tokens = []
+    for line in raw.splitlines():
+        if line.startswith("IPAddressAllow="):
+            tokens += line.split("=", 1)[1].split()
+    assert tokens, "the unit declares no IPAddressAllow at all"
+    nets = []
+    for token in tokens:
+        for prefix in _SYMBOLIC_PREFIXES.get(token, [token]):
+            nets.append(ipaddress.ip_network(prefix))
+    return nets
+
+
+def test_the_camera_unit_ip_filter_excludes_the_scanner_segment(rendered):
+    """The systemd layer must agree with the bind address and the nft rule.
+
+    A plain `172.16.0.0/12` covers `172.31.100.0/24` -- so the unit would have
+    permitted traffic to the scanner segment while its own comment claimed it
+    was "not reachable from the scanner segment", and it would have looked
+    hardened while doing it. Three layers that disagree are worse than one,
+    because each is read as corroborating the others.
+    """
+    import ipaddress
+    nets = _ip_allow_networks(rendered)
+    for forbidden in (bi.DEFAULT_NETWORK["SCANNER_IP"],
+                      bi.DEFAULT_NETWORK["SCANNER_FALLBACK_IP"],
+                      bi.DEFAULT_NETWORK["ETH_ADDR"]):
+        addr = ipaddress.ip_address(forbidden)
+        covering = [str(n) for n in nets if addr in n]
+        assert not covering, f"{forbidden} (scanner segment) is allowed by {covering}"
+    # The whole /16 the scanner segment lives in, not just the two hosts.
+    scanner_16 = ipaddress.ip_network("172.31.0.0/16")
+    overlapping = [str(n) for n in nets if n.version == 4 and n.overlaps(scanner_16)]
+    assert not overlapping, f"{overlapping} overlap the scanner /16"
+
+
+def test_the_camera_unit_ip_filter_still_permits_an_ordinary_home_lan(rendered):
+    """A filter tightened until it blocks the product is not a fix. These are
+    the RFC1918 ranges a home or travel Wi-Fi actually hands out, including
+    172.17.2.0/24 -- the subnet this bridge was measured on."""
+    import ipaddress
+    nets = _ip_allow_networks(rendered)
+    for allowed in ("192.168.1.50", "10.0.0.7", "172.17.2.78", "172.30.4.4"):
+        addr = ipaddress.ip_address(allowed)
+        assert any(addr in n for n in nets), f"{allowed} would be blocked"
+
+
+def test_the_rendered_unit_carries_the_real_port_not_only_the_token(rendered):
+    """`{{CAM_PORT}}` surviving into an installed unit is a service that never
+    starts, and the token test alone cannot see that."""
+    raw = (rendered / "etc" / "systemd" / "system" / CAM_UNIT).read_text()
+    assert "{{" not in raw, "an unrendered token reached the installed unit"
+    assert "ROOMSCAN_CAM_PORT=5001" in raw
+    nft = (rendered / "etc" / "nftables" / "roomscan-bridge.nft").read_text()
+    assert nft.count("tcp dport 5001") == 2
+
+
+def test_the_image_ships_the_tool_the_frame_rate_control_needs():
+    """`v4l2-ctl` is how `exposure_dynamic_framerate` gets set at all.
+
+    Without `v4l-utils` on the image the set is a silent no-op, the C270 stays
+    at the value that halves its cadence, and the daemon advertises 30 fps
+    while delivering 14.7 -- the exact "silently fall back while continuing to
+    advertise 720p30" the spec forbids. The daemon now reports that as a
+    control mismatch, but reporting a self-inflicted fault is not a substitute
+    for shipping the package.
+    """
+    assert "v4l-utils" in bi.EXTRA_PACKAGES
+    daemon = (PAYLOAD / "usr" / "local" / "sbin" / "roomscan-cam").read_text()
+    assert "/usr/bin/v4l2-ctl" in daemon
+
+
+def test_the_daemon_compares_the_control_readback_against_the_request():
+    """A readback nobody compares is the same failure as a getter that returns
+    what its setter just wrote (#106): it proves the call was made, nothing
+    more. The comparison, the degraded flag, and the measured-vs-requested
+    cadence must all be present."""
+    daemon = (PAYLOAD / "usr" / "local" / "sbin" / "roomscan-cam").read_text()
+    assert "def control_mismatch(" in daemon
+    assert "def verify_controls(" in daemon
+    assert '"degraded"' in daemon and '"degraded_reasons"' in daemon
+    assert '"fps_measured"' in daemon
+
+
+def test_the_daemon_handles_sigterm_so_systemd_can_stop_it():
+    daemon = (PAYLOAD / "usr" / "local" / "sbin" / "roomscan-cam").read_text()
+    assert "signal.signal(signal.SIGTERM" in daemon
+    # Restart=on-failure only restarts on a non-zero exit, so the
+    # address-change path must exit non-zero or the daemon stays stopped.
+    assert "EXIT_ADDRESS_CHANGED" in daemon
+    cp_raw = (PAYLOAD / "etc" / "systemd" / "system" / CAM_UNIT).read_text()
+    assert "Restart=on-failure" in cp_raw

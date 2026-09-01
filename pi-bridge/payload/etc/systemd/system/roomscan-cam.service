@@ -88,10 +88,20 @@ DeviceAllow=char-video4linux rw
 RestrictAddressFamilies=AF_INET AF_UNIX
 IPAddressDeny=any
 # The roomscan LAN is the trust boundary, exactly as it already is for the
-# unauthenticated web UI. This does not enumerate the LAN's subnet, which
-# changes between the home and travel Wi-Fi profiles; the binding to wlan0's
-# own address plus the nftables input rule are what scope the surface.
-IPAddressAllow=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+# unauthenticated web UI. The wlan0 subnet is not enumerable here -- it changes
+# between the home and travel Wi-Fi profiles -- so this is the RFC1918 space
+# minus the one part of it this service must never speak to.
+#
+# 172.31.0.0/16 IS DELIBERATELY EXCLUDED. It holds the scanner segment
+# (172.31.100.0/24 static, 172.31.253.0/24 self-assigned fallback), and a plain
+# 172.16.0.0/12 would have covered it -- so the unit would have contradicted
+# its own "not reachable from the scanner segment" claim while looking
+# hardened. 172.16/12 minus 172.31/16 is exactly these four prefixes:
+#   172.16.0.0/13   172.16 - 172.23
+#   172.24.0.0/14   172.24 - 172.27
+#   172.28.0.0/15   172.28 - 172.29
+#   172.30.0.0/16   172.30
+IPAddressAllow=localhost link-local multicast 10.0.0.0/8 192.168.0.0/16 172.16.0.0/13 172.24.0.0/14 172.28.0.0/15 172.30.0.0/16
 
 # --- bounded --------------------------------------------------------------
 # One capture loop, one latest frame, at most max_clients writer threads. The

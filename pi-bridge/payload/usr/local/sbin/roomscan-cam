@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import http.server
+import signal
 import json
 import os
 import socket
@@ -46,10 +47,20 @@ import time
 import fcntl
 from pathlib import Path
 
+# Importing the sibling module would otherwise drop a __pycache__ directory
+# into /usr/local/sbin -- which install.sh treats as the payload's tool
+# directory. Under the shipped unit ProtectSystem=strict makes that write fail
+# silently anyway; this makes it not happen when someone runs the daemon by
+# hand as root.
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import roomscan_cam_v4l2 as v4l2  # noqa: E402
 
 BOUNDARY = "frame"
+#: How long a stream handler blocks per wait before re-checking whether its
+#: peer is still there. Short enough that a departed viewer frees its slot
+#: promptly, long enough not to spin.
+STREAM_POLL_S = 0.5
 TIMESTAMP_DOMAIN_HEADER = "X-Roomscan-Timestamp-Domain"
 
 DEFAULTS = {
@@ -65,7 +76,23 @@ DEFAULTS = {
     "controls": "exposure_dynamic_framerate=0",
     "reopen_backoff_s": 1.0,
     "reopen_backoff_max_s": 15.0,
+    # A stream request that arrives before the first frame exists waits this
+    # long for one and then answers 503, rather than holding the connection --
+    # and one of the bounded client slots -- open indefinitely.
+    "stream_first_frame_wait_s": 5.0,
+    # A stream that has gone this long without a new frame ends. The client
+    # reconnects; the alternative is a socket that looks alive forever while
+    # the camera is gone.
+    "stream_idle_timeout_s": 10.0,
+    # wlan0's address is re-resolved this often; see AddressWatchdog.
+    "address_check_interval_s": 15.0,
 }
+
+#: Exit status for "the address we bound is no longer this interface's
+#: address". Non-zero on purpose: the unit is Restart=on-failure, so a
+#: non-zero exit is what gets the daemon restarted onto the new address, and a
+#: clean stop still stays stopped.
+EXIT_ADDRESS_CHANGED = 75
 
 STATE_DEVICE_ABSENT = "device_absent"
 STATE_OPENING = "opening"
@@ -135,17 +162,27 @@ def frame_headers(frame: CameraFrame) -> list[tuple[str, str]]:
     ]
 
 
-def multipart_part(frame: CameraFrame, boundary: str = BOUNDARY) -> bytes:
-    """Exactly the bytes spec 5.2 specifies for one multipart part.
+def multipart_head(frame: CameraFrame, boundary: str = BOUNDARY) -> bytes:
+    """The boundary + headers that precede one JPEG, without the JPEG.
 
-    Built once per client per frame rather than cached on the frame, because
-    the boundary is a per-response property and caching it on a shared
-    immutable frame would tie the two together for no gain.
+    Split out so the handler can write head / jpeg / CRLF as three sends and
+    never build a second copy of a 68 KB frame per client per frame -- at 30 fps
+    with several viewers that copy is the daemon's largest avoidable
+    allocation.
     """
     head = f"--{boundary}\r\n"
     head += "".join(f"{k}: {v}\r\n" for k, v in frame_headers(frame))
     head += "\r\n"
-    return head.encode("ascii") + frame.jpeg + b"\r\n"
+    return head.encode("ascii")
+
+
+def multipart_part(frame: CameraFrame, boundary: str = BOUNDARY) -> bytes:
+    """Exactly the bytes spec 5.2 specifies for one multipart part.
+
+    The concatenation of what the handler actually sends, kept as one function
+    so the wire format can be pinned literally in a test.
+    """
+    return multipart_head(frame, boundary) + frame.jpeg + b"\r\n"
 
 
 # ===========================================================================
@@ -234,6 +271,8 @@ class CaptureStats:
         self.negotiated: dict = {}
         self.identity: dict = {}
         self.controls: dict = {}
+        self.controls_requested: dict = {}
+        self.control_mismatch: dict = {}
         self.opened_mono_ns: int | None = None
         self._recent: list[int] = []
 
@@ -336,7 +375,7 @@ class CaptureLoop:
             raise FileNotFoundError(selection["reason"])
 
         width, height, fps = parse_mode(self.config["mode"])
-        apply_controls(selection["selected"], self.config["controls"])
+        controls = verify_controls(selection["selected"], self.config["controls"])
         device = v4l2.V4L2Device(selection["selected"])
         device.open()
         try:
@@ -347,9 +386,21 @@ class CaptureLoop:
                 self.stats.identity = {"path": selection["selected"],
                                        "reason": selection["reason"],
                                        **device.query_cap()}
-                self.stats.controls = read_controls(selection["selected"])
+                self.stats.controls = controls["actual"]
+                self.stats.controls_requested = controls["requested"]
+                self.stats.control_mismatch = controls["mismatch"]
                 self.stats.opened_mono_ns = time.monotonic_ns()
                 self.stats.last_error = None
+                if controls["mismatch"]:
+                    # Degraded, and SAID SO. The cadence this daemon
+                    # advertises is a property of these controls, so a control
+                    # that did not take makes the advertised mode a claim
+                    # nothing supports.
+                    self.stats.last_error = (
+                        "camera controls did not take effect: "
+                        f"{controls['mismatch']}; the advertised cadence is "
+                        "not trustworthy -- compare mode.fps_measured")
+                    _log(f"ERROR: {self.stats.last_error}")
             _log(f"streaming {negotiated['width']}x{negotiated['height']} "
                  f"{negotiated['fourcc']} @ {negotiated['fps']} fps "
                  f"from {selection['selected']} (generation {generation})")
@@ -377,8 +428,15 @@ class CaptureLoop:
                     self.stats.malformed += 1
                 continue
             if raw.get("buffer_error"):
+                # V4L2_BUF_FLAG_ERROR means the driver is handing back a
+                # buffer it could not fill correctly. Counting it and
+                # publishing it anyway put a corrupt frame in front of every
+                # viewer AND consumed a sequence number, so the gap that would
+                # have made it visible did not appear either. Drop it; the
+                # counter is the record that it happened.
                 with self.stats.lock:
                     self.stats.buffer_errors += 1
+                continue
             seq += 1
             self.slot.publish(CameraFrame(
                 generation=generation,
@@ -422,19 +480,79 @@ def parse_controls(text: str) -> dict[str, str]:
     return out
 
 
-def apply_controls(path: str, text: str) -> None:
+V4L2_CTL = "/usr/bin/v4l2-ctl"
+
+
+def apply_controls(path: str, text: str) -> dict:
+    """Set the controls, and REPORT whether the attempt even ran.
+
+    This used to swallow every failure. On an image without `v4l-utils` the
+    set is a silent no-op, the C270 stays at `exposure_dynamic_framerate=1`,
+    and the daemon goes on advertising 30 fps while delivering 14.7 -- which
+    is precisely the "silently fall back while continuing to advertise
+    720p30" the spec forbids.
+    """
     import subprocess
     wanted = parse_controls(text)
+    out = {"requested": wanted, "tool": V4L2_CTL, "ran": False,
+           "returncode": None, "error": None}
     if not wanted:
-        return
+        out["ran"] = True
+        return out
     args = []
     for key, value in wanted.items():
         args += ["-c", f"{key}={value}"]
     try:
-        subprocess.run(["/usr/bin/v4l2-ctl", "-d", path, *args],
-                       capture_output=True, timeout=10)
+        proc = subprocess.run([V4L2_CTL, "-d", path, *args],
+                              capture_output=True, text=True, timeout=10)
+    except FileNotFoundError:
+        out["error"] = f"{V4L2_CTL} is not installed"
+        _log(f"ERROR: {out['error']} -- camera controls were NOT applied")
+        return out
     except (OSError, subprocess.SubprocessError) as exc:
-        _log(f"could not apply controls {wanted}: {exc}")
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        _log(f"ERROR: could not apply controls {wanted}: {exc}")
+        return out
+    out["ran"] = True
+    out["returncode"] = proc.returncode
+    if proc.returncode != 0:
+        out["error"] = (proc.stderr or proc.stdout or "").strip()[-200:] or \
+            f"exit {proc.returncode}"
+        _log(f"ERROR: applying controls {wanted}: {out['error']}")
+    return out
+
+
+def control_mismatch(requested: dict, actual: dict) -> dict:
+    """Which requested controls the device is NOT actually carrying.
+
+    A readback that nobody compares against the request is the same failure as
+    a getter returning the value its setter just wrote: it proves the call was
+    made, nothing more. This is the comparison.
+    """
+    if not requested:
+        return {}
+    if not actual or "error" in actual:
+        # Could not read at all -> every request is unverified, which is a
+        # mismatch. "I could not check" must never render as "it is fine".
+        return {key: {"requested": value, "actual": None}
+                for key, value in requested.items()}
+    out = {}
+    for key, value in requested.items():
+        got = actual.get(key)
+        if got is None or str(got) != str(value).strip():
+            out[key] = {"requested": value, "actual": got}
+    return out
+
+
+def verify_controls(path: str, text: str, *, applier=None, reader=None) -> dict:
+    """Apply the controls, read them back, and compare. Injectable for tests."""
+    applier = applier or apply_controls
+    reader = reader or read_controls
+    requested = parse_controls(text)
+    applied = applier(path, text)
+    actual = reader(path) if requested else {}
+    return {"requested": requested, "actual": actual, "applied": applied,
+            "mismatch": control_mismatch(requested, actual)}
 
 
 def read_controls(path: str) -> dict:
@@ -442,7 +560,7 @@ def read_controls(path: str) -> dict:
     import re
     import subprocess
     try:
-        proc = subprocess.run(["/usr/bin/v4l2-ctl", "-d", path, "--list-ctrls"],
+        proc = subprocess.run([V4L2_CTL, "-d", path, "--list-ctrls"],
                               capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError) as exc:
         return {"error": str(exc)}
@@ -544,10 +662,44 @@ class CamHandler(http.server.BaseHTTPRequestHandler):
         if body:
             self.wfile.write(frame.jpeg)
 
+    def _peer_gone(self) -> bool:
+        """Has the client closed its end?
+
+        A viewer that navigates away leaves a socket that is only discovered
+        on the next WRITE -- and when no frames are being produced there is no
+        next write, so the handler would sit in its wait loop forever holding
+        one of the bounded client slots. This is that missing observation: an
+        HTTP client sends nothing after its request, so a readable socket that
+        peeks empty is a closed one.
+        """
+        try:
+            return self.connection.recv(
+                1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
+        except (BlockingIOError, InterruptedError):
+            return False
+        except OSError:
+            return True
+
     def _stream(self, body: bool) -> None:
         server = self.server
+        config = server.config
+        if not body:
+            # HEAD must not block: answer from the current state, which is the
+            # same 200-or-503 a GET would reach, without the bounded wait.
+            frame = server.slot.latest()
+            if frame is None:
+                self._json({"error": "no frame", "state": server.stats.state},
+                           body=False, code=503)
+                return
+            self.send_response(200)
+            self.send_header(
+                "Content-Type", f"multipart/x-mixed-replace; boundary={BOUNDARY}")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+
         with server.client_lock:
-            if server.clients >= server.config["max_clients"]:
+            if server.clients >= config["max_clients"]:
                 server.rejected_clients += 1
                 admitted = False
             else:
@@ -557,32 +709,55 @@ class CamHandler(http.server.BaseHTTPRequestHandler):
             # A bounded thread budget means saying no, out loud, rather than
             # accepting an unbounded number of capture-rate writers.
             self._json({"error": "too many clients",
-                        "max_clients": server.config["max_clients"]},
+                        "max_clients": config["max_clients"]},
                        body, code=503)
             return
         try:
+            # Do not open a multipart response we cannot feed. With no camera
+            # fitted this used to send 200 and then loop forever -- the client
+            # slot was never released, so a browser card's ordinary retries
+            # pinned every slot within seconds and each later request 503'd
+            # until the unit was restarted. The bounded wait plus this 503 is
+            # what makes "no camera" a recoverable answer instead of a
+            # permanent one.
+            first_wait = config["stream_first_frame_wait_s"]
+            if server.slot.wait_newer(None, timeout=first_wait) is None:
+                self._json({"error": "no frame",
+                            "state": server.stats.state,
+                            "last_error": server.stats.last_error,
+                            "waited_s": first_wait}, body, code=503)
+                return
             self.send_response(200)
             self.send_header(
                 "Content-Type", f"multipart/x-mixed-replace; boundary={BOUNDARY}")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Connection", "close")
             self.end_headers()
-            if not body:
-                return
             self.close_connection = True
+            idle_timeout = config["stream_idle_timeout_s"]
             last_key = None
+            idle_since = time.monotonic()
             while True:
-                frame = server.slot.wait_newer(last_key, timeout=1.0)
+                frame = server.slot.wait_newer(last_key, timeout=STREAM_POLL_S)
                 if frame is None:
-                    if server.stats.state == STATE_DEVICE_ABSENT and last_key:
+                    if self._peer_gone():
+                        return
+                    if time.monotonic() - idle_since >= idle_timeout:
+                        # The camera stopped. End the response so the client
+                        # reconnects, rather than holding a socket that looks
+                        # alive and carries nothing (spec section 8: an
+                        # unplugged camera ends the current MJPEG response).
                         return
                     continue
+                idle_since = time.monotonic()
                 last_key = frame.key
-                # ONE immutable reference, held only across this write.  A
-                # blocked socket blocks this thread and nothing else; when it
-                # drains, wait_newer returns the current frame, not the next
-                # one in a backlog.
-                self.wfile.write(multipart_part(frame))
+                # ONE immutable reference, held only across these writes, and
+                # no second copy of the JPEG. A blocked socket blocks this
+                # thread and nothing else; when it drains, wait_newer returns
+                # the current frame, not the next one in a backlog.
+                self.wfile.write(multipart_head(frame))
+                self.wfile.write(frame.jpeg)
+                self.wfile.write(b"\r\n")
                 with server.client_lock:
                     server.sent_frames += 1
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -601,6 +776,8 @@ def build_status(server) -> dict:
         negotiated = dict(stats.negotiated)
         identity = dict(stats.identity)
         controls = dict(stats.controls)
+        controls_requested = dict(stats.controls_requested)
+        mismatch = dict(stats.control_mismatch)
         counters = {
             "frames": stats.frames,
             "frames_this_generation": stats.frames_this_generation,
@@ -617,22 +794,45 @@ def build_status(server) -> dict:
         rejected = server.rejected_clients
     frame = server.slot.latest()
     now = time.monotonic_ns()
+    measured_fps = stats.capture_fps()
+    degraded_reasons = []
+    if mismatch:
+        degraded_reasons.append(
+            f"controls not applied: {sorted(mismatch)}")
+    if state in (STATE_DEVICE_ABSENT, STATE_FAULTED):
+        degraded_reasons.append(f"state={state}")
+    # Requested vs measured, side by side, so "advertises 30, delivers 14.7"
+    # is legible in one reading instead of being two numbers nobody compares.
+    requested_fps = negotiated.get("fps")
+    if (requested_fps and measured_fps is not None
+            and measured_fps < 0.8 * requested_fps):
+        degraded_reasons.append(
+            f"measured {measured_fps} fps against a requested {requested_fps}")
     return {
         "service": "roomscan-cam",
         "state": state,
         "generation": generation,
         "device": identity or None,
+        # ONE shape, always. A `mode` dict that grows keys once the device
+        # opens makes every consumer's `mode["fps_requested"]` a KeyError on
+        # exactly the unhappy path they wrote it to handle. Null means
+        # unknown; the requested string is always there.
         "mode": {
             "requested": server.config["mode"],
             "width": negotiated.get("width"),
             "height": negotiated.get("height"),
             "fourcc": negotiated.get("fourcc"),
             "fps_requested": negotiated.get("fps"),
+            "fps_measured": measured_fps,
             "buffers": negotiated.get("buffers"),
             "buffer_layout": negotiated.get("buffer_layout"),
-        } if negotiated else {"requested": server.config["mode"]},
+        },
         "controls": controls or None,
-        "capture_fps": stats.capture_fps(),
+        "controls_requested": controls_requested or None,
+        "controls_mismatch": mismatch or None,
+        "degraded": bool(degraded_reasons),
+        "degraded_reasons": degraded_reasons,
+        "capture_fps": measured_fps,
         "sent_frames": sent_frames,
         "clients": clients,
         "max_clients": server.config["max_clients"],
@@ -677,6 +877,61 @@ def interface_address(iface: str) -> str | None:
         return None
     finally:
         sock.close()
+
+
+class AddressWatchdog(threading.Thread):
+    """Notice when the address we bound stops being the interface's address.
+
+    Resolving wlan0 once at startup leaves a very quiet failure: after a
+    re-DHCP onto a different address the daemon is still `active`, its socket
+    is bound to an address the box no longer holds, and nothing heals it --
+    reconcile only acts on an INACTIVE unit, so "running and unreachable" is
+    exactly the state it cannot see.
+
+    So: re-resolve periodically and exit non-zero on a change. The unit is
+    Restart=on-failure, so a non-zero exit is what puts the daemon back on the
+    new address, while a clean stop still stays stopped. The resolver is
+    injectable so this is testable without a second NIC.
+    """
+
+    def __init__(self, iface: str, bound: str, on_change, *,
+                 interval: float = 15.0, resolver=None):
+        super().__init__(name="address-watchdog", daemon=True)
+        self.iface = iface
+        self.bound = bound
+        self.on_change = on_change
+        self.interval = interval
+        self.resolver = resolver or interface_address
+        # NOT `self._stop`: threading.Thread has a private `_stop()` METHOD
+        # that join() calls, and shadowing it with an Event makes every join()
+        # on this thread raise "'Event' object is not callable".
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def check(self) -> str | None:
+        """The reason to restart, or None. Pure apart from the resolver."""
+        current = self.resolver(self.iface)
+        if current is None:
+            return (f"{self.iface} no longer has an IPv4 address; "
+                    f"bound to {self.bound}")
+        if current != self.bound:
+            return (f"{self.iface} moved from {self.bound} to {current}; "
+                    "the bound socket is on a dead address")
+        return None
+
+    def run(self) -> None:
+        while not self._stop_event.wait(self.interval):
+            try:
+                reason = self.check()
+            except Exception as exc:                      # noqa: BLE001
+                _log(f"address watchdog check failed: {exc!r}")
+                continue
+            if reason:
+                _log(f"ERROR: {reason} -- exiting so systemd rebinds")
+                self.on_change(reason)
+                return
 
 
 def _ntp_synchronized() -> bool | None:
@@ -724,6 +979,12 @@ def load_config(argv=None) -> dict:
                                     or DEFAULTS["max_frame_bytes"]))
     parser.add_argument("--bind-wait-s", type=float, default=60.0,
                         help="how long to wait for the interface to get an address")
+    parser.add_argument("--stream-first-frame-wait-s", type=float,
+                        default=DEFAULTS["stream_first_frame_wait_s"])
+    parser.add_argument("--stream-idle-timeout-s", type=float,
+                        default=DEFAULTS["stream_idle_timeout_s"])
+    parser.add_argument("--address-check-interval-s", type=float,
+                        default=DEFAULTS["address_check_interval_s"])
     args = parser.parse_args(argv)
     return {
         "port": args.port, "iface": args.iface, "bind": args.bind,
@@ -731,6 +992,9 @@ def load_config(argv=None) -> dict:
         "controls": args.controls, "max_clients": args.max_clients,
         "max_frame_bytes": args.max_frame_bytes,
         "bind_wait_s": args.bind_wait_s,
+        "stream_first_frame_wait_s": args.stream_first_frame_wait_s,
+        "stream_idle_timeout_s": args.stream_idle_timeout_s,
+        "address_check_interval_s": args.address_check_interval_s,
         "reopen_backoff_s": DEFAULTS["reopen_backoff_s"],
         "reopen_backoff_max_s": DEFAULTS["reopen_backoff_max_s"],
     }
@@ -758,6 +1022,37 @@ def main(argv=None) -> int:
     stats = CaptureStats()
     capture = CaptureLoop(slot, stats, config)
     server = CamServer((bind, config["port"]), CamHandler, slot, stats, config)
+    exit_code = [0]
+
+    def _begin_shutdown(reason: str, code: int = 0) -> None:
+        exit_code[0] = code
+        # shutdown() blocks until serve_forever() returns, and serve_forever
+        # is running on THIS thread when a signal handler fires -- calling it
+        # inline would deadlock the process it is trying to stop.
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    def _on_signal(signum, _frame):
+        # Without this, `systemctl stop|restart` SIGTERMs the interpreter and
+        # the default action kills it outright: serve_forever never returns,
+        # the finally below never runs, and the V4L2 device is never
+        # STREAMOFF'd or closed. Spec section 8 asks for a bounded stop/join,
+        # and a bounded stop needs somewhere to start.
+        _log(f"received signal {signum}, shutting down")
+        _begin_shutdown(f"signal {signum}")
+
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+
+    watchdog = AddressWatchdog(
+        config["iface"], bind,
+        lambda reason: _begin_shutdown(reason, EXIT_ADDRESS_CHANGED),
+        interval=config["address_check_interval_s"])
+    if not config["bind"]:
+        # Only when the address was RESOLVED from the interface. An operator
+        # who passed --bind explicitly asked for that address and should not
+        # have the daemon second-guess them.
+        watchdog.start()
+
     capture.start()
     _log(f"listening on http://{bind}:{config['port']} "
          f"(iface {config['iface']}, mode {config['mode']})")
@@ -766,10 +1061,10 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        server.shutdown()
+        watchdog.stop()
         server.server_close()
         capture.stop()
-    return 0
+    return exit_code[0]
 
 
 if __name__ == "__main__":
