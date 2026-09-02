@@ -256,6 +256,71 @@ states back from the Pi after the install runs. `bridge_status` in
 particular is where to start whenever a capture looks lossy and you suspect
 the wireless hop — read its `warnings` list first.
 
+## 6.5. Camera feed (issue #226)
+
+`roomscan-cam` is an **optional** unit on port 5001 (`CAM_PORT` build token), wlan0-only,
+unauthenticated (the roomscan LAN is the trust boundary, same as the web UI). Endpoints:
+`/stream.mjpg`, `/frame.jpg`, `/status.json`, `/clock.json`. Check it with
+
+```sh
+curl -s http://roomscan-bridge.local:5001/status.json
+```
+
+**A camera that is not fitted is not a fault.** The unit runs anyway and reports `device_absent`;
+`bridge_status()` reads the status script's `camera` block — `usb_present`, `port`, `daemon` (the
+daemon's own `/status.json`, verbatim), `daemon_reachable`, `unit`, `unit_enabled`,
+`unit_active_state`, `unit_result`, `disabled_by_operator`, `warning`, `note`. Presence is decided
+by `usb_present` being explicitly `true`; `false` or `null` means no camera warnings at all and the
+unit is exempt from the unit check. Once a camera **is** fitted, the Pi's own `camera.warning` string
+is surfaced **verbatim** (the Pi is the only party that can see the USB tree, the unit and the daemon
+at once); `note` is informational and never a fault. `unit_active_state` is systemd about the UNIT;
+`daemon.state` is the daemon about the CAMERA — `active` + `device_absent` is a healthy service with
+no camera plugged in.
+
+**`exposure_dynamic_framerate` is load-bearing.** At `1` the C270 gives 14.7 fps at every
+resolution; the unit ships `0` and the daemon reads it back. If someone changes it by hand the
+advertised 30 fps stops being true, and `/status.json`'s `controls`, `controls_mismatch`,
+`degraded` and `mode.fps_measured` are where that shows. `v4l-utils` is in the image for that
+readback.
+
+**Turning the camera off.** Three switches, all honoured by reconcile and all reported by
+`bridge_status` as deliberate (`disabled_by_operator: true`, `warning: null`, `note` naming the
+evidence):
+
+| switch | lasts |
+|---|---|
+| `systemctl stop roomscan-cam.service` | until the next boot |
+| `systemctl disable --now roomscan-cam.service` | until the next `bridge_update` re-enables it (#200's enable-on-update path; a freshly copied unit reads `disabled` too, so install.sh cannot tell them apart) |
+| `systemctl mask --now roomscan-cam.service` | survives reboot **and** deploy — install.sh leaves a masked optional unit alone |
+
+Use `mask --now` for a spec §5.1 camera-off arm or any measurement that must not be disturbed.
+`mask --runtime` does **not** work: the unit is installed in `/etc/systemd/system`, which outranks
+`/run`. Reconcile restarts the camera only when: C270 present AND unit enabled AND not in transition
+AND (`failed` OR `Result != success`); a crash still self-heals within one 10 s tick (measured
+2026-09-02: `kill -9` → back in 5 s via `Restart=on-failure`). Caveat: `enabled + inactive +
+Result=success` also matches "enabled but never started this boot"; reconcile deliberately does not
+self-heal that class, because through systemd's own readings it is indistinguishable from a clean
+operator stop. It is covered by install.sh's enable+restart on update and by `WantedBy` at the next
+boot; if a camera is enabled and dead with `Result=success` and you did not stop it, `systemctl
+start roomscan-cam.service` once.
+
+**Host side.** `ROOMSCAN_CAMERA=0` in the `roomscan-web` unit's environment turns camera ingest off
+(default on); a missing daemon costs one refused connection per backoff period (0.5 s doubling to a
+10 s cap), logged at INFO once per distinct reason and at DEBUG on repeat. `ROOMSCAN_CAMERA_PORT`
+overrides 5001, `ROOMSCAN_CAMERA_HOST` pins the address (used by hermetic probes). `roomscan-web`
+bounds its own shutdown: a client holding `/api/camera/stream.mjpg` used to pin `systemctl restart`
+until `TimeoutStopSec=90` SIGKILLed it, because uvicorn's graceful shutdown waits for open
+connections and an MJPEG response never ends. The stream route now ends its response when the signal
+lands, and `ROOMSCAN_SHUTDOWN_TIMEOUT_S` (default 3 s) caps anything that cannot be asked to let go,
+so a restart completes in well under 5 s (measured 3.7 s with a browser tab holding the stream).
+`python host/tools/camera_shutdown_probe.py` re-measures it end to end with no Pi and no rig.
+
+Per-node overrides go in `/etc/roomscan-bridge/cam.env` (`ROOMSCAN_CAM_MODE`, `ROOMSCAN_CAM_PORT`,
+`ROOMSCAN_CAM_CONTROLS`, `ROOMSCAN_CAM_MAX_CLIENTS`, `ROOMSCAN_CAM_DEVICE`); the unit has
+`EnvironmentFile=-` for it. Re-characterize with `pi-bridge/tools/cam_characterize.py` (receiver on
+the host, arm on the Pi) after any camera/kernel/Wi-Fi change; the 2026-09-01 baseline is
+`pi-bridge/tools/cam_characterize_results_20260901.md`.
+
 ## 7. Recovering lost frames from the tee
 
 The Pi tees every scanner UDP packet on `eth0` to a bounded local pcap ring

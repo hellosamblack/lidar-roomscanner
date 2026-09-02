@@ -196,3 +196,38 @@ workflow are described in [Phase 6 SLAM validation](phase6-slam-validation.md).
 - [Coordinate frames](coordinate-frames.md) — sensor, world, Open3D/CV, and display conventions.
 - [IKS4A1 stacking](iks4a1-stacking.md) — shared-bus wiring and sensor configuration.
 - [Headless host setup](headless-host-setup.md) — deployment and first bring-up.
+
+## Rig camera (#226 Stage A)
+
+The Pi bridge runs `roomscan-cam`, one V4L2 MMAP loop over the Logitech C270, serving MJPEG on port
+5001 of its **wlan0** address (never the scanner-facing eth0; nft `roomscan-cam-allow-wlan0` /
+`roomscan-cam-deny-eth0` count it). It is an **optional** systemd unit: enabled on update and on
+cold boot, honoured off when an operator stops, disables or masks it (reconcile keys on `is-enabled`
++ `Result`, not on `is-active` alone). The USB tree matters: on the Pi 3B the C270, the scanner's
+Ethernet NIC and the scanner's CDC-ACM debug port share one 480 Mbit USB2 hub. Measured 2026-09-01
+with the scanner streaming: 720p30 MJPEG (29.7–29.8 fps, ~66 KB/frame, ~2.5 MB/s over wlan0) changed
+nothing on the scanner path — 451.6 vs 450.9 pkt/s camera-on vs camera-off over paired five-minute
+windows, 0 drops, no throttling — but it is a shared resource and belongs on the diagram.
+
+**One control is load-bearing.** The C270's `exposure_dynamic_framerate` shipped as `1`, and at `1`
+the camera delivers 14.7 fps at *every* resolution. A mode that enumerates at 30 fps is not a mode
+that delivers 30 fps; the daemon sets the control to `0`, reads it back, and reports
+`fps_measured` beside `fps_requested` plus `degraded`/`controls_mismatch` when the readback
+disagrees. Never infer cadence from the mode table.
+
+`roomscan-web` holds exactly **one** connection to the daemon, opened and closed by FastAPI lifespan —
+not by the first route or session message that wants a picture, because an ingest a viewer can start
+is an ingest N viewers can start N times. Frames land in a single immutable latest-frame slot; the
+browser proxy `/api/camera/stream.mjpg`, `/api/camera/frame.jpg`, the `camera` state message and the
+MCP `camera_status`/`camera_snapshot` tools all read that one slot, so browser count never multiplies
+Pi camera opens and the host holds one JPEG rather than one queue per viewer. Camera pixels take this
+dedicated HTTP MJPEG path, never `/ws`, `/ws-mesh` or `/ws-thin`. `ROOMSCAN_CAMERA=0` disables the
+ingest entirely, which reads as "not running", never as a fault. Reconnect backoff runs 0.5 s → 10 s
+and resets only after a connection that actually delivered frames.
+
+Clock domains stay separate: the Pi's capture stamp is a `domain.PiMonoNanos`, a third monotonic
+origin sharing no epoch with `HostMono`, and Stage A publishes no cross-clock number at all. Measured
+Pi↔host offset uncertainty on the home WLAN is ~±1.2 ms (half-RTT of the lowest-RTT quartile); the
+Pi-side capture→host-socket latency was median 52–55 ms, p95 ~90 ms. The far-side browser-pixel
+latency (§5.1's ≤150/≤250 ms gate) is **not yet measured** — it needs a host-timed fiducial on a
+monitor in the camera's view, and there is none; #226 stays open on that.
