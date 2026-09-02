@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from tools.capture_compression import (deinterleave16, lz4_compress_bound,
-                                       measure_captures, _codec_report,
+                                       measure_captures, _codec_report, _timed,
                                        LZ4_STREAM_STATE_BYTES)
 
 MAGIC = b"RSCN"
@@ -159,6 +159,74 @@ def test_codec_report_raises_on_round_trip_mismatch():
 
     with pytest.raises(RuntimeError, match="round-trip mismatch"):
         _codec_report("broken", [b"hello world" * 10], lambda d: d, bad_decompress, b"hello world")
+
+
+# --- throughput units: decompress must rate by UNCOMPRESSED bytes ----------
+#
+# `_timed` rates by `len(args[0])` unless told otherwise. A decompress call's
+# `args[0]` is the COMPRESSED bytes it consumes, not the uncompressed bytes it
+# produces -- rating by that silently reports decompress throughput in a
+# different unit from compress throughput ("compressed MB/s consumed" vs
+# "uncompressed MB/s consumed"), under-reporting decompress by exactly the
+# compression factor. `_codec_report` must pass `size_bytes=len(sample)` to
+# fix the unit.
+
+def test_timed_size_bytes_overrides_args0_length():
+    # Direct formula check: with size_bytes given, the rate is computed from
+    # size_bytes, not from len(args[0]) -- construct them to disagree by 100x
+    # so a wrong wiring is unmissable.
+    compressed_stub = b"c" * 10          # what the timed call is invoked WITH
+    uncompressed_size = 1000             # what it should be RATED by
+
+    _, mb_s = _timed(lambda c: b"x", compressed_stub, size_bytes=uncompressed_size,
+                     min_s=0.01)
+    _, mb_s_default = _timed(lambda c: b"x", compressed_stub, min_s=0.01)
+
+    # Same call, same wall time budget, ~100x different rating input -> the
+    # size_bytes-driven rate must be far larger than the args0-driven one.
+    assert mb_s > mb_s_default * 20
+
+
+def test_codec_report_times_decompress_by_the_uncompressed_sample_size(monkeypatch):
+    """Pins the actual fix site: `_codec_report`'s decompress `_timed` call
+    must pass `size_bytes=len(sample)`, not leave it defaulting to the
+    compressed bytes decompress is invoked with.
+
+    Proved discriminating by reintroducing the defect (manually, not shipped):
+    deleting `size_bytes=len(sample)` from `_codec_report`'s decompress
+    `_timed` call makes `decompress_call["size_bytes"]` read `None` here,
+    failing this assertion immediately.
+    """
+    import tools.capture_compression as cc
+
+    calls = []
+
+    def fake_timed(fn, *args, min_s=None, max_iters=None, size_bytes=None):
+        calls.append({"args0_len": len(args[0]), "size_bytes": size_bytes})
+        return fn(*args), 42.0
+
+    monkeypatch.setattr(cc, "_timed", fake_timed)
+
+    sample = b"hello world" * 50
+
+    def compress(_d):
+        return b"C" * 5  # deliberately much shorter than `sample`
+
+    def decompress(_c, _n):
+        return sample
+
+    report = _codec_report("x", [sample], compress, decompress, sample)
+
+    assert len(calls) == 2, "expected one _timed call for compress, one for decompress"
+    compress_call, decompress_call = calls
+    assert compress_call["size_bytes"] is None      # rides the default: len(args[0]) == len(sample)
+    assert compress_call["args0_len"] == len(sample)
+    assert decompress_call["args0_len"] == 5, "decompress is called WITH the compressed bytes"
+    assert decompress_call["size_bytes"] == len(sample), (
+        "decompress throughput must be rated by the UNCOMPRESSED sample size "
+        "(what it produces), not the compressed bytes it consumes -- otherwise "
+        "decompress_mb_s under-reports by exactly the compression factor")
+    assert report["decompress_mb_s"] == 42.0
 
 
 # --- shape / plumbing -------------------------------------------------------

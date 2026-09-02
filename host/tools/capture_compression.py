@@ -48,6 +48,11 @@ a hard error (`RuntimeError`), not a silently wrong ratio.
 renders it as a table; `--json` for the raw dict. `roomscan.mcp_server` wraps
 the same function (`capture_compression` tool) -- one implementation, two front
 ends.
+
+Sampling note: `max_frames_per_stream` takes the FIRST N frames of a stream in
+capture order, so a large capture is measured on its opening seconds -- biased
+toward whatever scene/motion the take started with, not a representative
+spread across the whole file.
 """
 from __future__ import annotations
 
@@ -108,14 +113,23 @@ def _zstd_compressor(level: int):
     return zstd.ZstdCompressor(level=level)
 
 
-def _timed(fn, *args, min_s: float = MIN_TIMING_S, max_iters: int = MAX_TIMING_ITERS):
-    """Run `fn(*args)` repeatedly until >= min_s elapsed; return (result, iters/s * len).
+def _timed(fn, *args, min_s: float = MIN_TIMING_S, max_iters: int = MAX_TIMING_ITERS,
+          size_bytes: int | None = None):
+    """Run `fn(*args)` repeatedly until >= min_s elapsed; return (result, mb_per_s).
 
-    Returns (last_result, mb_per_s). `mb_per_s` is None if `args[0]` (the bytes
-    being processed) is empty -- there is nothing to rate.
+    `mb_per_s` rates by `size_bytes` if given, otherwise by `len(args[0])`.
+    Callers whose `args[0]` is the COMPRESSED bytes (i.e. timing a decompress
+    call) MUST pass `size_bytes=<uncompressed length>` -- rating by the
+    compressed length would report decompress throughput in "compressed
+    MB/s consumed", a different unit from compress's "uncompressed MB/s
+    consumed", making the two numbers silently incomparable and decompress
+    read as slower than it is by exactly the compression factor.
+
+    Returns (last_result, mb_per_s). `mb_per_s` is None if the rating size is
+    zero -- there is nothing to rate.
     """
-    payload = args[0]
-    if not payload:
+    n = size_bytes if size_bytes is not None else len(args[0])
+    if not n:
         return fn(*args), None
     start = time.perf_counter()
     result = None
@@ -127,7 +141,7 @@ def _timed(fn, *args, min_s: float = MIN_TIMING_S, max_iters: int = MAX_TIMING_I
         elapsed = time.perf_counter() - start
         if elapsed >= min_s:
             break
-    mb_per_s = (len(payload) * iters / (1024 * 1024)) / elapsed if elapsed > 0 else None
+    mb_per_s = (n * iters / (1024 * 1024)) / elapsed if elapsed > 0 else None
     return result, mb_per_s
 
 
@@ -151,7 +165,10 @@ def _codec_report(name: str, payloads: list[bytes], compress, decompress, sample
     comp_sample, compress_mb_s = _timed(compress, sample)
     decompress_mb_s = None
     if sample:
-        decompress_mb_s = _timed(lambda c: decompress(c, len(sample)), comp_sample)[1]
+        # size_bytes=len(sample): rate by UNCOMPRESSED bytes produced, not the
+        # compressed bytes consumed, so this is comparable to compress_mb_s.
+        decompress_mb_s = _timed(lambda c: decompress(c, len(sample)), comp_sample,
+                                 size_bytes=len(sample))[1]
 
     ratio = (comp_total / raw_total) if raw_total else None
     return {

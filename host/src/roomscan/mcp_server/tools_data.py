@@ -506,6 +506,9 @@ def capture_compression(paths: list[str], streams: list[str] | None = None,
     several captures to reproduce a "pooled over N frames from M captures"
     figure. `streams`, if given, is a list of stream names (e.g.
     `["RAW_3DMD"]`); default measures every stream type present.
+    `max_frames_per_stream` samples the FIRST N frames of each stream in
+    capture order, so it is biased toward the opening seconds of a large
+    capture, not a representative spread across the whole file.
 
     Wraps `host/tools/capture_compression.py::measure_captures()`.
     """
