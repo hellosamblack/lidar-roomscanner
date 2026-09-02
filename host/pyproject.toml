@@ -5,7 +5,11 @@ description = "Host-side tools for the roomscanner ToF streamer"
 requires-python = ">=3.11,<3.13"  # upper bound: open3d wheel availability
 # plyfile: standard INRIA-3DGS PLY reader, used by the splat-vs-scan compare tool
 # (roomscan.splat.compare) which is core, not part of the heavy [splat] build extra.
-dependencies = ["numpy>=1.26", "pyserial>=3.5", "open3d>=0.18", "psutil>=5.9", "Pillow>=10", "zeroconf>=0.130", "plyfile>=1.0"]
+dependencies = ["numpy>=1.26", "pyserial>=3.5", "open3d>=0.18", "psutil>=5.9", "Pillow>=10", "zeroconf>=0.130", "plyfile>=1.0",
+               # lz4 + zstandard: real codec bindings for host/tools/capture_compression.py
+               # (#130) -- the Phase 5.5 compression go/no-go measurement, never a proxy
+               # for the library whose performance is the actual question (AGENTS.md).
+               "lz4>=4.0", "zstandard>=0.22"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.4", "pytest-xdist>=3.5", "pyright>=1.1.400"]

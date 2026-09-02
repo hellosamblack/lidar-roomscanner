@@ -472,6 +472,62 @@ def capture_motion(path: str, hold_deg_s: float = 0.0, fast_deg_s: float = 0.0,
 
 
 @mcp.tool()
+def capture_compression(paths: list[str], streams: list[str] | None = None,
+                        zstd_level: int = 9, zlib_level: int = 6,
+                        max_frames_per_stream: int = 500) -> dict:
+    """Re-runnable measurement behind the Phase 5.5 compression go/no-go (#130).
+
+    `docs/roadmap-history.md`'s Phase 5.5 entry quotes two numbers from a
+    one-off 2026-07-31 investigation that until now existed only as prose:
+    LZ4 on a 2-byte de-interleaved RAW_3DMD payload gives a "54.3% pooled"
+    ratio in transit (recommended), and zstd-9 "strictly dominates" zlib-6 at
+    rest (1.868x vs 1.808x). This tool re-measures both with the real `lz4`
+    and `zstandard` libraries against real captures, so a firmware decision
+    rests on a command, not a paragraph.
+
+    Per stream type present (e.g. `RAW_3DMD`): raw bytes, LZ4 block-mode ratio
+    with and without the 2-byte de-interleave (`lz4`/`lz4_deinterleaved` --
+    ToF payloads are 16-bit LE, so this separates the low-entropy high byte
+    from the noisy low byte, measured per FRAME with no cross-frame
+    dictionary, matching realistic on-MCU usage), zstd/zlib ratio measured on
+    the whole stream's payloads concatenated (the "at rest"/archival
+    methodology -- at per-frame block sizes zstd's frame overhead can lose to
+    zlib, which is not what the whole-corpus figure measured), compress/
+    decompress throughput in MB/s on THIS host, and an LZ4 working-set
+    ESTIMATE for a Cortex-M33 (`lz4.h`'s documented `LZ4_STREAMSIZE` plus one
+    frame's input/output buffers -- nothing built or flashed).
+
+    Ratio is reported both ways the roadmap prose uses it: `pct_of_original`
+    (compressed/raw*100, smaller better -- the "54.3%" phrasing) and `factor`
+    (raw/compressed, bigger better -- the "1.868x" phrasing). Every codec's
+    output is round-tripped against the original bytes.
+
+    `pooled` combines every capture in `paths` per stream type -- pass
+    several captures to reproduce a "pooled over N frames from M captures"
+    figure. `streams`, if given, is a list of stream names (e.g.
+    `["RAW_3DMD"]`); default measures every stream type present.
+
+    Wraps `host/tools/capture_compression.py::measure_captures()`.
+    """
+    from tools.capture_compression import measure_captures
+
+    resolved = []
+    for path in paths:
+        p = (REPO / path) if not Path(path).is_absolute() else Path(path)
+        if not p.is_file():
+            return {"error": f"no such capture: {rel(p)}"}
+        resolved.append(p)
+    try:
+        report = measure_captures(resolved, streams=streams, zstd_level=zstd_level,
+                                  zlib_level=zlib_level,
+                                  max_frames_per_stream=max_frames_per_stream)
+    except ValueError as e:
+        return {"error": str(e)}
+    report["captures"] = {rel(Path(k)): v for k, v in report["captures"].items()}
+    return report
+
+
+@mcp.tool()
 def capture_profile_probe(path: str, requested_fps: float = 0.0,
                           udp_stats: dict | None = None) -> dict:
     """Grade a capture against the ranging profile it was supposed to run at.

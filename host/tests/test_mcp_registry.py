@@ -27,6 +27,7 @@ PYPROJECT = REPO / "host" / "pyproject.toml"
 # script -> the MCP tool(s) that cover it
 EXPOSED: dict[str, tuple[str, ...]] = {
     "analyze_capture.py": ("capture_analyze",),
+    "capture_compression.py": ("capture_compression",),
     "capture_motion.py": ("capture_motion",),
     "meta_check.py": ("capture_meta",),
     "fleet_budget.py": ("fleet_budget",),
