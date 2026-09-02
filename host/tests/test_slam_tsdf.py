@@ -661,3 +661,58 @@ def test_the_safe_threshold_sits_below_the_last_measured_good_extraction():
     under the good one -- if someone re-bisects on a new Open3D, this is the
     assertion that should make them think."""
     assert tsdf_mod._MAX_SAFE_EXTRACT_BLOCKS <= 258161
+
+
+# ------------------------------------------------------- chunked=True (#111)
+
+def _wide_intrinsic():
+    fx = fy = 90.0
+    w, h = 200, 150
+    cx, cy = w / 2, h / 2
+    return o3d.core.Tensor(
+        np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64),
+        device=o3d.core.Device("CPU:0")), w, h
+
+
+def test_mesh_default_is_unchanged_by_the_chunked_kwarg_existing():
+    # The mere PRESENCE of the chunked kwarg must not change default
+    # behavior: mesh() with no arguments is byte-identical to before.
+    m = TsdfMap(voxel_size=0.02, depth_max=5.0)
+    K = pinhole(W, H)
+    m.integrate(_wall_depth(1.0), K, np.eye(4))
+    default = m.mesh()
+    explicit_false = m.mesh(chunked=False)
+    assert len(default.vertex.positions) == len(explicit_false.vertex.positions)
+    assert len(default.triangle.indices) == len(explicit_false.triangle.indices)
+
+
+def test_mesh_chunked_true_matches_unchunked_below_the_ceiling():
+    intr, w, h = _wide_intrinsic()
+    m = TsdfMap(voxel_size=0.02, depth_max=5.0, block_count=4000)
+    depth = np.full((h, w), 1000.0, dtype=np.float32)
+    for _ in range(4):
+        m.integrate(depth, intr, np.eye(4))
+    blocks, _cap = m.block_usage()
+    assert blocks > 200   # exercise real multi-chunk partitioning
+
+    unchunked = m.mesh()
+    chunked = m.mesh(chunked=True, chunk_blocks=4, halo=1)
+    assert len(chunked.vertex.positions) == len(unchunked.vertex.positions)
+    assert len(chunked.triangle.indices) == len(unchunked.triangle.indices)
+
+
+def test_mesh_chunked_true_bypasses_the_block_count_refusal(monkeypatch):
+    # The whole point of #111: chunked=True must NOT go through
+    # _check_extractable(), because it never hands the full active-block
+    # set to a single extract_triangle_mesh() call.
+    from roomscan.slam import chunked_mesher as chunked_mesher_mod
+
+    m = TsdfMap(voxel_size=0.02)
+    m._empty = False
+    m._vbg = types.SimpleNamespace(
+        hashmap=lambda: types.SimpleNamespace(
+            size=lambda: tsdf_mod._MAX_SAFE_EXTRACT_BLOCKS + 1))
+    monkeypatch.setattr(
+        chunked_mesher_mod, "chunked_extract_triangle_mesh",
+        lambda vbg, **kw: "CHUNKED_MESH")
+    assert m.mesh(chunked=True) == "CHUNKED_MESH"

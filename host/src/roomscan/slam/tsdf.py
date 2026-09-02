@@ -587,7 +587,23 @@ class TsdfMap:
             o3d.core.cuda.release_cache()
             self.cache_releases += 1
 
-    def mesh(self) -> o3d.t.geometry.TriangleMesh:
+    def mesh(self, *, chunked: bool = False,
+             chunk_blocks: int | None = None, halo: int = 1) -> o3d.t.geometry.TriangleMesh:
+        """`chunked=False` (default) is byte-identical to the original
+        behavior, including `_check_extractable()`'s refusal above
+        `_MAX_SAFE_EXTRACT_BLOCKS`.
+
+        `chunked=True` (issue #111 / `docs/superpowers/specs/
+        2026-08-19-slam-mesh-ceiling-design.md`) routes through
+        `chunked_mesher.chunked_extract_triangle_mesh` instead: it never
+        hands the whole active-block set to a single
+        `extract_triangle_mesh()` call, so it is NOT subject to
+        `_check_extractable()`'s refusal and can produce a mesh past the
+        ~260k-block crash ceiling -- verified equivalent (vertex/triangle
+        counts, zero boundary-edge delta) to the unchunked path on a map
+        below the ceiling, see `test_chunked_mesher.py`. `chunk_blocks`
+        defaults to `chunked_mesher.DEFAULT_CHUNK_BLOCKS` when omitted.
+        """
         if self._empty:
             # `extract_triangle_mesh()` raises a C++ HashMap error ("Input
             # number of keys should > 0") on an empty map -- e.g. the very
@@ -601,6 +617,14 @@ class TsdfMap:
             m.vertex.colors = o3d.core.Tensor(np.zeros((0, 3), dtype=np.float32), device=self._device)
             m.triangle.indices = o3d.core.Tensor(np.zeros((0, 3), dtype=np.int32), device=self._device)
             return m
+        if chunked:
+            from . import chunked_mesher as _chunked_mesher
+            out = _chunked_mesher.chunked_extract_triangle_mesh(
+                self._vbg, voxel_size=self.voxel_size, block_resolution=self.block_resolution,
+                weight_threshold=self.weight_threshold,
+                chunk_blocks=chunk_blocks or _chunked_mesher.DEFAULT_CHUNK_BLOCKS, halo=halo)
+            self._release_cache_if_due()
+            return out
         self._check_extractable()
         out = self._extract("extract_triangle_mesh")
         self._release_cache_if_due()
