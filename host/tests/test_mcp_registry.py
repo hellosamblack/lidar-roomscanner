@@ -67,6 +67,9 @@ EXCLUDED: dict[str, str] = {
     "browser_reap_probe.py": ("live bench for the #219 idle reaper; needs its OWN "
                               "browser, since the MCP server's singleton is the "
                               "subject under test"),
+    "camera_shutdown_probe.py": ("live bench: starts its OWN roomscan-web process and "
+                                 "signals it, so it cannot run inside the server the "
+                                 "MCP tools talk to; run by test_camera_shutdown.py"),
     "check_udp.py": "binds the device UDP stream; would starve a live roomscan-web",
     "bench_commands.py": "binds the device CDC stream; rare hardware bench",
     # Scratch tier: hardcoded IPs / Windows paths, superseded by the tools above.

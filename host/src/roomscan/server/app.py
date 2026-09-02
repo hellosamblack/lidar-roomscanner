@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -41,11 +42,33 @@ from .ws_thin import websocket_thin_endpoint
 
 log = logging.getLogger("roomscan.web")
 
+#: How long the whole stop is allowed to take, end to end. Overridable so a
+#: deployment can trade a longer in-flight-download grace for a slower restart.
+#: The route-level gate is what actually ends the camera stream; this is the
+#: backstop for anything else that could hold a connection open.
+SHUTDOWN_TIMEOUT_S = float(os.environ.get("ROOMSCAN_SHUTDOWN_TIMEOUT_S") or 3.0)
+
+#: Bound on the lifespan's own teardown, once uvicorn finally reaches it.
+CAMERA_STOP_TIMEOUT_S = 2.0
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    # The shutdown gate, created before anything can consume it. Long-lived
+    # response generators (`/api/camera/stream.mjpg`) check it so they can end
+    # their response instead of pinning the connection open -- see
+    # `routes.shutdown_event` for why setting it HERE, on lifespan shutdown,
+    # would be far too late to be the only place it is set.
+    if getattr(app.state, "shutdown_event", None) is None:
+        app.state.shutdown_event = asyncio.Event()
+    # `handle_exit` runs in a signal handler with no running loop of its own;
+    # it needs this to schedule the `set()` back onto ours.
+    app.state.loop = asyncio.get_running_loop()
+
     # Start the single broadcast task once the server begins serving. app.state
-    # is fully populated by main() before uvicorn.run(); guard the (test/import)
-    # case where it isn't so a bare `import roomscan.web` never spins a task.
+    # is fully populated by main() before the server runs; guard the
+    # (test/import) case where it isn't so a bare `import roomscan.web` never
+    # spins a task.
     if getattr(app.state, "ready", False):
         app.state.broadcast_task = asyncio.create_task(_broadcaster())
         app.state.idle_reconcile_task = asyncio.create_task(_idle_reconcile_loop())
@@ -78,6 +101,11 @@ async def _lifespan(app: FastAPI):
             register_mdns, getattr(app.state, "port", 8000),
             zeroconf_factory=getattr(app.state, "zeroconf_factory", Zeroconf))
     yield
+    # Belt and braces for every path that does NOT come through `handle_exit`
+    # -- a test harness, an embedded run, a reload. Idempotent.
+    event = getattr(app.state, "shutdown_event", None)
+    if event is not None:
+        event.set()
     task = getattr(app.state, "broadcast_task", None)
     if task is not None:
         task.cancel()
@@ -103,7 +131,15 @@ async def _lifespan(app: FastAPI):
     # a task to stop and it having stopped (#219).
     camera = getattr(app.state, "camera", None)
     if camera is not None:
-        await camera.stop()
+        # Bounded. `stop()` joins its worker tasks, and a join is only as
+        # bounded as the thing it joins; a shutdown that can be held open by
+        # one wedged socket read is the defect this whole round is about, and
+        # it must not simply move from the route into the lifespan.
+        try:
+            await asyncio.wait_for(camera.stop(), timeout=CAMERA_STOP_TIMEOUT_S)
+        except (asyncio.TimeoutError, Exception) as exc:   # noqa: BLE001
+            log.warning("camera ingest did not stop within %.1fs: %r",
+                        CAMERA_STOP_TIMEOUT_S, exc)
         app.state.camera = None
     # Live SLAM: tear the worker down and, with `[slam] backend = "remote"`,
     # end the spawned service subprocess (#224) -- it holds the CUDA context.

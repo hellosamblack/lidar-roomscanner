@@ -60,6 +60,11 @@ from .weather import MslPressure
 from .server import *
 from . import server as _server_mod
 
+# The two names `main()` actually reaches for, imported explicitly on top of the
+# star re-export above. Same objects; naming them means a reader (and ruff) can
+# see where they come from instead of inferring it from a `*`.
+from .server.app import SHUTDOWN_TIMEOUT_S, app
+
 for _k, _v in vars(_server_mod).items():
     if not _k.startswith("__"):
         globals()[_k] = _v
@@ -302,8 +307,40 @@ def main(argv=None) -> int:
     # connections) froze the server 630 ms out of every second. What the cost
     # bought: float32 geometry deflates to 80%. Turning it off trades ~20% more
     # LAN bytes for the loop back.
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning",
-                ws_per_message_deflate=False)
+    # `uvicorn.Server` explicitly rather than `uvicorn.run` (which, with no
+    # reload/workers, is exactly `Server(Config(...)).run()`) so two things can
+    # be attached that `run()` gives no way to reach:
+    #
+    #  1. `handle_exit`, to fire the app's shutdown gate the INSTANT the signal
+    #     lands. uvicorn's graceful shutdown waits for open connections before
+    #     it runs the lifespan shutdown, so a gate set in the lifespan can
+    #     never release the connection that is blocking the lifespan. With a
+    #     browser holding `/api/camera/stream.mjpg`, SIGTERM measured >122 s
+    #     (systemd SIGKILLed at TimeoutStopSec=90) against 0.21 s with nothing
+    #     attached -- see `routes._camera_parts`.
+    #  2. `timeout_graceful_shutdown`, which uvicorn leaves at `None` (i.e.
+    #     `wait_for(..., timeout=None)`: wait forever). The gate above is the
+    #     real fix and ends the camera response in milliseconds; this is the
+    #     backstop for a connection nothing has taught to let go -- a stalled
+    #     client blocked mid-`send`, a long `/capture_video` download. Cutting
+    #     one of those off at restart is the correct trade against a server
+    #     that never comes back.
+    class _RoomscanServer(uvicorn.Server):
+        def handle_exit(self, sig, frame):      # noqa: ANN001 - uvicorn's signature
+            loop = getattr(app.state, "loop", None)
+            event = getattr(app.state, "shutdown_event", None)
+            if loop is not None and event is not None and not event.is_set():
+                # call_soon_threadsafe, not `event.set()`: a signal handler is
+                # not guaranteed to be running on the loop's thread, and this
+                # also wakes a loop parked in epoll instead of leaving the
+                # waiters until the next unrelated timer fires.
+                loop.call_soon_threadsafe(event.set)
+            super().handle_exit(sig, frame)
+
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning",
+                            ws_per_message_deflate=False,
+                            timeout_graceful_shutdown=SHUTDOWN_TIMEOUT_S)
+    _RoomscanServer(config=config).run()
     return 0
 
 

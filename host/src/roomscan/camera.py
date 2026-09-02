@@ -112,6 +112,9 @@ MAX_BACKOFF_S = 10.0
 #: absent daemon, and the card should say so rather than spinning forever.
 OFFLINE_AFTER_FAILURES = 2
 
+#: Ceiling on joining ONE camera task during `stop()`.
+STOP_TIMEOUT_S = 1.0
+
 CONNECT_TIMEOUT_S = 5.0
 RESPONSE_HEADER_TIMEOUT_S = 5.0
 #: A read that yields nothing for this long is a dead connection. TCP alone
@@ -524,6 +527,9 @@ class CameraIngestConfig:
     max_backoff_s: float = MAX_BACKOFF_S
     offline_after_failures: int = OFFLINE_AFTER_FAILURES
     max_frame_bytes: int = MAX_FRAME_BYTES
+    #: Per-task ceiling on `stop()`. Short: both workers are plain asyncio and
+    #: cancel promptly, so anything approaching this is a bug worth logging.
+    stop_timeout_s: float = STOP_TIMEOUT_S
 
 
 @dataclass
@@ -672,7 +678,16 @@ class CameraClient:
                     continue
                 task.cancel()
                 try:
-                    await task
+                    # BOUNDED. A join is only as bounded as the thing it joins:
+                    # a worker wedged somewhere uncancellable would turn
+                    # "teardown" into "hang", which is exactly the failure mode
+                    # #226 round 4 was reported for. Past the timeout the task
+                    # is abandoned rather than waited on, and that is said out
+                    # loud below instead of being swallowed.
+                    await asyncio.wait_for(task, timeout=self.config.stop_timeout_s)
+                except asyncio.TimeoutError:
+                    log.warning("camera %s did not stop within %.1fs; abandoning it",
+                                attr.lstrip("_"), self.config.stop_timeout_s)
                 except asyncio.CancelledError:
                     # Two different events raise here and they must not be
                     # conflated: the task WE cancelled finishing (expected,
@@ -714,9 +729,9 @@ class CameraClient:
         if wait_closed is None:
             return                              # a test double, or an old loop
         try:
-            await wait_closed()
-        except Exception:                       # noqa: BLE001 - it is closing
-            pass
+            await asyncio.wait_for(wait_closed(), timeout=STOP_TIMEOUT_S)
+        except Exception:                       # noqa: BLE001 - it is closing,
+            pass                                # or it never will; either way we go
 
     # -- the ingest loop -------------------------------------------------
 

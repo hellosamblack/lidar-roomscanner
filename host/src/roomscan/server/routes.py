@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 
 from fastapi import Request
@@ -191,6 +192,18 @@ CAMERA_NO_STORE = {"Cache-Control": "no-store, no-cache, must-revalidate",
                    "Pragma": "no-cache"}
 
 
+def shutdown_event(request: Request | None = None):
+    """The app-wide "we are shutting down" gate, or None if there is none.
+
+    Set from `handle_exit` (see `web.main`), i.e. the moment the signal lands
+    -- NOT at lifespan shutdown, which uvicorn only reaches after every
+    connection has closed. A gate set there could never release the connection
+    that is blocking it, which is precisely the deadlock this exists to break.
+    """
+    state = _get_app_state(request)
+    return getattr(state, "shutdown_event", None)
+
+
 def _camera_client(state):
     """The lifespan-owned `CameraClient`, or None when the server was built
     without one (every unit test that does not exercise the camera)."""
@@ -247,24 +260,77 @@ def encode_mjpeg_part(frame: CameraFrame, boundary: str = CAMERA_BOUNDARY) -> by
     return ("\r\n".join(head) + "\r\n\r\n").encode("latin-1") + frame.jpeg + b"\r\n"
 
 
-async def _camera_parts(slot: LatestFrameSlot, boundary: str = CAMERA_BOUNDARY):
-    """Latest-only async generator over `slot`.
+async def _camera_parts(slot: LatestFrameSlot, boundary: str = CAMERA_BOUNDARY,
+                        stop: asyncio.Event | None = None):
+    """Latest-only async generator over `slot`, ending when `stop` is set.
 
     The subscriber counter is incremented/decremented in a `finally`, so a
     browser that vanishes mid-frame does not leave the card reporting a viewer
     that is gone -- connection count is a real performance variable on this
     server (BUG-060) and a lying one is worse than none.
+
+    `stop` is what makes the server able to shut down (#226 round 4). An MJPEG
+    response never ends on its own, and uvicorn's graceful shutdown treats a
+    response still in flight as a connection it must WAIT for: unlike the
+    WebSocket path, which calls `transport.close()` unconditionally
+    (`websockets_sansio_impl.shutdown`), the HTTP path only sets
+    `cycle.keep_alive = False` when a response is open (`httptools_impl.py:349`)
+    and leaves the transport up. `Server._wait_tasks_to_complete` then loops
+    `while self.server_state.connections` -- with `timeout_graceful_shutdown`
+    defaulting to `None`, forever. Measured: SIGTERM with one browser holding
+    this response never exited (>122 s, systemd SIGKILLed at 90 s), against
+    0.21 s with nothing attached.
+
+    So ending this generator is not a nicety, it is the whole shutdown path:
+    the response completes, uvicorn closes the connection, and only then does
+    it run the lifespan shutdown that stops the camera ingest. That ordering is
+    also why the ingest's upstream socket to the Pi was still ESTABLISHED 8 s
+    after SIGTERM -- `CameraClient.stop()` had never been reached.
     """
     slot.subscribers += 1
     tick = 0
     try:
-        while True:
-            tick, frame = await slot.wait_next(tick)
+        while stop is None or not stop.is_set():
+            nxt = await _next_part_or_stop(slot, tick, stop)
+            if nxt is None:
+                return                  # shutting down: end the response
+            tick, frame = nxt
             # `yield` returns only after Starlette's `await send(...)` for the
-            # previous part has completed. That await IS the bound.
+            # previous part has completed. That await IS the backpressure bound.
             yield encode_mjpeg_part(frame, boundary)
     finally:
         slot.subscribers = max(0, slot.subscribers - 1)
+
+
+async def _next_part_or_stop(slot: LatestFrameSlot, tick: int,
+                             stop: asyncio.Event | None):
+    """The next frame newer than `tick`, or None once `stop` is set.
+
+    A race, not a poll: `slot.wait_next` blocks indefinitely when the camera
+    has gone quiet, which is exactly the state a shutdown is most likely to
+    find it in, so a loop that only re-checked `stop` after a frame arrived
+    would still hang on a dead camera.
+
+    The losing waiter is cancelled and awaited, so neither task outlives this
+    call -- a stray `wait_next` would keep this subscriber's seat in the slot
+    and go on counting skips for a viewer that has gone.
+    """
+    if stop is None:
+        return await slot.wait_next(tick)
+    frame_task = asyncio.ensure_future(slot.wait_next(tick))
+    stop_task = asyncio.ensure_future(stop.wait())
+    try:
+        done, pending = await asyncio.wait(
+            {frame_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in (frame_task, stop_task):
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+    if frame_task in done and not frame_task.cancelled():
+        return frame_task.result()
+    return None
 
 
 async def api_camera_stream(request: Request) -> Response:
@@ -278,8 +344,9 @@ async def api_camera_stream(request: Request) -> Response:
     if client is None:
         return JSONResponse({"error": "camera ingest is not running"},
                             status_code=503, headers=CAMERA_NO_STORE)
-    return StreamingResponse(_camera_parts(client.slot),
-                             media_type=CAMERA_MEDIA_TYPE, headers=CAMERA_NO_STORE)
+    return StreamingResponse(
+        _camera_parts(client.slot, CAMERA_BOUNDARY, shutdown_event(request)),
+        media_type=CAMERA_MEDIA_TYPE, headers=CAMERA_NO_STORE)
 
 
 async def api_camera_frame(request: Request) -> Response:

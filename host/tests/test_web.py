@@ -5627,11 +5627,51 @@ def test_uvicorn_runs_with_permessage_deflate_disabled():
     awaits `send_bytes` PER CLIENT -- so each binary payload is deflated once
     per connected tab, on the event loop. Measured at +130 ms of whole-process
     freeze per client on a 3.2 MB SLAM mesh, for an 80% compression ratio.
-    A source guard, because the cost is invisible until someone profiles it."""
+    A source guard, because the cost is invisible until someone profiles it.
+
+    Reads `uvicorn.Config(...)` since #226 round 4: `main()` now builds the
+    Config and Server explicitly (identical to what `uvicorn.run` does with no
+    reload/workers) so it can attach a `handle_exit` override and a graceful
+    timeout. The setting under test is unchanged -- only where it is written."""
     src = pathlib.Path(web.__file__).read_text()
-    call = src[src.index("uvicorn.run(app"):]
+    call = src[src.index("uvicorn.Config(app"):]
     call = call[:call.index(")") + 1]
     assert "ws_per_message_deflate=False" in call, call
+
+
+def test_uvicorn_is_given_a_bounded_graceful_shutdown():
+    """uvicorn leaves `timeout_graceful_shutdown` at None -- `wait_for(...,
+    timeout=None)`, i.e. wait forever for open connections.
+
+    With a browser holding `/api/camera/stream.mjpg`, that was a restart which
+    never completed: systemd sat in `stop-sigterm` for the full
+    TimeoutStopSec=90 and SIGKILLed the server. The route-level shutdown gate is
+    the real fix; this is the backstop for a connection nothing has taught to
+    let go, and its absence is invisible until someone restarts at the wrong
+    moment. `test_camera_shutdown.py` measures the actual exit time."""
+    src = pathlib.Path(web.__file__).read_text()
+    call = src[src.index("uvicorn.Config(app"):]
+    call = call[:call.index(")") + 1]
+    assert "timeout_graceful_shutdown=" in call, call
+    assert web.SHUTDOWN_TIMEOUT_S > 0, "a non-positive timeout would cut every request"
+    assert web.SHUTDOWN_TIMEOUT_S <= 10.0, (
+        f"a {web.SHUTDOWN_TIMEOUT_S}s graceful timeout is longer than a human "
+        f"waits for a restart; systemd's TimeoutStopSec is the backstop, not the target")
+
+
+def test_the_server_fires_the_shutdown_gate_from_handle_exit():
+    """The gate must be set when the SIGNAL lands, not at lifespan shutdown.
+
+    uvicorn reaches `lifespan.shutdown()` only after every connection has
+    closed, so a gate set there could never release the connection blocking it
+    -- the deadlock would be intact and the code would look correct."""
+    src = pathlib.Path(web.__file__).read_text()
+    assert "def handle_exit" in src, (
+        "nothing overrides handle_exit, so the shutdown gate is only set from "
+        "the lifespan -- far too late to release an open response")
+    body = src[src.index("def handle_exit"):]
+    body = body[:body.index("config = uvicorn.Config")]
+    assert "shutdown_event" in body and "call_soon_threadsafe" in body, body
 
 
 def test_slam_config_carries_a_live_mesh_byte_budget():

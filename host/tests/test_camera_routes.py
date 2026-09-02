@@ -374,8 +374,16 @@ async def test_repeated_lifespan_cycles_start_exactly_one_camera_each(monkeypatc
 async def test_a_camera_that_fails_to_stop_does_not_strand_the_lifespan(monkeypatch):
     """A teardown that raises must not leave the server unable to shut down.
 
-    It is allowed to propagate -- what must not happen is the earlier tasks
-    being left running, so this asserts the census, not the exception.
+    It is CONTAINED, not propagated (tightened #226 round 4). Letting it out
+    aborts the rest of the lifespan teardown, and the steps after the camera
+    are the expensive ones: the SLAM runner's CUDA context, the mDNS
+    unregister, and the Filament renderer -- which ABORTS the process at
+    interpreter exit if it is collected instead of closed. Trading a clean
+    shutdown of all of those for the propagation of one camera error is a bad
+    bargain, so the error is logged and the teardown continues.
+
+    Asserted three ways: no exception escapes, the later teardown still runs,
+    and nothing is left running.
     """
     started: list = []
     app_mod = _neutralise_lifespan(monkeypatch, started)
@@ -393,15 +401,59 @@ async def test_a_camera_that_fails_to_stop_does_not_strand_the_lifespan(monkeypa
         async def stop(self):
             raise RuntimeError("socket already gone")
 
+    class _Runner:
+        """Stands in for the SLAM runner -- a teardown step AFTER the camera."""
+        closed = False
+
+        def close(self):
+            type(self).closed = True
+
     monkeypatch.setattr(app_mod, "build_camera_client", lambda _s: _Boom())
     app = _LifespanApp()
+    app.state.slam_runner = _Runner()
     before = len(asyncio.all_tasks())
-    with pytest.raises(RuntimeError, match="socket already gone"):
-        async with app_mod._lifespan(app):
-            pass
+    async with app_mod._lifespan(app):     # must NOT raise
+        pass
     await asyncio.sleep(0)
+    assert _Runner.closed is True, (
+        "a raising camera teardown aborted the lifespan before the SLAM runner "
+        "was closed -- that leaks the CUDA context on every restart")
     assert len(asyncio.all_tasks()) == before
+    assert app.state.camera is None
     assert real_build is not None      # the real factory is restored by monkeypatch
+
+
+@asyncio_test
+async def test_a_camera_that_hangs_in_stop_does_not_hang_the_lifespan(monkeypatch):
+    """The bounded half of the same rule.
+
+    A `stop()` that never returns is worse than one that raises: nothing is
+    logged, nothing propagates, and the process simply does not come back. That
+    is the #226 shutdown hang moved from the route into the lifespan, so the
+    join is under `wait_for` and this measures the ceiling.
+    """
+    started: list = []
+    app_mod = _neutralise_lifespan(monkeypatch, started)
+    monkeypatch.setattr(app_mod, "CAMERA_STOP_TIMEOUT_S", 0.05)
+
+    class _Wedged:
+        async def start(self):
+            return None
+
+        async def stop(self):
+            await asyncio.sleep(3600)
+
+    monkeypatch.setattr(app_mod, "build_camera_client", lambda _s: _Wedged())
+    app = _LifespanApp()
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    async with app_mod._lifespan(app):
+        pass
+    elapsed = loop.time() - t0
+    assert elapsed < 1.0, (
+        f"the lifespan waited {elapsed:.2f}s on a camera stop that never "
+        f"returns; the join is not bounded")
+    assert app.state.camera is None
 
 
 def test_build_camera_client_shares_the_one_bridge_resolver(monkeypatch):

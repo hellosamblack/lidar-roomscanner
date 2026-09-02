@@ -5183,6 +5183,15 @@ def build_camera_client(state):
     port = int(os.environ.get("ROOMSCAN_CAMERA_PORT") or 0)
     if port:
         cfg.port = port
+    # `ROOMSCAN_CAMERA_HOST` pins the daemon's address and SKIPS the resolver
+    # entirely -- a literal beats mDNS, rather than racing it. Needed by
+    # `host/tools/camera_shutdown_probe.py`, which stands up its own daemon on
+    # loopback: with the resolver in play the probe would silently attach to the
+    # real bridge and stop being a hermetic test of this host.
+    host = (os.environ.get("ROOMSCAN_CAMERA_HOST") or "").strip()
+    if host:
+        cfg.host = host
+        return CameraClient(cfg)
     return CameraClient(cfg, resolve=lambda: _resolve_bridge_host(state))
 
 
