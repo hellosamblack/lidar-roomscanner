@@ -30,6 +30,7 @@ import functools
 import gc
 import json
 import weakref
+from contextlib import suppress
 
 import pytest
 
@@ -1561,3 +1562,107 @@ def test_save_camera_snapshot_refuses_a_non_jpeg_response(tmp_path, monkeypatch)
     assert out["ok"] is False
     assert "not a JPEG" in out["error"]
     assert not list((tmp_path / "results").rglob("*.jpg"))
+
+
+@asyncio_test
+async def test_a_worker_raising_an_os_timeout_is_not_reported_as_a_slow_stop(caplog):
+    """Since 3.11 `asyncio.TimeoutError` IS the builtin `TimeoutError`.
+
+    So `except asyncio.TimeoutError` around the join also catches an OS-level
+    timeout raised BY the worker -- a failed socket read logged as "the task
+    would not stop". Opposite diagnoses (the worker died vs the bound is too
+    tight), and the one that is true decides whether anyone looks at the
+    socket. `asyncio.wait` never raises for time, so the two are separated by
+    what is afterwards TRUE of the task: still pending, or finished with an
+    exception.
+    """
+    import logging
+
+    client, _ = make_client([], min_backoff_s=5.0)
+    await client.start()
+
+    async def dies_with_a_timeout():
+        raise TimeoutError("[Errno 110] Connection timed out")
+
+    # Replace the ingest task with one that fails the way a wedged socket does.
+    client._task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await client._task
+    client._task = asyncio.create_task(dies_with_a_timeout())
+    await asyncio.sleep(0)
+
+    with caplog.at_level(logging.WARNING, logger="roomscan.camera"):
+        await client.stop()
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "did not stop within" not in text, (
+        f"a worker that raised TimeoutError was reported as a slow stop: {text}")
+    assert "raised TimeoutError" in text and "Errno 110" in text, text
+
+
+@asyncio_test
+async def test_a_worker_that_will_not_die_is_reported_as_a_slow_stop(caplog):
+    """The other arm, so neither message can be a constant.
+
+    The stand-in absorbs its cancellation and then takes far longer than the
+    stop budget to unwind -- what a worker stuck in a native call looks like.
+    It does eventually finish, deliberately: a task that swallowed
+    cancellation FOREVER hung `asyncio.run`'s own teardown (which cancels and
+    gathers whatever is left), so the test wedged and the code under test was
+    never the problem. A fixture that cannot be cleaned up does not test
+    robustness, it just moves the hang.
+    """
+    import logging
+
+    client, _ = make_client([], min_backoff_s=5.0, stop_timeout_s=0.05)
+    await client.start()
+
+    async def slow_to_unwind():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            # Absorbed once, then a real (bounded) unwind. A second cancel --
+            # asyncio.run's teardown -- lands here and ends it.
+            await asyncio.sleep(0.4)
+
+    client._task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await client._task
+    stubborn = asyncio.create_task(slow_to_unwind())
+    await asyncio.sleep(0)
+    client._task = stubborn
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="roomscan.camera"):
+            await client.stop()
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "did not stop within" in text, text
+        assert "raised" not in text, (
+            f"a task that merely would not finish was reported as raising: {text}")
+    finally:
+        stubborn.cancel()
+        with suppress(asyncio.CancelledError):
+            await stubborn
+
+
+@asyncio_test
+async def test_the_writer_close_uses_the_configured_timeout_not_the_module_default():
+    """`stop_timeout_s` is a config field so a test can shrink it; reading the
+    module constant instead means a caller that lowered the bound silently did
+    not."""
+    slow = asyncio.Event()
+
+    class _SlowWriter(FakeWriter):
+        async def wait_closed(self):
+            self.close_awaited = True
+            await slow.wait()             # never completes within the test
+
+    client, _ = make_client([], min_backoff_s=5.0, stop_timeout_s=0.05)
+    client._writer = _SlowWriter()
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    await client.stop()
+    elapsed = loop.time() - t0
+    assert elapsed < 1.0, (
+        f"the writer close took {elapsed:.2f}s against a 0.05s configured "
+        f"timeout -- it is reading the module constant instead")
+    assert client._writer is None

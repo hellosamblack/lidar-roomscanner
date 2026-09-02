@@ -59,8 +59,16 @@ async def _lifespan(app: FastAPI):
     # their response instead of pinning the connection open -- see
     # `routes.shutdown_event` for why setting it HERE, on lifespan shutdown,
     # would be far too late to be the only place it is set.
-    if getattr(app.state, "shutdown_event", None) is None:
-        app.state.shutdown_event = asyncio.Event()
+    #
+    # A FRESH Event every startup, not a reused one. Shutdown sets this and
+    # nothing ever cleared it, so a second lifespan on the same `app` object --
+    # a reused `TestClient`, an embedded run, a reload -- began with the gate
+    # already set and `/api/camera/stream.mjpg` returned an empty body forever,
+    # to every client, with the camera perfectly healthy. Replacing rather than
+    # `clear()`ing is deliberate: a generator still holding the OLD event sees
+    # it set and ends, which is what a generator from a finished lifespan
+    # should do; clearing in place would silently revive it.
+    app.state.shutdown_event = asyncio.Event()
     # `handle_exit` runs in a signal handler with no running loop of its own;
     # it needs this to schedule the `set()` back onto ours.
     app.state.loop = asyncio.get_running_loop()
@@ -135,11 +143,20 @@ async def _lifespan(app: FastAPI):
         # bounded as the thing it joins; a shutdown that can be held open by
         # one wedged socket read is the defect this whole round is about, and
         # it must not simply move from the route into the lifespan.
+        #
+        # Two failures, two messages. `except (TimeoutError, Exception)` reported
+        # a real AttributeError inside `stop()` as "did not stop within 2.0s" --
+        # a bug in the teardown, described to whoever reads the log as a slow
+        # socket. They need opposite responses (raise the bound vs fix the
+        # code), so they must not share a sentence.
         try:
             await asyncio.wait_for(camera.stop(), timeout=CAMERA_STOP_TIMEOUT_S)
-        except (asyncio.TimeoutError, Exception) as exc:   # noqa: BLE001
-            log.warning("camera ingest did not stop within %.1fs: %r",
-                        CAMERA_STOP_TIMEOUT_S, exc)
+        except asyncio.TimeoutError:
+            log.warning("camera ingest did not stop within %.1fs; abandoning it",
+                        CAMERA_STOP_TIMEOUT_S)
+        except Exception as exc:                           # noqa: BLE001
+            log.warning("camera ingest teardown raised %s: %s -- continuing "
+                        "shutdown", type(exc).__name__, exc)
         app.state.camera = None
     # Live SLAM: tear the worker down and, with `[slam] backend = "remote"`,
     # end the spawned service subprocess (#224) -- it holds the CUDA context.

@@ -5659,6 +5659,45 @@ def test_uvicorn_is_given_a_bounded_graceful_shutdown():
         f"waits for a restart; systemd's TimeoutStopSec is the backstop, not the target")
 
 
+def test_arming_the_gate_before_startup_warns_instead_of_failing_silently(caplog):
+    """A signal that beats lifespan startup finds no loop and no gate.
+
+    That is survivable -- the `timeout_graceful_shutdown` backstop still ends
+    the process -- but it must not be SILENT. A shutdown that quietly loses its
+    fast path reads later as "restarts got slower lately" and never gets
+    diagnosed, which is the whole reason this round exists.
+    """
+    from types import SimpleNamespace
+
+    with caplog.at_level("WARNING", logger="roomscan.web"):
+        assert web.arm_shutdown_gate(SimpleNamespace()) is False
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "before the app finished starting" in text, text
+    assert "graceful timeout" in text, text
+
+
+def test_arming_the_gate_after_startup_schedules_the_set_onto_the_loop():
+    """The happy path, asserted on the EVENT, not on the return value.
+
+    `handle_exit` runs in a signal handler, so the set is scheduled with
+    `call_soon_threadsafe`; a test that only checked the boolean would pass
+    against a version that scheduled nothing.
+    """
+    import asyncio as _asyncio
+    from types import SimpleNamespace
+
+    async def drive():
+        state = SimpleNamespace(loop=_asyncio.get_running_loop(),
+                                shutdown_event=_asyncio.Event())
+        assert web.arm_shutdown_gate(state) is True
+        await _asyncio.sleep(0)             # let the scheduled callback run
+        assert state.shutdown_event.is_set()
+        # A second signal is a no-op, not a second schedule.
+        assert web.arm_shutdown_gate(state) is False
+
+    _asyncio.run(drive())
+
+
 def test_the_server_fires_the_shutdown_gate_from_handle_exit():
     """The gate must be set when the SIGNAL lands, not at lifespan shutdown.
 
@@ -5671,7 +5710,10 @@ def test_the_server_fires_the_shutdown_gate_from_handle_exit():
         "the lifespan -- far too late to release an open response")
     body = src[src.index("def handle_exit"):]
     body = body[:body.index("config = uvicorn.Config")]
-    assert "shutdown_event" in body and "call_soon_threadsafe" in body, body
+    assert "arm_shutdown_gate" in body, body
+    assert "call_soon_threadsafe" in src[:src.index("# --- CLI entry point")], (
+        "the gate is set directly rather than scheduled onto the loop; a signal "
+        "handler is not guaranteed to run on the loop's thread")
 
 
 def test_slam_config_carries_a_live_mesh_byte_budget():

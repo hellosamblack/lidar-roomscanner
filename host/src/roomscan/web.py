@@ -63,11 +63,50 @@ from . import server as _server_mod
 # The two names `main()` actually reaches for, imported explicitly on top of the
 # star re-export above. Same objects; naming them means a reader (and ruff) can
 # see where they come from instead of inferring it from a `*`.
-from .server.app import SHUTDOWN_TIMEOUT_S, app
+from .server.app import SHUTDOWN_TIMEOUT_S, app, log
 
 for _k, _v in vars(_server_mod).items():
     if not _k.startswith("__"):
         globals()[_k] = _v
+
+
+def arm_shutdown_gate(state) -> bool:
+    """Fire the app's shutdown gate. Returns whether it was actually armed.
+
+    Called from `uvicorn.Server.handle_exit`, i.e. inside a signal handler, so
+    it must not raise and must not assume it is on the event loop's thread --
+    hence `call_soon_threadsafe` rather than `event.set()`, which also wakes a
+    loop parked in epoll instead of leaving the waiters until some unrelated
+    timer fires.
+
+    Split out of the nested class purely so it can be tested: driving the real
+    thing needs a signal, a live server and a socket.
+
+    **A signal arriving before lifespan startup has run** finds no loop and no
+    event, so the gate cannot be armed and only the `timeout_graceful_shutdown`
+    backstop applies. That is survivable -- the server still exits, just at the
+    3 s bound instead of promptly -- but it must not be SILENT: a shutdown that
+    quietly loses its fast path is exactly the kind of degradation that reads
+    as "restarts got slower lately" and never gets diagnosed.
+    """
+    loop = getattr(state, "loop", None)
+    event = getattr(state, "shutdown_event", None)
+    if loop is None or event is None:
+        log.warning(
+            "shutdown signal arrived before the app finished starting "
+            "(loop=%s, gate=%s); long-lived responses will be cut by the %.1fs "
+            "graceful timeout instead of ending cleanly",
+            "set" if loop is not None else "unset",
+            "set" if event is not None else "unset", SHUTDOWN_TIMEOUT_S)
+        return False
+    if event.is_set():
+        return False                # a second signal; already armed
+    try:
+        loop.call_soon_threadsafe(event.set)
+    except RuntimeError as exc:     # loop already closed -- nothing left to gate
+        log.warning("could not arm the shutdown gate: %r", exc)
+        return False
+    return True
 
 
 # --- CLI entry point --------------------------------------------------------
@@ -327,14 +366,7 @@ def main(argv=None) -> int:
     #     that never comes back.
     class _RoomscanServer(uvicorn.Server):
         def handle_exit(self, sig, frame):      # noqa: ANN001 - uvicorn's signature
-            loop = getattr(app.state, "loop", None)
-            event = getattr(app.state, "shutdown_event", None)
-            if loop is not None and event is not None and not event.is_set():
-                # call_soon_threadsafe, not `event.set()`: a signal handler is
-                # not guaranteed to be running on the loop's thread, and this
-                # also wakes a loop parked in epoll instead of leaving the
-                # waiters until the next unrelated timer fires.
-                loop.call_soon_threadsafe(event.set)
+            arm_shutdown_gate(app.state)
             super().handle_exit(sig, frame)
 
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning",

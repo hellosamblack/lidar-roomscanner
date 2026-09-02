@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import socket
 import struct
@@ -291,9 +292,13 @@ def run_arm(arm: str, *, budget_s: float = DEFAULT_BUDGET_S,
             proc.wait(timeout=10)
         daemon.shutdown()
         daemon.server_close()
-        for p in (capture,):
-            p.unlink(missing_ok=True)
-        tmp.rmdir()
+        # Cleanup must never replace a real measurement with a setup error: a
+        # leftover file, a race with the server's own writes, a read-only tmp
+        # would all raise out of this `finally` and discard the exit time we
+        # came here for. `rmtree(ignore_errors=True)` says the same thing in
+        # one call, and a stray temp dir is a far cheaper failure than a lost
+        # result.
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def probe(arms=ARMS, *, budget_s: float = DEFAULT_BUDGET_S) -> dict:

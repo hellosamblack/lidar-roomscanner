@@ -606,3 +606,119 @@ async def test_a_repeated_identical_failure_is_not_logged_every_backoff(monkeypa
         assert client.last_error and "nothing listening" in client.last_error
     finally:
         await client.stop()
+
+
+# --- shutdown gate lifecycle (#226 review round 5) --------------------------
+
+
+@asyncio_test
+async def test_a_second_lifespan_starts_with_a_fresh_shutdown_gate(monkeypatch):
+    """The gate must not survive the lifespan that set it.
+
+    Shutdown sets it and nothing cleared it, so a second lifespan on the SAME
+    `app` object -- a reused TestClient, an embedded run, a reload -- began with
+    the gate already set. `/api/camera/stream.mjpg` then returned an empty body
+    forever, to every client, with the camera perfectly healthy: the generator
+    checked the gate before its first frame and returned immediately.
+
+    Asserted end to end on the generator, not just on `is_set()`: the observable
+    that matters is whether a part comes out.
+    """
+    started: list = []
+    app_mod = _neutralise_lifespan(monkeypatch, started)
+    app = _LifespanApp()
+
+    async with app_mod._lifespan(app):
+        first = app.state.shutdown_event
+    assert first.is_set(), "shutdown must set the gate; that half still holds"
+
+    async with app_mod._lifespan(app):
+        second = app.state.shutdown_event
+        assert second is not first, "the second lifespan reused the old gate"
+        assert not second.is_set(), (
+            "the second lifespan started with the gate already set -- every "
+            "camera stream would return an empty body")
+
+        # The far side: a generator built against this gate must still stream.
+        slot = cam.LatestFrameSlot()
+        slot.publish(_frame(seq=1))
+        gen = routes_mod._camera_parts(slot, routes_mod.CAMERA_BOUNDARY, second)
+        try:
+            part = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+            assert b"X-Roomscan-Camera-Seq: 1" in part
+        finally:
+            await gen.aclose()
+
+
+@asyncio_test
+async def test_the_stream_generator_ends_at_once_on_an_already_set_gate():
+    """The behaviour the stale gate produced, pinned as intended.
+
+    A gate that is already set means the server is going away, so ending
+    immediately is correct -- the defect was never this branch, it was reaching
+    it on a healthy startup. Keeping it tested means the fix above cannot be
+    "fixed" by making the generator ignore the gate.
+    """
+    slot = cam.LatestFrameSlot()
+    slot.publish(_frame(seq=1))
+    gate = asyncio.Event()
+    gate.set()
+    gen = routes_mod._camera_parts(slot, routes_mod.CAMERA_BOUNDARY, gate)
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+    assert slot.subscribers == 0, "the generator kept its seat after ending"
+
+
+@asyncio_test
+async def test_a_raising_camera_teardown_is_logged_as_an_error_not_a_timeout(
+        monkeypatch, caplog):
+    """Two failures, two messages.
+
+    `except (TimeoutError, Exception)` reported a real AttributeError inside
+    `stop()` as "did not stop within 2.0s" -- a bug in the teardown, described
+    to whoever reads the log as a slow socket. They need opposite responses
+    (raise the bound vs fix the code), so the log must not blur them.
+    """
+    started: list = []
+    app_mod = _neutralise_lifespan(monkeypatch, started)
+
+    class _Broken:
+        async def start(self):
+            return None
+
+        async def stop(self):
+            raise AttributeError("'NoneType' object has no attribute 'close'")
+
+    monkeypatch.setattr(app_mod, "build_camera_client", lambda _s: _Broken())
+    app = _LifespanApp()
+    with caplog.at_level("WARNING", logger="roomscan.web"):
+        async with app_mod._lifespan(app):
+            pass
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "AttributeError" in text and "has no attribute" in text, text
+    assert "did not stop within" not in text, (
+        f"a raising teardown was reported as a timeout: {text}")
+
+
+@asyncio_test
+async def test_a_hanging_camera_teardown_is_logged_as_a_timeout(monkeypatch, caplog):
+    """The other arm, so neither message can be a constant."""
+    started: list = []
+    app_mod = _neutralise_lifespan(monkeypatch, started)
+    monkeypatch.setattr(app_mod, "CAMERA_STOP_TIMEOUT_S", 0.05)
+
+    class _Wedged:
+        async def start(self):
+            return None
+
+        async def stop(self):
+            await asyncio.sleep(3600)
+
+    monkeypatch.setattr(app_mod, "build_camera_client", lambda _s: _Wedged())
+    app = _LifespanApp()
+    with caplog.at_level("WARNING", logger="roomscan.web"):
+        async with app_mod._lifespan(app):
+            pass
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "did not stop within" in text, text
+    assert "raised" not in text, text

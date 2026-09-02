@@ -678,16 +678,21 @@ class CameraClient:
                     continue
                 task.cancel()
                 try:
-                    # BOUNDED. A join is only as bounded as the thing it joins:
-                    # a worker wedged somewhere uncancellable would turn
-                    # "teardown" into "hang", which is exactly the failure mode
-                    # #226 round 4 was reported for. Past the timeout the task
-                    # is abandoned rather than waited on, and that is said out
-                    # loud below instead of being swallowed.
-                    await asyncio.wait_for(task, timeout=self.config.stop_timeout_s)
-                except asyncio.TimeoutError:
-                    log.warning("camera %s did not stop within %.1fs; abandoning it",
-                                attr.lstrip("_"), self.config.stop_timeout_s)
+                    # BOUNDED, and `asyncio.wait` rather than `wait_for`. A join
+                    # is only as bounded as the thing it joins: a worker wedged
+                    # somewhere uncancellable would turn "teardown" into "hang",
+                    # the failure mode #226 round 4 was reported for.
+                    #
+                    # `wait_for` was wrong here for a subtler reason than the
+                    # bound: since 3.11 `asyncio.TimeoutError` IS the builtin
+                    # `TimeoutError`, so `except asyncio.TimeoutError` also
+                    # catches an OS-level timeout raised BY the worker -- a
+                    # failed socket read reported as "the task would not stop".
+                    # `wait` never raises for time, so the two are separated by
+                    # what is actually true of the task afterwards: still
+                    # pending, or finished with an exception.
+                    done, pending = await asyncio.wait(
+                        {task}, timeout=self.config.stop_timeout_s)
                 except asyncio.CancelledError:
                     # Two different events raise here and they must not be
                     # conflated: the task WE cancelled finishing (expected,
@@ -697,8 +702,16 @@ class CameraClient:
                     # signal, so it is re-raised after cleanup completes.
                     if _being_cancelled(current):
                         cancelled_from_outside = True
-                except Exception:               # noqa: BLE001 - a dead worker
-                    pass
+                    continue
+                name = attr.lstrip("_")
+                if pending:
+                    log.warning("camera %s did not stop within %.1fs; abandoning it",
+                                name, self.config.stop_timeout_s)
+                elif not task.cancelled():
+                    exc = task.exception()
+                    if exc is not None:
+                        log.warning("camera %s raised %s while stopping: %s",
+                                    name, type(exc).__name__, exc)
         finally:
             # Runs even when the re-raise above is pending, so the socket and
             # the slot are released either way.
@@ -729,7 +742,8 @@ class CameraClient:
         if wait_closed is None:
             return                              # a test double, or an old loop
         try:
-            await asyncio.wait_for(wait_closed(), timeout=STOP_TIMEOUT_S)
+            await asyncio.wait_for(wait_closed(),
+                                    timeout=self.config.stop_timeout_s)
         except Exception:                       # noqa: BLE001 - it is closing,
             pass                                # or it never will; either way we go
 
