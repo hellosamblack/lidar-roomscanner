@@ -145,3 +145,31 @@ def test_mesh_extract_ms_reflects_a_slow_mesh_call(monkeypatch):
     w.submit(_wall(), (1.0, 0.0, 0.0, 0.0), 101325.0)
     assert w.run_once() is True
     assert w.mesh_extract_ms >= 40.0    # measured >=0.05s sleep, generous floor
+
+
+# ---- Issue #150: node-store kwargs reach the Mapper the worker owns -------
+
+def test_worker_retains_no_nodes_by_default():
+    w = SlamWorker(W, H, voxel_size=0.02)
+    _submit_n(w, 1)
+    assert w.run_once() is True
+    assert w.node_count == 0
+    assert w._mapper.nodes is None
+
+
+def test_worker_forwards_the_node_store_kwargs_to_its_mapper():
+    """`SlamWorker(**mapper_kwargs)` is the Live SLAM path's only route to the
+    Mapper, so a knob that does not survive that hop is honoured offline and
+    silently ignored live (BUG-062's shape). Asserts the exact node count AND
+    the exact decimated point count, not merely that a store exists."""
+    w = SlamWorker(W, H, voxel_size=0.02, retain_node_clouds=True,
+                   node_decimation=4)
+    for _ in range(3):
+        _submit_n(w, 1)
+        assert w.run_once() is True
+    assert w.frames_processed == 3
+    assert w.node_count == 3
+    nodes = w._mapper.nodes
+    assert len(nodes) == 3
+    assert nodes[0].point_count == -(-(W * H) // 4)      # ceil(2268 / 4) = 567
+    assert w._mapper.node_bytes == 3 * (nodes[0].point_count * 12 + 128)

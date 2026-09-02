@@ -179,6 +179,16 @@ class SlamWorker:
     def tracking_lost_count(self) -> int:
         return self._mapper.tracking_lost_count
 
+    @property
+    def node_count(self) -> int:
+        """Keyframe clouds retained beside the TSDF by this worker's Mapper
+        (Issue #150). 0 when `retain_node_clouds` is off, which it is by
+        default. Read from the Mapper rather than counted here: the retention
+        decision is the Mapper's (it keys on real TSDF integration, which this
+        class cannot see), so a count maintained here would be a second,
+        drifting opinion of the same quantity."""
+        return self._mapper.node_count
+
     # ---- instrumentation (plan item 2, 2026-08-02) ---------------------------
     @property
     def frames_submitted(self) -> int:

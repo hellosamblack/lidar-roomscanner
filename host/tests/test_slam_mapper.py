@@ -1386,3 +1386,156 @@ def test_budget_breach_detection_and_counter(monkeypatch):
 
 
 
+
+
+# ---- Issue #150: per-node cloud store beside the TSDF ---------------------
+
+def test_node_store_is_off_by_default_and_retains_nothing():
+    """Default-off has to be *behaviourally* off, not merely empty: no store
+    object exists at all, so the retention branch in `step` never runs."""
+    m = Mapper(W, H, voxel_size=0.02)
+    assert m.retain_node_clouds is False
+    assert m.node_decimation == 1
+    assert m.nodes is None
+    for _ in range(4):
+        m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert m.node_count == 0
+    assert m.node_bytes == 0
+    assert m.node_stats() is None
+
+
+def test_retained_nodes_match_tsdf_integrations_one_for_one():
+    """One node per frame that ACTUALLY integrated. Keying retention on
+    `not tracking_lost` instead would over-retain by exactly the gated frames
+    -- and every one of those nodes would carry a pose the TSDF never saw."""
+    m = Mapper(W, H, voxel_size=0.02, retain_node_clouds=True)
+    for _ in range(4):
+        m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert m._total_integrations == 4
+    assert m.node_count == 4
+    assert [n.frame_index for n in m.nodes] == [0, 1, 2, 3]
+    assert [n.node_id for n in m.nodes] == [0, 1, 2, 3]
+
+
+def test_the_displacement_gate_bounds_the_node_count():
+    """The #149 gate is what makes this store affordable (spec Decision 3):
+    a gated frame integrates nothing, so it must retain nothing."""
+    q = (0.70710678, 0.0, 0.70710678, 0.0)
+    m = Mapper(W, H, voxel_size=0.02, icp_mode="translation",
+               min_linear_displacement_m=0.05, min_angular_displacement_rad=0.0,
+               retain_node_clouds=True)
+    m.step(_textured_wall(1.20), q, 101325.0)      # bootstrap -> integrates
+    m.step(_textured_wall(1.20), q, 101325.0)      # static    -> gated
+    m.step(_textured_wall(1.18), q, 101325.0)      # 2 cm      -> gated
+    m.step(_textured_wall(1.13), q, 101325.0)      # 7 cm      -> integrates
+    assert m._total_integrations == 2
+    assert m._gated_integrations == 2
+    assert m.node_count == 2
+    # ...and the retained frame indices are the two that integrated, not 0..3.
+    assert [n.frame_index for n in m.nodes] == [0, 3]
+
+
+def test_a_tracking_lost_frame_retains_no_node():
+    m = Mapper(W, H, voxel_size=0.02, retain_node_clouds=True)
+    m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert m.node_count == 1
+    step = m.step(np.zeros((H, W), dtype=np.float32), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    assert step.tracking_lost is True
+    assert m.node_count == 1
+    assert m.tracking_lost_count == 1
+
+
+def test_a_retained_node_carries_exactly_the_pose_the_tsdf_integrated_with():
+    """A node whose pose is not the integration pose re-poses the map wrongly
+    the first time a graph correction is applied -- and nothing before that
+    moment can tell."""
+    q = (0.70710678, 0.0, 0.70710678, 0.0)
+    m = Mapper(W, H, voxel_size=0.02, icp_mode="translation", retain_node_clouds=True)
+    m.step(_textured_wall(1.20), q, 101325.0)
+    m.step(_textured_wall(1.15), q, 101325.0)
+    assert m.node_count == 2
+    assert np.array_equal(m.nodes[-1].pose, m._last_integrated_pose)
+    # The second frame really did move, so this is not a trivially-identity pin.
+    assert not np.allclose(m.nodes[0].pose, m.nodes[1].pose)
+
+
+def test_retained_points_are_the_deprojected_sensor_frame_cloud():
+    """Exact equality against an independent `Deprojector` on the same depth
+    frame: the store keeps SENSOR-frame points (world-frame ones would differ
+    by the pose the moment the sensor moves, and by then the map is unfixable)."""
+    from roomscan.deproject import Deprojector
+    m = Mapper(W, H, voxel_size=0.02, retain_node_clouds=True)
+    depth = _textured_wall(1.20)
+    m.step(depth, (1.0, 0.0, 0.0, 0.0), 101325.0)
+    pts, valid = Deprojector(W, H, 55.0, 42.0).grid(depth)
+    expected = pts.reshape(-1, 3)[valid.reshape(-1)].astype(np.float32)
+    node = m.nodes[0]
+    assert node.point_count == int(valid.sum()) == W * H
+    assert np.allclose(node.points, expected, atol=1e-6)
+
+
+def test_node_decimation_retains_exactly_every_nth_point():
+    """The stride is the memory lever, so its effect has to be an exact count,
+    not "fewer points"."""
+    full = Mapper(W, H, voxel_size=0.02, retain_node_clouds=True)
+    thin = Mapper(W, H, voxel_size=0.02, retain_node_clouds=True, node_decimation=4)
+    depth = _textured_wall(1.20)
+    full.step(depth, (1.0, 0.0, 0.0, 0.0), 101325.0)
+    thin.step(depth, (1.0, 0.0, 0.0, 0.0), 101325.0)
+    n = full.nodes[0].point_count
+    assert n == W * H
+    assert thin.nodes[0].point_count == -(-n // 4)          # ceil(n / 4)
+    assert np.array_equal(thin.nodes[0].points, full.nodes[0].points[::4])
+    assert thin.node_bytes < full.node_bytes
+
+
+def test_node_bytes_and_stats_report_the_real_retained_cost():
+    m = Mapper(W, H, voxel_size=0.02, retain_node_clouds=True, node_decimation=2)
+    for _ in range(3):
+        m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    per_node = -(-(W * H) // 2)
+    assert m.node_count == 3
+    stats = m.node_stats()
+    assert stats["nodes"] == 3
+    assert stats["points"] == 3 * per_node
+    assert stats["decimation"] == 2
+    assert m.node_bytes == 3 * (per_node * 12 + 128)
+    assert stats["bytes"] == m.node_bytes
+
+
+def test_updating_node_poses_moves_the_map_without_re_integrating():
+    """The #150 acceptance property end to end: a graph correction is one 4x4
+    write per node, and the retained clouds are untouched."""
+    m = Mapper(W, H, voxel_size=0.02, retain_node_clouds=True, node_decimation=8)
+    m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    m.step(_wall(1.0), (1.0, 0.0, 0.0, 0.0), 101325.0)
+    before = m.nodes[1].points.copy()
+    world_before = m.nodes[1].world_points().copy()
+
+    # A pure world-frame shift of node 1's own pose: every retained point must
+    # then move by exactly that vector and by nothing else.
+    corrected = m.nodes[1].pose.copy()
+    corrected[:3, 3] += np.array([0.4, 0.0, -0.2])
+    assert len(m.nodes) == 2
+    assert m._nodes.update_poses({1: corrected}) == 1
+
+    assert np.array_equal(m.nodes[1].points, before)
+    delta = m.nodes[1].world_points() - world_before
+    assert np.allclose(delta - delta[0], 0.0, atol=1e-6)     # a pure rigid shift
+    assert np.allclose(delta[0], [0.4, 0.0, -0.2], atol=1e-5)
+
+
+def test_node_retention_does_not_perturb_the_trajectory():
+    """Default-off identity's unit-scale sibling: retaining clouds must not
+    change a single reported pose. Same inputs, both knobs, bit-for-bit."""
+    frames = [_textured_wall(1.20 - 0.01 * i) for i in range(6)]
+    q = (0.70710678, 0.0, 0.70710678, 0.0)
+    off = Mapper(W, H, voxel_size=0.02, icp_mode="translation")
+    on = Mapper(W, H, voxel_size=0.02, icp_mode="translation", retain_node_clouds=True)
+    for d in frames:
+        off.step(d, q, 101325.0)
+        on.step(d, q, 101325.0)
+    assert len(off.trajectory) == len(on.trajectory) == 6
+    for a, b in zip(off.trajectory, on.trajectory):
+        assert np.array_equal(a, b)
+    assert on.node_count == 6

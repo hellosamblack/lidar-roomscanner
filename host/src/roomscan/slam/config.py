@@ -196,6 +196,18 @@ class SlamConfig:
     # Minimum angular displacement (radians) since the last integrated frame
     # required to admit a new frame into the TSDF map. 0.0 disables angular gating.
     min_angular_displacement_rad: float = 0.0
+    # Per-node cloud store beside the TSDF (Issue #150; pose-graph backbone spec
+    # Decision 3). When on, every frame that actually integrates ALSO retains its
+    # decimated sensor-frame cloud plus the pose it was integrated with, so a
+    # later pose-graph optimisation can re-pose the map with one 4x4 write per
+    # node instead of de-integrating the VoxelBlockGrid. OFF by default: it is
+    # pure retention (no pose, map or timing decision changes) and the spec's own
+    # kill criterion for #150 is a memory measurement that has not selected a
+    # shipping configuration yet. `node_decimation` is the stride over each
+    # keyframe's valid points and is the per-node memory lever (1 = keep all).
+    # See slam/nodes.py.
+    retain_node_clouds: bool = False
+    node_decimation: int = 1
     # Working-memory per-frame time budget monitor (Issue #152 / admission design §C).
     # Target wall time ceiling in ms for a single SLAM frame step (~30 Hz -> 33.3 ms).
     # A step exceeding this budget marks budget_breached=True on FrameStep and increments
@@ -372,6 +384,8 @@ class SlamConfig:
             "baro_reject_m": self.baro_reject_m,
             "min_linear_displacement_m": self.min_linear_displacement_m,
             "min_angular_displacement_rad": self.min_angular_displacement_rad,
+            "retain_node_clouds": self.retain_node_clouds,
+            "node_decimation": self.node_decimation,
             "frame_time_budget_ms": self.frame_time_budget_ms,
             "stationary_hold": self.stationary_hold,
             "stationary_window": self.stationary_window,

@@ -266,3 +266,38 @@ def test_frame_time_budget_defaults_and_load(tmp_path):
 
 
 
+
+
+# ---- Issue #150: per-node cloud store -------------------------------------
+
+def test_node_cloud_store_defaults_are_off_and_reach_mapper_kwargs():
+    """Default-off, and forwarded to Live SLAM as well as CLI/Detailed --
+    BUG-062 is what a knob honoured by only one path costs."""
+    c = SlamConfig()
+    assert c.retain_node_clouds is False
+    assert c.node_decimation == 1
+    kw = c.mapper_kwargs()
+    assert kw["retain_node_clouds"] is False
+    assert kw["node_decimation"] == 1
+
+
+def test_node_cloud_store_knobs_load_from_the_slam_table(tmp_path):
+    p = tmp_path / "roomscan.toml"
+    p.write_text("[slam]\nretain_node_clouds = true\nnode_decimation = 4\n",
+                 encoding="utf-8")
+    c = SlamConfig.load(p)
+    assert c.retain_node_clouds is True
+    assert c.node_decimation == 4
+    assert c.mapper_kwargs()["retain_node_clouds"] is True
+    assert c.mapper_kwargs()["node_decimation"] == 4
+
+
+def test_detailed_preset_inherits_the_node_cloud_knobs(tmp_path):
+    """Detailed builds on the base dict, so an offline reconstruction retains
+    the same nodes the live path would -- otherwise a pose-graph pass over a
+    Detailed run would have no nodes to re-pose."""
+    from roomscan.slam.config import DetailedSlamPreset
+    base = SlamConfig(retain_node_clouds=True, node_decimation=8)
+    kw = DetailedSlamPreset().mapper_kwargs(base)
+    assert kw["retain_node_clouds"] is True
+    assert kw["node_decimation"] == 8

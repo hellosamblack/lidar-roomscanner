@@ -29,6 +29,7 @@ from .frames import apply_quat_phase as _quat_phase_correct
 from .frames import baro_height_m, predict_pose, slerp, world_up
 from .intrinsics import pinhole
 from .motion import StationarityGate, ZuptDetector
+from .nodes import NodeCloudStore
 from .odometry import _COND_CAP, _ROT_PRIOR_WEIGHT, register_escalating
 from .tsdf import DEFAULT_BLOCK_COUNT, TsdfMap
 
@@ -187,6 +188,8 @@ class Mapper:
                  baro_reject_m: float = 50.0,
                  min_linear_displacement_m: float = 0.0,
                  min_angular_displacement_rad: float = 0.0,
+                 retain_node_clouds: bool = False,
+                 node_decimation: int = 1,
                  frame_time_budget_ms: float = 33.3,
                  clock=time.perf_counter):
         if confidence_weight_mode not in ("reject", "weight", "both"):
@@ -204,6 +207,26 @@ class Mapper:
         self._last_integrated_pose: np.ndarray | None = None
         self._gated_integrations: int = 0
         self._total_integrations: int = 0
+        # Per-node cloud store beside the TSDF (Issue #150 / pose-graph backbone
+        # spec Decision 3). OFF by default: it is pure retention -- it changes no
+        # pose, no map and no timing decision -- so with the knob off no store
+        # object is built and `step()` never enters the retention branch at all,
+        # which is why the off path is bit-identical rather than merely
+        # "equivalent". On, every frame that ACTUALLY integrates into the TSDF
+        # also keeps its decimated SENSOR-frame cloud plus the exact pose it was
+        # integrated with, so a later pose-graph optimisation can re-pose the map
+        # with one 4x4 write per node instead of de-integrating the VoxelBlockGrid.
+        # Keyed on real integration (not on `not tracking_lost`) so the #149
+        # displacement gate bounds the node count -- that bound is what makes the
+        # store affordable at all. `node_decimation` is the per-node memory lever
+        # (stride over the valid points; 1 = keep them all). No cap is applied
+        # here: the spec asks for the cost to be MEASURED on the two reference
+        # captures before a ceiling is chosen (NodeCloudStore.max_nodes exists for
+        # when it is).
+        self.retain_node_clouds = bool(retain_node_clouds)
+        self.node_decimation = max(1, int(node_decimation))
+        self._nodes = (NodeCloudStore(decimation=self.node_decimation)
+                       if self.retain_node_clouds else None)
         self.frame_time_budget_ms = float(frame_time_budget_ms)
         self._budget_breach_count: int = 0
         # IMU spike pre-gate ceiling, deg of inter-frame SFLP rotation. Above
@@ -376,6 +399,45 @@ class Mapper:
     def budget_breach_count(self) -> int:
         """Total number of frame steps that exceeded frame_time_budget_ms."""
         return self._budget_breach_count
+
+    # ---- per-node cloud store (Issue #150) ----------------------------------
+    @property
+    def nodes(self):
+        """The retained keyframe nodes as a tuple, or **None** when
+        `retain_node_clouds` is off.
+
+        None rather than an empty tuple deliberately: "the store is off" and
+        "the store is on and has kept nothing yet" are different states, and a
+        caller reading an empty tuple for the first cannot tell that its
+        `[slam] retain_node_clouds` never took effect."""
+        return None if self._nodes is None else self._nodes.nodes
+
+    @property
+    def node_count(self) -> int:
+        """Retained keyframe count -- 0 when the store is off."""
+        return 0 if self._nodes is None else len(self._nodes)
+
+    @property
+    def node_bytes(self) -> int:
+        """Exact bytes of retained node clouds + poses (0 when off). This is
+        the number the spec's #150 kill criterion is stated in, so it is
+        measured off the arrays rather than estimated from a point count."""
+        return 0 if self._nodes is None else self._nodes.nbytes
+
+    def node_stats(self) -> dict | None:
+        """`NodeCloudStore.stats()`, or None when the store is off."""
+        return None if self._nodes is None else self._nodes.stats()
+
+    @staticmethod
+    def _node_points(pts: np.ndarray, valid: np.ndarray) -> np.ndarray:
+        """This frame's valid deprojected points in the SENSOR frame -- the same
+        (h, w, 3) grid + mask `step()` already computed for ICP, so retention
+        costs one masked gather and no second deprojection.
+
+        Decimation is NOT applied here: `NodeCloudStore` owns the stride (it is
+        what `stats()["decimation"]` reports), and applying it in both places
+        would silently square it."""
+        return pts.reshape(-1, 3)[valid.reshape(-1)]
 
     @property
     def _register_device(self) -> o3d.core.Device:
@@ -776,6 +838,16 @@ class Mapper:
                 integrate_ms = (self._clock() - t_integrate0) * 1000.0
                 self._last_integrated_pose = pose.copy()
                 self._total_integrations += 1
+                # Issue #150: retain this keyframe beside the TSDF, keyed to the
+                # integration that just happened -- same pose, same frame. Inside
+                # the `should_integrate` branch on purpose: a node whose pose the
+                # TSDF never saw would re-pose geometry that is not there.
+                # `len(self.trajectory)` is this frame's index (the append happens
+                # below), so the store can be replayed against the trajectory.
+                if self._nodes is not None:
+                    self._nodes.add(pose, self._node_points(pts, valid),
+                                    frame_index=len(self.trajectory),
+                                    t_device_us=t_device_us)
             else:
                 self._gated_integrations += 1
 

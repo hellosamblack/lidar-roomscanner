@@ -77,6 +77,20 @@ def _load_capture(path: str, max_frames: int | None):
     return frames, width, height
 
 
+def _peak_rss_mb() -> float:
+    """Peak resident set size of THIS process, in MiB.
+
+    The device columns here come from NVML and read 0 on a CPU-only box, so a
+    `--device CPU:0` run needs a host-memory observable or its memory summary
+    is a row of zeros. `ru_maxrss` is a high-water mark and never decreases, so
+    a before/after pair bounds what a run's peak grew by -- it does NOT measure
+    what is live at the end. For the exact live cost of the #150 node store,
+    read `node bytes` in the summary instead: that one is counted off the
+    retained arrays."""
+    import resource
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+
+
 def _percentile(xs, q):
     return float(np.percentile(np.asarray(xs, dtype=np.float64), q)) if xs else 0.0
 
@@ -120,6 +134,15 @@ def main(argv=None) -> int:
                     help="override [slam] block_count (VoxelBlockGrid capacity; it does not "
                          "grow -- see BUG-035). Watch the blocks/capacity column: saturation "
                          "silently stops the map and collapses tracking.")
+    ap.add_argument("--retain-node-clouds", action="store_true",
+                    help="Mapper retain_node_clouds (Issue #150): keep a decimated "
+                         "sensor-frame cloud + pose per INTEGRATED keyframe beside the "
+                         "TSDF. The summary then reports node count and the exact "
+                         "retained bytes -- the spec's #150 kill criterion is stated in "
+                         "MB of host RAM, so it needs a measurement, not an estimate.")
+    ap.add_argument("--node-decimation", type=int, default=None,
+                    help="Mapper node_decimation: stride over each keyframe's valid "
+                         "points (1 = keep all). The per-node memory lever.")
     ap.add_argument("--width", type=int, default=54)
     ap.add_argument("--height", type=int, default=42)
     ap.add_argument("--csv", default=None,
@@ -168,6 +191,11 @@ def main(argv=None) -> int:
         voxel_size=voxel, release_cache_every=release_every, device=args.device,
         block_count=(args.block_count if args.block_count is not None
                      else cfg.block_count))
+    if args.retain_node_clouds:
+        mapper_kwargs["retain_node_clouds"] = True
+    if args.node_decimation is not None:
+        mapper_kwargs["node_decimation"] = args.node_decimation
+    rss_before_mb = _peak_rss_mb()
     mapper = Mapper(width, height, **mapper_kwargs)
     vbg = mapper._tsdf._vbg
 
@@ -229,6 +257,21 @@ def main(argv=None) -> int:
     print(f"  step ms             : p50 {_percentile(ms, 50):.1f}  p90 {_percentile(ms, 90):.1f} "
           f" p99 {_percentile(ms, 99):.1f}  max {max(ms):.1f}")
     print(f"  cache releases      : {mapper._tsdf.cache_releases}")
+    print(f"  integrated frames   : {mapper._total_integrations}"
+          f"  (gated {mapper._gated_integrations})")
+    print(f"  peak RSS            : {rss_before_mb:.0f} -> {_peak_rss_mb():.0f} MiB")
+    node_stats = mapper.node_stats()
+    if node_stats is None:
+        print("  node store          : off")
+    else:
+        print(f"  node store          : {node_stats['nodes']} nodes, "
+              f"{node_stats['points']} points, {node_stats['mb']:.1f} MiB "
+              f"({node_stats['bytes']} bytes) at decimation "
+              f"{node_stats['decimation']}")
+        if node_stats["nodes"]:
+            per_node_kb = node_stats["bytes"] / node_stats["nodes"] / 1024.0
+            print(f"  per node            : {node_stats['points_per_node']:.0f} points, "
+                  f"{per_node_kb:.1f} KiB")
 
     if not args.no_csv:
         tag = ("synth" if args.synthetic else Path(args.capture).stem)
