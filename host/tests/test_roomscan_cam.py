@@ -35,18 +35,25 @@ DAEMON = SBIN / "roomscan-cam"
 
 
 def _load_daemon():
-    spec = importlib.util.spec_from_loader(
-        "roomscan_cam", importlib.machinery.SourceFileLoader("roomscan_cam", str(DAEMON)))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    # Prevent bytecode generation: the loader is a pure source loader, and we
+    # restore dont_write_bytecode after loading so the test session is unaffected.
+    old_dont_write_bytecode = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_loader(
+            "roomscan_cam", importlib.machinery.SourceFileLoader("roomscan_cam", str(DAEMON)))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.dont_write_bytecode = old_dont_write_bytecode
 
 
 import importlib.machinery  # noqa: E402  (needed by _load_daemon above)
 
 # Loading the daemon by path would drop a __pycache__ directory INSIDE the Pi
-# payload, and install.sh ships everything in that directory to the Pi.
-sys.dont_write_bytecode = True
+# payload, and install.sh ships everything in that directory to the Pi. The
+# _load_daemon() function handles the sys.dont_write_bytecode flag.
 cam = _load_daemon()
 
 
@@ -1173,3 +1180,13 @@ def test_an_address_change_exits_non_zero_so_systemd_rebinds():
                                resolver=lambda i: "1.2.3.4").check() is None
     assert cam.AddressWatchdog("wlan0", "1.2.3.4", lambda r: None,
                                resolver=lambda i: "5.6.7.8").check()
+
+
+def test_daemon_import_does_not_create_payload_pycache():
+    """Loading the daemon module should not leave __pycache__ directories in
+    the Pi payload (issue #226). install.sh ships everything in
+    pi-bridge/payload verbatim, so a stray __pycache__ from loading the daemon
+    would end up on the Pi."""
+    payload = REPO / "pi-bridge" / "payload"
+    pycaches = list(payload.glob("**/__pycache__"))
+    assert not pycaches, f"Found __pycache__ directories in payload: {pycaches}"
